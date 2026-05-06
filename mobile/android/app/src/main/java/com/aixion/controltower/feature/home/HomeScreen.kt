@@ -13,11 +13,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.aixion.controltower.core.model.ApprovalStatus
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.StatusCard
 import com.aixion.controltower.core.ui.theme.RiskBlocked
@@ -27,13 +29,10 @@ import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
-import com.aixion.controltower.data.mock.MockData
 
 @Composable
-fun HomeScreen() {
-    val pending = MockData.approvals.count { it.status == ApprovalStatus.PENDING_REVIEW }
-    val blocked = MockData.approvals.count { it.status == ApprovalStatus.BLOCKED }
-    val failedTests = 0
+fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
+    val state by viewModel.state.collectAsState()
 
     LazyColumn(
         modifier = Modifier
@@ -51,7 +50,7 @@ fun HomeScreen() {
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "AI-agent work that needs your attention.",
+                    text = if (state.loading) "Loading command state..." else "AI-agent work that needs your attention.",
                     color = TowerTextMuted,
                     fontSize = 14.sp
                 )
@@ -62,14 +61,14 @@ fun HomeScreen() {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatusCard(
                     title = "Pending",
-                    value = pending.toString(),
+                    value = state.pendingCount.toString(),
                     subtitle = "approvals waiting",
                     accent = TowerAccent,
                     modifier = Modifier.weight(1f)
                 )
                 StatusCard(
                     title = "Blocked",
-                    value = blocked.toString(),
+                    value = state.blockedCount.toString(),
                     subtitle = "policy stopped",
                     accent = RiskBlocked,
                     modifier = Modifier.weight(1f)
@@ -81,14 +80,14 @@ fun HomeScreen() {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatusCard(
                     title = "Projects",
-                    value = MockData.projects.size.toString(),
+                    value = state.projects.size.toString(),
                     subtitle = "active systems",
                     accent = RiskLow,
                     modifier = Modifier.weight(1f)
                 )
                 StatusCard(
                     title = "Failed Tests",
-                    value = failedTests.toString(),
+                    value = state.failedTestsCount.toString(),
                     subtitle = "need review",
                     accent = RiskCritical,
                     modifier = Modifier.weight(1f)
@@ -106,7 +105,7 @@ fun HomeScreen() {
             )
         }
 
-        items(MockData.approvals.take(3)) { approval ->
+        items(state.approvals.take(3)) { approval ->
             ApprovalCard(approval = approval)
         }
     }
