@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.StatusCard
 import com.aixion.controltower.core.ui.theme.RiskBlocked
@@ -31,7 +32,10 @@ import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
 @Composable
-fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
+fun HomeScreen(
+    viewModel: HomeViewModel = viewModel(),
+    onApprovalSelected: (ApprovalSummary) -> Unit = {}
+) {
     val state by viewModel.state.collectAsState()
 
     LazyColumn(
@@ -106,7 +110,7 @@ fun HomeScreen(viewModel: HomeViewModel = viewModel()) {
         }
 
         items(state.approvals.take(3)) { approval ->
-            ApprovalCard(approval = approval)
+            ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
         }
     }
 }
