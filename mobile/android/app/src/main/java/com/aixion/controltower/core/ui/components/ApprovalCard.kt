@@ -1,6 +1,7 @@
 package com.aixion.controltower.core.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,9 +23,19 @@ import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
 @Composable
-fun ApprovalCard(approval: ApprovalSummary, modifier: Modifier = Modifier) {
+fun ApprovalCard(
+    approval: ApprovalSummary,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null
+) {
+    val clickableModifier = if (onClick != null) {
+        modifier.clickable { onClick() }
+    } else {
+        modifier
+    }
+
     Column(
-        modifier = modifier
+        modifier = clickableModifier
             .fillMaxWidth()
             .background(TowerSurface, RoundedCornerShape(22.dp))
             .padding(16.dp)
