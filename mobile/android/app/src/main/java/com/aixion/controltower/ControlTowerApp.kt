@@ -14,9 +14,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.feature.approvals.ApprovalDetailScreen
 import com.aixion.controltower.feature.approvals.ApprovalInboxScreen
 import com.aixion.controltower.feature.audit.AuditTrailScreen
 import com.aixion.controltower.feature.command.CommandChatScreen
+import com.aixion.controltower.feature.diff.DiffViewerScreen
 import com.aixion.controltower.feature.home.HomeScreen
 import com.aixion.controltower.feature.projects.ProjectsScreen
 import com.aixion.controltower.navigation.Route
@@ -51,8 +53,10 @@ fun ControlTowerApp() {
                     Route.Home -> HomeScreen()
                     Route.Projects -> ProjectsScreen()
                     Route.Command -> CommandChatScreen()
-                    Route.Inbox -> ApprovalInboxScreen()
+                    Route.Inbox -> ApprovalDetailScreen()
                     Route.Audit -> AuditTrailScreen()
+                    Route.Diff -> DiffViewerScreen()
+                    Route.ApprovalDetail -> ApprovalDetailScreen()
                 }
             }
         }
