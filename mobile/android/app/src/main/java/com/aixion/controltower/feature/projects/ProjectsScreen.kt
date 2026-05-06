@@ -12,10 +12,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.theme.RiskBlocked
 import com.aixion.controltower.core.ui.theme.RiskLow
@@ -24,10 +27,11 @@ import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSurface
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
-import com.aixion.controltower.data.mock.MockData
 
 @Composable
-fun ProjectsScreen() {
+fun ProjectsScreen(viewModel: ProjectsViewModel = viewModel()) {
+    val state by viewModel.state.collectAsState()
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -43,13 +47,13 @@ fun ProjectsScreen() {
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Execution systems under AI-agent control.",
+                text = if (state.loading) "Loading projects..." else "Execution systems under AI-agent control.",
                 color = TowerTextMuted,
                 fontSize = 14.sp
             )
         }
 
-        items(MockData.projects) { project ->
+        items(state.projects) { project ->
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
