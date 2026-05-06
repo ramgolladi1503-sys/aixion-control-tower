@@ -17,10 +17,13 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.components.DiffBlock
@@ -35,10 +38,48 @@ import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSurface
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
-import com.aixion.controltower.data.mock.MockData
 
 @Composable
-fun ApprovalDetailScreen(approval: ApprovalSummary = MockData.approvals.first()) {
+fun ApprovalDetailScreen(viewModel: ApprovalsViewModel = viewModel()) {
+    val state by viewModel.state.collectAsState()
+    val approval = state.selectedApproval ?: state.approvals.firstOrNull()
+
+    if (approval == null) {
+        EmptyApprovalDetail()
+        return
+    }
+
+    ApprovalDetailContent(
+        approval = approval,
+        lastActionMessage = state.lastActionMessage,
+        onApprove = { viewModel.decide("approve", "Approved from mobile detail review.") },
+        onReject = { viewModel.decide("reject", "Rejected from mobile detail review.") },
+        onRevise = { viewModel.decide("revise", "Revision requested from mobile detail review.") }
+    )
+}
+
+@Composable
+private fun EmptyApprovalDetail() {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(TowerBackground)
+            .padding(18.dp),
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text("No approval selected", color = TowerTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Text("Open the inbox and select a request to review.", color = TowerTextMuted, fontSize = 14.sp)
+    }
+}
+
+@Composable
+private fun ApprovalDetailContent(
+    approval: ApprovalSummary,
+    lastActionMessage: String?,
+    onApprove: () -> Unit,
+    onReject: () -> Unit,
+    onRevise: () -> Unit
+) {
     val isBlocked = approval.status == ApprovalStatus.BLOCKED || approval.risk.name == "BLOCKED"
     val hasRequiredActions = approval.requiredActions.isNotEmpty()
     val canApprove = !isBlocked && !hasRequiredActions
@@ -68,6 +109,12 @@ fun ApprovalDetailScreen(approval: ApprovalSummary = MockData.approvals.first())
             }
         }
 
+        if (lastActionMessage != null) {
+            item {
+                DetailPanel(title = "Last Action", body = lastActionMessage)
+            }
+        }
+
         if (isBlocked) {
             item {
                 WarningPanel(
@@ -83,17 +130,9 @@ fun ApprovalDetailScreen(approval: ApprovalSummary = MockData.approvals.first())
             }
         }
 
-        item {
-            DetailPanel(title = "Agent", body = approval.agentName)
-        }
-
-        item {
-            DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n"))
-        }
-
-        item {
-            DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" })
-        }
+        item { DetailPanel(title = "Agent", body = approval.agentName) }
+        item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
+        item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
 
         item {
             Text(
@@ -104,27 +143,19 @@ fun ApprovalDetailScreen(approval: ApprovalSummary = MockData.approvals.first())
             )
         }
 
-        items(approval.files) { file ->
-            DiffBlock(file = file)
-        }
+        items(approval.files) { file -> DiffBlock(file = file) }
 
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
-                    onClick = { },
+                    onClick = onApprove,
                     enabled = canApprove,
                     colors = ButtonDefaults.buttonColors(containerColor = RiskLow),
                     modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Approve")
-                }
+                ) { Text("Approve") }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(onClick = { }, modifier = Modifier.weight(1f)) {
-                        Text("Reject")
-                    }
-                    OutlinedButton(onClick = { }, modifier = Modifier.weight(1f)) {
-                        Text("Request Revision")
-                    }
+                    OutlinedButton(onClick = onReject, modifier = Modifier.weight(1f), enabled = !isBlocked) { Text("Reject") }
+                    OutlinedButton(onClick = onRevise, modifier = Modifier.weight(1f), enabled = !isBlocked) { Text("Request Revision") }
                 }
                 if (!canApprove) {
                     Text(
@@ -176,8 +207,6 @@ private fun RequiredActionsPanel(actions: List<String>) {
     ) {
         Text("Required Before Approval", color = RiskCritical, fontSize = 15.sp, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(8.dp))
-        actions.forEach { action ->
-            Text("• $action", color = TowerTextPrimary, fontSize = 14.sp)
-        }
+        actions.forEach { action -> Text("• $action", color = TowerTextPrimary, fontSize = 14.sp) }
     }
 }
