@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException
 
 from .auth import require_api_key
+from .auth_routes import router as auth_router
 from .github_runner import router as github_runner_router
 from .models import (
     ApprovalRequest,
@@ -30,6 +31,7 @@ app = FastAPI(
     version="0.1.0",
     description="MVP backend for AI project execution control, approvals, risk scoring, and audit logs.",
 )
+app.include_router(auth_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
 AuthDependency = Depends(require_api_key)
@@ -47,6 +49,9 @@ def persist() -> None:
 
 def counts() -> dict[str, int]:
     return {
+        "users": len(store.users),
+        "sessions": len(store.sessions),
+        "devices": len(store.device_registrations),
         "projects": len(store.projects),
         "ideas": len(store.ideas),
         "work_orders": len(store.work_orders),
@@ -118,6 +123,7 @@ def seed_demo_data(_: None = AuthDependency) -> dict[str, int]:
                 path="core/execution_gate.py",
                 change_type="update",
                 diff='+ if stale_ltp:\n+     return ExecutionDecision(allowed=False, reason="STALE_LTP_BLOCK")',
+                new_content='if stale_ltp:\n    return ExecutionDecision(allowed=False, reason="STALE_LTP_BLOCK")\n',
             )
         ],
         test_plan=["pytest tests/test_execution_gate.py"],
