@@ -91,3 +91,12 @@ data class TestRunDto(
     val status: String,
     val output_summary: String? = null
 )
+
+data class AuditEventDto(
+    val id: String,
+    val event_type: String,
+    val actor: String = "system",
+    val entity_id: String,
+    val details: Map<String, Any?> = emptyMap(),
+    val created_at: String? = null
+)
