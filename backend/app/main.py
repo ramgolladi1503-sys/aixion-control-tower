@@ -34,6 +34,10 @@ def audit(event_type: str, entity_id: str, details: dict, actor: str = "system")
     return event
 
 
+def persist() -> None:
+    store.persist()
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "aixion-control-tower"}
@@ -44,6 +48,7 @@ def create_project(payload: ProjectCreate) -> Project:
     project = Project(**payload.model_dump())
     store.projects[project.id] = project
     audit("project.created", project.id, {"name": project.name, "mode": project.mode})
+    persist()
     return project
 
 
@@ -59,6 +64,7 @@ def create_idea(payload: IdeaCreate) -> Idea:
     idea = Idea(**payload.model_dump())
     store.ideas[idea.id] = idea
     audit("idea.created", idea.id, {"title": idea.title, "project_id": idea.project_id})
+    persist()
     return idea
 
 
@@ -82,6 +88,7 @@ def create_work_order(payload: WorkOrderCreate) -> WorkOrder:
         work_order.id,
         {"project_id": work_order.project_id, "risk_level": work_order.risk_level},
     )
+    persist()
     return work_order
 
 
@@ -111,6 +118,7 @@ def create_approval_request(payload: ApprovalRequestCreate) -> ApprovalRequest:
             "blocked": request.risk.blocked,
         },
     )
+    persist()
     return request
 
 
@@ -168,6 +176,7 @@ def decide_approval(approval_id: str, payload: DecisionCreate) -> ApprovalReques
         },
         actor="mobile-user",
     )
+    persist()
     return request
 
 
@@ -186,6 +195,7 @@ def create_test_run(payload: TestRunCreate) -> TestRun:
             "command": test_run.command,
         },
     )
+    persist()
     return test_run
 
 
