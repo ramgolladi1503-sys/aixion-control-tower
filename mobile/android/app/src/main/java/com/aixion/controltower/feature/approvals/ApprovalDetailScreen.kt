@@ -40,7 +40,10 @@ import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
 @Composable
-fun ApprovalDetailScreen(viewModel: ApprovalsViewModel = viewModel()) {
+fun ApprovalDetailScreen(
+    viewModel: ApprovalsViewModel = viewModel(),
+    onOpenDiff: () -> Unit = {}
+) {
     val state by viewModel.state.collectAsState()
     val approval = state.selectedApproval ?: state.approvals.firstOrNull()
 
@@ -52,6 +55,7 @@ fun ApprovalDetailScreen(viewModel: ApprovalsViewModel = viewModel()) {
     ApprovalDetailContent(
         approval = approval,
         lastActionMessage = state.lastActionMessage,
+        onOpenDiff = onOpenDiff,
         onApprove = { viewModel.decide("approve", "Approved from mobile detail review.") },
         onReject = { viewModel.decide("reject", "Rejected from mobile detail review.") },
         onRevise = { viewModel.decide("revise", "Revision requested from mobile detail review.") }
@@ -76,6 +80,7 @@ private fun EmptyApprovalDetail() {
 private fun ApprovalDetailContent(
     approval: ApprovalSummary,
     lastActionMessage: String?,
+    onOpenDiff: () -> Unit,
     onApprove: () -> Unit,
     onReject: () -> Unit,
     onRevise: () -> Unit
@@ -93,12 +98,7 @@ private fun ApprovalDetailContent(
     ) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "Approval Detail",
-                    color = TowerTextPrimary,
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Text("Approval Detail", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 Text(text = approval.title, color = TowerTextPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
                 Text(text = approval.summary, color = TowerTextMuted, fontSize = 14.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -110,24 +110,15 @@ private fun ApprovalDetailContent(
         }
 
         if (lastActionMessage != null) {
-            item {
-                DetailPanel(title = "Last Action", body = lastActionMessage)
-            }
+            item { DetailPanel(title = "Last Action", body = lastActionMessage) }
         }
 
         if (isBlocked) {
-            item {
-                WarningPanel(
-                    title = "Approval blocked",
-                    body = "This request violates a hard safety rule. It cannot be approved from mobile."
-                )
-            }
+            item { WarningPanel(title = "Approval blocked", body = "This request violates a hard safety rule. It cannot be approved from mobile.") }
         }
 
         if (hasRequiredActions) {
-            item {
-                RequiredActionsPanel(actions = approval.requiredActions)
-            }
+            item { RequiredActionsPanel(actions = approval.requiredActions) }
         }
 
         item { DetailPanel(title = "Agent", body = approval.agentName) }
@@ -135,13 +126,12 @@ private fun ApprovalDetailContent(
         item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
 
         item {
-            Text(
-                text = "File Changes",
-                color = TowerTextPrimary,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = onOpenDiff, modifier = Modifier.weight(1f)) { Text("Open Full Diff") }
+            }
         }
+
+        item { Text("File Changes", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
 
         items(approval.files) { file -> DiffBlock(file = file) }
 
@@ -158,11 +148,7 @@ private fun ApprovalDetailContent(
                     OutlinedButton(onClick = onRevise, modifier = Modifier.weight(1f), enabled = !isBlocked) { Text("Request Revision") }
                 }
                 if (!canApprove) {
-                    Text(
-                        text = "Approval disabled until safety requirements are satisfied.",
-                        color = RiskMedium,
-                        fontSize = 13.sp
-                    )
+                    Text("Approval disabled until safety requirements are satisfied.", color = RiskMedium, fontSize = 13.sp)
                 }
             }
         }
