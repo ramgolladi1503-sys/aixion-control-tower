@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.ApprovalStatus
+import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.theme.RiskBlocked
@@ -27,7 +28,10 @@ import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
 @Composable
-fun ApprovalInboxScreen(viewModel: ApprovalsViewModel = viewModel()) {
+fun ApprovalInboxScreen(
+    viewModel: ApprovalsViewModel = viewModel(),
+    onApprovalSelected: (ApprovalSummary) -> Unit = {}
+) {
     val state by viewModel.state.collectAsState()
     val pending = state.approvals.filter { it.status == ApprovalStatus.PENDING_REVIEW }
     val blocked = state.approvals.filter { it.status == ApprovalStatus.BLOCKED }
@@ -41,12 +45,7 @@ fun ApprovalInboxScreen(viewModel: ApprovalsViewModel = viewModel()) {
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text(
-                text = "Approval Inbox",
-                color = TowerTextPrimary,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Text("Approval Inbox", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
             Text(
                 text = if (state.loading) "Loading approvals..." else "Review agent requests before code moves.",
                 color = TowerTextMuted,
@@ -63,7 +62,13 @@ fun ApprovalInboxScreen(viewModel: ApprovalsViewModel = viewModel()) {
         }
 
         items(state.approvals) { approval ->
-            ApprovalCard(approval = approval)
+            ApprovalCard(
+                approval = approval,
+                onClick = {
+                    viewModel.selectApproval(approval)
+                    onApprovalSelected(approval)
+                }
+            )
         }
     }
 }
