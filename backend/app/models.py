@@ -45,6 +45,11 @@ class ProjectMode(StrEnum):
     LOCKDOWN = "LOCKDOWN"
 
 
+class NotificationStatus(StrEnum):
+    UNREAD = "UNREAD"
+    READ = "READ"
+
+
 class ProjectCreate(BaseModel):
     name: str
     description: str = ""
@@ -132,6 +137,16 @@ class TestRunCreate(BaseModel):
 
 class TestRun(TestRunCreate):
     id: str = Field(default_factory=lambda: new_id("test"))
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class Notification(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("notification"))
+    title: str
+    body: str
+    entity_type: str
+    entity_id: str
+    status: NotificationStatus = NotificationStatus.UNREAD
     created_at: datetime = Field(default_factory=now_utc)
 
 
