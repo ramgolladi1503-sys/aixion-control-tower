@@ -7,7 +7,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from .models import ApprovalRequest, AuditEvent, Idea, Project, TestRun, WorkOrder
+from .models import ApprovalRequest, AuditEvent, Idea, Notification, Project, TestRun, WorkOrder
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -29,6 +29,7 @@ class SQLiteBackedStore:
         self.work_orders: dict[str, WorkOrder] = {}
         self.approval_requests: dict[str, ApprovalRequest] = {}
         self.test_runs: dict[str, TestRun] = {}
+        self.notifications: dict[str, Notification] = {}
         self.audit_events: list[AuditEvent] = []
         self._init_db()
         self.load()
@@ -63,6 +64,7 @@ class SQLiteBackedStore:
         self.work_orders = self._load_entities("work_order", WorkOrder)
         self.approval_requests = self._load_entities("approval_request", ApprovalRequest)
         self.test_runs = self._load_entities("test_run", TestRun)
+        self.notifications = self._load_entities("notification", Notification)
         self.audit_events = list(self._load_entities("audit_event", AuditEvent).values())
 
     def persist(self) -> None:
@@ -73,6 +75,7 @@ class SQLiteBackedStore:
             self._write_map(conn, "work_order", self.work_orders)
             self._write_map(conn, "approval_request", self.approval_requests)
             self._write_map(conn, "test_run", self.test_runs)
+            self._write_map(conn, "notification", self.notifications)
             self._write_list(conn, "audit_event", self.audit_events)
 
     @staticmethod
@@ -98,6 +101,7 @@ class SQLiteBackedStore:
         self.work_orders.clear()
         self.approval_requests.clear()
         self.test_runs.clear()
+        self.notifications.clear()
         self.audit_events.clear()
         with self._connect() as conn:
             conn.execute("DELETE FROM kv_store")
