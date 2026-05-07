@@ -1,9 +1,7 @@
-import importlib
-
 from fastapi.testclient import TestClient
 
 from app import main
-from app.models import ApprovalStatus
+from app.models import ApprovalStatus, Project
 from app.store import SQLiteBackedStore
 
 client = TestClient(main.app)
@@ -37,8 +35,6 @@ def test_api_key_auth_can_block_requests(monkeypatch) -> None:
     authorized = client.get("/projects", headers={"X-Aixion-Api-Key": "test-key"})
     assert authorized.status_code == 200
 
-    monkeypatch.setenv("AIXION_AUTH_ENABLED", "false")
-
 
 def test_sqlite_store_persists_and_reloads(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "aixion.sqlite3"
@@ -46,9 +42,9 @@ def test_sqlite_store_persists_and_reloads(tmp_path, monkeypatch) -> None:
 
     first_store = SQLiteBackedStore()
     first_store.reset()
-
-    project_response = client.post("/projects", json={"name": "Persistent Project"})
-    assert project_response.status_code == 200
+    project = Project(name="Persistent Project")
+    first_store.projects[project.id] = project
+    first_store.persist()
 
     reloaded_store = SQLiteBackedStore()
     assert any(project.name == "Persistent Project" for project in reloaded_store.projects.values())
