@@ -25,11 +25,7 @@ class DeviceRegistrationRequest(BaseModel):
 @router.get("", response_model=list[Notification])
 def list_notifications(user: AuthUser = AuthDependency) -> list[Notification]:
     return sorted(
-        [
-            item
-            for item in store.notifications.values()
-            if item.user_id in {None, user.id}
-        ],
+        [item for item in store.notifications.values() if item.user_id in {None, user.id}],
         key=lambda item: item.created_at,
         reverse=True,
     )
@@ -76,7 +72,7 @@ def mark_notification_read(notification_id: str, user: AuthUser = AuthDependency
     return notification
 
 
-async def _send_fcm_to_token(token: str, title: str, body: str, data: dict[str, str]) -> str | None:
+def _send_fcm_to_token(token: str, title: str, body: str, data: dict[str, str]) -> str | None:
     server_key = os.getenv("FCM_SERVER_KEY", "").strip()
     if not server_key:
         return "SKIPPED_FCM_SERVER_KEY_NOT_CONFIGURED"
@@ -87,18 +83,22 @@ async def _send_fcm_to_token(token: str, title: str, body: str, data: dict[str, 
         "notification": {"title": title, "body": body},
         "data": data,
     }
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.post(
-            FCM_SEND_URL,
-            headers={"Authorization": f"key={server_key}", "Content-Type": "application/json"},
-            json=payload,
-        )
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            response = client.post(
+                FCM_SEND_URL,
+                headers={"Authorization": f"key={server_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        return f"FCM_NETWORK_ERROR: {exc}"
+
     if response.status_code >= 400:
         return f"FCM_ERROR_{response.status_code}: {response.text[:300]}"
     return None
 
 
-async def dispatch_push(notification: Notification) -> Notification:
+def dispatch_push(notification: Notification) -> Notification:
     target_devices = [
         device
         for device in store.device_registrations.values()
@@ -109,8 +109,9 @@ async def dispatch_push(notification: Notification) -> Notification:
         return notification
 
     errors: list[str] = []
+    skipped = False
     for device in target_devices:
-        error = await _send_fcm_to_token(
+        error = _send_fcm_to_token(
             token=device.token,
             title=notification.title,
             body=notification.body,
@@ -120,11 +121,20 @@ async def dispatch_push(notification: Notification) -> Notification:
                 "entity_id": notification.entity_id,
             },
         )
-        if error:
+        if error == "SKIPPED_FCM_SERVER_KEY_NOT_CONFIGURED":
+            skipped = True
+        elif error:
             errors.append(error)
 
-    notification.push_status = "FAILED" if errors else "SENT"
-    notification.push_error = " | ".join(errors) if errors else None
+    if errors:
+        notification.push_status = "FAILED"
+        notification.push_error = " | ".join(errors)
+    elif skipped:
+        notification.push_status = "SKIPPED"
+        notification.push_error = "FCM_SERVER_KEY is not configured"
+    else:
+        notification.push_status = "SENT"
+        notification.push_error = None
     return notification
 
 
@@ -142,5 +152,6 @@ def create_notification(
         entity_id=entity_id,
         user_id=user_id,
     )
+    dispatch_push(notification)
     store.notifications[notification.id] = notification
     return notification
