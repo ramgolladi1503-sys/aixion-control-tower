@@ -11,20 +11,24 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSurface
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
-import com.aixion.controltower.data.mock.MockData
 
 @Composable
-fun AuditTrailScreen() {
+fun AuditTrailScreen(viewModel: AuditTrailViewModel = viewModel()) {
+    val state by viewModel.state.collectAsState()
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -40,13 +44,13 @@ fun AuditTrailScreen() {
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Trace every agent action and human decision.",
+                text = if (state.loading) "Loading audit trail..." else "Trace every agent action and human decision.",
                 color = TowerTextMuted,
                 fontSize = 14.sp
             )
         }
 
-        items(MockData.auditEvents) { event ->
+        items(state.events) { event ->
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
