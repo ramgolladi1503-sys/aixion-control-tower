@@ -59,6 +59,14 @@ data class WorkOrderSummary(
     val requiredTests: List<String>
 )
 
+data class TestRunSummary(
+    val id: String,
+    val approvalRequestId: String,
+    val command: String,
+    val status: String,
+    val outputSummary: String
+)
+
 data class AuditEventSummary(
     val id: String,
     val eventType: String,
