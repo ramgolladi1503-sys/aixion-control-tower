@@ -1,6 +1,7 @@
 package com.aixion.controltower.core.api
 
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
+import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
@@ -50,4 +51,7 @@ interface ControlTowerApi {
 
     @GET("test-runs")
     suspend fun listTestRuns(): List<TestRunDto>
+
+    @GET("audit")
+    suspend fun listAuditEvents(): List<AuditEventDto>
 }
