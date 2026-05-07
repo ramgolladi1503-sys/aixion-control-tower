@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException
 
 from .auth import require_api_key
+from .github_runner import router as github_runner_router
 from .models import (
     ApprovalRequest,
     ApprovalRequestCreate,
@@ -20,6 +21,7 @@ from .models import (
     WorkOrderCreate,
     now_utc,
 )
+from .notifications import create_notification, router as notifications_router
 from .risk_engine import assess_approval_request, assess_work_order
 from .store import store
 
@@ -28,6 +30,8 @@ app = FastAPI(
     version="0.1.0",
     description="MVP backend for AI project execution control, approvals, risk scoring, and audit logs.",
 )
+app.include_router(notifications_router)
+app.include_router(github_runner_router)
 AuthDependency = Depends(require_api_key)
 
 
@@ -39,6 +43,18 @@ def audit(event_type: str, entity_id: str, details: dict, actor: str = "system")
 
 def persist() -> None:
     store.persist()
+
+
+def counts() -> dict[str, int]:
+    return {
+        "projects": len(store.projects),
+        "ideas": len(store.ideas),
+        "work_orders": len(store.work_orders),
+        "approvals": len(store.approval_requests),
+        "test_runs": len(store.test_runs),
+        "notifications": len(store.notifications),
+        "audit_events": len(store.audit_events),
+    }
 
 
 @app.get("/health")
@@ -53,14 +69,7 @@ def seed_demo_data(_: None = AuthDependency) -> dict[str, int]:
     This endpoint is intentionally explicit and auditable. It does not wipe existing data.
     """
     if store.projects:
-        return {
-            "projects": len(store.projects),
-            "ideas": len(store.ideas),
-            "work_orders": len(store.work_orders),
-            "approvals": len(store.approval_requests),
-            "test_runs": len(store.test_runs),
-            "audit_events": len(store.audit_events),
-        }
+        return counts()
 
     tradebot = Project(
         name="Tradebot",
@@ -129,16 +138,15 @@ def seed_demo_data(_: None = AuthDependency) -> dict[str, int]:
     )
     store.test_runs[test_run.id] = test_run
 
+    create_notification(
+        title="Approval needed: stale LTP guard",
+        body="Tradebot has a critical approval request waiting for review.",
+        entity_type="approval_request",
+        entity_id=approval.id,
+    )
     audit("demo.seeded", tradebot.id, {"projects": [tradebot.name, mcp.name]})
     persist()
-    return {
-        "projects": len(store.projects),
-        "ideas": len(store.ideas),
-        "work_orders": len(store.work_orders),
-        "approvals": len(store.approval_requests),
-        "test_runs": len(store.test_runs),
-        "audit_events": len(store.audit_events),
-    }
+    return counts()
 
 
 @app.post("/projects", response_model=Project)
@@ -216,6 +224,12 @@ def create_approval_request(payload: ApprovalRequestCreate, _: None = AuthDepend
             "blocked": request.risk.blocked,
         },
     )
+    create_notification(
+        title=f"Approval needed: {request.title}",
+        body=f"{request.risk.level} risk request on {request.target_branch}",
+        entity_type="approval_request",
+        entity_id=request.id,
+    )
     persist()
     return request
 
@@ -273,6 +287,12 @@ def decide_approval(approval_id: str, payload: DecisionCreate, _: None = AuthDep
             "new_status": request.status,
         },
         actor="mobile-user",
+    )
+    create_notification(
+        title=f"Approval {request.status.lower()}: {request.title}",
+        body=payload.reason or "Decision recorded from mobile review.",
+        entity_type="approval_request",
+        entity_id=request.id,
     )
     persist()
     return request
