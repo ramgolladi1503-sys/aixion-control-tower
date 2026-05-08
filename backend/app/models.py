@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def now_utc() -> datetime:
@@ -234,6 +234,11 @@ class ApprovalRequest(ApprovalRequestCreate):
     verified_source: bool = False
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
+
+    @field_validator("source_provider", mode="before")
+    @classmethod
+    def default_manual_source_provider(cls, value: AgentProvider | str | None) -> AgentProvider | str:
+        return AgentProvider.MANUAL if value is None else value
 
 
 class DecisionCreate(BaseModel):
