@@ -1,0 +1,20 @@
+{
+  "project_id": "project_demo",
+  "work_order_id": "work_demo",
+  "title": "Update Tradebot stale feed guard",
+  "summary": "Blocks stale LTP from becoming executable in the execution gate.",
+  "agent_name": "builder-agent",
+  "target_branch": "feature/tradebot-stale-feed-guard",
+  "files": [
+    {
+      "path": "core/execution_gate.py",
+      "change_type": "update",
+      "diff": "+ if stale_ltp:\n+     return ExecutionDecision(allowed=False, reason='STALE_LTP_BLOCK')"
+    }
+  ],
+  "test_plan": [
+    "pytest tests/test_execution_gate.py",
+    "pytest tests/test_feed_freshness.py"
+  ],
+  "rollback_plan": "Revert the feature branch commit and rerun execution gate regression tests."
+}

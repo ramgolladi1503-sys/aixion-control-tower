@@ -1,0 +1,22 @@
+{
+  "project_id": "project_demo",
+  "idea_id": "idea_demo",
+  "goal": "Create the policy engine MVP skeleton.",
+  "context": "The project needs policy evaluation, risk scoring, audit records, and regression tests.",
+  "tasks": [
+    "Create policy evaluator module",
+    "Create risk scorer module",
+    "Add audit event schema",
+    "Add policy engine tests"
+  ],
+  "affected_areas": [
+    "backend/app/policies",
+    "backend/app/audit",
+    "tests"
+  ],
+  "required_tests": [
+    "pytest tests/test_policy_engine.py",
+    "pytest tests/test_audit_log.py"
+  ],
+  "rollback_plan": "Revert the feature branch and rerun policy regression tests."
+}
