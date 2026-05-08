@@ -65,6 +65,7 @@ fun ApprovalCard(
         Spacer(modifier = Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = approval.status.name, color = TowerTextMuted)
+            SourceBadge(approval = approval)
             StatusBadge(label = "${approval.files.size} files", color = TowerTextMuted)
         }
     }
