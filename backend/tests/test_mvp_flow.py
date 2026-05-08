@@ -1,3 +1,5 @@
+import os
+os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.main import app

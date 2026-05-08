@@ -1,3 +1,5 @@
+import os
+os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app import main
@@ -25,14 +27,24 @@ def test_seed_demo_data_creates_mobile_ready_records() -> None:
     assert client.get("/notifications").json()[0]["status"] == "UNREAD"
 
 
-def test_api_key_auth_can_block_requests(monkeypatch) -> None:
+def test_bearer_auth_can_block_requests(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
-    monkeypatch.setenv("AIXION_API_KEY", "test-key")
 
     unauthorized = client.get("/projects")
     assert unauthorized.status_code == 401
 
-    authorized = client.get("/projects", headers={"X-Aixion-Api-Key": "test-key"})
+    register = client.post(
+        "/auth/register",
+        json={
+            "email": "tester@example.com",
+            "password": "StrongPass123!",
+            "display_name": "Tester",
+        },
+    )
+    assert register.status_code == 200
+
+    token = register.json()["access_token"]
+    authorized = client.get("/projects", headers={"Authorization": f"Bearer {token}"})
     assert authorized.status_code == 200
 
 

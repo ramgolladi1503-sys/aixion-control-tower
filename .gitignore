@@ -22,3 +22,10 @@ local.properties
 .idea/
 .vscode/
 .DS_Store
+
+# Local Android build/runtime files
+mobile/android/.gradle-user-home/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+mobile/android/local.properties
