@@ -28,6 +28,7 @@ import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.components.DiffBlock
 import com.aixion.controltower.core.ui.components.RiskBadge
+import com.aixion.controltower.core.ui.components.SourceBadge
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.theme.RiskBlocked
 import com.aixion.controltower.core.ui.theme.RiskCritical
@@ -104,6 +105,7 @@ private fun ApprovalDetailContent(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RiskBadge(approval.risk)
                     StatusBadge(approval.status.name, TowerTextMuted)
+                    SourceBadge(approval)
                     StatusBadge(approval.targetBranch, TowerAccent)
                 }
             }
@@ -122,6 +124,7 @@ private fun ApprovalDetailContent(
         }
 
         item { DetailPanel(title = "Agent", body = approval.agentName) }
+        item { DetailPanel(title = "Source", body = approval.sourceLabel) }
         item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
         item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
 
