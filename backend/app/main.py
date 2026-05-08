@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException
 
-from .auth import require_api_key
+from .agent_routes import router as agent_router
+from .auth import require_api_key, require_user
 from .auth_routes import router as auth_router
 from .github_runner import router as github_runner_router
 from .models import (
@@ -10,6 +11,7 @@ from .models import (
     ApprovalRequestCreate,
     ApprovalStatus,
     AuditEvent,
+    AuthUser,
     DecisionCreate,
     FileChange,
     Idea,
@@ -32,9 +34,11 @@ app = FastAPI(
     description="MVP backend for AI project execution control, approvals, risk scoring, and audit logs.",
 )
 app.include_router(auth_router)
+app.include_router(agent_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
 AuthDependency = Depends(require_api_key)
+UserDependency = Depends(require_user)
 
 
 def audit(event_type: str, entity_id: str, details: dict, actor: str = "system") -> AuditEvent:
@@ -51,6 +55,7 @@ def counts() -> dict[str, int]:
     return {
         "users": len(store.users),
         "sessions": len(store.sessions),
+        "agents": len(store.external_agents),
         "devices": len(store.device_registrations),
         "projects": len(store.projects),
         "ideas": len(store.ideas),
@@ -210,7 +215,7 @@ def list_work_orders(_: None = AuthDependency) -> list[WorkOrder]:
 
 
 @app.post("/approvals", response_model=ApprovalRequest)
-def create_approval_request(payload: ApprovalRequestCreate, _: None = AuthDependency) -> ApprovalRequest:
+def create_approval_request(payload: ApprovalRequestCreate, user: AuthUser = UserDependency) -> ApprovalRequest:
     if payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
     if payload.work_order_id and payload.work_order_id not in store.work_orders:
@@ -218,7 +223,13 @@ def create_approval_request(payload: ApprovalRequestCreate, _: None = AuthDepend
 
     risk = assess_approval_request(payload)
     status = ApprovalStatus.BLOCKED if risk.blocked else ApprovalStatus.PENDING_REVIEW
-    request = ApprovalRequest(**payload.model_dump(), risk=risk, status=status)
+    request = ApprovalRequest(
+        **payload.model_dump(),
+        risk=risk,
+        status=status,
+        created_by_user_id=user.id,
+        verified_source=False,
+    )
     store.approval_requests[request.id] = request
     audit(
         "approval.created",
@@ -228,7 +239,13 @@ def create_approval_request(payload: ApprovalRequestCreate, _: None = AuthDepend
             "risk_level": request.risk.level,
             "status": request.status,
             "blocked": request.risk.blocked,
+            "source_provider": request.source_provider,
+            "source_agent_id": request.source_agent_id,
+            "source_agent_name": request.source_agent_name,
+            "verified_source": request.verified_source,
+            "created_by_user_id": request.created_by_user_id,
         },
+        actor=user.email,
     )
     create_notification(
         title=f"Approval needed: {request.title}",
@@ -254,7 +271,7 @@ def get_approval_request(approval_id: str, _: None = AuthDependency) -> Approval
 
 
 @app.post("/approvals/{approval_id}/decision", response_model=ApprovalRequest)
-def decide_approval(approval_id: str, payload: DecisionCreate, _: None = AuthDependency) -> ApprovalRequest:
+def decide_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = UserDependency) -> ApprovalRequest:
     request = store.approval_requests.get(approval_id)
     if not request:
         raise HTTPException(status_code=404, detail="Approval request not found")
@@ -291,8 +308,11 @@ def decide_approval(approval_id: str, payload: DecisionCreate, _: None = AuthDep
             "reason": payload.reason,
             "previous_status": previous_status,
             "new_status": request.status,
+            "source_provider": request.source_provider,
+            "source_agent_id": request.source_agent_id,
+            "verified_source": request.verified_source,
         },
-        actor="mobile-user",
+        actor=user.email,
     )
     create_notification(
         title=f"Approval {request.status.lower()}: {request.title}",

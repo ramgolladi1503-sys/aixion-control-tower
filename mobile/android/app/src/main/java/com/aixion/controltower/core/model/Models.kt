@@ -50,8 +50,38 @@ data class ApprovalSummary(
     val files: List<FileChangeSummary>,
     val requiredActions: List<String>,
     val testPlan: List<String>,
-    val rollbackPlan: String
-)
+    val rollbackPlan: String,
+    val sourceProvider: String = "MANUAL",
+    val sourceAgentId: String? = null,
+    val sourceAgentName: String? = null,
+    val sourceSessionId: String? = null,
+    val sourceTaskUrl: String? = null,
+    val createdByUserId: String? = null,
+    val verifiedSource: Boolean = false
+) {
+    val sourceLabel: String
+        get() = sourceAgentName?.takeIf { it.isNotBlank() } ?: sourceProvider
+}
+
+val ApprovalSummary.requiresHumanAction: Boolean
+    get() = when (status) {
+        ApprovalStatus.PENDING_REVIEW,
+        ApprovalStatus.BLOCKED,
+        ApprovalStatus.REVISION_REQUESTED,
+        ApprovalStatus.TESTS_FAILED,
+        ApprovalStatus.READY_FOR_PR -> true
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.APPLIED,
+        ApprovalStatus.TESTS_RUNNING,
+        ApprovalStatus.TESTS_PASSED,
+        ApprovalStatus.REJECTED -> false
+    }
+
+val ApprovalSummary.isAwaitingGitHubExecution: Boolean
+    get() = status == ApprovalStatus.APPROVED
+
+val ApprovalSummary.isReadyForPullRequestReview: Boolean
+    get() = status == ApprovalStatus.READY_FOR_PR
 
 val ApprovalSummary.requiresHumanAction: Boolean
     get() = when (status) {

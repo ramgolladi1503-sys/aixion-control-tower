@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def now_utc() -> datetime:
@@ -56,6 +56,28 @@ class UserRole(StrEnum):
     REVIEWER = "REVIEWER"
 
 
+class AgentProvider(StrEnum):
+    CODEX = "CODEX"
+    CHATGPT = "CHATGPT"
+    CLAUDE = "CLAUDE"
+    CURSOR = "CURSOR"
+    GITHUB_ACTIONS = "GITHUB_ACTIONS"
+    MANUAL = "MANUAL"
+    OTHER = "OTHER"
+
+
+class AgentAuthType(StrEnum):
+    API_KEY = "API_KEY"
+    WEBHOOK_SECRET = "WEBHOOK_SECRET"
+    MANUAL = "MANUAL"
+
+
+class AgentAction(StrEnum):
+    CREATE_APPROVAL = "CREATE_APPROVAL"
+    CREATE_WORK_ORDER = "CREATE_WORK_ORDER"
+    EXECUTE_GITHUB = "EXECUTE_GITHUB"
+
+
 class User(BaseModel):
     id: str = Field(default_factory=lambda: new_id("user"))
     email: str
@@ -82,6 +104,50 @@ class AuthUser(BaseModel):
     email: str
     display_name: str
     role: UserRole
+
+
+class AgentCreate(BaseModel):
+    provider: AgentProvider
+    display_name: str
+    auth_type: AgentAuthType = AgentAuthType.API_KEY
+    allowed_project_ids: list[str] = Field(default_factory=list)
+    allowed_repositories: list[str] = Field(default_factory=list)
+    allowed_actions: list[AgentAction] = Field(default_factory=lambda: [AgentAction.CREATE_APPROVAL])
+    enabled: bool = True
+
+
+class ExternalAgent(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("agent"))
+    provider: AgentProvider
+    display_name: str
+    auth_type: AgentAuthType = AgentAuthType.API_KEY
+    allowed_project_ids: list[str] = Field(default_factory=list)
+    allowed_repositories: list[str] = Field(default_factory=list)
+    allowed_actions: list[AgentAction] = Field(default_factory=list)
+    created_by_user_id: str | None = None
+    enabled: bool = True
+    secret_hash: str | None = None
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
+class ExternalAgentPublic(BaseModel):
+    id: str
+    provider: AgentProvider
+    display_name: str
+    auth_type: AgentAuthType
+    allowed_project_ids: list[str] = Field(default_factory=list)
+    allowed_repositories: list[str] = Field(default_factory=list)
+    allowed_actions: list[AgentAction] = Field(default_factory=list)
+    created_by_user_id: str | None = None
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentRegistrationResponse(BaseModel):
+    agent: ExternalAgentPublic
+    agent_token: str | None = None
 
 
 class ProjectCreate(BaseModel):
@@ -141,6 +207,11 @@ class ApprovalRequestCreate(BaseModel):
     files: list[FileChange]
     test_plan: list[str] = Field(default_factory=list)
     rollback_plan: str = ""
+    source_provider: AgentProvider | None = None
+    source_agent_id: str | None = None
+    source_agent_name: str | None = None
+    source_session_id: str | None = None
+    source_task_url: str | None = None
 
 
 class RiskAssessment(BaseModel):
@@ -154,8 +225,20 @@ class ApprovalRequest(ApprovalRequestCreate):
     id: str = Field(default_factory=lambda: new_id("approval"))
     status: ApprovalStatus = ApprovalStatus.PENDING_REVIEW
     risk: RiskAssessment
+    source_provider: AgentProvider = AgentProvider.MANUAL
+    source_agent_id: str | None = None
+    source_agent_name: str | None = None
+    source_session_id: str | None = None
+    source_task_url: str | None = None
+    created_by_user_id: str | None = None
+    verified_source: bool = False
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
+
+    @field_validator("source_provider", mode="before")
+    @classmethod
+    def default_manual_source_provider(cls, value: AgentProvider | str | None) -> AgentProvider | str:
+        return AgentProvider.MANUAL if value is None else value
 
 
 class DecisionCreate(BaseModel):
