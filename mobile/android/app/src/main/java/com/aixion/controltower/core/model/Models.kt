@@ -14,8 +14,11 @@ enum class ApprovalStatus {
     REJECTED,
     REVISION_REQUESTED,
     BLOCKED,
+    APPLIED,
+    TESTS_RUNNING,
     TESTS_PASSED,
-    TESTS_FAILED
+    TESTS_FAILED,
+    READY_FOR_PR
 }
 
 data class ProjectSummary(
@@ -49,6 +52,26 @@ data class ApprovalSummary(
     val testPlan: List<String>,
     val rollbackPlan: String
 )
+
+val ApprovalSummary.requiresHumanAction: Boolean
+    get() = when (status) {
+        ApprovalStatus.PENDING_REVIEW,
+        ApprovalStatus.BLOCKED,
+        ApprovalStatus.REVISION_REQUESTED,
+        ApprovalStatus.TESTS_FAILED,
+        ApprovalStatus.READY_FOR_PR -> true
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.APPLIED,
+        ApprovalStatus.TESTS_RUNNING,
+        ApprovalStatus.TESTS_PASSED,
+        ApprovalStatus.REJECTED -> false
+    }
+
+val ApprovalSummary.isAwaitingGitHubExecution: Boolean
+    get() = status == ApprovalStatus.APPROVED
+
+val ApprovalSummary.isReadyForPullRequestReview: Boolean
+    get() = status == ApprovalStatus.READY_FOR_PR
 
 data class WorkOrderSummary(
     val id: String,
