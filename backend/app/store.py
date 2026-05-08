@@ -7,7 +7,18 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from .models import ApprovalRequest, AuditEvent, Idea, Notification, Project, TestRun, WorkOrder
+from .models import (
+    ApprovalRequest,
+    AuditEvent,
+    DeviceRegistration,
+    Idea,
+    Notification,
+    Project,
+    SessionToken,
+    TestRun,
+    User,
+    WorkOrder,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -24,6 +35,9 @@ class SQLiteBackedStore:
         db_path = os.getenv("AIXION_DB_PATH", "runtime/aixion_control_tower.sqlite3")
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.users: dict[str, User] = {}
+        self.sessions: dict[str, SessionToken] = {}
+        self.device_registrations: dict[str, DeviceRegistration] = {}
         self.projects: dict[str, Project] = {}
         self.ideas: dict[str, Idea] = {}
         self.work_orders: dict[str, WorkOrder] = {}
@@ -59,6 +73,9 @@ class SQLiteBackedStore:
         return {entity_id: model.model_validate_json(payload) for entity_id, payload in rows}
 
     def load(self) -> None:
+        self.users = self._load_entities("user", User)
+        self.sessions = self._load_entities("session", SessionToken)
+        self.device_registrations = self._load_entities("device_registration", DeviceRegistration)
         self.projects = self._load_entities("project", Project)
         self.ideas = self._load_entities("idea", Idea)
         self.work_orders = self._load_entities("work_order", WorkOrder)
@@ -70,6 +87,9 @@ class SQLiteBackedStore:
     def persist(self) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM kv_store")
+            self._write_map(conn, "user", self.users)
+            self._write_map(conn, "session", self.sessions)
+            self._write_map(conn, "device_registration", self.device_registrations)
             self._write_map(conn, "project", self.projects)
             self._write_map(conn, "idea", self.ideas)
             self._write_map(conn, "work_order", self.work_orders)
@@ -96,6 +116,9 @@ class SQLiteBackedStore:
             )
 
     def reset(self) -> None:
+        self.users.clear()
+        self.sessions.clear()
+        self.device_registrations.clear()
         self.projects.clear()
         self.ideas.clear()
         self.work_orders.clear()

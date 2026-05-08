@@ -50,6 +50,40 @@ class NotificationStatus(StrEnum):
     READ = "READ"
 
 
+class UserRole(StrEnum):
+    OWNER = "OWNER"
+    MAINTAINER = "MAINTAINER"
+    REVIEWER = "REVIEWER"
+
+
+class User(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("user"))
+    email: str
+    display_name: str = ""
+    role: UserRole = UserRole.OWNER
+    password_hash: str
+    password_salt: str
+    disabled: bool = False
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
+class SessionToken(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("session"))
+    user_id: str
+    token_hash: str
+    created_at: datetime = Field(default_factory=now_utc)
+    expires_at: datetime
+    revoked: bool = False
+
+
+class AuthUser(BaseModel):
+    id: str
+    email: str
+    display_name: str
+    role: UserRole
+
+
 class ProjectCreate(BaseModel):
     name: str
     description: str = ""
@@ -94,6 +128,7 @@ class FileChange(BaseModel):
     path: str
     change_type: str = "update"
     diff: str
+    new_content: str | None = None
 
 
 class ApprovalRequestCreate(BaseModel):
@@ -146,8 +181,21 @@ class Notification(BaseModel):
     body: str
     entity_type: str
     entity_id: str
+    user_id: str | None = None
     status: NotificationStatus = NotificationStatus.UNREAD
+    push_status: str = "PENDING"
+    push_error: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
+
+
+class DeviceRegistration(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("device"))
+    user_id: str | None = None
+    platform: str = "android"
+    token: str
+    app_version: str = ""
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
 
 
 class AuditEvent(BaseModel):
