@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import os
+from typing import Any
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .auth import require_api_key
-from .models import ApprovalStatus
+from .models import ApprovalStatus, TestRun, now_utc
 from .store import store
 
 router = APIRouter(prefix="/github-runner", tags=["github-runner"])
 AuthDependency = Depends(require_api_key)
+PROTECTED_BRANCHES = {"main", "master", "production", "release"}
+GITHUB_API_URL = "https://api.github.com"
 
 
 class PatchPlanRequest(BaseModel):
@@ -29,28 +35,54 @@ class PatchPlanResponse(BaseModel):
     next_steps: list[str] = Field(default_factory=list)
 
 
-@router.post("/patch-plan", response_model=PatchPlanResponse)
-def create_patch_plan(payload: PatchPlanRequest, _: None = AuthDependency) -> PatchPlanResponse:
-    """Prepare a safe GitHub patch execution plan.
+class ExecuteGitHubRequest(PatchPlanRequest):
+    commit_message: str = "Apply approved Aixion Control Tower change"
+    pr_title: str | None = None
+    pr_body: str | None = None
+    run_tests: bool = False
 
-    This endpoint deliberately does not write to GitHub yet. It validates that the
-    approval is safe enough to be handed to a GitHub worker in a later phase.
-    """
+
+class ExecuteGitHubResponse(BaseModel):
+    approval_request_id: str
+    repository_full_name: str
+    branch: str
+    commit_sha: str
+    pull_request_url: str
+    changed_files: list[str]
+    test_status: str = "NOT_RUN"
+
+
+def _github_headers() -> dict[str, str]:
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=500, detail="GITHUB_TOKEN is not configured for GitHub execution")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _validate_execution(payload: PatchPlanRequest) -> PatchPlanResponse:
     approval = store.approval_requests.get(payload.approval_request_id)
     if not approval:
         raise HTTPException(status_code=404, detail="Approval request not found")
 
     blockers: list[str] = []
     if approval.status != ApprovalStatus.APPROVED:
-        blockers.append("Approval request must be APPROVED before patch execution planning.")
+        blockers.append("Approval request must be APPROVED before GitHub execution.")
     if approval.risk.blocked:
         blockers.append("Blocked approval requests cannot be sent to GitHub runner.")
-    if payload.base_branch.lower() in {"main", "master", "production", "release"} and not payload.feature_branch:
+    if payload.base_branch.lower() in PROTECTED_BRANCHES and not payload.feature_branch:
         blockers.append("A feature branch is required; direct protected branch patching is not allowed.")
-    if payload.feature_branch.lower() in {"main", "master", "production", "release"}:
+    if payload.feature_branch.lower() in PROTECTED_BRANCHES:
         blockers.append("Feature branch cannot be a protected branch.")
+    if payload.feature_branch == payload.base_branch:
+        blockers.append("Feature branch must be different from base branch.")
     if not approval.files:
         blockers.append("Approval request has no file changes.")
+    if any(not file.new_content for file in approval.files):
+        blockers.append("Every file change must include new_content for deterministic GitHub execution.")
 
     return PatchPlanResponse(
         ready=not blockers,
@@ -62,9 +94,121 @@ def create_patch_plan(payload: PatchPlanRequest, _: None = AuthDependency) -> Pa
         blockers=blockers,
         next_steps=[
             "Create feature branch from base branch.",
-            "Apply approved patch only to listed files.",
+            "Apply approved full-file content only to listed files.",
             "Commit with approval id in message.",
-            "Run configured tests and report status back to /test-runs.",
+            "Optionally record test command status back to /test-runs.",
             "Open pull request; never auto-merge in MVP.",
         ],
+    )
+
+
+async def _github(client: httpx.AsyncClient, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    response = await client.request(method, f"{GITHUB_API_URL}{path}", headers=_github_headers(), **kwargs)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=response.text)
+    if not response.content:
+        return {}
+    return response.json()
+
+
+@router.post("/patch-plan", response_model=PatchPlanResponse)
+def create_patch_plan(payload: PatchPlanRequest, _: None = AuthDependency) -> PatchPlanResponse:
+    return _validate_execution(payload)
+
+
+@router.post("/execute", response_model=ExecuteGitHubResponse)
+async def execute_github_change(payload: ExecuteGitHubRequest, _: None = AuthDependency) -> ExecuteGitHubResponse:
+    plan = _validate_execution(payload)
+    if not plan.ready:
+        raise HTTPException(status_code=409, detail={"blockers": plan.blockers})
+
+    approval = store.approval_requests[payload.approval_request_id]
+    repo = payload.repository_full_name
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        base_ref = await _github(client, "GET", f"/repos/{repo}/git/ref/heads/{payload.base_branch}")
+        base_sha = base_ref["object"]["sha"]
+
+        branch_ref = f"refs/heads/{payload.feature_branch}"
+        branch_exists = True
+        try:
+            await _github(client, "GET", f"/repos/{repo}/git/ref/heads/{payload.feature_branch}")
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            branch_exists = False
+
+        if not branch_exists:
+            await _github(
+                client,
+                "POST",
+                f"/repos/{repo}/git/refs",
+                json={"ref": branch_ref, "sha": base_sha},
+            )
+
+        changed_files: list[str] = []
+        for file in approval.files:
+            existing_sha: str | None = None
+            try:
+                existing = await _github(
+                    client,
+                    "GET",
+                    f"/repos/{repo}/contents/{file.path}",
+                    params={"ref": payload.feature_branch},
+                )
+                existing_sha = existing.get("sha")
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+
+            body: dict[str, Any] = {
+                "message": f"{payload.commit_message}\n\nApproval: {approval.id}",
+                "content": file.new_content or "",
+                "branch": payload.feature_branch,
+            }
+            import base64
+
+            body["content"] = base64.b64encode((file.new_content or "").encode("utf-8")).decode("ascii")
+            if existing_sha:
+                body["sha"] = existing_sha
+            commit_response = await _github(client, "PUT", f"/repos/{repo}/contents/{file.path}", json=body)
+            changed_files.append(file.path)
+
+        pr = await _github(
+            client,
+            "POST",
+            f"/repos/{repo}/pulls",
+            json={
+                "title": payload.pr_title or approval.title,
+                "body": payload.pr_body
+                or f"Aixion approved change.\n\nApproval: `{approval.id}`\nRisk: `{approval.risk.level}`\n\nNo auto-merge. Review required.",
+                "head": payload.feature_branch,
+                "base": payload.base_branch,
+            },
+        )
+
+    approval.status = ApprovalStatus.READY_FOR_PR
+    approval.updated_at = now_utc()
+
+    test_status = "NOT_RUN"
+    if payload.run_tests:
+        test_status = "PENDING_EXTERNAL_CI"
+        test_run = TestRun(
+            approval_request_id=approval.id,
+            command="GitHub Actions / external CI",
+            status=test_status,
+            output_summary="PR opened. CI must be verified before merge.",
+        )
+        store.test_runs[test_run.id] = test_run
+
+    store.persist()
+
+    return ExecuteGitHubResponse(
+        approval_request_id=approval.id,
+        repository_full_name=repo,
+        branch=payload.feature_branch,
+        commit_sha=commit_response["commit"]["sha"],
+        pull_request_url=pr["html_url"],
+        changed_files=changed_files,
+        test_status=test_status,
     )
