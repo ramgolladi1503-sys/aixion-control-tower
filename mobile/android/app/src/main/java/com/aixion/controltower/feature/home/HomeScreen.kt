@@ -26,6 +26,7 @@ import com.aixion.controltower.core.ui.components.StatusCard
 import com.aixion.controltower.core.ui.theme.RiskBlocked
 import com.aixion.controltower.core.ui.theme.RiskCritical
 import com.aixion.controltower.core.ui.theme.RiskLow
+import com.aixion.controltower.core.ui.theme.RiskMedium
 import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
@@ -54,7 +55,7 @@ fun HomeScreen(
                     fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = if (state.loading) "Loading command state..." else "AI-agent work that needs your attention.",
+                    text = if (state.loading) "Loading command state..." else "AI-agent work grouped by the next real owner.",
                     color = TowerTextMuted,
                     fontSize = 14.sp
                 )
@@ -64,17 +65,17 @@ fun HomeScreen(
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatusCard(
-                    title = "Pending",
-                    value = state.pendingCount.toString(),
-                    subtitle = "approvals waiting",
+                    title = "Human Action",
+                    value = state.actionRequiredCount.toString(),
+                    subtitle = "review, unblock, PR",
                     accent = TowerAccent,
                     modifier = Modifier.weight(1f)
                 )
                 StatusCard(
-                    title = "Blocked",
-                    value = state.blockedCount.toString(),
-                    subtitle = "policy stopped",
-                    accent = RiskBlocked,
+                    title = "Runner Queue",
+                    value = state.githubExecutionCount.toString(),
+                    subtitle = "approved, not PR-ready",
+                    accent = RiskMedium,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -83,10 +84,10 @@ fun HomeScreen(
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatusCard(
-                    title = "Projects",
-                    value = state.projects.size.toString(),
-                    subtitle = "active systems",
-                    accent = RiskLow,
+                    title = "Blocked",
+                    value = state.blockedCount.toString(),
+                    subtitle = "policy stopped",
+                    accent = RiskBlocked,
                     modifier = Modifier.weight(1f)
                 )
                 StatusCard(
@@ -109,8 +110,32 @@ fun HomeScreen(
             )
         }
 
-        items(state.approvals.take(3)) { approval ->
-            ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
+        if (state.actionRequiredApprovals.isEmpty()) {
+            item {
+                Text(
+                    text = "No human action needed right now.",
+                    color = TowerTextMuted,
+                    fontSize = 13.sp
+                )
+            }
+        } else {
+            items(state.actionRequiredApprovals.take(3)) { approval ->
+                ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
+            }
+        }
+
+        if (state.githubExecutionApprovals.isNotEmpty()) {
+            item {
+                Text(
+                    text = "Awaiting GitHub Execution",
+                    color = TowerTextPrimary,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            items(state.githubExecutionApprovals.take(3)) { approval ->
+                ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
+            }
         }
     }
 }
