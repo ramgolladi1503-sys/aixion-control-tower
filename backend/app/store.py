@@ -11,6 +11,7 @@ from .models import (
     ApprovalRequest,
     AuditEvent,
     DeviceRegistration,
+    ExternalAgent,
     Idea,
     Notification,
     Project,
@@ -37,6 +38,7 @@ class SQLiteBackedStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.users: dict[str, User] = {}
         self.sessions: dict[str, SessionToken] = {}
+        self.external_agents: dict[str, ExternalAgent] = {}
         self.device_registrations: dict[str, DeviceRegistration] = {}
         self.projects: dict[str, Project] = {}
         self.ideas: dict[str, Idea] = {}
@@ -75,6 +77,7 @@ class SQLiteBackedStore:
     def load(self) -> None:
         self.users = self._load_entities("user", User)
         self.sessions = self._load_entities("session", SessionToken)
+        self.external_agents = self._load_entities("external_agent", ExternalAgent)
         self.device_registrations = self._load_entities("device_registration", DeviceRegistration)
         self.projects = self._load_entities("project", Project)
         self.ideas = self._load_entities("idea", Idea)
@@ -89,6 +92,7 @@ class SQLiteBackedStore:
             conn.execute("DELETE FROM kv_store")
             self._write_map(conn, "user", self.users)
             self._write_map(conn, "session", self.sessions)
+            self._write_map(conn, "external_agent", self.external_agents)
             self._write_map(conn, "device_registration", self.device_registrations)
             self._write_map(conn, "project", self.projects)
             self._write_map(conn, "idea", self.ideas)
@@ -118,6 +122,7 @@ class SQLiteBackedStore:
     def reset(self) -> None:
         self.users.clear()
         self.sessions.clear()
+        self.external_agents.clear()
         self.device_registrations.clear()
         self.projects.clear()
         self.ideas.clear()

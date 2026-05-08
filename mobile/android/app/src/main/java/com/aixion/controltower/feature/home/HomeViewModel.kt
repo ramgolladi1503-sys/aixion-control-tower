@@ -6,6 +6,8 @@ import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.ProjectSummary
+import com.aixion.controltower.core.model.isAwaitingGitHubExecution
+import com.aixion.controltower.core.model.requiresHumanAction
 import com.aixion.controltower.data.repository.ApprovalRepository
 import com.aixion.controltower.data.repository.ProjectRepository
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,9 +20,15 @@ data class HomeUiState(
     val projects: List<ProjectSummary> = emptyList(),
     val approvals: List<ApprovalSummary> = emptyList()
 ) {
+    val actionRequiredApprovals: List<ApprovalSummary> = approvals.filter { it.requiresHumanAction }
+    val githubExecutionApprovals: List<ApprovalSummary> = approvals.filter { it.isAwaitingGitHubExecution }
+    val readyForPrApprovals: List<ApprovalSummary> = approvals.filter { it.status == ApprovalStatus.READY_FOR_PR }
+
     val pendingCount: Int = approvals.count { it.status == ApprovalStatus.PENDING_REVIEW }
     val blockedCount: Int = approvals.count { it.status == ApprovalStatus.BLOCKED }
-    val failedTestsCount: Int = 0
+    val actionRequiredCount: Int = actionRequiredApprovals.size
+    val githubExecutionCount: Int = githubExecutionApprovals.size
+    val failedTestsCount: Int = approvals.count { it.status == ApprovalStatus.TESTS_FAILED }
 }
 
 class HomeViewModel : ViewModel() {
