@@ -83,26 +83,6 @@ val ApprovalSummary.isAwaitingGitHubExecution: Boolean
 val ApprovalSummary.isReadyForPullRequestReview: Boolean
     get() = status == ApprovalStatus.READY_FOR_PR
 
-val ApprovalSummary.requiresHumanAction: Boolean
-    get() = when (status) {
-        ApprovalStatus.PENDING_REVIEW,
-        ApprovalStatus.BLOCKED,
-        ApprovalStatus.REVISION_REQUESTED,
-        ApprovalStatus.TESTS_FAILED,
-        ApprovalStatus.READY_FOR_PR -> true
-        ApprovalStatus.APPROVED,
-        ApprovalStatus.APPLIED,
-        ApprovalStatus.TESTS_RUNNING,
-        ApprovalStatus.TESTS_PASSED,
-        ApprovalStatus.REJECTED -> false
-    }
-
-val ApprovalSummary.isAwaitingGitHubExecution: Boolean
-    get() = status == ApprovalStatus.APPROVED
-
-val ApprovalSummary.isReadyForPullRequestReview: Boolean
-    get() = status == ApprovalStatus.READY_FOR_PR
-
 data class WorkOrderSummary(
     val id: String,
     val projectName: String,
