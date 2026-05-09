@@ -19,9 +19,20 @@ fun String.toRiskLevelOrDefault(): RiskLevel = runCatching {
     RiskLevel.valueOf(uppercase())
 }.getOrDefault(RiskLevel.MEDIUM)
 
-fun String.toApprovalStatusOrDefault(): ApprovalStatus = runCatching {
-    ApprovalStatus.valueOf(uppercase())
-}.getOrDefault(ApprovalStatus.PENDING_REVIEW)
+fun String.toApprovalStatusOrDefault(): ApprovalStatus {
+    val normalized = uppercase()
+    val canonical = when (normalized) {
+        "PENDING_REVIEW" -> "REQUESTED"
+        "REJECTED" -> "DENIED"
+        "APPLIED", "TESTS_RUNNING" -> "EXECUTING"
+        "TESTS_FAILED" -> "FAILED"
+        "TESTS_PASSED" -> "MERGED"
+        else -> normalized
+    }
+    return runCatching {
+        ApprovalStatus.valueOf(canonical)
+    }.getOrDefault(ApprovalStatus.REQUESTED)
+}
 
 fun ProjectDto.toUiSummary(
     pendingApprovals: Int = 0,
@@ -64,7 +75,11 @@ fun ApprovalRequestDto.toUiSummary(projectName: String = "Project"): ApprovalSum
         testPlan = test_plan,
         rollbackPlan = rollback_plan.orEmpty(),
         sourceProvider = uiSourceProvider,
+        sourceAgentId = uiSourceAgentId,
         sourceAgentName = uiSourceAgentName,
+        sourceSessionId = uiSourceSessionId,
+        sourceTaskUrl = uiSourceTaskUrl,
+        createdByUserId = uiCreatedByUserId,
         verifiedSource = uiVerifiedSource
     )
 }
