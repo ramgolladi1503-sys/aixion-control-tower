@@ -25,8 +25,17 @@ class RiskLevel(StrEnum):
 
 
 class ApprovalStatus(StrEnum):
-    PENDING_REVIEW = "PENDING_REVIEW"
+    REQUESTED = "REQUESTED"
     APPROVED = "APPROVED"
+    DENIED = "DENIED"
+    EXPIRED = "EXPIRED"
+    EXECUTING = "EXECUTING"
+    READY_FOR_PR = "READY_FOR_PR"
+    FAILED = "FAILED"
+    MERGED = "MERGED"
+    CANCELLED = "CANCELLED"
+
+    PENDING_REVIEW = "PENDING_REVIEW"
     REJECTED = "REJECTED"
     REVISION_REQUESTED = "REVISION_REQUESTED"
     BLOCKED = "BLOCKED"
@@ -34,7 +43,6 @@ class ApprovalStatus(StrEnum):
     TESTS_RUNNING = "TESTS_RUNNING"
     TESTS_PASSED = "TESTS_PASSED"
     TESTS_FAILED = "TESTS_FAILED"
-    READY_FOR_PR = "READY_FOR_PR"
 
 
 class ProjectMode(StrEnum):
@@ -223,7 +231,7 @@ class RiskAssessment(BaseModel):
 
 class ApprovalRequest(ApprovalRequestCreate):
     id: str = Field(default_factory=lambda: new_id("approval"))
-    status: ApprovalStatus = ApprovalStatus.PENDING_REVIEW
+    status: ApprovalStatus = ApprovalStatus.REQUESTED
     risk: RiskAssessment
     source_provider: AgentProvider = AgentProvider.MANUAL
     source_agent_id: str | None = None
@@ -244,6 +252,16 @@ class ApprovalRequest(ApprovalRequestCreate):
 class DecisionCreate(BaseModel):
     decision: str
     reason: str = ""
+
+
+class ApprovalGroups(BaseModel):
+    action_required: list[ApprovalRequest] = Field(default_factory=list)
+    approved_waiting: list[ApprovalRequest] = Field(default_factory=list)
+    executing: list[ApprovalRequest] = Field(default_factory=list)
+    ready_for_pr: list[ApprovalRequest] = Field(default_factory=list)
+    failed: list[ApprovalRequest] = Field(default_factory=list)
+    completed: list[ApprovalRequest] = Field(default_factory=list)
+    history: list[ApprovalRequest] = Field(default_factory=list)
 
 
 class TestRunCreate(BaseModel):
