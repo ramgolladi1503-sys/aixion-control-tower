@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException
 
 from .agent_routes import router as agent_router
+from .approval_integrity import compute_approval_payload_hash
 from .approval_lifecycle import grouped_approvals
 from .auth import require_api_key, require_user
 from .auth_routes import router as auth_router
@@ -308,6 +309,9 @@ def decide_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = 
                     "required_actions": request.risk.required_actions,
                 },
             )
+        request.approved_payload_hash = compute_approval_payload_hash(request)
+        request.approved_at = now_utc()
+        request.approved_by_user_id = user.id
         request.status = ApprovalStatus.APPROVED
     elif decision in {"reject", "deny", "denied"}:
         request.status = ApprovalStatus.DENIED
@@ -325,6 +329,7 @@ def decide_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = 
             "reason": payload.reason,
             "previous_status": previous_status,
             "new_status": request.status,
+            "approved_payload_hash": request.approved_payload_hash,
             "source_provider": request.source_provider,
             "source_agent_id": request.source_agent_id,
             "verified_source": request.verified_source,
