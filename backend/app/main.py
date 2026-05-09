@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from .agent_routes import router as agent_router
 from .approval_integrity import compute_approval_payload_hash
 from .approval_lifecycle import grouped_approvals
+from .audit_routes import router as audit_router
 from .auth import require_api_key, require_user
 from .auth_routes import router as auth_router
 from .github_runner import router as github_runner_router
@@ -42,6 +43,7 @@ app.include_router(agent_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
 app.include_router(mcp_gateway_router)
+app.include_router(audit_router)
 AuthDependency = Depends(require_api_key)
 UserDependency = Depends(require_user)
 
