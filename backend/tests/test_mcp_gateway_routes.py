@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.mcp_gateway import FORWARDED_AFTER_APPROVAL
 from app.mcp_gateway_routes import child_received_count_for_test, reset_gateway_runtime_for_test
+from app.models import MCPPendingStatus
 from app.store import store
 
 client = TestClient(app)
@@ -57,6 +58,7 @@ def test_http_mcp_gateway_waits_then_forwards_after_mobile_decision() -> None:
     approval_id = initial["approval_request_id"]
     assert approval_id is not None
     assert child_received_count_for_test() == 0
+    assert len(store.mcp_pending_requests) == 1
 
     decision = client.post(
         f"/approvals/{approval_id}/decision",
@@ -72,10 +74,36 @@ def test_http_mcp_gateway_waits_then_forwards_after_mobile_decision() -> None:
     assert resolved_body["forwarded"] is True
     assert resolved_body["approval_required"] is True
     assert child_received_count_for_test() == 1
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
 
     audit_response = client.get("/audit")
     assert audit_response.status_code == 200
     assert FORWARDED_AFTER_APPROVAL in [event["event_type"] for event in audit_response.json()]
+
+
+def test_http_mcp_gateway_recovers_pending_request_after_runtime_reset() -> None:
+    project_id = _create_project()
+    initial = _submit_mutating_request(project_id)
+    approval_id = initial["approval_request_id"]
+    assert approval_id is not None
+    assert child_received_count_for_test() == 0
+    assert len(store.mcp_pending_requests) == 1
+
+    reset_gateway_runtime_for_test()
+    assert child_received_count_for_test() == 0
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "reason": "Recovered after runtime reset"},
+    )
+    assert decision.status_code == 200
+
+    resolved = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert resolved.status_code == 200
+    assert resolved.json()["forwarded"] is True
+    assert child_received_count_for_test() == 1
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
 
 
 def test_http_mcp_gateway_denied_request_never_forwards() -> None:
@@ -95,4 +123,5 @@ def test_http_mcp_gateway_denied_request_never_forwards() -> None:
     assert resolved.status_code == 200
     assert resolved.json()["forwarded"] is False
     assert child_received_count_for_test() == 0
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.BLOCKED_BY_DECISION
     assert FORWARDED_AFTER_APPROVAL not in [event.event_type for event in store.audit_events]

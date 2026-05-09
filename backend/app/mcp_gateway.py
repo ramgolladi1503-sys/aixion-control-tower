@@ -14,6 +14,8 @@ from .models import (
     ApprovalStatus,
     AuditEvent,
     FileChange,
+    MCPPendingRequest,
+    MCPPendingStatus,
     RiskAssessment,
     RiskLevel,
     now_utc,
@@ -65,7 +67,8 @@ class MCPGatewayApprovalDecisionLayer:
 
     Mutating tool calls are converted into approval requests and held. The child
     server only receives the exact pending call after the linked approval reaches
-    APPROVED. Denied, expired, cancelled, failed, or tampered requests fail closed.
+    APPROVED. Pending calls are also persisted so route/gateway recreation does not
+    silently lose held MCP work.
     """
 
     def __init__(self, child_server: ChildMCPTestServer, *, project_id: str) -> None:
@@ -106,6 +109,7 @@ class MCPGatewayApprovalDecisionLayer:
 
         approval = store.approval_requests.get(approval_request_id)
         if not approval:
+            self._mark_pending_status(approval_request_id, MCPPendingStatus.ORPHANED)
             return MCPGatewayDecision(
                 forwarded=False,
                 approval_required=True,
@@ -113,6 +117,7 @@ class MCPGatewayApprovalDecisionLayer:
             )
 
         if approval.status != ApprovalStatus.APPROVED:
+            self._mark_pending_status(approval.id, MCPPendingStatus.BLOCKED_BY_DECISION)
             return MCPGatewayDecision(
                 forwarded=False,
                 approval_required=True,
@@ -140,8 +145,9 @@ class MCPGatewayApprovalDecisionLayer:
                 reason="Approval payload changed after approval; request was not forwarded.",
             )
 
-        call = self._pending_calls.pop(approval.id, None)
+        call = self._pending_calls.pop(approval.id, None) or self._recover_pending_call(approval.id)
         if call is None:
+            self._mark_pending_status(approval.id, MCPPendingStatus.ORPHANED)
             return MCPGatewayDecision(
                 forwarded=False,
                 approval_required=True,
@@ -151,6 +157,7 @@ class MCPGatewayApprovalDecisionLayer:
             )
 
         result = self._forward(call)
+        self._mark_pending_status(approval.id, MCPPendingStatus.FORWARDED)
         self._audit_forwarded_after_approval(approval, call)
         return MCPGatewayDecision(
             forwarded=True,
@@ -220,7 +227,17 @@ class MCPGatewayApprovalDecisionLayer:
             source_session_id=call.session_id,
             verified_source=True,
         )
+        pending = MCPPendingRequest(
+            project_id=self.project_id,
+            approval_request_id=approval.id,
+            server_name=call.server_name,
+            tool_name=call.tool_name,
+            arguments=call.arguments,
+            session_id=call.session_id,
+            requested_by=call.requested_by,
+        )
         store.approval_requests[approval.id] = approval
+        store.mcp_pending_requests[pending.id] = pending
         store.audit_events.append(
             AuditEvent(
                 event_type="mcp.approval_requested",
@@ -230,11 +247,44 @@ class MCPGatewayApprovalDecisionLayer:
                     "server_name": call.server_name,
                     "tool_name": call.tool_name,
                     "mutating": True,
+                    "mcp_pending_request_id": pending.id,
                 },
             )
         )
         store.persist()
         return approval
+
+    def _recover_pending_call(self, approval_request_id: str) -> MCPGatewayToolCall | None:
+        pending = self._pending_for_approval(approval_request_id)
+        if pending is None or pending.status != MCPPendingStatus.WAITING_FOR_APPROVAL:
+            return None
+        return MCPGatewayToolCall(
+            server_name=pending.server_name,
+            tool_name=pending.tool_name,
+            arguments=pending.arguments,
+            session_id=pending.session_id,
+            requested_by=pending.requested_by,
+            mutating=True,
+        )
+
+    @staticmethod
+    def _pending_for_approval(approval_request_id: str) -> MCPPendingRequest | None:
+        return next(
+            (
+                pending
+                for pending in store.mcp_pending_requests.values()
+                if pending.approval_request_id == approval_request_id
+            ),
+            None,
+        )
+
+    def _mark_pending_status(self, approval_request_id: str, status: MCPPendingStatus) -> None:
+        pending = self._pending_for_approval(approval_request_id)
+        if pending is None:
+            return
+        pending.status = status
+        pending.updated_at = now_utc()
+        store.persist()
 
     def _forward(self, call: MCPGatewayToolCall) -> dict[str, Any]:
         return self.child_server.call_tool(
@@ -252,6 +302,7 @@ class MCPGatewayApprovalDecisionLayer:
         approval: ApprovalRequest,
         call: MCPGatewayToolCall,
     ) -> None:
+        pending = self._pending_for_approval(approval.id)
         store.audit_events.append(
             AuditEvent(
                 event_type=FORWARDED_AFTER_APPROVAL,
@@ -261,6 +312,7 @@ class MCPGatewayApprovalDecisionLayer:
                     "server_name": call.server_name,
                     "tool_name": call.tool_name,
                     "approved_payload_hash": approval.approved_payload_hash,
+                    "mcp_pending_request_id": pending.id if pending else None,
                 },
             )
         )

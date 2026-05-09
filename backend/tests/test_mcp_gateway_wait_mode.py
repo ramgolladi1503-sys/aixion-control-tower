@@ -6,7 +6,7 @@ from app.mcp_gateway import (
     MCPGatewayApprovalDecisionLayer,
     MCPGatewayToolCall,
 )
-from app.models import Project, ProjectMode
+from app.models import MCPPendingStatus, Project, ProjectMode
 from app.store import store
 
 
@@ -46,6 +46,7 @@ def test_mutating_call_waits_until_side_channel_approval_then_forwards() -> None
     assert initial.forwarded is False
     assert initial.approval_request_id is not None
     assert child.received_tool_calls == []
+    assert len(store.mcp_pending_requests) == 1
 
     gateway.approve_for_test(initial.approval_request_id)
     gateway.wait_handle(initial.approval_request_id).notify_decision_changed()
@@ -56,9 +57,26 @@ def test_mutating_call_waits_until_side_channel_approval_then_forwards() -> None
     assert len(child.received_tool_calls) == 1
     assert child.received_tool_calls[0].tool_name == "update_config"
     assert child.received_tool_calls[0].arguments == {"key": "demo", "value": "approved-value"}
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
 
     audit_event_types = [event.event_type for event in store.audit_events]
     assert FORWARDED_AFTER_APPROVAL in audit_event_types
+
+
+def test_pending_call_recovers_after_gateway_memory_loss() -> None:
+    child, gateway = _gateway()
+    initial = gateway.submit_tool_call(_mutating_call())
+    assert initial.approval_request_id is not None
+    project_id = store.approval_requests[initial.approval_request_id].project_id
+
+    recovered_gateway = MCPGatewayApprovalDecisionLayer(child, project_id=project_id)
+    recovered_gateway.approve_for_test(initial.approval_request_id)
+    resolved = recovered_gateway.resolve_after_side_channel_decision(initial.approval_request_id)
+
+    assert resolved.forwarded is True
+    assert len(child.received_tool_calls) == 1
+    assert child.received_tool_calls[0].tool_name == "update_config"
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
 
 
 def test_denied_mutating_call_is_never_forwarded() -> None:
@@ -74,6 +92,7 @@ def test_denied_mutating_call_is_never_forwarded() -> None:
     assert resolved.forwarded is False
     assert "request was not forwarded" in resolved.reason
     assert child.received_tool_calls == []
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.BLOCKED_BY_DECISION
     assert FORWARDED_AFTER_APPROVAL not in [event.event_type for event in store.audit_events]
 
 
@@ -90,6 +109,7 @@ def test_expired_mutating_call_is_never_forwarded() -> None:
     assert resolved.forwarded is False
     assert "request was not forwarded" in resolved.reason
     assert child.received_tool_calls == []
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.BLOCKED_BY_DECISION
     assert FORWARDED_AFTER_APPROVAL not in [event.event_type for event in store.audit_events]
 
 
@@ -110,3 +130,4 @@ def test_read_only_call_forwards_without_approval() -> None:
     assert resolved.approval_request_id is None
     assert len(child.received_tool_calls) == 1
     assert child.received_tool_calls[0].tool_name == "read_status"
+    assert store.mcp_pending_requests == {}
