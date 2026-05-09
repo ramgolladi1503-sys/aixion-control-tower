@@ -81,6 +81,31 @@ def test_http_mcp_gateway_waits_then_forwards_after_mobile_decision() -> None:
     assert FORWARDED_AFTER_APPROVAL in [event["event_type"] for event in audit_response.json()]
 
 
+def test_http_mcp_gateway_resolve_is_idempotent_after_forwarding() -> None:
+    project_id = _create_project()
+    initial = _submit_mutating_request(project_id)
+    approval_id = initial["approval_request_id"]
+    assert approval_id is not None
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "reason": "Approve once"},
+    )
+    assert decision.status_code == 200
+
+    first = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+    second = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["forwarded"] is True
+    assert second.json()["forwarded"] is False
+    assert "already final" in second.json()["reason"]
+    assert child_received_count_for_test() == 1
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
+    assert [event.event_type for event in store.audit_events].count(FORWARDED_AFTER_APPROVAL) == 1
+
+
 def test_http_mcp_gateway_recovers_pending_request_after_runtime_reset() -> None:
     project_id = _create_project()
     initial = _submit_mutating_request(project_id)
@@ -125,6 +150,27 @@ def test_http_mcp_gateway_denied_request_never_forwards() -> None:
     assert child_received_count_for_test() == 0
     assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.BLOCKED_BY_DECISION
     assert FORWARDED_AFTER_APPROVAL not in [event.event_type for event in store.audit_events]
+
+
+def test_http_mcp_gateway_resolve_is_idempotent_after_denial() -> None:
+    project_id = _create_project()
+    initial = _submit_mutating_request(project_id)
+    approval_id = initial["approval_request_id"]
+
+    client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "deny", "reason": "Deny once"},
+    )
+    first = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+    second = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["forwarded"] is False
+    assert second.json()["forwarded"] is False
+    assert "already final" in second.json()["reason"]
+    assert child_received_count_for_test() == 0
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.BLOCKED_BY_DECISION
 
 
 def test_http_mcp_pending_status_api_lists_filters_and_reads_detail() -> None:
