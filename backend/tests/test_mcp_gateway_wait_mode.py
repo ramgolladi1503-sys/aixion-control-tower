@@ -63,6 +63,23 @@ def test_mutating_call_waits_until_side_channel_approval_then_forwards() -> None
     assert FORWARDED_AFTER_APPROVAL in audit_event_types
 
 
+def test_resolve_is_idempotent_after_forwarding() -> None:
+    child, gateway = _gateway()
+    initial = gateway.submit_tool_call(_mutating_call())
+    assert initial.approval_request_id is not None
+
+    gateway.approve_for_test(initial.approval_request_id)
+    first = gateway.resolve_after_side_channel_decision(initial.approval_request_id)
+    second = gateway.resolve_after_side_channel_decision(initial.approval_request_id)
+
+    assert first.forwarded is True
+    assert second.forwarded is False
+    assert "already final" in second.reason
+    assert len(child.received_tool_calls) == 1
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
+    assert [event.event_type for event in store.audit_events].count(FORWARDED_AFTER_APPROVAL) == 1
+
+
 def test_pending_call_recovers_after_gateway_memory_loss() -> None:
     child, gateway = _gateway()
     initial = gateway.submit_tool_call(_mutating_call())
@@ -94,6 +111,22 @@ def test_denied_mutating_call_is_never_forwarded() -> None:
     assert child.received_tool_calls == []
     assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.BLOCKED_BY_DECISION
     assert FORWARDED_AFTER_APPROVAL not in [event.event_type for event in store.audit_events]
+
+
+def test_resolve_is_idempotent_after_denial() -> None:
+    child, gateway = _gateway()
+    initial = gateway.submit_tool_call(_mutating_call())
+    assert initial.approval_request_id is not None
+
+    gateway.deny_for_test(initial.approval_request_id)
+    first = gateway.resolve_after_side_channel_decision(initial.approval_request_id)
+    second = gateway.resolve_after_side_channel_decision(initial.approval_request_id)
+
+    assert first.forwarded is False
+    assert second.forwarded is False
+    assert "already final" in second.reason
+    assert child.received_tool_calls == []
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.BLOCKED_BY_DECISION
 
 
 def test_expired_mutating_call_is_never_forwarded() -> None:
