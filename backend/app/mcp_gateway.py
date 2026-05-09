@@ -33,6 +33,11 @@ MCP_MUTATING_TOOL_NAMES = {
     "git_commit",
     "github_create_pr",
 }
+FINAL_PENDING_STATUSES = {
+    MCPPendingStatus.FORWARDED,
+    MCPPendingStatus.BLOCKED_BY_DECISION,
+    MCPPendingStatus.ORPHANED,
+}
 
 
 class MCPGatewayToolCall(BaseModel):
@@ -108,6 +113,17 @@ class MCPGatewayApprovalDecisionLayer:
             event.wait(timeout=timeout_seconds)
 
         approval = store.approval_requests.get(approval_request_id)
+        pending = self._pending_for_approval(approval_request_id)
+        if pending is not None and pending.status in FINAL_PENDING_STATUSES:
+            self._pending_calls.pop(approval_request_id, None)
+            return MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval_request_id,
+                status=approval.status if approval else None,
+                reason=f"MCP pending request is already final: {pending.status}.",
+            )
+
         if not approval:
             self._mark_pending_status(approval_request_id, MCPPendingStatus.ORPHANED)
             return MCPGatewayDecision(
@@ -280,7 +296,7 @@ class MCPGatewayApprovalDecisionLayer:
 
     def _mark_pending_status(self, approval_request_id: str, status: MCPPendingStatus) -> None:
         pending = self._pending_for_approval(approval_request_id)
-        if pending is None:
+        if pending is None or pending.status in FINAL_PENDING_STATUSES:
             return
         pending.status = status
         pending.updated_at = now_utc()
