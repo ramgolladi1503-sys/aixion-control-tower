@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .auth import require_api_key
 from .child_mcp_test_server import ChildMCPTestServer
 from .mcp_gateway import MCPGatewayApprovalDecisionLayer, MCPGatewayDecision, MCPGatewayToolCall
+from .models import MCPPendingRequest, MCPPendingStatus
 from .store import store
 
 router = APIRouter(prefix="/mcp-gateway", tags=["mcp-gateway"])
@@ -43,6 +44,34 @@ def submit_gateway_request(
     _: None = AuthDependency,
 ) -> MCPGatewayDecision:
     return gateway_for_project(payload.project_id).submit_tool_call(payload.request)
+
+
+@router.get("/pending-requests", response_model=list[MCPPendingRequest])
+def list_pending_gateway_requests(
+    project_id: str | None = Query(default=None),
+    status: MCPPendingStatus | None = Query(default=None),
+    approval_request_id: str | None = Query(default=None),
+    _: None = AuthDependency,
+) -> list[MCPPendingRequest]:
+    requests = list(store.mcp_pending_requests.values())
+    if project_id is not None:
+        requests = [request for request in requests if request.project_id == project_id]
+    if status is not None:
+        requests = [request for request in requests if request.status == status]
+    if approval_request_id is not None:
+        requests = [request for request in requests if request.approval_request_id == approval_request_id]
+    return sorted(requests, key=lambda request: request.created_at, reverse=True)
+
+
+@router.get("/pending-requests/{pending_request_id}", response_model=MCPPendingRequest)
+def get_pending_gateway_request(
+    pending_request_id: str,
+    _: None = AuthDependency,
+) -> MCPPendingRequest:
+    pending = store.mcp_pending_requests.get(pending_request_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="MCP pending request not found")
+    return pending
 
 
 @router.post("/approvals/{approval_request_id}/resolve", response_model=MCPGatewayDecision)
