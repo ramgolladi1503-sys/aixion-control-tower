@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from .auth import require_api_key
+from .child_mcp_test_server import ChildMCPTestServer
+from .mcp_gateway import MCPGatewayApprovalDecisionLayer, MCPGatewayDecision, MCPGatewayToolCall
+from .store import store
+
+router = APIRouter(prefix="/mcp-gateway", tags=["mcp-gateway"])
+AuthDependency = Depends(require_api_key)
+
+_child_server = ChildMCPTestServer()
+_gateways: dict[str, MCPGatewayApprovalDecisionLayer] = {}
+
+
+class GatewaySubmitRequest(BaseModel):
+    project_id: str
+    request: MCPGatewayToolCall
+
+
+def gateway_for_project(project_id: str) -> MCPGatewayApprovalDecisionLayer:
+    if project_id not in store.projects:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project_id not in _gateways:
+        _gateways[project_id] = MCPGatewayApprovalDecisionLayer(_child_server, project_id=project_id)
+    return _gateways[project_id]
+
+
+def reset_gateway_runtime_for_test() -> None:
+    _child_server.received_tool_calls.clear()
+    _gateways.clear()
+
+
+def child_received_count_for_test() -> int:
+    return len(_child_server.received_tool_calls)
+
+
+@router.post("/requests", response_model=MCPGatewayDecision)
+def submit_gateway_request(
+    payload: GatewaySubmitRequest,
+    _: None = AuthDependency,
+) -> MCPGatewayDecision:
+    return gateway_for_project(payload.project_id).submit_tool_call(payload.request)
+
+
+@router.post("/approvals/{approval_request_id}/resolve", response_model=MCPGatewayDecision)
+def resolve_gateway_request(
+    approval_request_id: str,
+    _: None = AuthDependency,
+) -> MCPGatewayDecision:
+    approval = store.approval_requests.get(approval_request_id)
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    gateway = gateway_for_project(approval.project_id)
+    gateway.wait_handle(approval_request_id).notify_decision_changed()
+    return gateway.resolve_after_side_channel_decision(approval_request_id)
