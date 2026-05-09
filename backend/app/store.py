@@ -13,6 +13,7 @@ from .models import (
     DeviceRegistration,
     ExternalAgent,
     Idea,
+    MCPPendingRequest,
     Notification,
     Project,
     SessionToken,
@@ -44,6 +45,7 @@ class SQLiteBackedStore:
         self.ideas: dict[str, Idea] = {}
         self.work_orders: dict[str, WorkOrder] = {}
         self.approval_requests: dict[str, ApprovalRequest] = {}
+        self.mcp_pending_requests: dict[str, MCPPendingRequest] = {}
         self.test_runs: dict[str, TestRun] = {}
         self.notifications: dict[str, Notification] = {}
         self.audit_events: list[AuditEvent] = []
@@ -83,6 +85,7 @@ class SQLiteBackedStore:
         self.ideas = self._load_entities("idea", Idea)
         self.work_orders = self._load_entities("work_order", WorkOrder)
         self.approval_requests = self._load_entities("approval_request", ApprovalRequest)
+        self.mcp_pending_requests = self._load_entities("mcp_pending_request", MCPPendingRequest)
         self.test_runs = self._load_entities("test_run", TestRun)
         self.notifications = self._load_entities("notification", Notification)
         self.audit_events = list(self._load_entities("audit_event", AuditEvent).values())
@@ -98,6 +101,7 @@ class SQLiteBackedStore:
             self._write_map(conn, "idea", self.ideas)
             self._write_map(conn, "work_order", self.work_orders)
             self._write_map(conn, "approval_request", self.approval_requests)
+            self._write_map(conn, "mcp_pending_request", self.mcp_pending_requests)
             self._write_map(conn, "test_run", self.test_runs)
             self._write_map(conn, "notification", self.notifications)
             self._write_list(conn, "audit_event", self.audit_events)
@@ -128,6 +132,7 @@ class SQLiteBackedStore:
         self.ideas.clear()
         self.work_orders.clear()
         self.approval_requests.clear()
+        self.mcp_pending_requests.clear()
         self.test_runs.clear()
         self.notifications.clear()
         self.audit_events.clear()
