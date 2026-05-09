@@ -7,6 +7,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from .approval_integrity import compute_approval_payload_hash
 from .auth import require_api_key
 from .models import ApprovalStatus, TestRun, now_utc
 from .store import store
@@ -73,6 +74,12 @@ def _validate_execution(payload: PatchPlanRequest) -> PatchPlanResponse:
         blockers.append("Approval request must be APPROVED before GitHub execution.")
     if approval.risk.blocked:
         blockers.append("Blocked approval requests cannot be sent to GitHub runner.")
+    if not approval.approved_payload_hash:
+        blockers.append("Approval request is missing approved payload hash; re-approval is required.")
+    else:
+        current_hash = compute_approval_payload_hash(approval)
+        if current_hash != approval.approved_payload_hash:
+            blockers.append("Approval payload changed after approval; re-approval is required before execution.")
     if payload.base_branch.lower() in PROTECTED_BRANCHES and not payload.feature_branch:
         blockers.append("A feature branch is required; direct protected branch patching is not allowed.")
     if payload.feature_branch.lower() in PROTECTED_BRANCHES:
@@ -124,68 +131,78 @@ async def execute_github_change(payload: ExecuteGitHubRequest, _: None = AuthDep
 
     approval = store.approval_requests[payload.approval_request_id]
     repo = payload.repository_full_name
+    approval.status = ApprovalStatus.EXECUTING
+    approval.updated_at = now_utc()
+    store.persist()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        base_ref = await _github(client, "GET", f"/repos/{repo}/git/ref/heads/{payload.base_branch}")
-        base_sha = base_ref["object"]["sha"]
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            base_ref = await _github(client, "GET", f"/repos/{repo}/git/ref/heads/{payload.base_branch}")
+            base_sha = base_ref["object"]["sha"]
 
-        branch_ref = f"refs/heads/{payload.feature_branch}"
-        branch_exists = True
-        try:
-            await _github(client, "GET", f"/repos/{repo}/git/ref/heads/{payload.feature_branch}")
-        except HTTPException as exc:
-            if exc.status_code != 404:
-                raise
-            branch_exists = False
-
-        if not branch_exists:
-            await _github(
-                client,
-                "POST",
-                f"/repos/{repo}/git/refs",
-                json={"ref": branch_ref, "sha": base_sha},
-            )
-
-        changed_files: list[str] = []
-        for file in approval.files:
-            existing_sha: str | None = None
+            branch_ref = f"refs/heads/{payload.feature_branch}"
+            branch_exists = True
             try:
-                existing = await _github(
-                    client,
-                    "GET",
-                    f"/repos/{repo}/contents/{file.path}",
-                    params={"ref": payload.feature_branch},
-                )
-                existing_sha = existing.get("sha")
+                await _github(client, "GET", f"/repos/{repo}/git/ref/heads/{payload.feature_branch}")
             except HTTPException as exc:
                 if exc.status_code != 404:
                     raise
+                branch_exists = False
 
-            body: dict[str, Any] = {
-                "message": f"{payload.commit_message}\n\nApproval: {approval.id}",
-                "content": file.new_content or "",
-                "branch": payload.feature_branch,
-            }
-            import base64
+            if not branch_exists:
+                await _github(
+                    client,
+                    "POST",
+                    f"/repos/{repo}/git/refs",
+                    json={"ref": branch_ref, "sha": base_sha},
+                )
 
-            body["content"] = base64.b64encode((file.new_content or "").encode("utf-8")).decode("ascii")
-            if existing_sha:
-                body["sha"] = existing_sha
-            commit_response = await _github(client, "PUT", f"/repos/{repo}/contents/{file.path}", json=body)
-            changed_files.append(file.path)
+            changed_files: list[str] = []
+            commit_response: dict[str, Any] | None = None
+            for file in approval.files:
+                existing_sha: str | None = None
+                try:
+                    existing = await _github(
+                        client,
+                        "GET",
+                        f"/repos/{repo}/contents/{file.path}",
+                        params={"ref": payload.feature_branch},
+                    )
+                    existing_sha = existing.get("sha")
+                except HTTPException as exc:
+                    if exc.status_code != 404:
+                        raise
 
-        pr = await _github(
-            client,
-            "POST",
-            f"/repos/{repo}/pulls",
-            json={
-                "title": payload.pr_title or approval.title,
-                "body": payload.pr_body
-                or f"Aixion approved change.\n\nApproval: `{approval.id}`\nRisk: `{approval.risk.level}`\n\nNo auto-merge. Review required.",
-                "head": payload.feature_branch,
-                "base": payload.base_branch,
-            },
-        )
+                body: dict[str, Any] = {
+                    "message": f"{payload.commit_message}\n\nApproval: {approval.id}",
+                    "content": file.new_content or "",
+                    "branch": payload.feature_branch,
+                }
+                import base64
+
+                body["content"] = base64.b64encode((file.new_content or "").encode("utf-8")).decode("ascii")
+                if existing_sha:
+                    body["sha"] = existing_sha
+                commit_response = await _github(client, "PUT", f"/repos/{repo}/contents/{file.path}", json=body)
+                changed_files.append(file.path)
+
+            pr = await _github(
+                client,
+                "POST",
+                f"/repos/{repo}/pulls",
+                json={
+                    "title": payload.pr_title or approval.title,
+                    "body": payload.pr_body
+                    or f"Aixion approved change.\n\nApproval: `{approval.id}`\nApproved Payload: `{approval.approved_payload_hash}`\nRisk: `{approval.risk.level}`\n\nNo auto-merge. Review required.",
+                    "head": payload.feature_branch,
+                    "base": payload.base_branch,
+                },
+            )
+    except Exception:
+        approval.status = ApprovalStatus.FAILED
+        approval.updated_at = now_utc()
+        store.persist()
+        raise
 
     approval.status = ApprovalStatus.READY_FOR_PR
     approval.updated_at = now_utc()
@@ -202,6 +219,9 @@ async def execute_github_change(payload: ExecuteGitHubRequest, _: None = AuthDep
         store.test_runs[test_run.id] = test_run
 
     store.persist()
+
+    if commit_response is None:
+        raise HTTPException(status_code=500, detail="No commit was created during GitHub execution")
 
     return ExecuteGitHubResponse(
         approval_request_id=approval.id,

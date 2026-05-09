@@ -3,7 +3,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app import main
-from app.models import ApprovalStatus, Project
+from app.models import Project
 from app.store import SQLiteBackedStore
 
 client = TestClient(main.app)
@@ -97,9 +97,16 @@ def test_github_patch_plan_blocks_unapproved_requests() -> None:
 def test_github_patch_plan_ready_after_approval() -> None:
     client.post("/demo/seed")
     approval = client.get("/approvals").json()[0]
-    main.store.approval_requests[approval["id"]].status = ApprovalStatus.APPROVED
-    main.store.approval_requests[approval["id"]].risk.required_actions = []
+    request = main.store.approval_requests[approval["id"]]
+    request.risk.required_actions = []
     main.store.persist()
+
+    decision = client.post(
+        f"/approvals/{approval['id']}/decision",
+        json={"decision": "approve", "reason": "Seeded GitHub runner validation"},
+    )
+    assert decision.status_code == 200
+    assert decision.json()["approved_payload_hash"]
 
     response = client.post(
         "/github-runner/patch-plan",

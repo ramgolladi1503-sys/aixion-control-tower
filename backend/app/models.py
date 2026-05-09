@@ -240,6 +240,9 @@ class ApprovalRequest(ApprovalRequestCreate):
     source_task_url: str | None = None
     created_by_user_id: str | None = None
     verified_source: bool = False
+    approved_payload_hash: str | None = None
+    approved_at: datetime | None = None
+    approved_by_user_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
