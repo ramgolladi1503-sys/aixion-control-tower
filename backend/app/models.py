@@ -45,6 +45,13 @@ class ApprovalStatus(StrEnum):
     TESTS_FAILED = "TESTS_FAILED"
 
 
+class MCPPendingStatus(StrEnum):
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    FORWARDED = "FORWARDED"
+    BLOCKED_BY_DECISION = "BLOCKED_BY_DECISION"
+    ORPHANED = "ORPHANED"
+
+
 class ProjectMode(StrEnum):
     STRICT = "STRICT"
     MANUAL = "MANUAL"
@@ -250,6 +257,20 @@ class ApprovalRequest(ApprovalRequestCreate):
     @classmethod
     def default_manual_source_provider(cls, value: AgentProvider | str | None) -> AgentProvider | str:
         return AgentProvider.MANUAL if value is None else value
+
+
+class MCPPendingRequest(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("mcp_pending"))
+    project_id: str
+    approval_request_id: str
+    server_name: str
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    session_id: str | None = None
+    requested_by: str = "mcp-client"
+    status: MCPPendingStatus = MCPPendingStatus.WAITING_FOR_APPROVAL
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
 
 
 class DecisionCreate(BaseModel):
