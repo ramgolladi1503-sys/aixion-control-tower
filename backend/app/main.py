@@ -3,10 +3,12 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException
 
 from .agent_routes import router as agent_router
+from .approval_lifecycle import grouped_approvals
 from .auth import require_api_key, require_user
 from .auth_routes import router as auth_router
 from .github_runner import router as github_runner_router
 from .models import (
+    ApprovalGroups,
     ApprovalRequest,
     ApprovalRequestCreate,
     ApprovalStatus,
@@ -137,7 +139,7 @@ def seed_demo_data(_: None = AuthDependency) -> dict[str, int]:
     approval = ApprovalRequest(
         **approval_payload.model_dump(),
         risk=assess_approval_request(approval_payload),
-        status=ApprovalStatus.PENDING_REVIEW,
+        status=ApprovalStatus.REQUESTED,
     )
     store.approval_requests[approval.id] = approval
 
@@ -222,7 +224,7 @@ def create_approval_request(payload: ApprovalRequestCreate, user: AuthUser = Use
         raise HTTPException(status_code=404, detail="Work order not found")
 
     risk = assess_approval_request(payload)
-    status = ApprovalStatus.BLOCKED if risk.blocked else ApprovalStatus.PENDING_REVIEW
+    status = ApprovalStatus.BLOCKED if risk.blocked else ApprovalStatus.REQUESTED
     request = ApprovalRequest(
         **payload.model_dump(),
         risk=risk,
@@ -262,12 +264,27 @@ def list_approval_requests(_: None = AuthDependency) -> list[ApprovalRequest]:
     return list(store.approval_requests.values())
 
 
+@app.get("/approvals/grouped", response_model=ApprovalGroups)
+def list_grouped_approval_requests(_: None = AuthDependency) -> ApprovalGroups:
+    return ApprovalGroups(**grouped_approvals(store.approval_requests.values()))
+
+
 @app.get("/approvals/{approval_id}", response_model=ApprovalRequest)
 def get_approval_request(approval_id: str, _: None = AuthDependency) -> ApprovalRequest:
     request = store.approval_requests.get(approval_id)
     if not request:
         raise HTTPException(status_code=404, detail="Approval request not found")
     return request
+
+
+@app.post("/approvals/{approval_id}/approve", response_model=ApprovalRequest)
+def approve_approval(approval_id: str, user: AuthUser = UserDependency) -> ApprovalRequest:
+    return decide_approval(approval_id, DecisionCreate(decision="approve"), user)
+
+
+@app.post("/approvals/{approval_id}/deny", response_model=ApprovalRequest)
+def deny_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = UserDependency) -> ApprovalRequest:
+    return decide_approval(approval_id, DecisionCreate(decision="deny", reason=payload.reason), user)
 
 
 @app.post("/approvals/{approval_id}/decision", response_model=ApprovalRequest)
@@ -292,12 +309,12 @@ def decide_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = 
                 },
             )
         request.status = ApprovalStatus.APPROVED
-    elif decision == "reject":
-        request.status = ApprovalStatus.REJECTED
+    elif decision in {"reject", "deny", "denied"}:
+        request.status = ApprovalStatus.DENIED
     elif decision in {"revise", "request_revision", "revision"}:
         request.status = ApprovalStatus.REVISION_REQUESTED
     else:
-        raise HTTPException(status_code=400, detail="Decision must be approve, reject, or revise")
+        raise HTTPException(status_code=400, detail="Decision must be approve, deny, reject, or revise")
 
     request.updated_at = now_utc()
     audit(

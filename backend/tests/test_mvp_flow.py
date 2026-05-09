@@ -68,15 +68,28 @@ def test_idea_to_approval_flow_allows_low_risk_docs_change() -> None:
     )
     assert approval_response.status_code == 200
     approval = approval_response.json()
-    assert approval["status"] == "PENDING_REVIEW"
+    assert approval["status"] == "REQUESTED"
     assert approval["risk"]["level"] == "LOW"
+
+    grouped_response = client.get("/approvals/grouped")
+    assert grouped_response.status_code == 200
+    grouped = grouped_response.json()
+    assert [item["id"] for item in grouped["action_required"]] == [approval["id"]]
+    assert grouped["approved_waiting"] == []
 
     decision_response = client.post(
         f"/approvals/{approval['id']}/decision",
         json={"decision": "approve", "reason": "Docs-only change"},
     )
     assert decision_response.status_code == 200
-    assert decision_response.json()["status"] == "APPROVED"
+    approved = decision_response.json()
+    assert approved["status"] == "APPROVED"
+
+    grouped_after_approval_response = client.get("/approvals/grouped")
+    assert grouped_after_approval_response.status_code == 200
+    grouped_after_approval = grouped_after_approval_response.json()
+    assert grouped_after_approval["action_required"] == []
+    assert [item["id"] for item in grouped_after_approval["approved_waiting"]] == [approval["id"]]
 
     audit_response = client.get("/audit")
     assert audit_response.status_code == 200

@@ -86,7 +86,11 @@ data class ApprovalRequestDto(
     val verified_source: Boolean = false
 ) {
     val uiSourceProvider: String get() = source_provider ?: "MANUAL"
+    val uiSourceAgentId: String? get() = source_agent_id
     val uiSourceAgentName: String? get() = source_agent_name
+    val uiSourceSessionId: String? get() = source_session_id
+    val uiSourceTaskUrl: String? get() = source_task_url
+    val uiCreatedByUserId: String? get() = created_by_user_id
     val uiVerifiedSource: Boolean get() = verified_source
 }
 
