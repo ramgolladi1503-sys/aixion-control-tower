@@ -62,7 +62,10 @@ fun ApprovalRequestDto.toUiSummary(projectName: String = "Project"): ApprovalSum
         files = files.map { it.toUiSummary(riskLevel) },
         requiredActions = risk.required_actions,
         testPlan = test_plan,
-        rollbackPlan = rollback_plan.orEmpty()
+        rollbackPlan = rollback_plan.orEmpty(),
+        sourceProvider = uiSourceProvider,
+        sourceAgentName = uiSourceAgentName,
+        verifiedSource = uiVerifiedSource
     )
 }
 
