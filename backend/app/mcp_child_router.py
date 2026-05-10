@@ -28,6 +28,8 @@ class MCPChildServerRouter:
             return self._call_test_server(server, call)
         if server.transport == "http":
             return self._call_http_server(server, call)
+        if server.transport == "http-jsonrpc":
+            return self._call_http_jsonrpc_server(server, call)
         return {
             "ok": False,
             "server_name": server.name,
@@ -75,6 +77,47 @@ class MCPChildServerRouter:
                 "error": "HTTP MCP child server endpoint is not configured.",
             }
         payload = json.dumps(call.model_dump(mode="json")).encode("utf-8")
+        return MCPChildServerRouter._post_json(server, call, payload)
+
+    @staticmethod
+    def _call_http_jsonrpc_server(server: MCPChildServer, call: ChildMCPToolCall) -> dict:
+        """Forward an approved call to an HTTP child MCP server using JSON-RPC tools/call.
+
+        The legacy `http` transport posts Aixion's internal `ChildMCPToolCall` shape.
+        This transport sends the MCP-facing shape a real child server expects:
+        `{jsonrpc, id, method: tools/call, params: {name, arguments}}`.
+        """
+        if not server.endpoint:
+            return {
+                "ok": False,
+                "server_name": server.name,
+                "tool_name": call.tool_name,
+                "error": "HTTP JSON-RPC MCP child server endpoint is not configured.",
+            }
+        request_id = call.session_id or f"aixion-{server.name}-{call.tool_name}"
+        payload = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {
+                    "name": call.tool_name,
+                    "arguments": call.arguments,
+                },
+            }
+        ).encode("utf-8")
+        response = MCPChildServerRouter._post_json(server, call, payload)
+        if "error" in response and "result" not in response:
+            return response
+        return {
+            "ok": response.get("error") is None,
+            "server_name": server.name,
+            "tool_name": call.tool_name,
+            "jsonrpc_response": response,
+        }
+
+    @staticmethod
+    def _post_json(server: MCPChildServer, call: ChildMCPToolCall, payload: bytes) -> dict:
         request = Request(
             server.endpoint,
             data=payload,
