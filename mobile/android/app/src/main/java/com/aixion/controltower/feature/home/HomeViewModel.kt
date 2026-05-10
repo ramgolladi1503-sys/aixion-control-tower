@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.home
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -31,8 +32,8 @@ data class HomeUiState(
     val failedTestsCount: Int = approvals.count { it.status == ApprovalStatus.TESTS_FAILED }
 }
 
-class HomeViewModel : ViewModel() {
-    private val api = ApiClient.create()
+class HomeViewModel(application: Application) : AndroidViewModel(application) {
+    private val api = ApiClient.create(application.applicationContext)
     private val projectRepository = ProjectRepository(api)
     private val approvalRepository = ApprovalRepository(api)
 
