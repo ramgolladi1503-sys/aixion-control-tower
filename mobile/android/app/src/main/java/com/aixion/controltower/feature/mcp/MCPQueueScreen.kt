@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -62,6 +63,14 @@ fun MCPQueueScreen(viewModel: MCPQueueViewModel = viewModel()) {
                 color = TowerTextMuted,
                 fontSize = 14.sp
             )
+            state.message?.let { message ->
+                Text(
+                    text = message,
+                    color = TowerAccent,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
         }
 
         state.health?.let { health ->
@@ -83,7 +92,11 @@ fun MCPQueueScreen(viewModel: MCPQueueViewModel = viewModel()) {
         }
 
         items(state.pendingRequests) { pending ->
-            MCPPendingCard(pending)
+            MCPPendingCard(
+                pending = pending,
+                recovering = state.recoveringPendingId == pending.id,
+                onRecover = { viewModel.recoverPendingRequest(pending.id) }
+            )
         }
     }
 }
@@ -133,7 +146,11 @@ private fun MCPMetric(label: String, value: String, color: Color, modifier: Modi
 }
 
 @Composable
-private fun MCPPendingCard(pending: MCPPendingSummary) {
+private fun MCPPendingCard(
+    pending: MCPPendingSummary,
+    recovering: Boolean,
+    onRecover: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -174,7 +191,20 @@ private fun MCPPendingCard(pending: MCPPendingSummary) {
                 fontWeight = FontWeight.Bold
             )
         }
+        if (pending.canRecoverFromMobile()) {
+            Button(
+                onClick = onRecover,
+                enabled = !recovering,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (recovering) "Recovering..." else "Recover MCP request")
+            }
+        }
     }
+}
+
+private fun MCPPendingSummary.canRecoverFromMobile(): Boolean {
+    return status == MCPPendingStatus.DEAD_LETTER || needsOperatorAttention
 }
 
 private fun MCPPendingSummary.statusColor(): Color {
