@@ -42,6 +42,18 @@ class ApprovalsViewModel : ViewModel() {
         _state.value = _state.value.copy(selectedApproval = approval)
     }
 
+    fun openApprovalById(approvalId: String) {
+        viewModelScope.launch {
+            val cachedApproval = _state.value.approvals.firstOrNull { it.id == approvalId }
+            val selected = cachedApproval ?: repository.getApproval(approvalId)
+            _state.value = _state.value.copy(
+                loading = false,
+                selectedApproval = selected,
+                lastActionMessage = "Opened linked approval from MCP Queue"
+            )
+        }
+    }
+
     fun decide(decision: String, reason: String) {
         val approval = _state.value.selectedApproval ?: return
         viewModelScope.launch {
