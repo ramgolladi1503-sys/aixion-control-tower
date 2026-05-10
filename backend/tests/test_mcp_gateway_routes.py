@@ -228,6 +228,72 @@ def test_http_mcp_pending_status_api_lists_filters_and_reads_detail() -> None:
     assert blocked.json()[0]["approval_request_id"] == second["approval_request_id"]
 
 
+def test_http_mcp_pending_health_summary_counts_queue_risk_states() -> None:
+    project_id = _create_project()
+    for _ in range(5):
+        _submit_mutating_request(project_id)
+    pending_requests = list(store.mcp_pending_requests.values())
+    pending_requests[0].status = MCPPendingStatus.WAITING_FOR_APPROVAL
+    pending_requests[1].status = MCPPendingStatus.FORWARDING
+    pending_requests[1].lease_owner = "active-worker"
+    pending_requests[1].lease_expires_at = now_utc() + timedelta(seconds=60)
+    pending_requests[2].status = MCPPendingStatus.FORWARDING
+    pending_requests[2].lease_owner = "dead-worker"
+    pending_requests[2].lease_expires_at = now_utc() - timedelta(seconds=1)
+    pending_requests[3].status = MCPPendingStatus.DEAD_LETTER
+    pending_requests[4].status = MCPPendingStatus.FORWARDED
+    store.persist()
+
+    response = client.get("/mcp-gateway/pending-requests/health")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 5
+    assert body["by_status"][MCPPendingStatus.WAITING_FOR_APPROVAL] == 1
+    assert body["by_status"][MCPPendingStatus.FORWARDING] == 2
+    assert body["by_status"][MCPPendingStatus.DEAD_LETTER] == 1
+    assert body["by_status"][MCPPendingStatus.FORWARDED] == 1
+    assert body["waiting_for_approval"] == 1
+    assert body["forwarding"] == 2
+    assert body["active_leases"] == 1
+    assert body["expired_leases"] == 1
+    assert body["dead_letter"] == 1
+    assert body["terminal"] == 1
+    assert body["retryable"] == 3
+    assert body["attention_required"] == 2
+    assert body["oldest_waiting_created_at"] is not None
+    assert body["oldest_dead_letter_created_at"] is not None
+
+
+def test_http_mcp_pending_health_summary_filters_by_project() -> None:
+    project_one = _create_project("Project One")
+    project_two = _create_project("Project Two")
+    _submit_mutating_request(project_one)
+    _submit_mutating_request(project_two)
+    pending_requests = list(store.mcp_pending_requests.values())
+    pending_requests[0].status = MCPPendingStatus.DEAD_LETTER
+    pending_requests[1].status = MCPPendingStatus.WAITING_FOR_APPROVAL
+    store.persist()
+
+    project_one_health = client.get(f"/mcp-gateway/pending-requests/health?project_id={project_one}")
+    project_two_health = client.get(f"/mcp-gateway/pending-requests/health?project_id={project_two}")
+
+    assert project_one_health.status_code == 200
+    assert project_two_health.status_code == 200
+    assert project_one_health.json()["total"] == 1
+    assert project_one_health.json()["dead_letter"] == 1
+    assert project_one_health.json()["attention_required"] == 1
+    assert project_two_health.json()["total"] == 1
+    assert project_two_health.json()["waiting_for_approval"] == 1
+    assert project_two_health.json()["attention_required"] == 0
+
+
+def test_http_mcp_pending_health_summary_returns_404_for_unknown_project() -> None:
+    response = client.get("/mcp-gateway/pending-requests/health?project_id=project_missing")
+
+    assert response.status_code == 404
+
+
 def test_http_mcp_pending_retry_dead_letter_clears_error_and_resets_attempts() -> None:
     project_id = _create_project()
     _submit_mutating_request(project_id)

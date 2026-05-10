@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .auth import require_api_key
 from .mcp_child_router import MCPChildServerRouter
@@ -26,6 +28,21 @@ class GatewaySubmitRequest(BaseModel):
 class PendingRetryRequest(BaseModel):
     reason: str = ""
     reset_attempts: bool = True
+
+
+class MCPPendingHealthSummary(BaseModel):
+    total: int = 0
+    by_status: dict[str, int] = Field(default_factory=dict)
+    waiting_for_approval: int = 0
+    forwarding: int = 0
+    active_leases: int = 0
+    expired_leases: int = 0
+    retryable: int = 0
+    dead_letter: int = 0
+    terminal: int = 0
+    attention_required: int = 0
+    oldest_waiting_created_at: datetime | None = None
+    oldest_dead_letter_created_at: datetime | None = None
 
 
 def gateway_for_project(project_id: str) -> MCPGatewayApprovalDecisionLayer:
@@ -64,6 +81,21 @@ def _active_lease_exists(pending: MCPPendingRequest) -> bool:
     )
 
 
+def _expired_lease_exists(pending: MCPPendingRequest) -> bool:
+    return bool(
+        pending.status == MCPPendingStatus.FORWARDING
+        and pending.lease_expires_at is not None
+        and pending.lease_expires_at <= now_utc()
+    )
+
+
+def _pending_requests_for_project(project_id: str | None) -> list[MCPPendingRequest]:
+    requests = list(store.mcp_pending_requests.values())
+    if project_id is not None:
+        requests = [request for request in requests if request.project_id == project_id]
+    return requests
+
+
 def _audit_pending_recovery(event_type: str, pending: MCPPendingRequest, details: dict) -> None:
     store.audit_events.append(
         AuditEvent(
@@ -78,6 +110,44 @@ def _audit_pending_recovery(event_type: str, pending: MCPPendingRequest, details
                 **details,
             },
         )
+    )
+
+
+def _pending_health_summary(requests: list[MCPPendingRequest]) -> MCPPendingHealthSummary:
+    by_status = {status.value: 0 for status in MCPPendingStatus}
+    for pending in requests:
+        by_status[pending.status.value] = by_status.get(pending.status.value, 0) + 1
+
+    waiting = [pending for pending in requests if pending.status == MCPPendingStatus.WAITING_FOR_APPROVAL]
+    dead_letters = [pending for pending in requests if pending.status == MCPPendingStatus.DEAD_LETTER]
+    active_leases = [pending for pending in requests if _active_lease_exists(pending)]
+    expired_leases = [pending for pending in requests if _expired_lease_exists(pending)]
+    retryable = [
+        pending
+        for pending in requests
+        if pending.status in {MCPPendingStatus.WAITING_FOR_APPROVAL, MCPPendingStatus.DEAD_LETTER}
+        or _expired_lease_exists(pending)
+    ]
+    terminal_statuses = {
+        MCPPendingStatus.FORWARDED,
+        MCPPendingStatus.BLOCKED_BY_DECISION,
+        MCPPendingStatus.ORPHANED,
+    }
+    terminal = [pending for pending in requests if pending.status in terminal_statuses]
+
+    return MCPPendingHealthSummary(
+        total=len(requests),
+        by_status=by_status,
+        waiting_for_approval=len(waiting),
+        forwarding=by_status.get(MCPPendingStatus.FORWARDING.value, 0),
+        active_leases=len(active_leases),
+        expired_leases=len(expired_leases),
+        retryable=len(retryable),
+        dead_letter=len(dead_letters),
+        terminal=len(terminal),
+        attention_required=len(dead_letters) + len(expired_leases),
+        oldest_waiting_created_at=min((pending.created_at for pending in waiting), default=None),
+        oldest_dead_letter_created_at=min((pending.created_at for pending in dead_letters), default=None),
     )
 
 
@@ -96,14 +166,22 @@ def list_pending_gateway_requests(
     approval_request_id: str | None = Query(default=None),
     _: None = AuthDependency,
 ) -> list[MCPPendingRequest]:
-    requests = list(store.mcp_pending_requests.values())
-    if project_id is not None:
-        requests = [request for request in requests if request.project_id == project_id]
+    requests = _pending_requests_for_project(project_id)
     if status is not None:
         requests = [request for request in requests if request.status == status]
     if approval_request_id is not None:
         requests = [request for request in requests if request.approval_request_id == approval_request_id]
     return sorted(requests, key=lambda request: request.created_at, reverse=True)
+
+
+@router.get("/pending-requests/health", response_model=MCPPendingHealthSummary)
+def pending_gateway_health(
+    project_id: str | None = Query(default=None),
+    _: None = AuthDependency,
+) -> MCPPendingHealthSummary:
+    if project_id is not None and project_id not in store.projects:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return _pending_health_summary(_pending_requests_for_project(project_id))
 
 
 @router.get("/pending-requests/{pending_request_id}", response_model=MCPPendingRequest)
