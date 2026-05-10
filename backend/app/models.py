@@ -47,9 +47,11 @@ class ApprovalStatus(StrEnum):
 
 class MCPPendingStatus(StrEnum):
     WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    FORWARDING = "FORWARDING"
     FORWARDED = "FORWARDED"
     BLOCKED_BY_DECISION = "BLOCKED_BY_DECISION"
     ORPHANED = "ORPHANED"
+    DEAD_LETTER = "DEAD_LETTER"
 
 
 class ProjectMode(StrEnum):
@@ -292,6 +294,11 @@ class MCPPendingRequest(BaseModel):
     session_id: str | None = None
     requested_by: str = "mcp-client"
     status: MCPPendingStatus = MCPPendingStatus.WAITING_FOR_APPROVAL
+    attempts: int = 0
+    max_attempts: int = 3
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    last_error: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
