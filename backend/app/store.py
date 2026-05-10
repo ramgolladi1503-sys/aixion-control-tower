@@ -13,6 +13,7 @@ from .models import (
     DeviceRegistration,
     ExternalAgent,
     Idea,
+    MCPChildServer,
     MCPPendingRequest,
     Notification,
     Project,
@@ -42,6 +43,7 @@ class SQLiteBackedStore:
         self.external_agents: dict[str, ExternalAgent] = {}
         self.device_registrations: dict[str, DeviceRegistration] = {}
         self.projects: dict[str, Project] = {}
+        self.mcp_child_servers: dict[str, MCPChildServer] = {}
         self.ideas: dict[str, Idea] = {}
         self.work_orders: dict[str, WorkOrder] = {}
         self.approval_requests: dict[str, ApprovalRequest] = {}
@@ -82,6 +84,7 @@ class SQLiteBackedStore:
         self.external_agents = self._load_entities("external_agent", ExternalAgent)
         self.device_registrations = self._load_entities("device_registration", DeviceRegistration)
         self.projects = self._load_entities("project", Project)
+        self.mcp_child_servers = self._load_entities("mcp_child_server", MCPChildServer)
         self.ideas = self._load_entities("idea", Idea)
         self.work_orders = self._load_entities("work_order", WorkOrder)
         self.approval_requests = self._load_entities("approval_request", ApprovalRequest)
@@ -98,6 +101,7 @@ class SQLiteBackedStore:
             self._write_map(conn, "external_agent", self.external_agents)
             self._write_map(conn, "device_registration", self.device_registrations)
             self._write_map(conn, "project", self.projects)
+            self._write_map(conn, "mcp_child_server", self.mcp_child_servers)
             self._write_map(conn, "idea", self.ideas)
             self._write_map(conn, "work_order", self.work_orders)
             self._write_map(conn, "approval_request", self.approval_requests)
@@ -129,6 +133,7 @@ class SQLiteBackedStore:
         self.external_agents.clear()
         self.device_registrations.clear()
         self.projects.clear()
+        self.mcp_child_servers.clear()
         self.ideas.clear()
         self.work_orders.clear()
         self.approval_requests.clear()
