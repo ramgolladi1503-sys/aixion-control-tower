@@ -4,6 +4,9 @@ import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.AuditEventSummary
 import com.aixion.controltower.core.model.FileChangeSummary
+import com.aixion.controltower.core.model.MCPPendingHealthSummary
+import com.aixion.controltower.core.model.MCPPendingStatus
+import com.aixion.controltower.core.model.MCPPendingSummary
 import com.aixion.controltower.core.model.ProjectSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.model.WorkOrderSummary
@@ -128,5 +131,75 @@ object MockData {
         AuditEventSummary("audit_1", "approval.created", "system", "Tradebot critical approval created", "04:01"),
         AuditEventSummary("audit_2", "risk.blocked", "risk-engine", "Main branch edit blocked", "04:02"),
         AuditEventSummary("audit_3", "work_order.created", "system", "MCP Shield policy work order created", "04:03")
+    )
+
+    val mcpPendingHealth = MCPPendingHealthSummary(
+        total = 3,
+        byStatus = mapOf(
+            "WAITING_FOR_APPROVAL" to 1,
+            "FORWARDING" to 1,
+            "DEAD_LETTER" to 1
+        ),
+        waitingForApproval = 1,
+        forwarding = 1,
+        activeLeases = 1,
+        expiredLeases = 0,
+        retryable = 2,
+        deadLetter = 1,
+        terminal = 0,
+        attentionRequired = 1,
+        oldestWaitingCreatedAt = "recent",
+        oldestDeadLetterCreatedAt = "recent"
+    )
+
+    val mcpPendingRequests = listOf(
+        MCPPendingSummary(
+            id = "mcp_pending_waiting",
+            projectId = "project_mcp",
+            approvalRequestId = "approval_mcp_write",
+            serverName = "external-filesystem",
+            toolName = "write_file",
+            requestedBy = "mcp-jsonrpc-client",
+            status = MCPPendingStatus.WAITING_FOR_APPROVAL,
+            attempts = 0,
+            maxAttempts = 3,
+            leaseOwner = null,
+            leaseExpiresAt = null,
+            lastError = null,
+            createdAt = "recent",
+            updatedAt = "recent"
+        ),
+        MCPPendingSummary(
+            id = "mcp_pending_forwarding",
+            projectId = "project_mcp",
+            approvalRequestId = "approval_mcp_forwarding",
+            serverName = "filesystem",
+            toolName = "write_file",
+            requestedBy = "mcp-gateway-resolver",
+            status = MCPPendingStatus.FORWARDING,
+            attempts = 1,
+            maxAttempts = 3,
+            leaseOwner = "mcp-gateway-resolver",
+            leaseExpiresAt = "soon",
+            lastError = null,
+            createdAt = "recent",
+            updatedAt = "recent"
+        ),
+        MCPPendingSummary(
+            id = "mcp_pending_dead_letter",
+            projectId = "project_mcp",
+            approvalRequestId = "approval_mcp_dead_letter",
+            serverName = "external-filesystem",
+            toolName = "write_file",
+            requestedBy = "mcp-jsonrpc-client",
+            status = MCPPendingStatus.DEAD_LETTER,
+            attempts = 3,
+            maxAttempts = 3,
+            leaseOwner = null,
+            leaseExpiresAt = null,
+            lastError = "child server unavailable",
+            createdAt = "recent",
+            updatedAt = "recent"
+        )
     )
 }
