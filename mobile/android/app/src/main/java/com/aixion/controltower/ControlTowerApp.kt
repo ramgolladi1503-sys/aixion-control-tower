@@ -84,7 +84,14 @@ fun ControlTowerApp() {
                             }
                         )
                     }
-                    composable(Route.MCPQueue.value) { MCPQueueScreen() }
+                    composable(Route.MCPQueue.value) {
+                        MCPQueueScreen(
+                            onOpenApproval = { approvalId ->
+                                approvalsViewModel.openApprovalById(approvalId)
+                                navController.navigate(Route.ApprovalDetail.value)
+                            }
+                        )
+                    }
                     composable(Route.Tests.value) { TestRunsScreen() }
                     composable(Route.Audit.value) { AuditTrailScreen() }
                     composable(Route.Diff.value) { DiffViewerScreen(viewModel = approvalsViewModel) }
