@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from threading import Event
 from typing import Any
 
@@ -24,20 +25,16 @@ from .store import store
 
 
 FORWARDED_AFTER_APPROVAL = "FORWARDED_AFTER_APPROVAL"
-MCP_MUTATING_TOOL_NAMES = {
-    "write_file",
-    "edit_file",
-    "delete_file",
-    "apply_patch",
-    "run_command",
-    "git_commit",
-    "github_create_pr",
-}
+MCP_PENDING_FORWARD_FAILED = "MCP_PENDING_FORWARD_FAILED"
+MCP_PENDING_DEAD_LETTERED = "MCP_PENDING_DEAD_LETTERED"
+MCP_MUTATING_TOOL_NAMES = {"write_file", "edit_file", "apply_patch", "github_create_pr"}
 FINAL_PENDING_STATUSES = {
     MCPPendingStatus.FORWARDED,
     MCPPendingStatus.BLOCKED_BY_DECISION,
     MCPPendingStatus.ORPHANED,
+    MCPPendingStatus.DEAD_LETTER,
 }
+LEASE_SECONDS = 30
 
 
 class MCPGatewayToolCall(BaseModel):
@@ -68,13 +65,7 @@ class MCPGatewayWaitHandle:
 
 
 class MCPGatewayApprovalDecisionLayer:
-    """Approval gate in front of a child MCP server.
-
-    Mutating tool calls are converted into approval requests and held. The child
-    server only receives the exact pending call after the linked approval reaches
-    APPROVED. Pending calls are also persisted so route/gateway recreation does not
-    silently lose held MCP work.
-    """
+    """Approval gate in front of a child MCP server."""
 
     def __init__(self, child_server: ChildMCPTestServer, *, project_id: str) -> None:
         self.child_server = child_server
@@ -123,14 +114,24 @@ class MCPGatewayApprovalDecisionLayer:
                 status=approval.status if approval else None,
                 reason=f"MCP pending request is already final: {pending.status}.",
             )
+        if pending is not None and pending.status == MCPPendingStatus.FORWARDING:
+            if pending.lease_expires_at and pending.lease_expires_at > now_utc():
+                return MCPGatewayDecision(
+                    forwarded=False,
+                    approval_required=True,
+                    approval_request_id=approval_request_id,
+                    status=approval.status if approval else None,
+                    reason=f"MCP pending request is already leased by {pending.lease_owner}.",
+                )
+            pending.status = MCPPendingStatus.WAITING_FOR_APPROVAL
+            pending.lease_owner = None
+            pending.lease_expires_at = None
+            pending.updated_at = now_utc()
+            store.persist()
 
         if not approval:
             self._mark_pending_status(approval_request_id, MCPPendingStatus.ORPHANED)
-            return MCPGatewayDecision(
-                forwarded=False,
-                approval_required=True,
-                reason="Approval request no longer exists; request was not forwarded.",
-            )
+            return MCPGatewayDecision(forwarded=False, approval_required=True, reason="Approval request no longer exists; request was not forwarded.")
 
         if approval.status != ApprovalStatus.APPROVED:
             self._mark_pending_status(approval.id, MCPPendingStatus.BLOCKED_BY_DECISION)
@@ -172,7 +173,28 @@ class MCPGatewayApprovalDecisionLayer:
                 reason="No pending MCP tool call is linked to this approval.",
             )
 
+        pending = self._pending_for_approval(approval.id)
+        if pending is not None and not self._acquire_pending_lease(pending):
+            return MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval.id,
+                status=approval.status,
+                reason=f"MCP pending request is already leased by {pending.lease_owner}.",
+            )
+
         result = self._forward(call)
+        if result.get("ok") is False:
+            self._handle_forward_failure(approval, call, result)
+            return MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval.id,
+                status=approval.status,
+                result=result,
+                reason="MCP child forwarding failed; pending request was retained or dead-lettered.",
+            )
+
         self._mark_pending_status(approval.id, MCPPendingStatus.FORWARDED)
         self._audit_forwarded_after_approval(approval, call)
         return MCPGatewayDecision(
@@ -223,20 +245,10 @@ class MCPGatewayApprovalDecisionLayer:
             summary=f"Gateway intercepted mutating MCP call for {call.server_name}.{call.tool_name}",
             agent_name="mcp-gateway",
             target_branch=f"mcp-gateway/{call.tool_name}",
-            files=[
-                FileChange(
-                    path=f"mcp://{call.server_name}/{call.tool_name}",
-                    change_type="mcp_tool_call",
-                    diff=f"MCP mutating tool call requires approval: {call.model_dump()}",
-                    new_content=str(call.model_dump(mode="json")),
-                )
-            ],
+            files=[FileChange(path=f"mcp://{call.server_name}/{call.tool_name}", change_type="mcp_tool_call", diff=f"MCP mutating tool call requires approval: {call.model_dump()}", new_content=str(call.model_dump(mode="json")))],
             test_plan=["MCP gateway must forward only after approval."],
             rollback_plan="Deny or expire the approval; the child MCP server receives nothing.",
-            risk=RiskAssessment(
-                level=RiskLevel.HIGH,
-                reasons=["Mutating MCP tool call intercepted by gateway."],
-            ),
+            risk=RiskAssessment(level=RiskLevel.HIGH, reasons=["Mutating MCP tool call intercepted by gateway."]),
             status=ApprovalStatus.REQUESTED,
             source_provider=AgentProvider.OTHER,
             source_agent_name="mcp-gateway",
@@ -254,19 +266,7 @@ class MCPGatewayApprovalDecisionLayer:
         )
         store.approval_requests[approval.id] = approval
         store.mcp_pending_requests[pending.id] = pending
-        store.audit_events.append(
-            AuditEvent(
-                event_type="mcp.approval_requested",
-                actor=call.requested_by,
-                entity_id=approval.id,
-                details={
-                    "server_name": call.server_name,
-                    "tool_name": call.tool_name,
-                    "mutating": True,
-                    "mcp_pending_request_id": pending.id,
-                },
-            )
-        )
+        store.audit_events.append(AuditEvent(event_type="mcp.approval_requested", actor=call.requested_by, entity_id=approval.id, details={"server_name": call.server_name, "tool_name": call.tool_name, "mutating": True, "mcp_pending_request_id": pending.id}))
         store.persist()
         return approval
 
@@ -274,62 +274,52 @@ class MCPGatewayApprovalDecisionLayer:
         pending = self._pending_for_approval(approval_request_id)
         if pending is None or pending.status != MCPPendingStatus.WAITING_FOR_APPROVAL:
             return None
-        return MCPGatewayToolCall(
-            server_name=pending.server_name,
-            tool_name=pending.tool_name,
-            arguments=pending.arguments,
-            session_id=pending.session_id,
-            requested_by=pending.requested_by,
-            mutating=True,
-        )
+        return MCPGatewayToolCall(server_name=pending.server_name, tool_name=pending.tool_name, arguments=pending.arguments, session_id=pending.session_id, requested_by=pending.requested_by, mutating=True)
 
     @staticmethod
     def _pending_for_approval(approval_request_id: str) -> MCPPendingRequest | None:
-        return next(
-            (
-                pending
-                for pending in store.mcp_pending_requests.values()
-                if pending.approval_request_id == approval_request_id
-            ),
-            None,
-        )
+        return next((pending for pending in store.mcp_pending_requests.values() if pending.approval_request_id == approval_request_id), None)
 
     def _mark_pending_status(self, approval_request_id: str, status: MCPPendingStatus) -> None:
         pending = self._pending_for_approval(approval_request_id)
         if pending is None or pending.status in FINAL_PENDING_STATUSES:
             return
         pending.status = status
+        if status in FINAL_PENDING_STATUSES:
+            pending.lease_owner = None
+            pending.lease_expires_at = None
         pending.updated_at = now_utc()
         store.persist()
 
-    def _forward(self, call: MCPGatewayToolCall) -> dict[str, Any]:
-        return self.child_server.call_tool(
-            ChildMCPToolCall(
-                server_name=call.server_name,
-                tool_name=call.tool_name,
-                arguments=call.arguments,
-                session_id=call.session_id,
-                requested_by=call.requested_by,
-            )
-        )
+    def _acquire_pending_lease(self, pending: MCPPendingRequest) -> bool:
+        if pending.status == MCPPendingStatus.FORWARDING and pending.lease_expires_at and pending.lease_expires_at > now_utc():
+            return False
+        if pending.status not in {MCPPendingStatus.WAITING_FOR_APPROVAL, MCPPendingStatus.FORWARDING}:
+            return False
+        pending.status = MCPPendingStatus.FORWARDING
+        pending.attempts += 1
+        pending.lease_owner = "mcp-gateway-resolver"
+        pending.lease_expires_at = now_utc() + timedelta(seconds=LEASE_SECONDS)
+        pending.updated_at = now_utc()
+        store.persist()
+        return True
 
-    def _audit_forwarded_after_approval(
-        self,
-        approval: ApprovalRequest,
-        call: MCPGatewayToolCall,
-    ) -> None:
+    def _handle_forward_failure(self, approval: ApprovalRequest, call: MCPGatewayToolCall, result: dict[str, Any]) -> None:
         pending = self._pending_for_approval(approval.id)
-        store.audit_events.append(
-            AuditEvent(
-                event_type=FORWARDED_AFTER_APPROVAL,
-                actor="mcp-gateway",
-                entity_id=approval.id,
-                details={
-                    "server_name": call.server_name,
-                    "tool_name": call.tool_name,
-                    "approved_payload_hash": approval.approved_payload_hash,
-                    "mcp_pending_request_id": pending.id if pending else None,
-                },
-            )
-        )
+        error = str(result.get("error") or result)
+        if pending is not None:
+            pending.last_error = error
+            pending.lease_owner = None
+            pending.lease_expires_at = None
+            pending.status = MCPPendingStatus.DEAD_LETTER if pending.attempts >= pending.max_attempts else MCPPendingStatus.WAITING_FOR_APPROVAL
+            pending.updated_at = now_utc()
+        store.audit_events.append(AuditEvent(event_type=MCP_PENDING_DEAD_LETTERED if pending and pending.status == MCPPendingStatus.DEAD_LETTER else MCP_PENDING_FORWARD_FAILED, actor="mcp-gateway", entity_id=approval.id, details={"server_name": call.server_name, "tool_name": call.tool_name, "attempts": pending.attempts if pending else None, "max_attempts": pending.max_attempts if pending else None, "mcp_pending_request_id": pending.id if pending else None, "error": error}))
+        store.persist()
+
+    def _forward(self, call: MCPGatewayToolCall) -> dict[str, Any]:
+        return self.child_server.call_tool(ChildMCPToolCall(server_name=call.server_name, tool_name=call.tool_name, arguments=call.arguments, session_id=call.session_id, requested_by=call.requested_by))
+
+    def _audit_forwarded_after_approval(self, approval: ApprovalRequest, call: MCPGatewayToolCall) -> None:
+        pending = self._pending_for_approval(approval.id)
+        store.audit_events.append(AuditEvent(event_type=FORWARDED_AFTER_APPROVAL, actor="mcp-gateway", entity_id=approval.id, details={"server_name": call.server_name, "tool_name": call.tool_name, "approved_payload_hash": approval.approved_payload_hash, "mcp_pending_request_id": pending.id if pending else None, "attempts": pending.attempts if pending else None}))
         store.persist()
