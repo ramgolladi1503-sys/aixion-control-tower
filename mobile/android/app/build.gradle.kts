@@ -46,4 +46,5 @@ dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("com.google.firebase:firebase-messaging:24.1.0")
     debugImplementation("androidx.compose.ui:ui-tooling:1.7.5")
+    testImplementation("junit:junit:4.13.2")
 }
