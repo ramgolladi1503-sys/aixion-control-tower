@@ -22,6 +22,7 @@ import com.aixion.controltower.feature.audit.AuditTrailScreen
 import com.aixion.controltower.feature.command.CommandChatScreen
 import com.aixion.controltower.feature.diff.DiffViewerScreen
 import com.aixion.controltower.feature.home.HomeScreen
+import com.aixion.controltower.feature.mcp.MCPQueueScreen
 import com.aixion.controltower.feature.projects.ProjectsScreen
 import com.aixion.controltower.feature.tests.TestRunsScreen
 import com.aixion.controltower.feature.workorders.WorkOrdersScreen
@@ -83,6 +84,7 @@ fun ControlTowerApp() {
                             }
                         )
                     }
+                    composable(Route.MCPQueue.value) { MCPQueueScreen() }
                     composable(Route.Tests.value) { TestRunsScreen() }
                     composable(Route.Audit.value) { AuditTrailScreen() }
                     composable(Route.Diff.value) { DiffViewerScreen(viewModel = approvalsViewModel) }
