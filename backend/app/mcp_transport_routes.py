@@ -55,7 +55,7 @@ def _tool_call_from_params(params: dict[str, Any]) -> MCPGatewayToolCall:
     if not isinstance(tool_name, str) or not tool_name.strip():
         raise ValueError("tools/call params must include non-empty name")
 
-    arguments = params.get("arguments") or {}
+    arguments = params.get("arguments", {})
     if not isinstance(arguments, dict):
         raise ValueError("tools/call arguments must be an object")
 
