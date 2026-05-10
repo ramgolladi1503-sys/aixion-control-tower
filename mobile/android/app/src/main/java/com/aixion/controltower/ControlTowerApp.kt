@@ -23,6 +23,7 @@ import com.aixion.controltower.feature.command.CommandChatScreen
 import com.aixion.controltower.feature.diff.DiffViewerScreen
 import com.aixion.controltower.feature.home.HomeScreen
 import com.aixion.controltower.feature.mcp.MCPQueueScreen
+import com.aixion.controltower.feature.mcp.MCPQueueViewModel
 import com.aixion.controltower.feature.projects.ProjectsScreen
 import com.aixion.controltower.feature.tests.TestRunsScreen
 import com.aixion.controltower.feature.workorders.WorkOrdersScreen
@@ -34,6 +35,7 @@ fun ControlTowerApp() {
     ControlTowerTheme {
         val navController = rememberNavController()
         val approvalsViewModel: ApprovalsViewModel = viewModel()
+        val mcpQueueViewModel: MCPQueueViewModel = viewModel()
         val backStackEntry = navController.currentBackStackEntryAsState().value
         val currentRoute = backStackEntry?.destination?.route ?: Route.Home.value
 
@@ -86,6 +88,7 @@ fun ControlTowerApp() {
                     }
                     composable(Route.MCPQueue.value) {
                         MCPQueueScreen(
+                            viewModel = mcpQueueViewModel,
                             onOpenApproval = { approvalId ->
                                 approvalsViewModel.openApprovalById(approvalId)
                                 navController.navigate(Route.ApprovalDetail.value)
@@ -98,7 +101,8 @@ fun ControlTowerApp() {
                     composable(Route.ApprovalDetail.value) {
                         ApprovalDetailScreen(
                             viewModel = approvalsViewModel,
-                            onOpenDiff = { navController.navigate(Route.Diff.value) }
+                            onOpenDiff = { navController.navigate(Route.Diff.value) },
+                            onDecisionSubmitted = { mcpQueueViewModel.refresh() }
                         )
                     }
                 }
