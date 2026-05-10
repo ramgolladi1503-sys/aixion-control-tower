@@ -88,6 +88,11 @@ data class ApprovalSummary(
 ) {
     val sourceLabel: String
         get() = sourceAgentName?.takeIf { it.isNotBlank() } ?: sourceProvider
+
+    val isMCPToolApproval: Boolean
+        get() = files.any { file ->
+            file.path.startsWith("mcp://") || file.changeType == "mcp_tool_call"
+        }
 }
 
 val ApprovalStatus.canonical: ApprovalStatus
