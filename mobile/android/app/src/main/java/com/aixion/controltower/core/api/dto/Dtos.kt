@@ -154,3 +154,12 @@ data class PendingRetryRequestDto(
     val reason: String = "",
     val reset_attempts: Boolean = true
 )
+
+data class MCPGatewayDecisionDto(
+    val forwarded: Boolean = false,
+    val approval_required: Boolean = true,
+    val approval_request_id: String? = null,
+    val status: String? = null,
+    val result: Map<String, Any?>? = null,
+    val reason: String = ""
+)

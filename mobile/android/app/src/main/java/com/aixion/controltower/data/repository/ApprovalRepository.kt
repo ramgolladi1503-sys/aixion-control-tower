@@ -2,6 +2,7 @@ package com.aixion.controltower.data.repository
 
 import com.aixion.controltower.core.api.ControlTowerApi
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
+import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.data.mock.MockData
 
@@ -30,5 +31,9 @@ class ApprovalRepository(private val api: ControlTowerApi) {
         }.getOrElse {
             MockData.approvals.firstOrNull { it.id == approvalId } ?: MockData.approvals.first()
         }
+    }
+
+    suspend fun resolveMCPApproval(approvalId: String): MCPGatewayDecisionDto? {
+        return runCatching { api.resolveMCPApproval(approvalId) }.getOrNull()
     }
 }

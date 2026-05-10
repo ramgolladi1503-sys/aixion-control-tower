@@ -58,9 +58,17 @@ class ApprovalsViewModel : ViewModel() {
         val approval = _state.value.selectedApproval ?: return
         viewModelScope.launch {
             val updated = repository.decide(approval.id, decision, reason)
+            val resolveResult = repository.resolveMCPApproval(approval.id)
+            val resolveMessage = resolveResult?.let {
+                if (it.forwarded) {
+                    " MCP request forwarded."
+                } else {
+                    " MCP resolve: ${it.reason}"
+                }
+            }.orEmpty()
             _state.value = _state.value.copy(
                 selectedApproval = updated,
-                lastActionMessage = "Decision sent: $decision"
+                lastActionMessage = "Decision sent: $decision.$resolveMessage"
             )
         }
     }

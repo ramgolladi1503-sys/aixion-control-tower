@@ -5,6 +5,7 @@ import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
+import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.api.dto.MCPPendingHealthDto
 import com.aixion.controltower.core.api.dto.MCPPendingRequestDto
 import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
@@ -81,4 +82,9 @@ interface ControlTowerApi {
         @Path("pendingRequestId") pendingRequestId: String,
         @Body payload: PendingRetryRequestDto
     ): MCPPendingRequestDto
+
+    @POST("mcp-gateway/approvals/{approvalId}/resolve")
+    suspend fun resolveMCPApproval(
+        @Path("approvalId") approvalId: String
+    ): MCPGatewayDecisionDto
 }
