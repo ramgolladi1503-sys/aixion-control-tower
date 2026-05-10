@@ -13,6 +13,8 @@ import kotlinx.coroutines.launch
 
 data class MCPQueueUiState(
     val loading: Boolean = true,
+    val recoveringPendingId: String? = null,
+    val message: String? = null,
     val health: MCPPendingHealthSummary? = null,
     val pendingRequests: List<MCPPendingSummary> = emptyList()
 )
@@ -31,11 +33,37 @@ class MCPQueueViewModel : ViewModel() {
         viewModelScope.launch {
             val health = repository.getHealth()
             val pending = repository.listPendingRequests()
-            _state.value = MCPQueueUiState(
+            _state.value = _state.value.copy(
                 loading = false,
                 health = health,
                 pendingRequests = pending
             )
+        }
+    }
+
+    fun recoverPendingRequest(pendingRequestId: String) {
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                recoveringPendingId = pendingRequestId,
+                message = "Recovering MCP pending request..."
+            )
+            runCatching {
+                repository.recoverPendingRequest(pendingRequestId)
+            }.onSuccess {
+                val health = repository.getHealth()
+                val pending = repository.listPendingRequests()
+                _state.value = _state.value.copy(
+                    recoveringPendingId = null,
+                    message = "MCP pending request queued for recovery.",
+                    health = health,
+                    pendingRequests = pending
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    recoveringPendingId = null,
+                    message = error.message ?: "MCP recovery failed."
+                )
+            }
         }
     }
 }
