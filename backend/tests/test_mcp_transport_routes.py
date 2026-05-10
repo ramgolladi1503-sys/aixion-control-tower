@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -18,9 +21,49 @@ from app.store import store
 client = TestClient(app)
 
 
+class _RecordingJsonRpcChildHandler(BaseHTTPRequestHandler):
+    received_payloads: list[dict] = []
+
+    def do_POST(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length).decode("utf-8")
+        payload = json.loads(raw_body)
+        self.__class__.received_payloads.append(payload)
+        response = {
+            "jsonrpc": "2.0",
+            "id": payload.get("id"),
+            "result": {
+                "content": [{"type": "text", "text": "external child server received approved call"}],
+                "structuredContent": {
+                    "received_tool": payload.get("params", {}).get("name"),
+                    "received_arguments": payload.get("params", {}).get("arguments", {}),
+                },
+            },
+        }
+        response_body = json.dumps(response).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response_body)))
+        self.end_headers()
+        self.wfile.write(response_body)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
+def _start_recording_jsonrpc_child_server() -> tuple[HTTPServer, str]:
+    _RecordingJsonRpcChildHandler.received_payloads.clear()
+    server = HTTPServer(("127.0.0.1", 0), _RecordingJsonRpcChildHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    return server, f"http://{host}:{port}/mcp"
+
+
 def setup_function() -> None:
     store.reset()
     reset_gateway_runtime_for_test()
+    _RecordingJsonRpcChildHandler.received_payloads.clear()
 
 
 def _create_project() -> str:
@@ -68,6 +111,38 @@ def _register_child_server(project_id: str, *, enabled: bool = True, name: str =
                     },
                     "mutating": True,
                 },
+            ],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
+def _register_http_jsonrpc_child_server(project_id: str, endpoint: str) -> dict:
+    response = client.post(
+        "/mcp-registry/child-servers",
+        json={
+            "project_id": project_id,
+            "name": "external-filesystem",
+            "description": "External HTTP JSON-RPC filesystem child server",
+            "transport": "http-jsonrpc",
+            "endpoint": endpoint,
+            "enabled": True,
+            "tools": [
+                {
+                    "name": "write_file",
+                    "description": "Write a file through an external child MCP server",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["path", "content"],
+                        "additionalProperties": False,
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                    "mutating": True,
+                }
             ],
         },
     )
@@ -341,6 +416,62 @@ def test_mcp_tools_call_registered_mutating_routes_after_approval() -> None:
     assert child_received_count_for_server_for_test("filesystem") == 1
     assert child_received_count_for_server_for_test("child-test-server") == 0
     assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
+
+
+def test_mcp_tools_call_http_jsonrpc_child_server_receives_nothing_before_approval_and_one_call_after() -> None:
+    project_id = _create_project()
+    server, endpoint = _start_recording_jsonrpc_child_server()
+    try:
+        _register_http_jsonrpc_child_server(project_id, endpoint)
+
+        call = _jsonrpc(
+            project_id,
+            "tools/call",
+            {
+                "name": "write_file",
+                "server_name": "external-filesystem",
+                "arguments": {"path": "README.md", "content": "approved external write"},
+                "session_id": "external-session-1",
+                "mutating": False,
+            },
+        )
+        approval_id = call.json()["result"]["structuredContent"]["approval_request_id"]
+
+        assert approval_id is not None
+        assert _RecordingJsonRpcChildHandler.received_payloads == []
+        assert child_received_count_for_test() == 0
+
+        decision = client.post(
+            f"/approvals/{approval_id}/decision",
+            json={"decision": "approve", "reason": "approve external JSON-RPC child call"},
+        )
+        assert decision.status_code == 200
+
+        resolved = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+        assert resolved.status_code == 200
+        assert resolved.json()["forwarded"] is True
+        result = resolved.json()["result"]
+        assert result["ok"] is True
+        assert result["server_name"] == "external-filesystem"
+        assert result["tool_name"] == "write_file"
+        assert result["jsonrpc_response"]["result"]["structuredContent"]["received_tool"] == "write_file"
+
+        assert len(_RecordingJsonRpcChildHandler.received_payloads) == 1
+        received = _RecordingJsonRpcChildHandler.received_payloads[0]
+        assert received == {
+            "jsonrpc": "2.0",
+            "id": "external-session-1",
+            "method": "tools/call",
+            "params": {
+                "name": "write_file",
+                "arguments": {"path": "README.md", "content": "approved external write"},
+            },
+        }
+        assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_mcp_tools_call_can_be_approved_and_resolved_after_transport_submit_demo_fallback() -> None:
