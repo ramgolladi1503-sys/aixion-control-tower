@@ -26,14 +26,13 @@ class ApprovalRepository(private val api: ControlTowerApi) {
     }
 
     suspend fun decide(approvalId: String, decision: String, reason: String): ApprovalSummary {
-        return runCatching {
-            api.decideApproval(approvalId, DecisionRequestDto(decision = decision, reason = reason)).toUiSummary()
-        }.getOrElse {
-            MockData.approvals.firstOrNull { it.id == approvalId } ?: MockData.approvals.first()
-        }
+        return api.decideApproval(
+            approvalId,
+            DecisionRequestDto(decision = decision, reason = reason)
+        ).toUiSummary()
     }
 
-    suspend fun resolveMCPApproval(approvalId: String): MCPGatewayDecisionDto? {
-        return runCatching { api.resolveMCPApproval(approvalId) }.getOrNull()
+    suspend fun resolveMCPApproval(approvalId: String): MCPGatewayDecisionDto {
+        return api.resolveMCPApproval(approvalId)
     }
 }
