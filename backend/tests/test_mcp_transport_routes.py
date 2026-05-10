@@ -28,15 +28,15 @@ def _create_project() -> str:
     return response.json()["id"]
 
 
-def _register_child_server(project_id: str, *, enabled: bool = True) -> dict:
+def _register_child_server(project_id: str, *, enabled: bool = True, name: str = "filesystem") -> dict:
     response = client.post(
         "/mcp-registry/child-servers",
         json={
             "project_id": project_id,
-            "name": "filesystem",
+            "name": name,
             "description": "Filesystem child server",
             "transport": "test",
-            "endpoint": "memory://filesystem",
+            "endpoint": f"memory://{name}",
             "enabled": enabled,
             "tools": [
                 {
@@ -117,7 +117,86 @@ def test_mcp_tools_list_ignores_disabled_child_servers() -> None:
     assert "read_file" not in {tool["name"] for tool in tools}
 
 
-def test_mcp_tools_call_mutating_request_waits_for_approval() -> None:
+def test_mcp_tools_call_registered_mutating_tool_ignores_client_downgrade() -> None:
+    project_id = _create_project()
+    _register_child_server(project_id)
+
+    response = _jsonrpc(
+        project_id,
+        "tools/call",
+        {
+            "name": "write_file",
+            "server_name": "filesystem",
+            "arguments": {"path": "README.md", "content": "unsafe without approval"},
+            "mutating": False,
+        },
+    )
+
+    assert response.status_code == 200
+    structured = response.json()["result"]["structuredContent"]
+    assert structured["forwarded"] is False
+    assert structured["approval_required"] is True
+    assert structured["approval_request_id"] is not None
+    assert child_received_count_for_test() == 0
+    assert len(store.mcp_pending_requests) == 1
+    pending = next(iter(store.mcp_pending_requests.values()))
+    assert pending.server_name == "filesystem"
+    assert pending.tool_name == "write_file"
+    assert pending.status == MCPPendingStatus.WAITING_FOR_APPROVAL
+
+
+def test_mcp_tools_call_registered_read_only_tool_ignores_client_upgrade() -> None:
+    project_id = _create_project()
+    _register_child_server(project_id)
+
+    response = _jsonrpc(
+        project_id,
+        "tools/call",
+        {
+            "name": "read_file",
+            "server_name": "filesystem",
+            "arguments": {"path": "README.md"},
+            "mutating": True,
+        },
+    )
+
+    assert response.status_code == 200
+    structured = response.json()["result"]["structuredContent"]
+    assert structured["forwarded"] is True
+    assert structured["approval_required"] is False
+    assert child_received_count_for_test() == 1
+    assert store.mcp_pending_requests == {}
+
+
+def test_mcp_tools_call_registered_unknown_or_disabled_tool_is_rejected() -> None:
+    project_id = _create_project()
+    server = _register_child_server(project_id)
+
+    unknown = _jsonrpc(project_id, "tools/call", {"name": "unknown_tool", "arguments": {}})
+    client.post(f"/mcp-registry/child-servers/{server['id']}/disable")
+    disabled = _jsonrpc(project_id, "tools/call", {"name": "read_file", "server_name": "filesystem", "arguments": {}})
+
+    assert unknown.status_code == 200
+    assert unknown.json()["error"]["code"] == -32602
+    assert "unknown or disabled" in unknown.json()["error"]["message"]
+    assert disabled.status_code == 200
+    assert disabled.json()["error"]["code"] == -32602
+    assert "unknown or disabled" in disabled.json()["error"]["message"]
+
+
+def test_mcp_tools_call_registered_ambiguous_tool_requires_server_name() -> None:
+    project_id = _create_project()
+    _register_child_server(project_id, name="filesystem")
+    _register_child_server(project_id, name="workspace")
+
+    response = _jsonrpc(project_id, "tools/call", {"name": "read_file", "arguments": {"path": "README.md"}})
+
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32602
+    assert "ambiguous" in response.json()["error"]["message"]
+
+
+def test_mcp_tools_call_mutating_request_waits_for_approval_demo_fallback() -> None:
     project_id = _create_project()
 
     response = _jsonrpc(
@@ -144,7 +223,7 @@ def test_mcp_tools_call_mutating_request_waits_for_approval() -> None:
     assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.WAITING_FOR_APPROVAL
 
 
-def test_mcp_tools_call_read_only_forwards_without_approval() -> None:
+def test_mcp_tools_call_read_only_forwards_without_approval_demo_fallback() -> None:
     project_id = _create_project()
 
     response = _jsonrpc(
