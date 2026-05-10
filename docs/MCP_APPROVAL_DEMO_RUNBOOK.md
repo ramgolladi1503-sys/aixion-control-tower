@@ -219,21 +219,48 @@ approval.decision
 FORWARDED_AFTER_APPROVAL
 ```
 
+## Android API base URL
+
+The Android app defaults to the emulator-friendly backend URL:
+
+```text
+http://10.0.2.2:8000/
+```
+
+That is correct for the Android emulator. It is wrong for a physical Android phone because `10.0.2.2` is an emulator alias, not your Mac or backend machine.
+
+For a real phone demo, build with a backend URL reachable from the phone:
+
+```bash
+cd mobile/android
+./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/
+```
+
+Example:
+
+```bash
+./gradlew assembleDebug -PAIXION_API_BASE_URL=http://192.168.1.42:8000/
+```
+
+The URL must end with `/` because Retrofit requires a trailing slash for base URLs.
+
 ## Android demo checklist
 
 Use this only after backend validation passes.
 
 1. Start backend with `AIXION_AUTH_ENABLED=false` for local demo.
-2. Point Android API base URL at the backend host reachable from the device or emulator.
-3. Submit a mutating MCP call through the backend API.
-4. Open Android MCP Queue.
-5. Confirm the pending row appears as `WAITING_FOR_APPROVAL`.
-6. Tap `Open linked approval`.
-7. Approve the request.
-8. Confirm approval completion message appears.
-9. Return to MCP Queue.
-10. Confirm the queue refreshes and shows `FORWARDED`.
-11. Verify `/audit` contains the approval and forwarding trail.
+2. Confirm the backend is reachable from the Android device or emulator.
+3. For emulator, the default `http://10.0.2.2:8000/` is enough.
+4. For physical phone, build with `-PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/`.
+5. Submit a mutating MCP call through the backend API.
+6. Open Android MCP Queue.
+7. Confirm the pending row appears as `WAITING_FOR_APPROVAL`.
+8. Tap `Open linked approval`.
+9. Approve the request.
+10. Confirm approval completion message appears.
+11. Return to MCP Queue.
+12. Confirm the queue refreshes and shows `FORWARDED`.
+13. Verify `/audit` contains the approval and forwarding trail.
 
 ## Demo failure interpretation
 
@@ -241,6 +268,7 @@ Use this only after backend validation passes.
 | --- | --- |
 | Request forwards before approval | Gateway wait-mode is broken. Stop the demo. |
 | No pending request appears | Queue persistence or pending API is broken. |
+| Android cannot reach backend | Wrong API base URL, wrong LAN IP, backend not bound/reachable, or firewall/network issue. |
 | Approval lacks `approved_payload_hash` | Integrity freeze is broken. Gateway should not forward. |
 | Resolve returns `forwarded=false` after approval | Check resolve reason and pending status. |
 | Queue stays `WAITING_FOR_APPROVAL` after resolve | Android refresh or pending status update is stale. |
