@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.workorders
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.WorkOrderSummary
@@ -16,8 +17,8 @@ data class WorkOrdersUiState(
     val workOrders: List<WorkOrderSummary> = emptyList()
 )
 
-class WorkOrdersViewModel : ViewModel() {
-    private val api = ApiClient.create()
+class WorkOrdersViewModel(application: Application) : AndroidViewModel(application) {
+    private val api = ApiClient.create(application.applicationContext)
     private val projectRepository = ProjectRepository(api)
     private val workOrderRepository = WorkOrderRepository(api)
 
