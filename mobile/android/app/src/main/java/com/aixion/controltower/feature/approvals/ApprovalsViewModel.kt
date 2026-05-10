@@ -57,23 +57,30 @@ class ApprovalsViewModel : ViewModel() {
     fun decide(decision: String, reason: String, onCompleted: () -> Unit = {}) {
         val approval = _state.value.selectedApproval ?: return
         viewModelScope.launch {
-            val updated = repository.decide(approval.id, decision, reason)
-            val resolveMessage = if (approval.isMCPToolApproval) {
-                repository.resolveMCPApproval(approval.id)?.let {
-                    if (it.forwarded) {
+            runCatching {
+                val updated = repository.decide(approval.id, decision, reason)
+                val resolveMessage = if (approval.isMCPToolApproval) {
+                    val result = repository.resolveMCPApproval(approval.id)
+                    if (result.forwarded) {
                         " MCP request forwarded."
                     } else {
-                        " MCP resolve: ${it.reason}"
+                        " MCP resolve: ${result.reason}"
                     }
-                }.orEmpty()
-            } else {
-                ""
+                } else {
+                    ""
+                }
+                updated to resolveMessage
+            }.onSuccess { (updated, resolveMessage) ->
+                _state.value = _state.value.copy(
+                    selectedApproval = updated,
+                    lastActionMessage = "Decision sent: $decision.$resolveMessage"
+                )
+                onCompleted()
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    lastActionMessage = "Decision failed: ${error.message ?: "backend request failed"}"
+                )
             }
-            _state.value = _state.value.copy(
-                selectedApproval = updated,
-                lastActionMessage = "Decision sent: $decision.$resolveMessage"
-            )
-            onCompleted()
         }
     }
 }
