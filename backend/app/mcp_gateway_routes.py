@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .auth import require_api_key
-from .child_mcp_test_server import ChildMCPTestServer
+from .mcp_child_router import MCPChildServerRouter
 from .mcp_gateway import MCPGatewayApprovalDecisionLayer, MCPGatewayDecision, MCPGatewayToolCall
 from .models import MCPPendingRequest, MCPPendingStatus
 from .store import store
@@ -12,7 +12,7 @@ from .store import store
 router = APIRouter(prefix="/mcp-gateway", tags=["mcp-gateway"])
 AuthDependency = Depends(require_api_key)
 
-_child_server = ChildMCPTestServer()
+_child_router = MCPChildServerRouter()
 _gateways: dict[str, MCPGatewayApprovalDecisionLayer] = {}
 
 
@@ -25,17 +25,21 @@ def gateway_for_project(project_id: str) -> MCPGatewayApprovalDecisionLayer:
     if project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
     if project_id not in _gateways:
-        _gateways[project_id] = MCPGatewayApprovalDecisionLayer(_child_server, project_id=project_id)
+        _gateways[project_id] = MCPGatewayApprovalDecisionLayer(_child_router, project_id=project_id)
     return _gateways[project_id]
 
 
 def reset_gateway_runtime_for_test() -> None:
-    _child_server.received_tool_calls.clear()
+    _child_router.reset_for_test()
     _gateways.clear()
 
 
 def child_received_count_for_test() -> int:
-    return len(_child_server.received_tool_calls)
+    return _child_router.received_count_for_test()
+
+
+def child_received_count_for_server_for_test(server_name: str) -> int:
+    return _child_router.received_count_for_server_for_test(server_name)
 
 
 @router.post("/requests", response_model=MCPGatewayDecision)

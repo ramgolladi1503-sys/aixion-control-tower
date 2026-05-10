@@ -7,7 +7,11 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.mcp_gateway_routes import child_received_count_for_test, reset_gateway_runtime_for_test
+from app.mcp_gateway_routes import (
+    child_received_count_for_server_for_test,
+    child_received_count_for_test,
+    reset_gateway_runtime_for_test,
+)
 from app.models import MCPPendingStatus
 from app.store import store
 
@@ -142,6 +146,7 @@ def test_mcp_tools_call_registered_mutating_tool_ignores_client_downgrade() -> N
     assert structured["approval_required"] is True
     assert structured["approval_request_id"] is not None
     assert child_received_count_for_test() == 0
+    assert child_received_count_for_server_for_test("filesystem") == 0
     assert len(store.mcp_pending_requests) == 1
     pending = next(iter(store.mcp_pending_requests.values()))
     assert pending.server_name == "filesystem"
@@ -149,7 +154,7 @@ def test_mcp_tools_call_registered_mutating_tool_ignores_client_downgrade() -> N
     assert pending.status == MCPPendingStatus.WAITING_FOR_APPROVAL
 
 
-def test_mcp_tools_call_registered_read_only_tool_ignores_client_upgrade() -> None:
+def test_mcp_tools_call_registered_read_only_tool_routes_to_registered_child_server() -> None:
     project_id = _create_project()
     _register_child_server(project_id)
 
@@ -168,7 +173,11 @@ def test_mcp_tools_call_registered_read_only_tool_ignores_client_upgrade() -> No
     structured = response.json()["result"]["structuredContent"]
     assert structured["forwarded"] is True
     assert structured["approval_required"] is False
+    assert structured["result"]["server_name"] == "filesystem"
+    assert structured["result"]["tool_name"] == "read_file"
     assert child_received_count_for_test() == 1
+    assert child_received_count_for_server_for_test("filesystem") == 1
+    assert child_received_count_for_server_for_test("child-test-server") == 0
     assert store.mcp_pending_requests == {}
 
 
@@ -293,10 +302,48 @@ def test_mcp_tools_call_read_only_forwards_without_approval_demo_fallback() -> N
     assert structured["approval_required"] is False
     assert structured["approval_request_id"] is None
     assert child_received_count_for_test() == 1
+    assert child_received_count_for_server_for_test("child-test-server") == 1
     assert store.mcp_pending_requests == {}
 
 
-def test_mcp_tools_call_can_be_approved_and_resolved_after_transport_submit() -> None:
+def test_mcp_tools_call_registered_mutating_routes_after_approval() -> None:
+    project_id = _create_project()
+    _register_child_server(project_id)
+
+    call = _jsonrpc(
+        project_id,
+        "tools/call",
+        {
+            "name": "write_file",
+            "server_name": "filesystem",
+            "arguments": {"path": "README.md", "content": "approved"},
+            "mutating": False,
+        },
+    )
+    approval_id = call.json()["result"]["structuredContent"]["approval_request_id"]
+    assert approval_id is not None
+    assert child_received_count_for_test() == 0
+    assert child_received_count_for_server_for_test("filesystem") == 0
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "reason": "approve registered transport call"},
+    )
+    assert decision.status_code == 200
+
+    resolved = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert resolved.status_code == 200
+    assert resolved.json()["forwarded"] is True
+    assert resolved.json()["result"]["server_name"] == "filesystem"
+    assert resolved.json()["result"]["tool_name"] == "write_file"
+    assert child_received_count_for_test() == 1
+    assert child_received_count_for_server_for_test("filesystem") == 1
+    assert child_received_count_for_server_for_test("child-test-server") == 0
+    assert next(iter(store.mcp_pending_requests.values())).status == MCPPendingStatus.FORWARDED
+
+
+def test_mcp_tools_call_can_be_approved_and_resolved_after_transport_submit_demo_fallback() -> None:
     project_id = _create_project()
 
     call = _jsonrpc(
