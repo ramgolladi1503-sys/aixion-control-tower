@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.projects
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.ProjectSummary
@@ -15,8 +16,8 @@ data class ProjectsUiState(
     val projects: List<ProjectSummary> = emptyList()
 )
 
-class ProjectsViewModel : ViewModel() {
-    private val repository = ProjectRepository(ApiClient.create())
+class ProjectsViewModel(application: Application) : AndroidViewModel(application) {
+    private val repository = ProjectRepository(ApiClient.create(application.applicationContext))
 
     private val _state = MutableStateFlow(ProjectsUiState())
     val state: StateFlow<ProjectsUiState> = _state.asStateFlow()
