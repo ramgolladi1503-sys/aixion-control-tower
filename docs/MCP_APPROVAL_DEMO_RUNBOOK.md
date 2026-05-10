@@ -72,14 +72,34 @@ python -m pytest
 
 Do not claim CI is green unless GitHub Actions confirms it.
 
-## Manual API validation path
+## Start the demo backend
 
-For a server-backed manual demo, start the backend with local auth disabled:
+For local emulator-only demo, this works:
 
 ```bash
 cd backend
 AIXION_AUTH_ENABLED=false uvicorn app.main:app --reload
 ```
+
+For a physical Android phone demo, localhost binding is not enough. Start the backend on all interfaces:
+
+```bash
+cd backend
+bash scripts/run_demo_server.sh
+```
+
+Equivalent manual command:
+
+```bash
+cd backend
+AIXION_AUTH_ENABLED=false uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Hard rule: a real phone must use your computer LAN IP, not `127.0.0.1` and not `10.0.2.2`.
+
+## Manual API validation path
+
+The commands below assume the backend is reachable at `http://127.0.0.1:8000` from your terminal.
 
 ### 1. Create a project
 
@@ -248,7 +268,7 @@ The URL must end with `/` because Retrofit requires a trailing slash for base UR
 
 Use this only after backend validation passes.
 
-1. Start backend with `AIXION_AUTH_ENABLED=false` for local demo.
+1. Start backend with `bash scripts/run_demo_server.sh` for physical phone demo.
 2. Confirm the backend is reachable from the Android device or emulator.
 3. For emulator, the default `http://10.0.2.2:8000/` is enough.
 4. For physical phone, build with `-PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/`.
@@ -268,7 +288,7 @@ Use this only after backend validation passes.
 | --- | --- |
 | Request forwards before approval | Gateway wait-mode is broken. Stop the demo. |
 | No pending request appears | Queue persistence or pending API is broken. |
-| Android cannot reach backend | Wrong API base URL, wrong LAN IP, backend not bound/reachable, or firewall/network issue. |
+| Android cannot reach backend | Wrong API base URL, wrong LAN IP, backend not bound to `0.0.0.0`, firewall, or network issue. |
 | Approval lacks `approved_payload_hash` | Integrity freeze is broken. Gateway should not forward. |
 | Resolve returns `forwarded=false` after approval | Check resolve reason and pending status. |
 | Queue stays `WAITING_FOR_APPROVAL` after resolve | Android refresh or pending status update is stale. |
