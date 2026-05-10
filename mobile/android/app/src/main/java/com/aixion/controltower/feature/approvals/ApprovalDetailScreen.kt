@@ -59,16 +59,25 @@ fun ApprovalDetailScreen(
         lastActionMessage = state.lastActionMessage,
         onOpenDiff = onOpenDiff,
         onApprove = {
-            viewModel.decide("approve", "Approved from mobile detail review.")
-            onDecisionSubmitted()
+            viewModel.decide(
+                decision = "approve",
+                reason = "Approved from mobile detail review.",
+                onCompleted = onDecisionSubmitted
+            )
         },
         onReject = {
-            viewModel.decide("reject", "Rejected from mobile detail review.")
-            onDecisionSubmitted()
+            viewModel.decide(
+                decision = "reject",
+                reason = "Rejected from mobile detail review.",
+                onCompleted = onDecisionSubmitted
+            )
         },
         onRevise = {
-            viewModel.decide("revise", "Revision requested from mobile detail review.")
-            onDecisionSubmitted()
+            viewModel.decide(
+                decision = "revise",
+                reason = "Revision requested from mobile detail review.",
+                onCompleted = onDecisionSubmitted
+            )
         }
     )
 }
