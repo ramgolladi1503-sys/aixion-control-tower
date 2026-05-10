@@ -10,6 +10,7 @@ from .auth import require_api_key, require_user
 from .auth_routes import router as auth_router
 from .github_runner import router as github_runner_router
 from .mcp_gateway_routes import router as mcp_gateway_router
+from .mcp_transport_routes import router as mcp_transport_router
 from .models import (
     ApprovalGroups,
     ApprovalRequest,
@@ -43,6 +44,7 @@ app.include_router(agent_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
 app.include_router(mcp_gateway_router)
+app.include_router(mcp_transport_router)
 app.include_router(audit_router)
 AuthDependency = Depends(require_api_key)
 UserDependency = Depends(require_user)
