@@ -1,17 +1,19 @@
 package com.aixion.controltower.core.api
 
 import android.content.Context
+import com.aixion.controltower.BuildConfig
 import com.aixion.controltower.core.auth.AuthSession
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 
 object ApiClient {
-    private const val DEFAULT_BASE_URL = "http://10.0.2.2:8000/"
+    private val defaultBaseUrl: String
+        get() = BuildConfig.AIXION_API_BASE_URL
 
     fun create(
         context: Context? = null,
-        baseUrl: String = DEFAULT_BASE_URL,
+        baseUrl: String = defaultBaseUrl,
         accessToken: String = ""
     ): ControlTowerApi {
         val client = OkHttpClient.Builder()
