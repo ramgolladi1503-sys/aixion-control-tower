@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -37,7 +38,10 @@ import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
 @Composable
-fun MCPQueueScreen(viewModel: MCPQueueViewModel = viewModel()) {
+fun MCPQueueScreen(
+    viewModel: MCPQueueViewModel = viewModel(),
+    onOpenApproval: (String) -> Unit = {}
+) {
     val state by viewModel.state.collectAsState()
 
     LazyColumn(
@@ -95,6 +99,7 @@ fun MCPQueueScreen(viewModel: MCPQueueViewModel = viewModel()) {
             MCPPendingCard(
                 pending = pending,
                 recovering = state.recoveringPendingId == pending.id,
+                onOpenApproval = { onOpenApproval(pending.approvalRequestId) },
                 onRecover = { viewModel.recoverPendingRequest(pending.id) }
             )
         }
@@ -149,6 +154,7 @@ private fun MCPMetric(label: String, value: String, color: Color, modifier: Modi
 private fun MCPPendingCard(
     pending: MCPPendingSummary,
     recovering: Boolean,
+    onOpenApproval: () -> Unit,
     onRecover: () -> Unit
 ) {
     Column(
@@ -190,6 +196,12 @@ private fun MCPPendingCard(
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold
             )
+        }
+        OutlinedButton(
+            onClick = onOpenApproval,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Open linked approval")
         }
         if (pending.canRecoverFromMobile()) {
             Button(
