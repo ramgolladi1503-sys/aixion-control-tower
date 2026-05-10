@@ -43,7 +43,8 @@ import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 @Composable
 fun ApprovalDetailScreen(
     viewModel: ApprovalsViewModel = viewModel(),
-    onOpenDiff: () -> Unit = {}
+    onOpenDiff: () -> Unit = {},
+    onDecisionSubmitted: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
     val approval = state.selectedApproval ?: state.approvals.firstOrNull()
@@ -57,9 +58,18 @@ fun ApprovalDetailScreen(
         approval = approval,
         lastActionMessage = state.lastActionMessage,
         onOpenDiff = onOpenDiff,
-        onApprove = { viewModel.decide("approve", "Approved from mobile detail review.") },
-        onReject = { viewModel.decide("reject", "Rejected from mobile detail review.") },
-        onRevise = { viewModel.decide("revise", "Revision requested from mobile detail review.") }
+        onApprove = {
+            viewModel.decide("approve", "Approved from mobile detail review.")
+            onDecisionSubmitted()
+        },
+        onReject = {
+            viewModel.decide("reject", "Rejected from mobile detail review.")
+            onDecisionSubmitted()
+        },
+        onRevise = {
+            viewModel.decide("revise", "Revision requested from mobile detail review.")
+            onDecisionSubmitted()
+        }
     )
 }
 
