@@ -54,7 +54,7 @@ class ApprovalsViewModel : ViewModel() {
         }
     }
 
-    fun decide(decision: String, reason: String) {
+    fun decide(decision: String, reason: String, onCompleted: () -> Unit = {}) {
         val approval = _state.value.selectedApproval ?: return
         viewModelScope.launch {
             val updated = repository.decide(approval.id, decision, reason)
@@ -73,6 +73,7 @@ class ApprovalsViewModel : ViewModel() {
                 selectedApproval = updated,
                 lastActionMessage = "Decision sent: $decision.$resolveMessage"
             )
+            onCompleted()
         }
     }
 }
