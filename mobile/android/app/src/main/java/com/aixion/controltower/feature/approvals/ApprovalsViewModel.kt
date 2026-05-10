@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.approvals
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -17,8 +18,8 @@ data class ApprovalsUiState(
     val lastActionMessage: String? = null
 )
 
-class ApprovalsViewModel : ViewModel() {
-    private val repository = ApprovalRepository(ApiClient.create())
+class ApprovalsViewModel(application: Application) : AndroidViewModel(application) {
+    private val repository = ApprovalRepository(ApiClient.create(application.applicationContext))
 
     private val _state = MutableStateFlow(ApprovalsUiState())
     val state: StateFlow<ApprovalsUiState> = _state.asStateFlow()
