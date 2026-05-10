@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from .auth import require_api_key
 from .mcp_gateway import MCPGatewayDecision, MCPGatewayToolCall
 from .mcp_gateway_routes import gateway_for_project
+from .models import MCPChildServer
 from .store import store
 
 router = APIRouter(prefix="/mcp", tags=["mcp-transport"])
@@ -48,6 +49,61 @@ def _error_response(
     data: dict[str, Any] | None = None,
 ) -> MCPJsonRpcResponse:
     return MCPJsonRpcResponse(id=request_id, error=MCPJsonRpcError(code=code, message=message, data=data))
+
+
+def _enabled_child_servers(project_id: str) -> list[MCPChildServer]:
+    return [
+        server
+        for server in store.mcp_child_servers.values()
+        if server.project_id == project_id and server.enabled
+    ]
+
+
+def _registered_tools(project_id: str) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    for server in _enabled_child_servers(project_id):
+        for tool in server.tools:
+            tools.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                    "annotations": {
+                        "server_name": server.name,
+                        "server_id": server.id,
+                        "mutating": tool.mutating,
+                    },
+                }
+            )
+    if tools:
+        return tools
+    return _demo_tools()
+
+
+def _demo_tools() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "update_config",
+            "description": "Demo mutating tool routed through Aixion approval wait mode.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "value": {"type": "string"},
+                },
+            },
+            "annotations": {"server_name": "child-test-server", "mutating": True},
+        },
+        {
+            "name": "read_status",
+            "description": "Demo read-only tool that may pass without approval.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}},
+            },
+            "annotations": {"server_name": "child-test-server", "mutating": False},
+        },
+    ]
 
 
 def _tool_call_from_params(params: dict[str, Any]) -> MCPGatewayToolCall:
@@ -129,32 +185,7 @@ def handle_mcp_jsonrpc(
         )
 
     if payload.method == "tools/list":
-        return _result_response(
-            payload.id,
-            {
-                "tools": [
-                    {
-                        "name": "update_config",
-                        "description": "Demo mutating tool routed through Aixion approval wait mode.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "key": {"type": "string"},
-                                "value": {"type": "string"},
-                            },
-                        },
-                    },
-                    {
-                        "name": "read_status",
-                        "description": "Demo read-only tool that may pass without approval.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"key": {"type": "string"}},
-                        },
-                    },
-                ]
-            },
-        )
+        return _result_response(payload.id, {"tools": _registered_tools(project_id)})
 
     try:
         tool_call = _tool_call_from_params(payload.params)

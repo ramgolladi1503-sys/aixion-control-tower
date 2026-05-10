@@ -177,6 +177,29 @@ class Project(ProjectCreate):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class MCPToolDefinition(BaseModel):
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=lambda: {"type": "object", "properties": {}})
+    mutating: bool = False
+
+
+class MCPChildServerCreate(BaseModel):
+    project_id: str
+    name: str
+    description: str = ""
+    transport: str = "test"
+    endpoint: str = ""
+    enabled: bool = True
+    tools: list[MCPToolDefinition] = Field(default_factory=list)
+
+
+class MCPChildServer(MCPChildServerCreate):
+    id: str = Field(default_factory=lambda: new_id("mcp_server"))
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
 class IdeaCreate(BaseModel):
     project_id: str | None = None
     title: str
