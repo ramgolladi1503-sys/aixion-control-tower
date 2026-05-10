@@ -5,6 +5,9 @@ import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
+import com.aixion.controltower.core.api.dto.MCPPendingHealthDto
+import com.aixion.controltower.core.api.dto.MCPPendingRequestDto
+import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.TestRunDto
@@ -14,6 +17,7 @@ import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Path
+import retrofit2.http.Query
 
 interface ControlTowerApi {
     @GET("health")
@@ -54,4 +58,27 @@ interface ControlTowerApi {
 
     @GET("audit")
     suspend fun listAuditEvents(): List<AuditEventDto>
+
+    @GET("mcp-gateway/pending-requests")
+    suspend fun listMCPPendingRequests(
+        @Query("project_id") projectId: String? = null,
+        @Query("status") status: String? = null,
+        @Query("approval_request_id") approvalRequestId: String? = null
+    ): List<MCPPendingRequestDto>
+
+    @GET("mcp-gateway/pending-requests/health")
+    suspend fun getMCPPendingHealth(
+        @Query("project_id") projectId: String? = null
+    ): MCPPendingHealthDto
+
+    @GET("mcp-gateway/pending-requests/{pendingRequestId}")
+    suspend fun getMCPPendingRequest(
+        @Path("pendingRequestId") pendingRequestId: String
+    ): MCPPendingRequestDto
+
+    @POST("mcp-gateway/pending-requests/{pendingRequestId}/retry")
+    suspend fun retryMCPPendingRequest(
+        @Path("pendingRequestId") pendingRequestId: String,
+        @Body payload: PendingRetryRequestDto
+    ): MCPPendingRequestDto
 }
