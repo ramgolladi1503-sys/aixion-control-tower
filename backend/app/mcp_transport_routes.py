@@ -51,12 +51,12 @@ def _error_response(
     return MCPJsonRpcResponse(id=request_id, error=MCPJsonRpcError(code=code, message=message, data=data))
 
 
+def _project_child_servers(project_id: str) -> list[MCPChildServer]:
+    return [server for server in store.mcp_child_servers.values() if server.project_id == project_id]
+
+
 def _enabled_child_servers(project_id: str) -> list[MCPChildServer]:
-    return [
-        server
-        for server in store.mcp_child_servers.values()
-        if server.project_id == project_id and server.enabled
-    ]
+    return [server for server in _project_child_servers(project_id) if server.enabled]
 
 
 def _registered_tools(project_id: str) -> list[dict[str, Any]]:
@@ -111,13 +111,15 @@ def _registered_tool_policy(
     tool_name: str,
     requested_server_name: str | None,
 ) -> tuple[str, bool] | None:
-    enabled_servers = _enabled_child_servers(project_id)
-    if not enabled_servers:
+    registered_servers = _project_child_servers(project_id)
+    if not registered_servers:
         return None
 
     matches = []
-    for server in enabled_servers:
+    for server in registered_servers:
         if requested_server_name is not None and requested_server_name != server.name:
+            continue
+        if not server.enabled:
             continue
         for tool in server.tools:
             if tool.name == tool_name:
