@@ -15,6 +15,7 @@ data class MCPQueueUiState(
     val loading: Boolean = true,
     val recoveringPendingId: String? = null,
     val message: String? = null,
+    val errorMessage: String? = null,
     val health: MCPPendingHealthSummary? = null,
     val pendingRequests: List<MCPPendingSummary> = emptyList()
 )
@@ -31,13 +32,26 @@ class MCPQueueViewModel : ViewModel() {
 
     fun refresh() {
         viewModelScope.launch {
-            val health = repository.getHealth()
-            val pending = repository.listPendingRequests()
-            _state.value = _state.value.copy(
-                loading = false,
-                health = health,
-                pendingRequests = pending
-            )
+            _state.value = _state.value.copy(loading = true, errorMessage = null)
+            runCatching {
+                val health = repository.getHealth()
+                val pending = repository.listPendingRequests()
+                health to pending
+            }.onSuccess { (health, pending) ->
+                _state.value = _state.value.copy(
+                    loading = false,
+                    errorMessage = null,
+                    health = health,
+                    pendingRequests = pending
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    loading = false,
+                    errorMessage = error.message ?: "Unable to load MCP queue from backend.",
+                    health = null,
+                    pendingRequests = emptyList()
+                )
+            }
         }
     }
 
@@ -45,7 +59,8 @@ class MCPQueueViewModel : ViewModel() {
         viewModelScope.launch {
             _state.value = _state.value.copy(
                 recoveringPendingId = pendingRequestId,
-                message = "Recovering MCP pending request..."
+                message = "Recovering MCP pending request...",
+                errorMessage = null
             )
             runCatching {
                 repository.recoverPendingRequest(pendingRequestId)
@@ -55,13 +70,14 @@ class MCPQueueViewModel : ViewModel() {
                 _state.value = _state.value.copy(
                     recoveringPendingId = null,
                     message = "MCP pending request queued for recovery.",
+                    errorMessage = null,
                     health = health,
                     pendingRequests = pending
                 )
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     recoveringPendingId = null,
-                    message = error.message ?: "MCP recovery failed."
+                    errorMessage = error.message ?: "MCP recovery failed."
                 )
             }
         }

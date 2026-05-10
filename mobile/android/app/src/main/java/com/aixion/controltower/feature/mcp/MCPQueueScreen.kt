@@ -75,6 +75,15 @@ fun MCPQueueScreen(
                     modifier = Modifier.padding(top = 8.dp)
                 )
             }
+            state.errorMessage?.let { error ->
+                Text(
+                    text = "Backend error: $error",
+                    color = RiskCritical,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
         }
 
         state.health?.let { health ->
@@ -84,7 +93,11 @@ fun MCPQueueScreen(
         if (!state.loading && state.pendingRequests.isEmpty()) {
             item {
                 Text(
-                    text = "No MCP pending work found.",
+                    text = if (state.errorMessage == null) {
+                        "No MCP pending work found."
+                    } else {
+                        "MCP queue unavailable. Fix backend connectivity instead of trusting mock queue data."
+                    },
                     color = TowerTextMuted,
                     fontSize = 15.sp,
                     modifier = Modifier
