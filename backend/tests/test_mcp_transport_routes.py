@@ -143,7 +143,9 @@ def test_mcp_jsonrpc_errors_for_invalid_method_and_params() -> None:
     assert missing_name.json()["error"]["code"] == -32602
 
     assert bad_arguments.status_code == 200
+    assert bad_arguments.json()["result"] is None
     assert bad_arguments.json()["error"]["code"] == -32602
+    assert "arguments must be an object" in bad_arguments.json()["error"]["message"]
 
 
 def test_mcp_jsonrpc_returns_404_for_unknown_project() -> None:
