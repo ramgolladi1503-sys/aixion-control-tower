@@ -28,6 +28,45 @@ def _create_project() -> str:
     return response.json()["id"]
 
 
+def _register_child_server(project_id: str, *, enabled: bool = True) -> dict:
+    response = client.post(
+        "/mcp-registry/child-servers",
+        json={
+            "project_id": project_id,
+            "name": "filesystem",
+            "description": "Filesystem child server",
+            "transport": "test",
+            "endpoint": "memory://filesystem",
+            "enabled": enabled,
+            "tools": [
+                {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                    "mutating": False,
+                },
+                {
+                    "name": "write_file",
+                    "description": "Write a file",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                    },
+                    "mutating": True,
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
+
+
 def _jsonrpc(project_id: str, method: str, params: dict | None = None, request_id: str = "rpc_1"):
     return client.post(
         f"/mcp/{project_id}/jsonrpc",
@@ -35,7 +74,7 @@ def _jsonrpc(project_id: str, method: str, params: dict | None = None, request_i
     )
 
 
-def test_mcp_initialize_and_tools_list() -> None:
+def test_mcp_initialize_and_tools_list_demo_fallback() -> None:
     project_id = _create_project()
 
     initialized = _jsonrpc(project_id, "initialize", request_id="init_1")
@@ -48,6 +87,34 @@ def test_mcp_initialize_and_tools_list() -> None:
     assert listed.status_code == 200
     tools = listed.json()["result"]["tools"]
     assert {tool["name"] for tool in tools} >= {"update_config", "read_status"}
+    assert tools[0]["annotations"]["server_name"] == "child-test-server"
+
+
+def test_mcp_tools_list_uses_enabled_child_server_registry() -> None:
+    project_id = _create_project()
+    server = _register_child_server(project_id)
+
+    listed = _jsonrpc(project_id, "tools/list", request_id="list_registry")
+
+    assert listed.status_code == 200
+    tools = listed.json()["result"]["tools"]
+    assert [tool["name"] for tool in tools] == ["read_file", "write_file"]
+    assert tools[0]["annotations"]["server_name"] == "filesystem"
+    assert tools[0]["annotations"]["server_id"] == server["id"]
+    assert tools[0]["annotations"]["mutating"] is False
+    assert tools[1]["annotations"]["mutating"] is True
+
+
+def test_mcp_tools_list_ignores_disabled_child_servers() -> None:
+    project_id = _create_project()
+    _register_child_server(project_id, enabled=False)
+
+    listed = _jsonrpc(project_id, "tools/list", request_id="list_disabled")
+
+    assert listed.status_code == 200
+    tools = listed.json()["result"]["tools"]
+    assert {tool["name"] for tool in tools} >= {"update_config", "read_status"}
+    assert "read_file" not in {tool["name"] for tool in tools}
 
 
 def test_mcp_tools_call_mutating_request_waits_for_approval() -> None:
