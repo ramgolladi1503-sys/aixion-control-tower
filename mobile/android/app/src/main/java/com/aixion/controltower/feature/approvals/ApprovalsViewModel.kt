@@ -45,12 +45,30 @@ class ApprovalsViewModel : ViewModel() {
     fun openApprovalById(approvalId: String) {
         viewModelScope.launch {
             val cachedApproval = _state.value.approvals.firstOrNull { it.id == approvalId }
-            val selected = cachedApproval ?: repository.getApproval(approvalId)
-            _state.value = _state.value.copy(
-                loading = false,
-                selectedApproval = selected,
-                lastActionMessage = "Opened linked approval from MCP Queue"
-            )
+            if (cachedApproval != null) {
+                _state.value = _state.value.copy(
+                    loading = false,
+                    selectedApproval = cachedApproval,
+                    lastActionMessage = "Opened linked approval from MCP Queue"
+                )
+                return@launch
+            }
+
+            runCatching {
+                repository.getApproval(approvalId)
+            }.onSuccess { selected ->
+                _state.value = _state.value.copy(
+                    loading = false,
+                    selectedApproval = selected,
+                    lastActionMessage = "Opened linked approval from MCP Queue"
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    loading = false,
+                    selectedApproval = null,
+                    lastActionMessage = "Failed to open linked approval $approvalId: ${error.message ?: "backend request failed"}"
+                )
+            }
         }
     }
 

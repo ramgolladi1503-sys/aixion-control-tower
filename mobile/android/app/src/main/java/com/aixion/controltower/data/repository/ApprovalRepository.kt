@@ -18,11 +18,7 @@ class ApprovalRepository(private val api: ControlTowerApi) {
     }
 
     suspend fun getApproval(approvalId: String, projectName: String = "Project"): ApprovalSummary {
-        return runCatching {
-            api.getApproval(approvalId).toUiSummary(projectName)
-        }.getOrElse {
-            MockData.approvals.firstOrNull { it.id == approvalId } ?: MockData.approvals.first()
-        }
+        return api.getApproval(approvalId).toUiSummary(projectName)
     }
 
     suspend fun decide(approvalId: String, decision: String, reason: String): ApprovalSummary {
