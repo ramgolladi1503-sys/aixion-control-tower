@@ -106,7 +106,32 @@ def _demo_tools() -> list[dict[str, Any]]:
     ]
 
 
-def _tool_call_from_params(params: dict[str, Any]) -> MCPGatewayToolCall:
+def _registered_tool_policy(
+    project_id: str,
+    tool_name: str,
+    requested_server_name: str | None,
+) -> tuple[str, bool] | None:
+    enabled_servers = _enabled_child_servers(project_id)
+    if not enabled_servers:
+        return None
+
+    matches = []
+    for server in enabled_servers:
+        if requested_server_name is not None and requested_server_name != server.name:
+            continue
+        for tool in server.tools:
+            if tool.name == tool_name:
+                matches.append((server, tool))
+
+    if len(matches) == 1:
+        server, tool = matches[0]
+        return server.name, tool.mutating
+    if len(matches) > 1:
+        raise ValueError("tools/call is ambiguous; provide server_name")
+    raise ValueError("tools/call references an unknown or disabled registered tool")
+
+
+def _tool_call_from_params(project_id: str, params: dict[str, Any]) -> MCPGatewayToolCall:
     tool_name = params.get("name")
     if not isinstance(tool_name, str) or not tool_name.strip():
         raise ValueError("tools/call params must include non-empty name")
@@ -115,8 +140,8 @@ def _tool_call_from_params(params: dict[str, Any]) -> MCPGatewayToolCall:
     if not isinstance(arguments, dict):
         raise ValueError("tools/call arguments must be an object")
 
-    server_name = params.get("server_name") or "child-test-server"
-    if not isinstance(server_name, str):
+    requested_server_name = params.get("server_name")
+    if requested_server_name is not None and not isinstance(requested_server_name, str):
         raise ValueError("server_name must be a string")
 
     session_id = params.get("session_id")
@@ -130,6 +155,13 @@ def _tool_call_from_params(params: dict[str, Any]) -> MCPGatewayToolCall:
     mutating = params.get("mutating")
     if mutating is not None and not isinstance(mutating, bool):
         raise ValueError("mutating must be a boolean when provided")
+
+    registered_policy = _registered_tool_policy(project_id, tool_name, requested_server_name)
+    if registered_policy is not None:
+        server_name, registered_mutating = registered_policy
+        mutating = registered_mutating
+    else:
+        server_name = requested_server_name or "child-test-server"
 
     return MCPGatewayToolCall(
         server_name=server_name,
@@ -188,7 +220,7 @@ def handle_mcp_jsonrpc(
         return _result_response(payload.id, {"tools": _registered_tools(project_id)})
 
     try:
-        tool_call = _tool_call_from_params(payload.params)
+        tool_call = _tool_call_from_params(project_id, payload.params)
     except ValueError as exc:
         return _error_response(payload.id, code=-32602, message=str(exc))
 
