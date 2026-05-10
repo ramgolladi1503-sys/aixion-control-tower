@@ -39,6 +39,15 @@ enum class ApprovalDashboardBucket {
     HISTORY
 }
 
+enum class MCPPendingStatus {
+    WAITING_FOR_APPROVAL,
+    FORWARDING,
+    FORWARDED,
+    BLOCKED_BY_DECISION,
+    ORPHANED,
+    DEAD_LETTER
+}
+
 data class ProjectSummary(
     val id: String,
     val name: String,
@@ -146,3 +155,44 @@ data class AuditEventSummary(
     val details: String,
     val timestamp: String
 )
+
+data class MCPPendingSummary(
+    val id: String,
+    val projectId: String,
+    val approvalRequestId: String,
+    val serverName: String,
+    val toolName: String,
+    val requestedBy: String,
+    val status: MCPPendingStatus,
+    val attempts: Int,
+    val maxAttempts: Int,
+    val leaseOwner: String?,
+    val leaseExpiresAt: String?,
+    val lastError: String?,
+    val createdAt: String?,
+    val updatedAt: String?
+) {
+    val isRetryable: Boolean
+        get() = status == MCPPendingStatus.WAITING_FOR_APPROVAL || status == MCPPendingStatus.DEAD_LETTER
+
+    val needsOperatorAttention: Boolean
+        get() = status == MCPPendingStatus.DEAD_LETTER || lastError != null
+}
+
+data class MCPPendingHealthSummary(
+    val total: Int,
+    val byStatus: Map<String, Int>,
+    val waitingForApproval: Int,
+    val forwarding: Int,
+    val activeLeases: Int,
+    val expiredLeases: Int,
+    val retryable: Int,
+    val deadLetter: Int,
+    val terminal: Int,
+    val attentionRequired: Int,
+    val oldestWaitingCreatedAt: String?,
+    val oldestDeadLetterCreatedAt: String?
+) {
+    val isHealthy: Boolean
+        get() = attentionRequired == 0 && expiredLeases == 0 && deadLetter == 0
+}
