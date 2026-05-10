@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .auth import require_api_key
 from .mcp_child_router import MCPChildServerRouter
 from .mcp_gateway import MCPGatewayApprovalDecisionLayer, MCPGatewayDecision, MCPGatewayToolCall
-from .models import MCPPendingRequest, MCPPendingStatus
+from .models import AuditEvent, MCPPendingRequest, MCPPendingStatus, now_utc
 from .store import store
 
 router = APIRouter(prefix="/mcp-gateway", tags=["mcp-gateway"])
@@ -14,11 +16,18 @@ AuthDependency = Depends(require_api_key)
 
 _child_router = MCPChildServerRouter()
 _gateways: dict[str, MCPGatewayApprovalDecisionLayer] = {}
+MCP_PENDING_RETRIED = "MCP_PENDING_RETRIED"
+MCP_PENDING_LEASE_RELEASED = "MCP_PENDING_LEASE_RELEASED"
 
 
 class GatewaySubmitRequest(BaseModel):
     project_id: str
     request: MCPGatewayToolCall
+
+
+class PendingRetryRequest(BaseModel):
+    reason: str = ""
+    reset_attempts: bool = True
 
 
 def gateway_for_project(project_id: str) -> MCPGatewayApprovalDecisionLayer:
@@ -40,6 +49,38 @@ def child_received_count_for_test() -> int:
 
 def child_received_count_for_server_for_test(server_name: str) -> int:
     return _child_router.received_count_for_server_for_test(server_name)
+
+
+def _get_pending_or_404(pending_request_id: str) -> MCPPendingRequest:
+    pending = store.mcp_pending_requests.get(pending_request_id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="MCP pending request not found")
+    return pending
+
+
+def _active_lease_exists(pending: MCPPendingRequest) -> bool:
+    return bool(
+        pending.status == MCPPendingStatus.FORWARDING
+        and pending.lease_expires_at is not None
+        and pending.lease_expires_at > now_utc()
+    )
+
+
+def _audit_pending_recovery(event_type: str, pending: MCPPendingRequest, details: dict) -> None:
+    store.audit_events.append(
+        AuditEvent(
+            event_type=event_type,
+            actor="mcp-operator",
+            entity_id=pending.approval_request_id,
+            details={
+                "mcp_pending_request_id": pending.id,
+                "project_id": pending.project_id,
+                "server_name": pending.server_name,
+                "tool_name": pending.tool_name,
+                **details,
+            },
+        )
+    )
 
 
 @router.post("/requests", response_model=MCPGatewayDecision)
@@ -72,9 +113,60 @@ def get_pending_gateway_request(
     pending_request_id: str,
     _: None = AuthDependency,
 ) -> MCPPendingRequest:
-    pending = store.mcp_pending_requests.get(pending_request_id)
-    if pending is None:
-        raise HTTPException(status_code=404, detail="MCP pending request not found")
+    return _get_pending_or_404(pending_request_id)
+
+
+@router.post("/pending-requests/{pending_request_id}/retry", response_model=MCPPendingRequest)
+def retry_pending_gateway_request(
+    pending_request_id: str,
+    payload: PendingRetryRequest | None = None,
+    _: None = AuthDependency,
+) -> MCPPendingRequest:
+    pending = _get_pending_or_404(pending_request_id)
+    payload = payload or PendingRetryRequest()
+    previous_status = pending.status
+
+    if previous_status in {
+        MCPPendingStatus.FORWARDED,
+        MCPPendingStatus.BLOCKED_BY_DECISION,
+        MCPPendingStatus.ORPHANED,
+    }:
+        raise HTTPException(status_code=409, detail=f"MCP pending request cannot be retried from {previous_status}")
+
+    if _active_lease_exists(pending):
+        raise HTTPException(status_code=409, detail="MCP pending request has an active lease")
+
+    if previous_status == MCPPendingStatus.FORWARDING:
+        _audit_pending_recovery(
+            MCP_PENDING_LEASE_RELEASED,
+            pending,
+            {
+                "reason": payload.reason,
+                "previous_status": previous_status,
+                "previous_lease_owner": pending.lease_owner,
+                "previous_lease_expires_at": pending.lease_expires_at.isoformat() if pending.lease_expires_at else None,
+            },
+        )
+
+    pending.status = MCPPendingStatus.WAITING_FOR_APPROVAL
+    if payload.reset_attempts:
+        pending.attempts = 0
+    pending.lease_owner = None
+    pending.lease_expires_at = None
+    pending.last_error = None
+    pending.updated_at = now_utc()
+
+    _audit_pending_recovery(
+        MCP_PENDING_RETRIED,
+        pending,
+        {
+            "reason": payload.reason,
+            "previous_status": previous_status,
+            "reset_attempts": payload.reset_attempts,
+            "attempts": pending.attempts,
+        },
+    )
+    store.persist()
     return pending
 
 
