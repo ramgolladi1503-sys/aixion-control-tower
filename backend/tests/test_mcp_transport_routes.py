@@ -44,6 +44,8 @@ def _register_child_server(project_id: str, *, enabled: bool = True, name: str =
                     "description": "Read a file",
                     "input_schema": {
                         "type": "object",
+                        "required": ["path"],
+                        "additionalProperties": False,
                         "properties": {"path": {"type": "string"}},
                     },
                     "mutating": False,
@@ -53,6 +55,8 @@ def _register_child_server(project_id: str, *, enabled: bool = True, name: str =
                     "description": "Write a file",
                     "input_schema": {
                         "type": "object",
+                        "required": ["path", "content"],
+                        "additionalProperties": False,
                         "properties": {
                             "path": {"type": "string"},
                             "content": {"type": "string"},
@@ -166,6 +170,53 @@ def test_mcp_tools_call_registered_read_only_tool_ignores_client_upgrade() -> No
     assert structured["approval_required"] is False
     assert child_received_count_for_test() == 1
     assert store.mcp_pending_requests == {}
+
+
+def test_mcp_tools_call_registered_schema_rejects_missing_required_wrong_type_and_extra_fields() -> None:
+    project_id = _create_project()
+    _register_child_server(project_id)
+
+    missing_required = _jsonrpc(
+        project_id,
+        "tools/call",
+        {
+            "name": "write_file",
+            "server_name": "filesystem",
+            "arguments": {"path": "README.md"},
+        },
+    )
+    wrong_type = _jsonrpc(
+        project_id,
+        "tools/call",
+        {
+            "name": "write_file",
+            "server_name": "filesystem",
+            "arguments": {"path": "README.md", "content": 123},
+        },
+    )
+    extra_field = _jsonrpc(
+        project_id,
+        "tools/call",
+        {
+            "name": "read_file",
+            "server_name": "filesystem",
+            "arguments": {"path": "README.md", "extra": "nope"},
+        },
+    )
+
+    assert missing_required.status_code == 200
+    assert missing_required.json()["error"]["code"] == -32602
+    assert "missing required field: content" in missing_required.json()["error"]["message"]
+
+    assert wrong_type.status_code == 200
+    assert wrong_type.json()["error"]["code"] == -32602
+    assert "content must be string" in wrong_type.json()["error"]["message"]
+
+    assert extra_field.status_code == 200
+    assert extra_field.json()["error"]["code"] == -32602
+    assert "unsupported field: extra" in extra_field.json()["error"]["message"]
+    assert store.mcp_pending_requests == {}
+    assert child_received_count_for_test() == 0
 
 
 def test_mcp_tools_call_registered_unknown_or_disabled_tool_is_rejected() -> None:
