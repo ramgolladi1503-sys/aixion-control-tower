@@ -3,12 +3,13 @@ set -euo pipefail
 
 HOST="${AIXION_DEMO_HOST:-0.0.0.0}"
 PORT="${AIXION_DEMO_PORT:-8000}"
-DB_PATH="${AIXION_DB_PATH:-runtime/aixion_control_tower_demo.sqlite3}"
 
+export AIXION_PROFILE="${AIXION_PROFILE:-demo}"
 export AIXION_AUTH_ENABLED="${AIXION_AUTH_ENABLED:-false}"
-export AIXION_DB_PATH="$DB_PATH"
+export AIXION_DB_PATH="${AIXION_DB_PATH:-runtime/aixion_control_tower_demo.sqlite3}"
 
 echo "Starting Aixion Control Tower demo backend"
+echo "Profile: $AIXION_PROFILE"
 echo "Host: $HOST"
 echo "Port: $PORT"
 echo "Auth enabled: $AIXION_AUTH_ENABLED"
