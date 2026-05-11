@@ -2,7 +2,7 @@
 
 This checklist is the release/demo gate for the current Mobile Approval Console / Aixion Control Tower MVP.
 
-It does **not** prove production readiness. It proves whether the current build is demo-ready without lying about CI, Android reachability, MCP forwarding, auth, audit traceability, environment configuration, or role permissions.
+It does **not** prove production readiness. It proves whether the current build is demo-ready without lying about CI, Android reachability, MCP forwarding, auth, audit traceability, environment configuration, role permissions, or invite onboarding.
 
 ## Release position
 
@@ -15,7 +15,7 @@ Demo-ready MVP:            yes, if this checklist passes
 Production-grade product:  no
 ```
 
-Do not call this production-grade until deployment, secrets, monitoring, project-scoped roles, invite-based onboarding, signed release handling, and session lifecycle hardening exist.
+Do not call this production-grade until deployment, secrets, monitoring, project-scoped roles, invite acceptance enforcement, signed release handling, and session lifecycle hardening exist.
 
 ## Hard rules
 
@@ -26,7 +26,8 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 5. Do not claim audit proof unless the audit trail shows request, decision, and forwarding events.
 6. Do not claim signed APK readiness until a real keystore-backed signing process exists.
 7. Do not claim production deployment is solved because profiles exist. Profiles reduce config confusion; they do not solve deployment.
-8. Do not claim enterprise RBAC is complete. This is first-pass owner/maintainer/reviewer enforcement with owner-only role management, not project-scoped enterprise RBAC.
+8. Do not claim enterprise RBAC is complete. This is first-pass owner/maintainer/reviewer enforcement with owner-only role management and invite administration, not project-scoped enterprise RBAC.
+9. Do not claim onboarding is production-grade until invite acceptance registration blocks open non-bootstrap registration.
 
 ## Evidence matrix
 
@@ -36,7 +37,9 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Backend profile tests | Profile defaults and overrides are guarded | `cd backend && python -m pytest tests/test_settings.py` |
 | Backend role tests | Owner/maintainer/reviewer guards are tested | `cd backend && python -m pytest tests/test_role_permissions.py` |
 | Backend role management tests | Owner promotion/demotion and last-owner protection are tested | `cd backend && python -m pytest tests/test_role_management.py` |
+| Backend invite tests | Owner invite create/list/revoke behavior is tested | `cd backend && python -m pytest tests/test_invite_onboarding.py` |
 | Role permissions | First-pass role matrix and management endpoints are documented | `docs/ROLE_PERMISSIONS.md` |
+| Invite onboarding | Invite API scope and acceptance gap are documented | `docs/INVITE_ONBOARDING.md` |
 | Environment profiles | Local/demo/test/production-like profiles are documented | `docs/ENVIRONMENT_PROFILES.md` |
 | MCP demo script | Script exits successfully | `cd backend && python scripts/validate_mcp_approval_demo.py` |
 | MCP pytest guard | Demo script is protected by pytest | `cd backend && python -m pytest tests/test_mcp_approval_demo_validation.py` |
@@ -49,11 +52,12 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Auth-disabled demo | Fast local demo works without login | `AIXION_PROFILE=demo` / `AIXION_AUTH_ENABLED=false` path below |
 | Auth-enabled demo | Android `Acct` login/register/session verification works and protected screens load | `AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true` path below |
 | Owner role management | Owner can list users and promote/demote while last owner is protected | API/manual validation below |
+| Owner invite management | Owner can create/list/revoke invites and audit events exist | API/manual validation below |
 | Physical phone demo | Phone reaches backend over LAN | `./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/` |
 | MCP approval path | Request waits, approval opens, phone approves, resolve forwards | Manual path below or runbook |
 | Exactly-once forwarding | Downstream receives one call after resolve and no duplicate on second resolve | Demo script/runbook proof |
 | Queue refresh | MCP Queue changes from `WAITING_FOR_APPROVAL` to `FORWARDED` | Android/manual validation |
-| Audit proof | Audit includes request, approval decision, forwarding event, and role update event when role management is exercised | `/audit` or Android Audit screen |
+| Audit proof | Audit includes request, approval decision, forwarding event, role update event when exercised, and invite events when exercised | `/audit` or Android Audit screen |
 
 ## 1. Backend validation
 
@@ -70,46 +74,25 @@ Expected result:
 all backend tests pass
 ```
 
-Then run the focused profile guard:
+Then run focused guards:
 
 ```bash
 python -m pytest tests/test_settings.py
-```
-
-Expected result:
-
-```text
-profile default and override tests pass
-```
-
-Then run the focused role guards:
-
-```bash
 python -m pytest tests/test_role_permissions.py
 python -m pytest tests/test_role_management.py
-```
-
-Expected result:
-
-```text
-role default, permission guard, owner role update, and last-owner protection tests pass
-```
-
-Then run the focused MCP proof guard:
-
-```bash
+python -m pytest tests/test_invite_onboarding.py
 python -m pytest tests/test_mcp_approval_demo_validation.py
 ```
 
 Expected result:
 
 ```text
-test_mcp_approval_demo_validation_script_passes PASSED
+profile, role, role-management, invite-management, and MCP proof guards pass
 ```
 
 If this fails, stop. The product proof path is not safe enough for demo.
 
-## 2. Role permission and management validation
+## 2. Role and invite validation
 
 Role documentation lives at:
 
@@ -117,51 +100,36 @@ Role documentation lives at:
 docs/ROLE_PERMISSIONS.md
 ```
 
+Invite documentation lives at:
+
+```text
+docs/INVITE_ONBOARDING.md
+```
+
 Supported backend roles:
 
 ```text
-OWNER       agent management + user role management + all maintainer/reviewer permissions
+OWNER       agent management + user role management + invite management + all maintainer/reviewer permissions
 MAINTAINER  create/execute/recover controlled work
 REVIEWER    inspect evidence and make approval decisions
 ```
 
-Self-registration rule:
+Current self-registration rule:
 
 ```text
 first registered user -> OWNER
 later registered users -> REVIEWER
 ```
 
-Owner-only role management endpoints:
-
-```text
-GET   /auth/users
-PATCH /auth/users/{user_id}/role
-```
-
-Role choices endpoint:
-
-```text
-GET /auth/roles
-```
-
-Required behavior:
-
-```text
-OWNER can list users
-OWNER can promote REVIEWER -> MAINTAINER
-OWNER can demote MAINTAINER -> REVIEWER
-backend blocks demoting the last active OWNER
-successful role changes create auth.role_updated audit events
-```
-
 Known limitation:
 
 ```text
-Android shows current user role, but full Android owner role-management UI is still future work
+Invite creation/list/revoke exists.
+Invite acceptance registration is still future work.
+Open registration is not fully solved yet.
 ```
 
-Hard rule: do not claim enterprise RBAC is complete.
+Hard rule: do not claim enterprise RBAC or production onboarding is complete.
 
 ## 3. Environment profile validation
 
@@ -219,17 +187,6 @@ mutating MCP request submitted
 -> audit contains request, decision, and exactly-one forwarding event
 ```
 
-Hard failure meanings:
-
-| Failure | Meaning |
-| --- | --- |
-| Child receives call before approval | MCP wait mode is broken. |
-| No approval ID created | Gateway approval creation is broken. |
-| Missing `approved_payload_hash` | Integrity freeze is broken. |
-| Child receives zero calls after resolve | Forwarding is broken. |
-| Child receives more than one call | Idempotency is broken. Serious bug. |
-| Missing audit event | Demo is not client-safe. |
-
 ## 5. Android JVM tests
 
 Run:
@@ -237,16 +194,6 @@ Run:
 ```bash
 cd mobile/android
 ./gradlew testDebugUnitTest
-```
-
-This must guard at least:
-
-```text
-MCP-backed approval detection
-MCP pending queue helper behavior
-approval repository truthfulness
-no fake success for failed decision/resolve paths
-session/auth failure classification
 ```
 
 If tests fail because of fake API drift or model drift, fix that before demo. Do not wave it away as “just tests”. For this product, tests are part of the proof story.
@@ -290,8 +237,6 @@ See:
 ```text
 docs/ANDROID_RELEASE_PROCESS.md
 ```
-
-Hard rule: do not claim signed release readiness until a real keystore-backed signing process exists.
 
 ## 8. Auth-disabled fast demo
 
@@ -372,8 +317,6 @@ invalid/expired token -> Account clears saved session and asks operator to log i
 network/backend failure -> saved token is not automatically cleared
 ```
 
-That is correct. Do not treat missing-token failures as backend bugs when auth is intentionally enabled.
-
 ## 10. Owner role-management manual API check
 
 Use auth-enabled mode.
@@ -419,7 +362,55 @@ auth.role_updated appears in audit
 attempting to demote the only OWNER returns 409
 ```
 
-## 11. Physical Android phone LAN demo
+## 11. Owner invite-management manual API check
+
+Create invite:
+
+```bash
+curl -s -X POST http://localhost:8000/auth/invites \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"newuser@example.com","role":"REVIEWER"}'
+```
+
+Expected behavior:
+
+```text
+response includes one-time raw token
+stored invite contains token_hash, not raw token
+auth.invite_created appears in audit
+```
+
+List invites:
+
+```bash
+curl -s http://localhost:8000/auth/invites \
+  -H "Authorization: Bearer $OWNER_TOKEN"
+```
+
+Expected behavior:
+
+```text
+invite metadata is returned
+raw token is not returned
+```
+
+Revoke invite:
+
+```bash
+curl -s -X POST http://localhost:8000/auth/invites/INVITE_ID/revoke \
+  -H "Authorization: Bearer $OWNER_TOKEN"
+```
+
+Expected behavior:
+
+```text
+pending invite becomes REVOKED
+auth.invite_revoked appears in audit
+accepted invite returns 409 if revocation is attempted
+```
+
+## 12. Physical Android phone LAN demo
 
 Use this only when demoing on a real phone, not an emulator.
 
@@ -446,15 +437,15 @@ cd mobile/android
 Hard rules:
 
 ```text
-emulator URL:       http://10.0.2.2:8000/
-physical phone URL: http://YOUR_LAN_IP:8000/
-wrong for phone:    http://127.0.0.1:8000/
-wrong for phone:    http://10.0.2.2:8000/
+emulator URL:        http://10.0.2.2:8000/
+physical phone URL:  http://YOUR_LAN_IP:8000/
+wrong for phone:     http://127.0.0.1:8000/
+wrong for phone:     http://10.0.2.2:8000/
 ```
 
 If the phone cannot hit `/health`, the Android app will not work. Do not debug UI until network reachability is proven.
 
-## 12. MCP approval path manual demo
+## 13. MCP approval path manual demo
 
 The minimum valid demo path is:
 
@@ -484,7 +475,7 @@ Required proof points:
 
 If any one of these fails, the demo is not ready. Do not compensate with explanation. Fix the failing link.
 
-## 13. Audit trail proof
+## 14. Audit trail proof
 
 Audit must prove the control story, not just show logs.
 
@@ -495,16 +486,10 @@ mcp.approval_requested
 approval.decision
 FORWARDED_AFTER_APPROVAL
 auth.role_updated, when role management is exercised
+auth.invite_created and auth.invite_revoked, when invite management is exercised
 ```
 
-The audit proof must answer two questions:
-
-1. Was the MCP request blocked until approval?
-2. Was the approved request forwarded exactly once?
-
-If audit cannot answer both, the product story is incomplete.
-
-## 14. Known failure interpretations
+## 15. Known failure interpretations
 
 | Failure | Likely cause | Action |
 | --- | --- | --- |
@@ -513,9 +498,12 @@ If audit cannot answer both, the product story is incomplete.
 | Settings tests fail | Profile default/override regression | Fix before demo. |
 | Role tests fail | Role default/permission regression | Fix before demo. |
 | Role management tests fail | Owner promotion/demotion regression | Fix before demo. |
+| Invite tests fail | Invite administration regression | Fix before demo. |
 | Invalid profile | `AIXION_PROFILE` typo | Use `local`, `demo`, `test`, or `production`. |
 | 403 forbidden after login | User role lacks permission for that action | Use the correct role or owner promotion path. |
 | Last owner demotion returns 409 | Correct safety guard | Create/promote another owner before demoting. |
+| Invite duplicate returns 409 | Existing pending invite for that email | Reuse or revoke the old invite. |
+| Invite accepted/revoked/expired returns 409 during reuse | Correct lifecycle guard | Create a fresh invite if appropriate. |
 | MCP script fails | Core product proof broken | Stop and fix. |
 | Android tests fail | Model/API/fake drift or real Android logic issue | Fix before demo. |
 | `assembleDebug` fails | Android compile/build issue | Fix before phone demo. |
@@ -524,15 +512,9 @@ If audit cannot answer both, the product story is incomplete.
 | Android missing token | Auth enabled but no active session | Login/register through `Acct`. |
 | Android invalid/expired session | Saved bearer token is no longer usable | Account should clear saved session and ask for login. |
 | Android backend/network failure during session check | Backend unreachable, not necessarily invalid token | Do not clear token automatically. Fix backend/network first. |
-| Register button disabled | Password shorter than 12 characters | Use a 12+ character password. |
-| MCP Queue unavailable | Backend unreachable or API failing | Fix backend/network first. |
-| Linked approval opens wrong data | Mock fallback regression | Stop; this is unsafe. |
-| Decision says success when backend failed | Truthfulness regression | Stop; this is unsafe. |
-| Queue does not become `FORWARDED` | Resolve/refresh/status update issue | Re-run backend proof, then Android path. |
-| Audit missing forwarding event | Traceability broken | Not demo-safe. |
 | Signed APK unavailable | Keystore/signing process missing | Do not claim signed release readiness. |
 
-## 15. What not to claim
+## 16. What not to claim
 
 Do **not** claim:
 
@@ -542,6 +524,8 @@ signed APK is ready
 production deployment is ready
 secrets are production-safe
 enterprise RBAC is complete
+invite onboarding is production-grade
+open registration is solved
 session lifecycle is production-grade
 monitoring/observability exists
 all errors are polished
@@ -553,7 +537,7 @@ Unless each claim has direct evidence.
 Safe claim after this checklist passes:
 
 ```text
-This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, owner-only role management, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
+This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, owner-only role management, owner-only invite administration, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
 ```
 
 Unsafe claim:
@@ -564,7 +548,7 @@ This is production ready.
 
 That would be dishonest.
 
-## 16. Final go/no-go gate
+## 17. Final go/no-go gate
 
 Release/demo is a **GO** only if all are true:
 
@@ -572,6 +556,7 @@ Release/demo is a **GO** only if all are true:
 - [ ] Backend environment profile tests pass.
 - [ ] Backend role permission tests pass.
 - [ ] Backend role management tests pass.
+- [ ] Backend invite onboarding tests pass.
 - [ ] MCP validation script passes.
 - [ ] MCP validation pytest guard passes.
 - [ ] Android JVM tests pass.
@@ -582,17 +567,18 @@ Release/demo is a **GO** only if all are true:
 - [ ] Auth-disabled fast demo path works.
 - [ ] Auth-enabled Android account/session path works.
 - [ ] Owner role-management API path works.
+- [ ] Owner invite-management API path works.
 - [ ] Physical phone can reach backend over LAN, if using real phone.
 - [ ] MCP Queue shows pending request.
 - [ ] Linked approval opens the correct approval.
 - [ ] Phone approval resolves MCP request.
 - [ ] Child MCP forwarding is exactly once.
 - [ ] Queue refreshes to `FORWARDED`.
-- [ ] Audit proves request, decision, forwarding, and role update when exercised.
+- [ ] Audit proves request, decision, forwarding, role update when exercised, and invite events when exercised.
 - [ ] CI status is either verified or explicitly stated as unverified.
 - [ ] Signed APK status is explicitly stated as unavailable unless signing has been implemented.
 - [ ] Production deployment status is explicitly stated as incomplete unless deployment/secrets/monitoring are implemented.
-- [ ] Enterprise RBAC status is explicitly stated as incomplete unless project-scoped roles/invites/promotion UX are implemented.
+- [ ] Enterprise RBAC status is explicitly stated as incomplete unless project-scoped roles/invites/session revocation are implemented.
 
 If any box is unchecked, the honest status is:
 

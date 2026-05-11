@@ -73,6 +73,13 @@ class UserRole(StrEnum):
     REVIEWER = "REVIEWER"
 
 
+class InviteStatus(StrEnum):
+    PENDING = "PENDING"
+    ACCEPTED = "ACCEPTED"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+
+
 class AgentProvider(StrEnum):
     CODEX = "CODEX"
     CHATGPT = "CHATGPT"
@@ -114,6 +121,19 @@ class SessionToken(BaseModel):
     created_at: datetime = Field(default_factory=now_utc)
     expires_at: datetime
     revoked: bool = False
+
+
+class Invite(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("invite"))
+    email: str
+    role: UserRole = UserRole.REVIEWER
+    token_hash: str
+    status: InviteStatus = InviteStatus.PENDING
+    expires_at: datetime
+    created_by_user_id: str
+    accepted_by_user_id: str | None = None
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
 
 
 class AuthUser(BaseModel):

@@ -8,24 +8,26 @@ This is not enterprise RBAC yet. It is the minimum serious permission boundary n
 
 | Role | Purpose |
 | --- | --- |
-| `OWNER` | Owns the control tower, manages agents, manages user roles, and controls all operational surfaces. |
+| `OWNER` | Owns the control tower, manages agents, manages user roles, manages invites, and controls all operational surfaces. |
 | `MAINTAINER` | Can create and execute controlled work, register MCP child servers, recover queues, and run GitHub execution paths. |
 | `REVIEWER` | Can inspect work and make approval decisions from the mobile approval flow. |
 
-## Self-registration rule
+## Current registration rule
 
-Self-registration follows this rule:
+Self-registration still follows this rule:
 
 ```text
 first registered user -> OWNER
 later registered users -> REVIEWER
 ```
 
-This prevents every new self-registered user from becoming an owner.
+This prevents every new self-registered user from becoming an owner, but it is not good enough for production onboarding.
+
+Hard truth: open registration after bootstrap is still a weak posture. PR #60 adds invite administration, but invite acceptance must be completed next before onboarding can be called serious.
 
 ## Owner role management
 
-The backend now exposes a minimal owner-only role management surface.
+The backend exposes a minimal owner-only role management surface.
 
 | Endpoint | Access | Purpose |
 | --- | --- | --- |
@@ -53,7 +55,48 @@ Audit behavior:
 successful role changes append auth.role_updated audit events
 ```
 
-This closes the clumsy-administration gap from the first role-permission layer. It still does not replace invite-based onboarding or project-scoped roles.
+## Owner invite management
+
+The backend now exposes the first invite administration layer.
+
+| Endpoint | Access | Purpose |
+| --- | --- | --- |
+| `POST /auth/invites` | `OWNER` only | Create an invite for an email and role. |
+| `GET /auth/invites` | `OWNER` only | List invite metadata without exposing raw invite tokens. |
+| `POST /auth/invites/{invite_id}/revoke` | `OWNER` only | Revoke a pending invite. |
+
+Invite statuses:
+
+```text
+PENDING
+ACCEPTED
+EXPIRED
+REVOKED
+```
+
+Invite rules:
+
+```text
+role defaults to REVIEWER
+role must be OWNER, MAINTAINER, or REVIEWER
+raw invite token is returned only at creation time
+the store persists only the invite token hash
+accepted invites cannot be revoked
+successful create/revoke actions write audit events
+```
+
+Audit behavior:
+
+```text
+auth.invite_created
+auth.invite_revoked
+```
+
+See:
+
+```text
+docs/INVITE_ONBOARDING.md
+```
 
 ## Permission matrix
 
@@ -63,6 +106,7 @@ This closes the clumsy-administration gap from the first role-permission layer. 
 | Read supported role choices | Yes | Yes | Yes |
 | List users | Yes | No | No |
 | Promote/demote users | Yes | No | No |
+| Create/list/revoke invites | Yes | No | No |
 | Read projects, ideas, work orders | Yes | Yes | Yes |
 | Read approvals/grouped approvals | Yes | Yes | Yes |
 | Read test runs | Yes | Yes | Yes |
@@ -105,11 +149,12 @@ register child MCP servers
 trigger GitHub execution
 recover/retry MCP queue items
 manage user roles
+manage invites
 ```
 
 ## Why maintainers can execute
 
-Maintainers are trusted operators. They can create work and run execution paths, but they do not manage external agents or users.
+Maintainers are trusted operators. They can create work and run execution paths, but they do not manage external agents, users, or invites.
 
 Maintainer can:
 
@@ -127,12 +172,13 @@ Maintainer cannot:
 register external agents
 list external agent credentials/surfaces
 manage user roles
+manage invites
 act as owner
 ```
 
-## Why agent and user management are owner-only
+## Why agent, user, and invite management are owner-only
 
-External agents can create approvals and initiate powerful workflows. User role changes decide who can approve, execute, and administer those workflows.
+External agents can create approvals and initiate powerful workflows. User role changes decide who can approve, execute, and administer those workflows. Invites decide who can enter the system next.
 
 Only owner can:
 
@@ -142,6 +188,7 @@ list external agents
 inspect agent configuration
 list users
 promote or demote users
+create/list/revoke invites
 ```
 
 ## Auth-disabled profile behavior
@@ -160,26 +207,25 @@ Do not confuse auth-disabled demo behavior with production security.
 
 ## Remaining gaps
 
-Role management is improved, but still not enterprise RBAC.
+Role and invite administration are improved, but this is still not enterprise RBAC.
 
 Missing:
 
 ```text
-Android owner role-management UI
-invite-based onboarding
+invite acceptance registration flow
+blocking open registration after bootstrap
 project-scoped roles
-role audit UI
+role and invite audit UI polish
 session revocation by owner
+production deployment/secrets/monitoring
 ```
-
-The current layer is valuable because owners now have a clean backend promotion/demotion path. But it is not complete enterprise-grade RBAC.
 
 ## Safe claim
 
-After this role layer passes CI, it is safe to claim:
+After this layer passes CI, it is safe to claim:
 
 ```text
-The backend now enforces first-pass role boundaries and includes owner-only role management with last-owner protection.
+The backend now enforces first-pass role boundaries and includes owner-only role management plus owner-only invite creation/list/revoke APIs.
 ```
 
 ## Unsafe claim
@@ -188,10 +234,12 @@ Do not claim:
 
 ```text
 Enterprise RBAC is complete.
+Invite onboarding is production-grade.
+Open registration is solved.
 ```
 
-That would be false.
+Those would be false.
 
 ## Brutal truth
 
-Auth without roles means every logged-in user is too powerful. Roles without owner administration means access control is clumsy. This layer fixes the worst administration gap, but project-scoped roles and invite-based onboarding are still missing.
+Auth without roles means every logged-in user is too powerful. Roles without owner administration are clumsy. Owner administration without invites still leaves onboarding weak. This invite layer fixes administration, but PR #61 must wire invite acceptance before onboarding becomes serious.
