@@ -24,6 +24,7 @@ Do not call this production-grade until deployment, secrets, monitoring, role-ba
 3. Do not claim authenticated Android mode unless the `Acct` login/register path works with `AIXION_AUTH_ENABLED=true`.
 4. Do not claim MCP wait mode unless the child MCP server receives **zero calls before approval** and **exactly one call after approval resolve**.
 5. Do not claim audit proof unless the audit trail shows request, decision, and forwarding events.
+6. Do not claim signed APK readiness until a real keystore-backed signing process exists.
 
 ## Evidence matrix
 
@@ -33,7 +34,9 @@ Do not call this production-grade until deployment, secrets, monitoring, role-ba
 | MCP demo script | Script exits successfully | `cd backend && python scripts/validate_mcp_approval_demo.py` |
 | MCP pytest guard | Demo script is protected by pytest | `cd backend && python -m pytest tests/test_mcp_approval_demo_validation.py` |
 | Android tests | Android JVM tests pass | `cd mobile/android && ./gradlew testDebugUnitTest` |
-| Android build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
+| Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
+| Android release variant | Release variant compiles | `cd mobile/android && ./gradlew assembleRelease` |
+| Android release process | Release limits and signing gap are documented | `docs/ANDROID_RELEASE_PROCESS.md` |
 | Auth-disabled demo | Fast local demo works without login | `AIXION_AUTH_ENABLED=false` path below |
 | Auth-enabled demo | Android `Acct` login/register works and protected screens load | `AIXION_AUTH_ENABLED=true` path below |
 | Physical phone demo | Phone reaches backend over LAN | `./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/` |
@@ -147,11 +150,34 @@ Expected result:
 BUILD SUCCESSFUL
 ```
 
-This only proves a debug build. It does **not** prove signed release APK readiness.
+This proves a debug build. It does not prove signed release APK readiness.
 
-Do not claim release APK readiness until a real signed/release build process exists and is documented.
+## 5. Android release variant build
 
-## 5. Auth-disabled fast demo
+Run:
+
+```bash
+cd mobile/android
+./gradlew assembleRelease
+```
+
+Expected result:
+
+```text
+BUILD SUCCESSFUL
+```
+
+This proves the release variant compiles. It does **not** prove production signing, Play Store readiness, or installability of a signed APK.
+
+See:
+
+```text
+docs/ANDROID_RELEASE_PROCESS.md
+```
+
+Hard rule: do not claim signed release readiness until a real keystore-backed signing process exists.
+
+## 6. Auth-disabled fast demo
 
 Use this for the fastest backend/MCP proof.
 
@@ -179,7 +205,7 @@ MCP approval path can be exercised quickly
 
 This mode is valid for demoing MCP wait mode. It is not valid for proving authenticated Android behavior.
 
-## 6. Auth-enabled Android demo
+## 7. Auth-enabled Android demo
 
 Use this to prove the real Android account/session path.
 
@@ -227,7 +253,7 @@ cleared token -> protected calls fail again
 
 That is correct. Do not treat missing-token failures as backend bugs when auth is intentionally enabled.
 
-## 7. Physical Android phone LAN demo
+## 8. Physical Android phone LAN demo
 
 Use this only when demoing on a real phone, not an emulator.
 
@@ -262,7 +288,7 @@ wrong for phone:    http://10.0.2.2:8000/
 
 If the phone cannot hit `/health`, the Android app will not work. Do not debug UI until network reachability is proven.
 
-## 8. MCP approval path manual demo
+## 9. MCP approval path manual demo
 
 The minimum valid demo path is:
 
@@ -292,7 +318,7 @@ Required proof points:
 
 If any one of these fails, the demo is not ready. Do not compensate with explanation. Fix the failing link.
 
-## 9. Audit trail proof
+## 10. Audit trail proof
 
 Audit must prove the control story, not just show logs.
 
@@ -311,7 +337,7 @@ The audit proof must answer two questions:
 
 If audit cannot answer both, the product story is incomplete.
 
-## 10. Known failure interpretations
+## 11. Known failure interpretations
 
 | Failure | Likely cause | Action |
 | --- | --- | --- |
@@ -320,6 +346,7 @@ If audit cannot answer both, the product story is incomplete.
 | MCP script fails | Core product proof broken | Stop and fix. |
 | Android tests fail | Model/API/fake drift or real Android logic issue | Fix before demo. |
 | `assembleDebug` fails | Android compile/build issue | Fix before phone demo. |
+| `assembleRelease` fails | Release variant compile issue | Fix before claiming release variant readiness. |
 | Phone cannot reach backend | Wrong LAN IP, backend bound to localhost, firewall, different network | Prove `/health` from phone first. |
 | Android missing token | Auth enabled but no active session | Login/register through `Acct`. |
 | Register button disabled | Password shorter than 12 characters | Use a 12+ character password. |
@@ -328,8 +355,9 @@ If audit cannot answer both, the product story is incomplete.
 | Decision says success when backend failed | Truthfulness regression | Stop; this is unsafe. |
 | Queue does not become `FORWARDED` | Resolve/refresh/status update issue | Re-run backend proof, then Android path. |
 | Audit missing forwarding event | Traceability broken | Not demo-safe. |
+| Signed APK unavailable | Keystore/signing process missing | Do not claim signed release readiness. |
 
-## 11. What not to claim
+## 12. What not to claim
 
 Do **not** claim:
 
@@ -350,7 +378,7 @@ Unless each claim has direct evidence.
 Safe claim after this checklist passes:
 
 ```text
-This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, queue refresh, exactly-once forwarding, and audit traceability.
+This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
 ```
 
 Unsafe claim:
@@ -361,7 +389,7 @@ This is production ready.
 
 That would be dishonest.
 
-## 12. Final go/no-go gate
+## 13. Final go/no-go gate
 
 Release/demo is a **GO** only if all are true:
 
@@ -370,6 +398,7 @@ Release/demo is a **GO** only if all are true:
 - [ ] MCP validation pytest guard passes.
 - [ ] Android JVM tests pass.
 - [ ] Android debug build passes.
+- [ ] Android release variant build passes.
 - [ ] Auth-disabled fast demo path works.
 - [ ] Auth-enabled Android account path works.
 - [ ] Physical phone can reach backend over LAN, if using real phone.
@@ -380,6 +409,7 @@ Release/demo is a **GO** only if all are true:
 - [ ] Queue refreshes to `FORWARDED`.
 - [ ] Audit proves request, decision, and forwarding.
 - [ ] CI status is either verified or explicitly stated as unverified.
+- [ ] Signed APK status is explicitly stated as unavailable unless signing has been implemented.
 
 If any box is unchecked, the honest status is:
 
