@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
+import com.aixion.controltower.core.auth.AuthFailure
 import com.aixion.controltower.data.repository.AuthRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -63,7 +64,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(
                     loading = false,
                     authenticated = repository.hasSavedToken(),
-                    message = "Login failed: ${error.message ?: "backend request failed"}"
+                    message = "Login failed: ${AuthFailure.operatorMessage(error)}"
                 )
             }
         }
@@ -87,7 +88,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(
                     loading = false,
                     authenticated = repository.hasSavedToken(),
-                    message = "Registration failed: ${error.message ?: "backend request failed"}"
+                    message = "Registration failed: ${AuthFailure.operatorMessage(error)}"
                 )
             }
         }
@@ -99,15 +100,32 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         viewModelScope.launch {
+            _state.value = _state.value.copy(loading = true, message = null)
             runCatching {
                 repository.currentUserLabel()
             }.onSuccess { label ->
-                _state.value = _state.value.copy(authenticated = true, userLabel = label)
-            }.onFailure { error ->
                 _state.value = _state.value.copy(
+                    loading = false,
                     authenticated = true,
-                    message = "Saved token found, but session check failed: ${error.message ?: "backend request failed"}"
+                    userLabel = label,
+                    message = "Session verified."
                 )
+            }.onFailure { error ->
+                if (AuthFailure.shouldClearSavedSession(error)) {
+                    repository.logout()
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        authenticated = false,
+                        userLabel = null,
+                        message = AuthFailure.operatorMessage(error)
+                    )
+                } else {
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        authenticated = repository.hasSavedToken(),
+                        message = "Saved token found, but session check failed: ${AuthFailure.operatorMessage(error)}"
+                    )
+                }
             }
         }
     }
