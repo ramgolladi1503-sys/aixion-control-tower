@@ -11,6 +11,7 @@ from .models import (
     DeviceRegistration,
     ExternalAgent,
     Idea,
+    Invite,
     MCPChildServer,
     MCPPendingRequest,
     Notification,
@@ -38,6 +39,7 @@ class SQLiteBackedStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.users: dict[str, User] = {}
         self.sessions: dict[str, SessionToken] = {}
+        self.invites: dict[str, Invite] = {}
         self.external_agents: dict[str, ExternalAgent] = {}
         self.device_registrations: dict[str, DeviceRegistration] = {}
         self.projects: dict[str, Project] = {}
@@ -79,6 +81,7 @@ class SQLiteBackedStore:
     def load(self) -> None:
         self.users = self._load_entities("user", User)
         self.sessions = self._load_entities("session", SessionToken)
+        self.invites = self._load_entities("invite", Invite)
         self.external_agents = self._load_entities("external_agent", ExternalAgent)
         self.device_registrations = self._load_entities("device_registration", DeviceRegistration)
         self.projects = self._load_entities("project", Project)
@@ -96,6 +99,7 @@ class SQLiteBackedStore:
             conn.execute("DELETE FROM kv_store")
             self._write_map(conn, "user", self.users)
             self._write_map(conn, "session", self.sessions)
+            self._write_map(conn, "invite", self.invites)
             self._write_map(conn, "external_agent", self.external_agents)
             self._write_map(conn, "device_registration", self.device_registrations)
             self._write_map(conn, "project", self.projects)
@@ -128,6 +132,7 @@ class SQLiteBackedStore:
     def reset(self) -> None:
         self.users.clear()
         self.sessions.clear()
+        self.invites.clear()
         self.external_agents.clear()
         self.device_registrations.clear()
         self.projects.clear()
