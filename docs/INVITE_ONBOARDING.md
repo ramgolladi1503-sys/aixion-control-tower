@@ -2,11 +2,11 @@
 
 Invite onboarding closes the biggest remaining auth hole after owner-only role management: unrestricted self-registration is not a serious production posture.
 
-This document covers the first backend invite layer only. Invite acceptance registration is intentionally split into a later PR.
-
 ## Current scope
 
-PR #60 adds owner-controlled invite administration:
+The backend now supports owner-controlled invite administration and invite-token registration acceptance.
+
+Invite administration:
 
 ```text
 POST /auth/invites
@@ -14,7 +14,18 @@ GET  /auth/invites
 POST /auth/invites/{invite_id}/revoke
 ```
 
-It does not yet change `/auth/register` to require an invite token. That belongs in the next PR so the API and tests stay reviewable.
+Registration acceptance:
+
+```text
+POST /auth/register
+```
+
+Registration rule:
+
+```text
+first registered user -> OWNER without invite
+all later registrations -> require a valid pending invite token
+```
 
 ## Invite model
 
@@ -42,9 +53,9 @@ EXPIRED
 REVOKED
 ```
 
-The backend returns the raw invite token only when an owner creates an invite. It stores only the token hash.
+The backend returns the invite code only when an owner creates an invite. It stores only the token hash.
 
-Hard truth: storing raw invite tokens would be lazy security. Even for an MVP, that is the wrong habit.
+Hard truth: storing reusable plain invite codes would be lazy security. Even for an MVP, that is the wrong habit.
 
 ## Create invite
 
@@ -82,6 +93,52 @@ pending duplicate invite for the same email returns 409
 successful creation writes auth.invite_created audit event
 ```
 
+## Register with invite
+
+The first user can bootstrap without an invite and becomes OWNER.
+
+Every later user must register with the invite code issued by an owner.
+
+```http
+POST /auth/register
+Content-Type: application/json
+```
+
+Body:
+
+```json
+{
+  "email": "maintainer@example.com",
+  "password": "valid-password-123",
+  "display_name": "Maintainer",
+  "invite_token": "INVITE_CODE_FROM_OWNER"
+}
+```
+
+Behavior:
+
+```text
+missing invite after bootstrap returns 403
+unknown invite returns 404
+revoked, expired, or accepted invite returns 409
+email must match the invite email
+new user gets the role from the invite
+accepted invite is marked ACCEPTED
+accepted_by_user_id is set
+auth.invite_accepted audit event is written
+```
+
+## Android registration
+
+Android Account registration now includes an invite code field.
+
+```text
+first owner: leave invite code blank
+later users: paste owner-issued invite code
+```
+
+This is intentionally a basic Account-screen input, not a polished invite-admin UX.
+
 ## List invites
 
 ```http
@@ -94,7 +151,7 @@ Behavior:
 ```text
 OWNER only
 returns invite metadata
-never returns raw invite token
+never returns raw invite code
 expired pending invites are surfaced as EXPIRED
 ```
 
@@ -124,19 +181,27 @@ python -m pytest tests/test_role_management.py
 python -m pytest
 ```
 
-## Next PR
+Android contract validation:
 
-PR #61 should wire invite acceptance into registration:
-
-```text
-register with invite token
-validate token hash
-reject revoked/expired/accepted invites
-create user with invite role
-mark invite ACCEPTED
-set accepted_by_user_id
-write auth.invite_accepted audit event
-optionally disable open self-registration after bootstrap owner exists
+```bash
+cd mobile/android
+./gradlew testDebugUnitTest
+./gradlew assembleDebug
 ```
 
-Do not claim onboarding is production-grade until PR #61 removes open registration for non-bootstrap users.
+## Remaining gaps
+
+Invite onboarding is now serious enough for a demo, but still not enterprise-grade.
+
+Missing:
+
+```text
+email delivery for invites
+invite resend/rotate
+dedicated Android invite-admin screen
+role/invite audit UI polish
+project-scoped invites or project-scoped roles
+owner session revocation
+```
+
+Do not claim enterprise onboarding is complete until those are addressed.
