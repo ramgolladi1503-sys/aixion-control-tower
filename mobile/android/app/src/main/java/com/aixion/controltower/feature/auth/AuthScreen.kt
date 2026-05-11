@@ -83,6 +83,7 @@ fun AuthScreen(viewModel: AuthViewModel = viewModel()) {
             value = state.password,
             onValueChange = viewModel::updatePassword,
             label = { Text("Password") },
+            supportingText = { Text("Registration requires at least 12 characters.") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             visualTransformation = PasswordVisualTransformation()
@@ -105,7 +106,7 @@ fun AuthScreen(viewModel: AuthViewModel = viewModel()) {
             }
             OutlinedButton(
                 onClick = viewModel::register,
-                enabled = !state.loading,
+                enabled = !state.loading && state.password.length >= 12,
                 modifier = Modifier.weight(1f)
             ) {
                 Text("Register")
