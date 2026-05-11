@@ -33,6 +33,7 @@ from .models import (
 )
 from .notifications import create_notification, router as notifications_router
 from .risk_engine import assess_approval_request, assess_work_order
+from .role_routes import router as role_router
 from .store import store
 
 app = FastAPI(
@@ -41,6 +42,7 @@ app = FastAPI(
     description="MVP backend for AI project execution control, approvals, risk scoring, and audit logs.",
 )
 app.include_router(auth_router)
+app.include_router(role_router)
 app.include_router(agent_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
