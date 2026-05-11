@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from .auth import require_api_key
-from .models import AuditEvent
+from .auth import require_reviewer
+from .models import AuditEvent, AuthUser
 from .store import store
 
 router = APIRouter(prefix="/audit", tags=["audit"])
-AuthDependency = Depends(require_api_key)
+ReviewerDependency = Depends(require_reviewer)
 
 
 @router.get("/events", response_model=list[AuditEvent])
@@ -18,7 +18,7 @@ def query_audit_events(
     detail_key: str | None = Query(default=None),
     detail_value: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
-    _: None = AuthDependency,
+    _: AuthUser = ReviewerDependency,
 ) -> list[AuditEvent]:
     events = list(store.audit_events)
     if event_type is not None:
@@ -38,7 +38,7 @@ def query_audit_events(
 @router.get("/events/{audit_event_id}", response_model=AuditEvent)
 def get_audit_event(
     audit_event_id: str,
-    _: None = AuthDependency,
+    _: AuthUser = ReviewerDependency,
 ) -> AuditEvent:
     event = next((item for item in store.audit_events if item.id == audit_event_id), None)
     if event is None:
