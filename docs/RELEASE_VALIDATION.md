@@ -15,7 +15,7 @@ Demo-ready MVP:            yes, if this checklist passes
 Production-grade product:  no
 ```
 
-Do not call this production-grade until deployment, secrets, monitoring, role-based permissions, signed release handling, and session lifecycle hardening exist.
+Do not call this production-grade until deployment, secrets, monitoring, project-scoped roles, invite-based onboarding, signed release handling, and session lifecycle hardening exist.
 
 ## Hard rules
 
@@ -26,7 +26,7 @@ Do not call this production-grade until deployment, secrets, monitoring, role-ba
 5. Do not claim audit proof unless the audit trail shows request, decision, and forwarding events.
 6. Do not claim signed APK readiness until a real keystore-backed signing process exists.
 7. Do not claim production deployment is solved because profiles exist. Profiles reduce config confusion; they do not solve deployment.
-8. Do not claim enterprise RBAC is complete. This is first-pass owner/maintainer/reviewer enforcement only.
+8. Do not claim enterprise RBAC is complete. This is first-pass owner/maintainer/reviewer enforcement with owner-only role management, not project-scoped enterprise RBAC.
 
 ## Evidence matrix
 
@@ -35,22 +35,25 @@ Do not call this production-grade until deployment, secrets, monitoring, role-ba
 | Backend tests | Full backend test suite passes locally or in CI | `cd backend && python -m pytest` |
 | Backend profile tests | Profile defaults and overrides are guarded | `cd backend && python -m pytest tests/test_settings.py` |
 | Backend role tests | Owner/maintainer/reviewer guards are tested | `cd backend && python -m pytest tests/test_role_permissions.py` |
-| Role permissions | First-pass role matrix is documented | `docs/ROLE_PERMISSIONS.md` |
+| Backend role management tests | Owner promotion/demotion and last-owner protection are tested | `cd backend && python -m pytest tests/test_role_management.py` |
+| Role permissions | First-pass role matrix and management endpoints are documented | `docs/ROLE_PERMISSIONS.md` |
 | Environment profiles | Local/demo/test/production-like profiles are documented | `docs/ENVIRONMENT_PROFILES.md` |
 | MCP demo script | Script exits successfully | `cd backend && python scripts/validate_mcp_approval_demo.py` |
 | MCP pytest guard | Demo script is protected by pytest | `cd backend && python -m pytest tests/test_mcp_approval_demo_validation.py` |
 | Android tests | Android JVM tests pass | `cd mobile/android && ./gradlew testDebugUnitTest` |
 | Android session lifecycle | Expired/invalid sessions are classified and cleared | `AuthFailureTest` + Account manual check |
+| Android role visibility | Account screen shows current backend role after `/auth/me` | Manual Account check |
 | Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
 | Android release variant | Release variant compiles | `cd mobile/android && ./gradlew assembleRelease` |
 | Android release process | Release limits and signing gap are documented | `docs/ANDROID_RELEASE_PROCESS.md` |
 | Auth-disabled demo | Fast local demo works without login | `AIXION_PROFILE=demo` / `AIXION_AUTH_ENABLED=false` path below |
 | Auth-enabled demo | Android `Acct` login/register/session verification works and protected screens load | `AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true` path below |
+| Owner role management | Owner can list users and promote/demote while last owner is protected | API/manual validation below |
 | Physical phone demo | Phone reaches backend over LAN | `./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/` |
 | MCP approval path | Request waits, approval opens, phone approves, resolve forwards | Manual path below or runbook |
 | Exactly-once forwarding | Downstream receives one call after resolve and no duplicate on second resolve | Demo script/runbook proof |
 | Queue refresh | MCP Queue changes from `WAITING_FOR_APPROVAL` to `FORWARDED` | Android/manual validation |
-| Audit proof | Audit includes request, approval decision, and forwarding event | `/audit` or Android Audit screen |
+| Audit proof | Audit includes request, approval decision, forwarding event, and role update event when role management is exercised | `/audit` or Android Audit screen |
 
 ## 1. Backend validation
 
@@ -79,16 +82,17 @@ Expected result:
 profile default and override tests pass
 ```
 
-Then run the focused role guard:
+Then run the focused role guards:
 
 ```bash
 python -m pytest tests/test_role_permissions.py
+python -m pytest tests/test_role_management.py
 ```
 
 Expected result:
 
 ```text
-role default and permission guard tests pass
+role default, permission guard, owner role update, and last-owner protection tests pass
 ```
 
 Then run the focused MCP proof guard:
@@ -105,7 +109,7 @@ test_mcp_approval_demo_validation_script_passes PASSED
 
 If this fails, stop. The product proof path is not safe enough for demo.
 
-## 2. Role permission validation
+## 2. Role permission and management validation
 
 Role documentation lives at:
 
@@ -116,7 +120,7 @@ docs/ROLE_PERMISSIONS.md
 Supported backend roles:
 
 ```text
-OWNER       agent management + all maintainer/reviewer permissions
+OWNER       agent management + user role management + all maintainer/reviewer permissions
 MAINTAINER  create/execute/recover controlled work
 REVIEWER    inspect evidence and make approval decisions
 ```
@@ -128,10 +132,33 @@ first registered user -> OWNER
 later registered users -> REVIEWER
 ```
 
+Owner-only role management endpoints:
+
+```text
+GET   /auth/users
+PATCH /auth/users/{user_id}/role
+```
+
+Role choices endpoint:
+
+```text
+GET /auth/roles
+```
+
+Required behavior:
+
+```text
+OWNER can list users
+OWNER can promote REVIEWER -> MAINTAINER
+OWNER can demote MAINTAINER -> REVIEWER
+backend blocks demoting the last active OWNER
+successful role changes create auth.role_updated audit events
+```
+
 Known limitation:
 
 ```text
-owner-only role-promotion API/UI is still future work
+Android shows current user role, but full Android owner role-management UI is still future work
 ```
 
 Hard rule: do not claim enterprise RBAC is complete.
@@ -326,14 +353,15 @@ Validation steps:
 2. Open `Acct`.
 3. Register with email, display name, and a password of at least 12 characters.
 4. Confirm session becomes active.
-5. Tap `Verify session`.
-6. Confirm session verification succeeds.
-7. Open Home, Review, MCP Queue, Audit, and Acct.
-8. Confirm protected screens load after login.
-9. Clear saved session from `Acct`.
-10. Confirm protected requests fail until login/register again.
-11. Login again.
-12. Confirm protected screens work again.
+5. Confirm Account shows the current backend role.
+6. Tap `Verify session`.
+7. Confirm session verification succeeds.
+8. Open Home, Review, MCP Queue, Audit, and Acct.
+9. Confirm protected screens load after login.
+10. Clear saved session from `Acct`.
+11. Confirm protected requests fail until login/register again.
+12. Login again.
+13. Confirm protected screens work again.
 
 Expected behavior:
 
@@ -346,7 +374,52 @@ network/backend failure -> saved token is not automatically cleared
 
 That is correct. Do not treat missing-token failures as backend bugs when auth is intentionally enabled.
 
-## 10. Physical Android phone LAN demo
+## 10. Owner role-management manual API check
+
+Use auth-enabled mode.
+
+Register first user and save the owner token:
+
+```bash
+OWNER_TOKEN=$(curl -s -X POST http://localhost:8000/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"owner@example.com","password":"valid-password-123","display_name":"Owner"}' \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+```
+
+Register a second user:
+
+```bash
+curl -s -X POST http://localhost:8000/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"reviewer@example.com","password":"valid-password-123","display_name":"Reviewer"}'
+```
+
+List users as owner:
+
+```bash
+curl -s http://localhost:8000/auth/users \
+  -H "Authorization: Bearer $OWNER_TOKEN"
+```
+
+Promote the reviewer:
+
+```bash
+curl -s -X PATCH http://localhost:8000/auth/users/USER_ID/role \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"MAINTAINER"}'
+```
+
+Expected behavior:
+
+```text
+reviewer role changes to MAINTAINER
+auth.role_updated appears in audit
+attempting to demote the only OWNER returns 409
+```
+
+## 11. Physical Android phone LAN demo
 
 Use this only when demoing on a real phone, not an emulator.
 
@@ -381,7 +454,7 @@ wrong for phone:    http://10.0.2.2:8000/
 
 If the phone cannot hit `/health`, the Android app will not work. Do not debug UI until network reachability is proven.
 
-## 11. MCP approval path manual demo
+## 12. MCP approval path manual demo
 
 The minimum valid demo path is:
 
@@ -411,7 +484,7 @@ Required proof points:
 
 If any one of these fails, the demo is not ready. Do not compensate with explanation. Fix the failing link.
 
-## 12. Audit trail proof
+## 13. Audit trail proof
 
 Audit must prove the control story, not just show logs.
 
@@ -421,6 +494,7 @@ Minimum expected events:
 mcp.approval_requested
 approval.decision
 FORWARDED_AFTER_APPROVAL
+auth.role_updated, when role management is exercised
 ```
 
 The audit proof must answer two questions:
@@ -430,7 +504,7 @@ The audit proof must answer two questions:
 
 If audit cannot answer both, the product story is incomplete.
 
-## 13. Known failure interpretations
+## 14. Known failure interpretations
 
 | Failure | Likely cause | Action |
 | --- | --- | --- |
@@ -438,8 +512,10 @@ If audit cannot answer both, the product story is incomplete.
 | Backend pytest fails | Backend regression | Fix before demo. |
 | Settings tests fail | Profile default/override regression | Fix before demo. |
 | Role tests fail | Role default/permission regression | Fix before demo. |
+| Role management tests fail | Owner promotion/demotion regression | Fix before demo. |
 | Invalid profile | `AIXION_PROFILE` typo | Use `local`, `demo`, `test`, or `production`. |
-| 403 forbidden after login | User role lacks permission for that action | Use the correct role or owner promotion path when implemented. |
+| 403 forbidden after login | User role lacks permission for that action | Use the correct role or owner promotion path. |
+| Last owner demotion returns 409 | Correct safety guard | Create/promote another owner before demoting. |
 | MCP script fails | Core product proof broken | Stop and fix. |
 | Android tests fail | Model/API/fake drift or real Android logic issue | Fix before demo. |
 | `assembleDebug` fails | Android compile/build issue | Fix before phone demo. |
@@ -456,7 +532,7 @@ If audit cannot answer both, the product story is incomplete.
 | Audit missing forwarding event | Traceability broken | Not demo-safe. |
 | Signed APK unavailable | Keystore/signing process missing | Do not claim signed release readiness. |
 
-## 14. What not to claim
+## 15. What not to claim
 
 Do **not** claim:
 
@@ -477,7 +553,7 @@ Unless each claim has direct evidence.
 Safe claim after this checklist passes:
 
 ```text
-This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
+This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, owner-only role management, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
 ```
 
 Unsafe claim:
@@ -488,28 +564,31 @@ This is production ready.
 
 That would be dishonest.
 
-## 15. Final go/no-go gate
+## 16. Final go/no-go gate
 
 Release/demo is a **GO** only if all are true:
 
 - [ ] Backend full pytest passes.
 - [ ] Backend environment profile tests pass.
 - [ ] Backend role permission tests pass.
+- [ ] Backend role management tests pass.
 - [ ] MCP validation script passes.
 - [ ] MCP validation pytest guard passes.
 - [ ] Android JVM tests pass.
 - [ ] Android session/auth failure classification tests pass.
+- [ ] Android Account shows current backend role.
 - [ ] Android debug build passes.
 - [ ] Android release variant build passes.
 - [ ] Auth-disabled fast demo path works.
 - [ ] Auth-enabled Android account/session path works.
+- [ ] Owner role-management API path works.
 - [ ] Physical phone can reach backend over LAN, if using real phone.
 - [ ] MCP Queue shows pending request.
 - [ ] Linked approval opens the correct approval.
 - [ ] Phone approval resolves MCP request.
 - [ ] Child MCP forwarding is exactly once.
 - [ ] Queue refreshes to `FORWARDED`.
-- [ ] Audit proves request, decision, and forwarding.
+- [ ] Audit proves request, decision, forwarding, and role update when exercised.
 - [ ] CI status is either verified or explicitly stated as unverified.
 - [ ] Signed APK status is explicitly stated as unavailable unless signing has been implemented.
 - [ ] Production deployment status is explicitly stated as incomplete unless deployment/secrets/monitoring are implemented.
