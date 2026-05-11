@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from collections.abc import Callable
 from datetime import timedelta
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
-from .models import AuthUser, SessionToken, User, now_utc
+from .models import AuthUser, SessionToken, User, UserRole, now_utc
 from .settings import get_settings
 from .store import store
 
@@ -55,6 +56,12 @@ def _safe_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+def _default_role_for_new_user() -> UserRole:
+    if not store.users:
+        return UserRole.OWNER
+    return UserRole.REVIEWER
+
+
 def _to_auth_user(user: User) -> AuthUser:
     return AuthUser(
         id=user.id,
@@ -64,7 +71,7 @@ def _to_auth_user(user: User) -> AuthUser:
     )
 
 
-def create_user(email: str, password: str, display_name: str = "") -> User:
+def create_user(email: str, password: str, display_name: str = "", role: UserRole | None = None) -> User:
     normalized_email = email.lower().strip()
     if any(user.email.lower() == normalized_email for user in store.users.values()):
         raise HTTPException(status_code=409, detail="User already exists")
@@ -73,6 +80,7 @@ def create_user(email: str, password: str, display_name: str = "") -> User:
     user = User(
         email=normalized_email,
         display_name=display_name.strip() or normalized_email,
+        role=role or _default_role_for_new_user(),
         password_salt=salt,
         password_hash=_hash_secret(password, salt),
     )
@@ -111,7 +119,7 @@ def require_user(authorization: str | None = Header(default=None)) -> AuthUser:
     AIXION_AUTH_ENABLED=false or AIXION_PROFILE=demo, but production defaults to enabled.
     """
     if not auth_enabled():
-        return AuthUser(id="dev_user", email="dev@local", display_name="Local Dev", role="OWNER")
+        return AuthUser(id="dev_user", email="dev@local", display_name="Local Dev", role=UserRole.OWNER)
 
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
@@ -135,6 +143,25 @@ def require_user(authorization: str | None = Header(default=None)) -> AuthUser:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not active")
     return _to_auth_user(user)
 
+
+def require_roles(*allowed_roles: UserRole) -> Callable[[AuthUser], AuthUser]:
+    allowed = set(allowed_roles)
+
+    def dependency(user: AuthUser = Depends(require_user)) -> AuthUser:
+        if user.role not in allowed:
+            allowed_names = ", ".join(role.value for role in sorted(allowed, key=lambda role: role.value))
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires one of roles: {allowed_names}",
+            )
+        return user
+
+    return dependency
+
+
+require_owner = require_roles(UserRole.OWNER)
+require_maintainer = require_roles(UserRole.OWNER, UserRole.MAINTAINER)
+require_reviewer = require_roles(UserRole.OWNER, UserRole.MAINTAINER, UserRole.REVIEWER)
 
 # Backward-compatible dependency name while endpoints are migrated.
 require_api_key = require_user
