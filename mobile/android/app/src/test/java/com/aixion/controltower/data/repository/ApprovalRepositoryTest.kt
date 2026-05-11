@@ -16,6 +16,8 @@ import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
+import com.aixion.controltower.core.api.dto.RoleChoicesDto
+import com.aixion.controltower.core.api.dto.RoleUpdateRequestDto
 import com.aixion.controltower.core.api.dto.TestRunDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
@@ -84,6 +86,14 @@ private class FailingApprovalApi : ControlTowerApi {
     }
 
     override suspend fun me(): AuthUserDto {
+        throw UnsupportedOperationException("not needed")
+    }
+
+    override suspend fun listRoleChoices(): RoleChoicesDto = RoleChoicesDto()
+
+    override suspend fun listUsers(): List<AuthUserDto> = emptyList()
+
+    override suspend fun updateUserRole(userId: String, payload: RoleUpdateRequestDto): AuthUserDto {
         throw UnsupportedOperationException("not needed")
     }
 
