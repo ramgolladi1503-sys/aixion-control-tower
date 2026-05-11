@@ -2,15 +2,19 @@ package com.aixion.controltower.core.api
 
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
+import com.aixion.controltower.core.api.dto.AuthResponseDto
+import com.aixion.controltower.core.api.dto.AuthUserDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
+import com.aixion.controltower.core.api.dto.LoginRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.api.dto.MCPPendingHealthDto
 import com.aixion.controltower.core.api.dto.MCPPendingRequestDto
 import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
+import com.aixion.controltower.core.api.dto.RegisterRequestDto
 import com.aixion.controltower.core.api.dto.TestRunDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
@@ -23,6 +27,15 @@ import retrofit2.http.Query
 interface ControlTowerApi {
     @GET("health")
     suspend fun health(): Map<String, String>
+
+    @POST("auth/register")
+    suspend fun register(@Body payload: RegisterRequestDto): AuthResponseDto
+
+    @POST("auth/login")
+    suspend fun login(@Body payload: LoginRequestDto): AuthResponseDto
+
+    @GET("auth/me")
+    suspend fun me(): AuthUserDto
 
     @GET("projects")
     suspend fun listProjects(): List<ProjectDto>

@@ -99,6 +99,30 @@ data class DecisionRequestDto(
     val reason: String = ""
 )
 
+data class AuthUserDto(
+    val id: String,
+    val email: String,
+    val display_name: String,
+    val role: String
+)
+
+data class LoginRequestDto(
+    val email: String,
+    val password: String
+)
+
+data class RegisterRequestDto(
+    val email: String,
+    val password: String,
+    val display_name: String = ""
+)
+
+data class AuthResponseDto(
+    val access_token: String,
+    val token_type: String = "bearer",
+    val user: AuthUserDto
+)
+
 data class TestRunDto(
     val id: String,
     val approval_request_id: String,
