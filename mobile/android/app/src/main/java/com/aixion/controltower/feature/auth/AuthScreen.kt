@@ -113,12 +113,21 @@ fun AuthScreen(viewModel: AuthViewModel = viewModel()) {
             }
         }
 
-        OutlinedButton(
-            onClick = viewModel::logout,
-            enabled = !state.loading,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Clear saved session")
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = viewModel::refreshSession,
+                enabled = !state.loading,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Verify session")
+            }
+            OutlinedButton(
+                onClick = viewModel::logout,
+                enabled = !state.loading,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Clear session")
+            }
         }
     }
 }
