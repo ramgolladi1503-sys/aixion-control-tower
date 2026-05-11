@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "runtime" / "mcp_approval_demo_validation.sqlite3"
 
+os.environ.setdefault("AIXION_PROFILE", "test")
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 os.environ.setdefault("AIXION_DB_PATH", str(DB_PATH))
 
