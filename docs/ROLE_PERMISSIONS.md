@@ -12,18 +12,18 @@ This is not enterprise RBAC yet. It is the minimum serious permission boundary n
 | `MAINTAINER` | Can create and execute controlled work, register MCP child servers, recover queues, and run GitHub execution paths. |
 | `REVIEWER` | Can inspect work and make approval decisions from the mobile approval flow. |
 
-## Current registration rule
+## Registration rule
 
-Self-registration still follows this rule:
+Registration now follows this rule:
 
 ```text
-first registered user -> OWNER
-later registered users -> REVIEWER
+first registered user -> OWNER without invite
+later registered users -> require valid pending invite token
 ```
 
-This prevents every new self-registered user from becoming an owner, but it is not good enough for production onboarding.
+Later users receive the role attached to the invite.
 
-Hard truth: open registration after bootstrap is still a weak posture. PR #60 adds invite administration, but invite acceptance must be completed next before onboarding can be called serious.
+This closes the open self-registration hole after bootstrap. It is still not enterprise onboarding because invite delivery, resend/rotate, project-scoped invites, and polished admin UX are not done.
 
 ## Owner role management
 
@@ -57,13 +57,14 @@ successful role changes append auth.role_updated audit events
 
 ## Owner invite management
 
-The backend now exposes the first invite administration layer.
+The backend exposes invite administration and invite-token registration acceptance.
 
 | Endpoint | Access | Purpose |
 | --- | --- | --- |
 | `POST /auth/invites` | `OWNER` only | Create an invite for an email and role. |
-| `GET /auth/invites` | `OWNER` only | List invite metadata without exposing raw invite tokens. |
+| `GET /auth/invites` | `OWNER` only | List invite metadata without exposing invite codes. |
 | `POST /auth/invites/{invite_id}/revoke` | `OWNER` only | Revoke a pending invite. |
+| `POST /auth/register` | Public bootstrap or invite holder | Bootstrap first owner or accept a valid invite. |
 
 Invite statuses:
 
@@ -79,10 +80,12 @@ Invite rules:
 ```text
 role defaults to REVIEWER
 role must be OWNER, MAINTAINER, or REVIEWER
-raw invite token is returned only at creation time
+invite code is returned only at creation time
 the store persists only the invite token hash
 accepted invites cannot be revoked
-successful create/revoke actions write audit events
+later registrations require a matching pending invite token
+accepted invite is marked ACCEPTED and linked to accepted_by_user_id
+successful create/revoke/accept actions write audit events
 ```
 
 Audit behavior:
@@ -90,6 +93,7 @@ Audit behavior:
 ```text
 auth.invite_created
 auth.invite_revoked
+auth.invite_accepted
 ```
 
 See:
@@ -102,7 +106,9 @@ docs/INVITE_ONBOARDING.md
 
 | Area | OWNER | MAINTAINER | REVIEWER |
 | --- | --- | --- | --- |
-| Register/login/self session | Yes | Yes | Yes |
+| Bootstrap first user | Yes | N/A | N/A |
+| Register with valid invite | Yes | Yes | Yes |
+| Login/self session | Yes | Yes | Yes |
 | Read supported role choices | Yes | Yes | Yes |
 | List users | Yes | No | No |
 | Promote/demote users | Yes | No | No |
@@ -207,13 +213,14 @@ Do not confuse auth-disabled demo behavior with production security.
 
 ## Remaining gaps
 
-Role and invite administration are improved, but this is still not enterprise RBAC.
+Role and invite onboarding are improved, but this is still not enterprise RBAC.
 
 Missing:
 
 ```text
-invite acceptance registration flow
-blocking open registration after bootstrap
+email delivery for invites
+invite resend/rotate
+dedicated Android invite-admin screen
 project-scoped roles
 role and invite audit UI polish
 session revocation by owner
@@ -225,7 +232,7 @@ production deployment/secrets/monitoring
 After this layer passes CI, it is safe to claim:
 
 ```text
-The backend now enforces first-pass role boundaries and includes owner-only role management plus owner-only invite creation/list/revoke APIs.
+The backend now enforces first-pass role boundaries, owner-only role management, owner-only invite administration, and invite-token registration after bootstrap.
 ```
 
 ## Unsafe claim
@@ -234,12 +241,11 @@ Do not claim:
 
 ```text
 Enterprise RBAC is complete.
-Invite onboarding is production-grade.
-Open registration is solved.
+Enterprise onboarding is complete.
 ```
 
 Those would be false.
 
 ## Brutal truth
 
-Auth without roles means every logged-in user is too powerful. Roles without owner administration are clumsy. Owner administration without invites still leaves onboarding weak. This invite layer fixes administration, but PR #61 must wire invite acceptance before onboarding becomes serious.
+Auth without roles means every logged-in user is too powerful. Roles without owner administration are clumsy. Owner administration without invite acceptance leaves onboarding weak. This layer finally closes open non-bootstrap registration, but enterprise onboarding still needs delivery, rotation, project scoping, and revocation polish.
