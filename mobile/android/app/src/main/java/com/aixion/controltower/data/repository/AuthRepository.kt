@@ -15,12 +15,13 @@ class AuthRepository(
         AuthSession.saveAccessToken(context, response.access_token)
     }
 
-    suspend fun register(email: String, password: String, displayName: String) {
+    suspend fun register(email: String, password: String, displayName: String, inviteCode: String = "") {
         val response = api.register(
             RegisterRequestDto(
                 email = email.trim(),
                 password = password,
-                display_name = displayName.trim()
+                display_name = displayName.trim(),
+                invite_token = inviteCode.trim().ifBlank { null }
             )
         )
         AuthSession.saveAccessToken(context, response.access_token)
