@@ -8,12 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .approval_integrity import compute_approval_payload_hash
-from .auth import require_api_key
-from .models import ApprovalStatus, TestRun, now_utc
+from .auth import require_maintainer
+from .models import ApprovalStatus, AuthUser, TestRun, now_utc
 from .store import store
 
 router = APIRouter(prefix="/github-runner", tags=["github-runner"])
-AuthDependency = Depends(require_api_key)
+MaintainerDependency = Depends(require_maintainer)
 PROTECTED_BRANCHES = {"main", "master", "production", "release"}
 GITHUB_API_URL = "https://api.github.com"
 
@@ -119,12 +119,12 @@ async def _github(client: httpx.AsyncClient, method: str, path: str, **kwargs: A
 
 
 @router.post("/patch-plan", response_model=PatchPlanResponse)
-def create_patch_plan(payload: PatchPlanRequest, _: None = AuthDependency) -> PatchPlanResponse:
+def create_patch_plan(payload: PatchPlanRequest, _: AuthUser = MaintainerDependency) -> PatchPlanResponse:
     return _validate_execution(payload)
 
 
 @router.post("/execute", response_model=ExecuteGitHubResponse)
-async def execute_github_change(payload: ExecuteGitHubRequest, _: None = AuthDependency) -> ExecuteGitHubResponse:
+async def execute_github_change(payload: ExecuteGitHubRequest, _: AuthUser = MaintainerDependency) -> ExecuteGitHubResponse:
     plan = _validate_execution(payload)
     if not plan.ready:
         raise HTTPException(status_code=409, detail={"blockers": plan.blockers})
