@@ -3,16 +3,19 @@ package com.aixion.controltower.data.repository
 import com.aixion.controltower.core.api.ControlTowerApi
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
+import com.aixion.controltower.core.api.dto.AuthResponseDto
+import com.aixion.controltower.core.api.dto.AuthUserDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
+import com.aixion.controltower.core.api.dto.LoginRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.api.dto.MCPPendingHealthDto
 import com.aixion.controltower.core.api.dto.MCPPendingRequestDto
 import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
-import com.aixion.controltower.core.api.dto.RiskAssessmentDto
+import com.aixion.controltower.core.api.dto.RegisterRequestDto
 import com.aixion.controltower.core.api.dto.TestRunDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
@@ -61,6 +64,18 @@ class ApprovalRepositoryTest {
 
 private class FailingApprovalApi : ControlTowerApi {
     override suspend fun health(): Map<String, String> = emptyMap()
+
+    override suspend fun register(payload: RegisterRequestDto): AuthResponseDto {
+        throw UnsupportedOperationException("not needed")
+    }
+
+    override suspend fun login(payload: LoginRequestDto): AuthResponseDto {
+        throw UnsupportedOperationException("not needed")
+    }
+
+    override suspend fun me(): AuthUserDto {
+        throw UnsupportedOperationException("not needed")
+    }
 
     override suspend fun listProjects(): List<ProjectDto> = emptyList()
 
@@ -122,14 +137,3 @@ private class FailingApprovalApi : ControlTowerApi {
         throw IllegalStateException("backend resolve failed")
     }
 }
-
-private fun approvalDto(id: String = "approval_real"): ApprovalRequestDto = ApprovalRequestDto(
-    id = id,
-    project_id = "project_real",
-    title = "Real approval",
-    summary = "Real backend approval",
-    agent_name = "agent",
-    target_branch = "feature/real",
-    status = "REQUESTED",
-    risk = RiskAssessmentDto(level = "HIGH")
-)
