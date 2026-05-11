@@ -6,7 +6,7 @@ from .agent_routes import router as agent_router
 from .approval_integrity import compute_approval_payload_hash
 from .approval_lifecycle import grouped_approvals
 from .audit_routes import router as audit_router
-from .auth import require_api_key, require_user
+from .auth import require_maintainer, require_reviewer
 from .auth_routes import router as auth_router
 from .github_runner import router as github_runner_router
 from .mcp_gateway_routes import router as mcp_gateway_router
@@ -48,8 +48,8 @@ app.include_router(mcp_gateway_router)
 app.include_router(mcp_registry_router)
 app.include_router(mcp_transport_router)
 app.include_router(audit_router)
-AuthDependency = Depends(require_api_key)
-UserDependency = Depends(require_user)
+ReviewerDependency = Depends(require_reviewer)
+MaintainerDependency = Depends(require_maintainer)
 
 
 def audit(event_type: str, entity_id: str, details: dict, actor: str = "system") -> AuditEvent:
@@ -84,7 +84,7 @@ def health() -> dict[str, str]:
 
 
 @app.post("/demo/seed")
-def seed_demo_data(_: None = AuthDependency) -> dict[str, int]:
+def seed_demo_data(_: AuthUser = MaintainerDependency) -> dict[str, int]:
     """Seed realistic MVP data for mobile development and demos.
 
     This endpoint is intentionally explicit and auditable. It does not wipe existing data.
@@ -172,37 +172,37 @@ def seed_demo_data(_: None = AuthDependency) -> dict[str, int]:
 
 
 @app.post("/projects", response_model=Project)
-def create_project(payload: ProjectCreate, _: None = AuthDependency) -> Project:
+def create_project(payload: ProjectCreate, user: AuthUser = MaintainerDependency) -> Project:
     project = Project(**payload.model_dump())
     store.projects[project.id] = project
-    audit("project.created", project.id, {"name": project.name, "mode": project.mode})
+    audit("project.created", project.id, {"name": project.name, "mode": project.mode}, actor=user.email)
     persist()
     return project
 
 
 @app.get("/projects", response_model=list[Project])
-def list_projects(_: None = AuthDependency) -> list[Project]:
+def list_projects(_: AuthUser = ReviewerDependency) -> list[Project]:
     return list(store.projects.values())
 
 
 @app.post("/ideas", response_model=Idea)
-def create_idea(payload: IdeaCreate, _: None = AuthDependency) -> Idea:
+def create_idea(payload: IdeaCreate, user: AuthUser = MaintainerDependency) -> Idea:
     if payload.project_id and payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
     idea = Idea(**payload.model_dump())
     store.ideas[idea.id] = idea
-    audit("idea.created", idea.id, {"title": idea.title, "project_id": idea.project_id})
+    audit("idea.created", idea.id, {"title": idea.title, "project_id": idea.project_id}, actor=user.email)
     persist()
     return idea
 
 
 @app.get("/ideas", response_model=list[Idea])
-def list_ideas(_: None = AuthDependency) -> list[Idea]:
+def list_ideas(_: AuthUser = ReviewerDependency) -> list[Idea]:
     return list(store.ideas.values())
 
 
 @app.post("/work-orders", response_model=WorkOrder)
-def create_work_order(payload: WorkOrderCreate, _: None = AuthDependency) -> WorkOrder:
+def create_work_order(payload: WorkOrderCreate, user: AuthUser = MaintainerDependency) -> WorkOrder:
     if payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
     if payload.idea_id and payload.idea_id not in store.ideas:
@@ -215,18 +215,19 @@ def create_work_order(payload: WorkOrderCreate, _: None = AuthDependency) -> Wor
         "work_order.created",
         work_order.id,
         {"project_id": work_order.project_id, "risk_level": work_order.risk_level},
+        actor=user.email,
     )
     persist()
     return work_order
 
 
 @app.get("/work-orders", response_model=list[WorkOrder])
-def list_work_orders(_: None = AuthDependency) -> list[WorkOrder]:
+def list_work_orders(_: AuthUser = ReviewerDependency) -> list[WorkOrder]:
     return list(store.work_orders.values())
 
 
 @app.post("/approvals", response_model=ApprovalRequest)
-def create_approval_request(payload: ApprovalRequestCreate, user: AuthUser = UserDependency) -> ApprovalRequest:
+def create_approval_request(payload: ApprovalRequestCreate, user: AuthUser = MaintainerDependency) -> ApprovalRequest:
     if payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
     if payload.work_order_id and payload.work_order_id not in store.work_orders:
@@ -269,17 +270,17 @@ def create_approval_request(payload: ApprovalRequestCreate, user: AuthUser = Use
 
 
 @app.get("/approvals", response_model=list[ApprovalRequest])
-def list_approval_requests(_: None = AuthDependency) -> list[ApprovalRequest]:
+def list_approval_requests(_: AuthUser = ReviewerDependency) -> list[ApprovalRequest]:
     return list(store.approval_requests.values())
 
 
 @app.get("/approvals/grouped", response_model=ApprovalGroups)
-def list_grouped_approval_requests(_: None = AuthDependency) -> ApprovalGroups:
+def list_grouped_approval_requests(_: AuthUser = ReviewerDependency) -> ApprovalGroups:
     return ApprovalGroups(**grouped_approvals(store.approval_requests.values()))
 
 
 @app.get("/approvals/{approval_id}", response_model=ApprovalRequest)
-def get_approval_request(approval_id: str, _: None = AuthDependency) -> ApprovalRequest:
+def get_approval_request(approval_id: str, _: AuthUser = ReviewerDependency) -> ApprovalRequest:
     request = store.approval_requests.get(approval_id)
     if not request:
         raise HTTPException(status_code=404, detail="Approval request not found")
@@ -287,17 +288,17 @@ def get_approval_request(approval_id: str, _: None = AuthDependency) -> Approval
 
 
 @app.post("/approvals/{approval_id}/approve", response_model=ApprovalRequest)
-def approve_approval(approval_id: str, user: AuthUser = UserDependency) -> ApprovalRequest:
+def approve_approval(approval_id: str, user: AuthUser = ReviewerDependency) -> ApprovalRequest:
     return decide_approval(approval_id, DecisionCreate(decision="approve"), user)
 
 
 @app.post("/approvals/{approval_id}/deny", response_model=ApprovalRequest)
-def deny_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = UserDependency) -> ApprovalRequest:
+def deny_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = ReviewerDependency) -> ApprovalRequest:
     return decide_approval(approval_id, DecisionCreate(decision="deny", reason=payload.reason), user)
 
 
 @app.post("/approvals/{approval_id}/decision", response_model=ApprovalRequest)
-def decide_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = UserDependency) -> ApprovalRequest:
+def decide_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = ReviewerDependency) -> ApprovalRequest:
     request = store.approval_requests.get(approval_id)
     if not request:
         raise HTTPException(status_code=404, detail="Approval request not found")
@@ -355,7 +356,7 @@ def decide_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = 
 
 
 @app.post("/test-runs", response_model=TestRun)
-def create_test_run(payload: TestRunCreate, _: None = AuthDependency) -> TestRun:
+def create_test_run(payload: TestRunCreate, user: AuthUser = MaintainerDependency) -> TestRun:
     if payload.approval_request_id not in store.approval_requests:
         raise HTTPException(status_code=404, detail="Approval request not found")
     test_run = TestRun(**payload.model_dump())
@@ -368,16 +369,17 @@ def create_test_run(payload: TestRunCreate, _: None = AuthDependency) -> TestRun
             "status": test_run.status,
             "command": test_run.command,
         },
+        actor=user.email,
     )
     persist()
     return test_run
 
 
 @app.get("/test-runs", response_model=list[TestRun])
-def list_test_runs(_: None = AuthDependency) -> list[TestRun]:
+def list_test_runs(_: AuthUser = ReviewerDependency) -> list[TestRun]:
     return list(store.test_runs.values())
 
 
 @app.get("/audit", response_model=list[AuditEvent])
-def list_audit_events(_: None = AuthDependency) -> list[AuditEvent]:
+def list_audit_events(_: AuthUser = ReviewerDependency) -> list[AuditEvent]:
     return store.audit_events
