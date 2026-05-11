@@ -19,6 +19,7 @@ import com.aixion.controltower.feature.approvals.ApprovalDetailScreen
 import com.aixion.controltower.feature.approvals.ApprovalInboxScreen
 import com.aixion.controltower.feature.approvals.ApprovalsViewModel
 import com.aixion.controltower.feature.audit.AuditTrailScreen
+import com.aixion.controltower.feature.auth.AuthScreen
 import com.aixion.controltower.feature.command.CommandChatScreen
 import com.aixion.controltower.feature.diff.DiffViewerScreen
 import com.aixion.controltower.feature.home.HomeScreen
@@ -95,6 +96,7 @@ fun ControlTowerApp() {
                             }
                         )
                     }
+                    composable(Route.Account.value) { AuthScreen() }
                     composable(Route.Tests.value) { TestRunsScreen() }
                     composable(Route.Audit.value) { AuditTrailScreen() }
                     composable(Route.Diff.value) { DiffViewerScreen(viewModel = approvalsViewModel) }
