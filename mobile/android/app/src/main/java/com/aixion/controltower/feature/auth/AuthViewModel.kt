@@ -15,6 +15,7 @@ data class AuthUiState(
     val email: String = "",
     val password: String = "",
     val displayName: String = "",
+    val inviteCode: String = "",
     val loading: Boolean = false,
     val authenticated: Boolean = false,
     val userLabel: String? = null,
@@ -46,6 +47,10 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         _state.value = _state.value.copy(displayName = value)
     }
 
+    fun updateInviteCode(value: String) {
+        _state.value = _state.value.copy(inviteCode = value)
+    }
+
     fun login() {
         val current = _state.value
         viewModelScope.launch {
@@ -75,7 +80,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _state.value = current.copy(loading = true, message = null)
             runCatching {
-                repository.register(current.email, current.password, current.displayName)
+                repository.register(current.email, current.password, current.displayName, current.inviteCode)
                 repository.currentUserLabel()
             }.onSuccess { label ->
                 _state.value = _state.value.copy(

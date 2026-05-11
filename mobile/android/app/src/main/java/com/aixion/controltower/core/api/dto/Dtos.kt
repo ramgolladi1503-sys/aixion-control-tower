@@ -114,7 +114,8 @@ data class LoginRequestDto(
 data class RegisterRequestDto(
     val email: String,
     val password: String,
-    val display_name: String = ""
+    val display_name: String = "",
+    val invite_token: String? = null
 )
 
 data class AuthResponseDto(

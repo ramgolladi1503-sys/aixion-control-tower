@@ -21,6 +21,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=12)
     display_name: str = ""
+    invite_token: str | None = None
 
 
 class LoginRequest(BaseModel):
