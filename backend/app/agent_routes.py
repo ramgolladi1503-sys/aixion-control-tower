@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from .agent_auth import assert_agent_can, register_external_agent, require_external_agent, to_public_agent
-from .auth import require_user
+from .auth import require_owner
 from .models import (
     AgentAction,
     AgentCreate,
@@ -21,6 +21,7 @@ from .risk_engine import assess_approval_request
 from .store import store
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+OwnerDependency = Depends(require_owner)
 
 
 def audit(event_type: str, entity_id: str, details: dict, actor: str = "system") -> AuditEvent:
@@ -30,7 +31,7 @@ def audit(event_type: str, entity_id: str, details: dict, actor: str = "system")
 
 
 @router.post("", response_model=AgentRegistrationResponse)
-def create_agent(payload: AgentCreate, user: AuthUser = Depends(require_user)) -> AgentRegistrationResponse:
+def create_agent(payload: AgentCreate, user: AuthUser = OwnerDependency) -> AgentRegistrationResponse:
     response = register_external_agent(payload, user)
     audit(
         "agent.registered",
@@ -49,12 +50,12 @@ def create_agent(payload: AgentCreate, user: AuthUser = Depends(require_user)) -
 
 
 @router.get("", response_model=list[ExternalAgentPublic])
-def list_agents(_: AuthUser = Depends(require_user)) -> list[ExternalAgentPublic]:
+def list_agents(_: AuthUser = OwnerDependency) -> list[ExternalAgentPublic]:
     return [to_public_agent(agent) for agent in store.external_agents.values()]
 
 
 @router.get("/{agent_id}", response_model=ExternalAgentPublic)
-def get_agent(agent_id: str, _: AuthUser = Depends(require_user)) -> ExternalAgentPublic:
+def get_agent(agent_id: str, _: AuthUser = OwnerDependency) -> ExternalAgentPublic:
     agent = store.external_agents.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="External agent not found")

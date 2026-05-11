@@ -5,14 +5,15 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from .auth import require_api_key
+from .auth import require_maintainer, require_reviewer
 from .mcp_child_router import MCPChildServerRouter
 from .mcp_gateway import MCPGatewayApprovalDecisionLayer, MCPGatewayDecision, MCPGatewayToolCall
-from .models import AuditEvent, MCPPendingRequest, MCPPendingStatus, now_utc
+from .models import AuditEvent, AuthUser, MCPPendingRequest, MCPPendingStatus, now_utc
 from .store import store
 
 router = APIRouter(prefix="/mcp-gateway", tags=["mcp-gateway"])
-AuthDependency = Depends(require_api_key)
+ReviewerDependency = Depends(require_reviewer)
+MaintainerDependency = Depends(require_maintainer)
 
 _child_router = MCPChildServerRouter()
 _gateways: dict[str, MCPGatewayApprovalDecisionLayer] = {}
@@ -96,11 +97,11 @@ def _pending_requests_for_project(project_id: str | None) -> list[MCPPendingRequ
     return requests
 
 
-def _audit_pending_recovery(event_type: str, pending: MCPPendingRequest, details: dict) -> None:
+def _audit_pending_recovery(event_type: str, pending: MCPPendingRequest, details: dict, actor: str) -> None:
     store.audit_events.append(
         AuditEvent(
             event_type=event_type,
-            actor="mcp-operator",
+            actor=actor,
             entity_id=pending.approval_request_id,
             details={
                 "mcp_pending_request_id": pending.id,
@@ -154,7 +155,7 @@ def _pending_health_summary(requests: list[MCPPendingRequest]) -> MCPPendingHeal
 @router.post("/requests", response_model=MCPGatewayDecision)
 def submit_gateway_request(
     payload: GatewaySubmitRequest,
-    _: None = AuthDependency,
+    _: AuthUser = MaintainerDependency,
 ) -> MCPGatewayDecision:
     return gateway_for_project(payload.project_id).submit_tool_call(payload.request)
 
@@ -164,7 +165,7 @@ def list_pending_gateway_requests(
     project_id: str | None = Query(default=None),
     status: MCPPendingStatus | None = Query(default=None),
     approval_request_id: str | None = Query(default=None),
-    _: None = AuthDependency,
+    _: AuthUser = ReviewerDependency,
 ) -> list[MCPPendingRequest]:
     requests = _pending_requests_for_project(project_id)
     if status is not None:
@@ -177,7 +178,7 @@ def list_pending_gateway_requests(
 @router.get("/pending-requests/health", response_model=MCPPendingHealthSummary)
 def pending_gateway_health(
     project_id: str | None = Query(default=None),
-    _: None = AuthDependency,
+    _: AuthUser = ReviewerDependency,
 ) -> MCPPendingHealthSummary:
     if project_id is not None and project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -187,7 +188,7 @@ def pending_gateway_health(
 @router.get("/pending-requests/{pending_request_id}", response_model=MCPPendingRequest)
 def get_pending_gateway_request(
     pending_request_id: str,
-    _: None = AuthDependency,
+    _: AuthUser = ReviewerDependency,
 ) -> MCPPendingRequest:
     return _get_pending_or_404(pending_request_id)
 
@@ -196,7 +197,7 @@ def get_pending_gateway_request(
 def retry_pending_gateway_request(
     pending_request_id: str,
     payload: PendingRetryRequest | None = None,
-    _: None = AuthDependency,
+    user: AuthUser = MaintainerDependency,
 ) -> MCPPendingRequest:
     pending = _get_pending_or_404(pending_request_id)
     payload = payload or PendingRetryRequest()
@@ -222,6 +223,7 @@ def retry_pending_gateway_request(
                 "previous_lease_owner": pending.lease_owner,
                 "previous_lease_expires_at": pending.lease_expires_at.isoformat() if pending.lease_expires_at else None,
             },
+            actor=user.email,
         )
 
     pending.status = MCPPendingStatus.WAITING_FOR_APPROVAL
@@ -241,6 +243,7 @@ def retry_pending_gateway_request(
             "reset_attempts": payload.reset_attempts,
             "attempts": pending.attempts,
         },
+        actor=user.email,
     )
     store.persist()
     return pending
@@ -249,7 +252,7 @@ def retry_pending_gateway_request(
 @router.post("/approvals/{approval_request_id}/resolve", response_model=MCPGatewayDecision)
 def resolve_gateway_request(
     approval_request_id: str,
-    _: None = AuthDependency,
+    _: AuthUser = MaintainerDependency,
 ) -> MCPGatewayDecision:
     approval = store.approval_requests.get(approval_request_id)
     if not approval:

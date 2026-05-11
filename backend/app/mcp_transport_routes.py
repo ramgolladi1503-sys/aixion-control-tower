@@ -5,14 +5,14 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from .auth import require_api_key
+from .auth import require_maintainer
 from .mcp_gateway import MCPGatewayDecision, MCPGatewayToolCall
 from .mcp_gateway_routes import gateway_for_project
-from .models import MCPChildServer
+from .models import AuthUser, MCPChildServer
 from .store import store
 
 router = APIRouter(prefix="/mcp", tags=["mcp-transport"])
-AuthDependency = Depends(require_api_key)
+MaintainerDependency = Depends(require_maintainer)
 
 SUPPORTED_METHODS = {"initialize", "tools/list", "tools/call"}
 
@@ -262,7 +262,7 @@ def _gateway_decision_to_mcp_result(decision: MCPGatewayDecision) -> dict[str, A
 def handle_mcp_jsonrpc(
     project_id: str,
     payload: MCPJsonRpcRequest,
-    _: None = AuthDependency,
+    _: AuthUser = MaintainerDependency,
 ) -> MCPJsonRpcResponse:
     if project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
