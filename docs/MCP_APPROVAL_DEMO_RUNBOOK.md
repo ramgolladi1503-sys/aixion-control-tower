@@ -72,9 +72,35 @@ python -m pytest
 
 Do not claim CI is green unless GitHub Actions confirms it.
 
+## Choose demo mode
+
+There are now two valid demo modes.
+
+### Fast local demo mode
+
+Use this when you want the fastest MCP proof and do not care about login/session behavior:
+
+```bash
+AIXION_AUTH_ENABLED=false
+```
+
+This is the default used by `backend/scripts/run_demo_server.sh`.
+
+### Authenticated Android MVP mode
+
+Use this when validating the real Android Account screen, saved bearer token, and protected API calls:
+
+```bash
+AIXION_AUTH_ENABLED=true
+```
+
+In authenticated mode, open the Android `Acct` screen first, register or login, then use Home, Review, MCP Queue, Audit, and other protected screens.
+
+Hard rule: if auth is enabled and Android is not logged in, protected backend calls should fail. That is correct behavior.
+
 ## Start the demo backend
 
-For local emulator-only demo, this works:
+For local emulator-only demo with auth disabled:
 
 ```bash
 cd backend
@@ -88,18 +114,75 @@ cd backend
 bash scripts/run_demo_server.sh
 ```
 
-Equivalent manual command:
+Equivalent manual command with auth disabled:
 
 ```bash
 cd backend
 AIXION_AUTH_ENABLED=false uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Equivalent manual command with auth enabled:
+
+```bash
+cd backend
+AIXION_AUTH_ENABLED=true uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
 Hard rule: a real phone must use your computer LAN IP, not `127.0.0.1` and not `10.0.2.2`.
+
+## Authenticated Android validation
+
+Use this after PRs that touch Android auth, API clients, approval actions, or MCP Queue.
+
+1. Start backend with auth enabled:
+
+```bash
+cd backend
+AIXION_AUTH_ENABLED=true uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+2. Build Android with a reachable backend URL.
+
+For emulator:
+
+```bash
+cd mobile/android
+./gradlew assembleDebug
+```
+
+For physical phone:
+
+```bash
+cd mobile/android
+./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/
+```
+
+3. Open Android `Acct`.
+4. Register with email, password, and display name, or login with an existing user.
+5. Confirm the screen shows an active session.
+6. Open Home, Review, MCP Queue, Audit, and Acct.
+7. Confirm protected requests work after login.
+8. Clear saved session from `Acct`.
+9. Confirm protected requests fail until login/register again.
 
 ## Manual API validation path
 
-The commands below assume the backend is reachable at `http://127.0.0.1:8000` from your terminal.
+The commands below assume auth is disabled and the backend is reachable at `http://127.0.0.1:8000` from your terminal.
+
+If auth is enabled, first register/login and pass the bearer token:
+
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"demo@example.com","password":"change-this-demo-password","display_name":"Demo Operator"}' \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+```
+
+Then add this header to protected `curl` calls:
+
+```bash
+-H "Authorization: Bearer $TOKEN"
+```
 
 ### 1. Create a project
 
@@ -268,19 +351,21 @@ The URL must end with `/` because Retrofit requires a trailing slash for base UR
 
 Use this only after backend validation passes.
 
-1. Start backend with `bash scripts/run_demo_server.sh` for physical phone demo.
+1. Start backend with `bash scripts/run_demo_server.sh` for physical phone demo, or start manually with auth enabled/disabled as needed.
 2. Confirm the backend is reachable from the Android device or emulator.
 3. For emulator, the default `http://10.0.2.2:8000/` is enough.
 4. For physical phone, build with `-PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/`.
-5. Submit a mutating MCP call through the backend API.
-6. Open Android MCP Queue.
-7. Confirm the pending row appears as `WAITING_FOR_APPROVAL`.
-8. Tap `Open linked approval`.
-9. Approve the request.
-10. Confirm approval completion message appears.
-11. Return to MCP Queue.
-12. Confirm the queue refreshes and shows `FORWARDED`.
-13. Verify `/audit` contains the approval and forwarding trail.
+5. If auth is enabled, open `Acct` and login/register first.
+6. Submit a mutating MCP call through the backend API.
+7. Open Android MCP Queue.
+8. Confirm the pending row appears as `WAITING_FOR_APPROVAL`.
+9. Tap `Open linked approval`.
+10. Approve the request.
+11. Confirm approval completion message appears.
+12. Return to MCP Queue.
+13. Confirm the queue refreshes and shows `FORWARDED`.
+14. Open Audit.
+15. Verify audit contains the approval and forwarding trail.
 
 ## Demo failure interpretation
 
@@ -289,6 +374,7 @@ Use this only after backend validation passes.
 | Request forwards before approval | Gateway wait-mode is broken. Stop the demo. |
 | No pending request appears | Queue persistence or pending API is broken. |
 | Android cannot reach backend | Wrong API base URL, wrong LAN IP, backend not bound to `0.0.0.0`, firewall, or network issue. |
+| Android shows missing/invalid bearer token | Auth is enabled but the app is not logged in, token expired, or Account flow did not save token. |
 | Approval lacks `approved_payload_hash` | Integrity freeze is broken. Gateway should not forward. |
 | Resolve returns `forwarded=false` after approval | Check resolve reason and pending status. |
 | Queue stays `WAITING_FOR_APPROVAL` after resolve | Android refresh or pending status update is stale. |
