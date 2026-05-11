@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.mcp
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.MCPPendingHealthSummary
@@ -20,8 +21,8 @@ data class MCPQueueUiState(
     val pendingRequests: List<MCPPendingSummary> = emptyList()
 )
 
-class MCPQueueViewModel : ViewModel() {
-    private val repository = MCPPendingRepository(ApiClient.create())
+class MCPQueueViewModel(application: Application) : AndroidViewModel(application) {
+    private val repository = MCPPendingRepository(ApiClient.create(application.applicationContext))
 
     private val _state = MutableStateFlow(MCPQueueUiState())
     val state: StateFlow<MCPQueueUiState> = _state.asStateFlow()

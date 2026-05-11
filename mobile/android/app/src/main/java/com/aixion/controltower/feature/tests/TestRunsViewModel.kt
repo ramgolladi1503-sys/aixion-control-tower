@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.tests
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.TestRunSummary
@@ -15,8 +16,8 @@ data class TestRunsUiState(
     val testRuns: List<TestRunSummary> = emptyList()
 )
 
-class TestRunsViewModel : ViewModel() {
-    private val repository = TestRunRepository(ApiClient.create())
+class TestRunsViewModel(application: Application) : AndroidViewModel(application) {
+    private val repository = TestRunRepository(ApiClient.create(application.applicationContext))
 
     private val _state = MutableStateFlow(TestRunsUiState())
     val state: StateFlow<TestRunsUiState> = _state.asStateFlow()
