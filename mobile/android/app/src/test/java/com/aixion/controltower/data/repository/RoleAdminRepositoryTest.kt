@@ -23,58 +23,44 @@ import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.fail
 import org.junit.Test
 
-class ApprovalRepositoryTest {
+class RoleAdminRepositoryTest {
     @Test
-    fun getApprovalThrowsWhenBackendFetchFails() = runTest {
-        val repository = ApprovalRepository(FailingApprovalApi())
+    fun listRolesReturnsBackendRoleChoices() = runTest {
+        val repository = RoleAdminRepository(RoleAdminApi())
 
-        assertIllegalStateFailure {
-            repository.getApproval("approval_missing")
-        }
+        assertEquals(listOf("OWNER", "MAINTAINER", "REVIEWER"), repository.listRoles())
     }
 
     @Test
-    fun decideThrowsWhenBackendDecisionFails() = runTest {
-        val repository = ApprovalRepository(FailingApprovalApi())
+    fun listUsersReturnsBackendUsers() = runTest {
+        val repository = RoleAdminRepository(RoleAdminApi())
 
-        assertIllegalStateFailure {
-            repository.decide("approval_missing", "approve", "test")
-        }
+        val users = repository.listUsers()
+
+        assertEquals(2, users.size)
+        assertEquals("owner@example.com", users[0].email)
+        assertEquals("REVIEWER", users[1].role)
     }
 
     @Test
-    fun resolveMCPApprovalThrowsWhenBackendResolveFails() = runTest {
-        val repository = ApprovalRepository(FailingApprovalApi())
+    fun updateRoleSendsRequestedRole() = runTest {
+        val api = RoleAdminApi()
+        val repository = RoleAdminRepository(api)
 
-        assertIllegalStateFailure {
-            repository.resolveMCPApproval("approval_missing")
-        }
-    }
+        val updated = repository.updateRole("user_reviewer", "MAINTAINER")
 
-    @Test
-    fun listApprovalsStillUsesMockFallbackForReadOnlyPreview() = runTest {
-        val repository = ApprovalRepository(FailingApprovalApi())
-
-        val approvals = repository.listApprovals()
-
-        assertEquals("approval_critical", approvals.first().id)
+        assertEquals("user_reviewer", api.updatedUserId)
+        assertEquals("MAINTAINER", api.updatedRole)
+        assertEquals("MAINTAINER", updated.role)
     }
 }
 
-private suspend fun assertIllegalStateFailure(block: suspend () -> Unit) {
-    try {
-        block()
-    } catch (error: IllegalStateException) {
-        return
-    }
+private class RoleAdminApi : ControlTowerApi {
+    var updatedUserId: String? = null
+    var updatedRole: String? = null
 
-    fail("Expected IllegalStateException to be thrown")
-}
-
-private class FailingApprovalApi : ControlTowerApi {
     override suspend fun health(): Map<String, String> = emptyMap()
 
     override suspend fun register(payload: RegisterRequestDto): AuthResponseDto {
@@ -89,12 +75,36 @@ private class FailingApprovalApi : ControlTowerApi {
         throw UnsupportedOperationException("not needed")
     }
 
-    override suspend fun listRoleChoices(): RoleChoicesDto = RoleChoicesDto()
+    override suspend fun listRoleChoices(): RoleChoicesDto {
+        return RoleChoicesDto(roles = listOf("OWNER", "MAINTAINER", "REVIEWER"))
+    }
 
-    override suspend fun listUsers(): List<AuthUserDto> = emptyList()
+    override suspend fun listUsers(): List<AuthUserDto> {
+        return listOf(
+            AuthUserDto(
+                id = "user_owner",
+                email = "owner@example.com",
+                display_name = "Owner",
+                role = "OWNER"
+            ),
+            AuthUserDto(
+                id = "user_reviewer",
+                email = "reviewer@example.com",
+                display_name = "Reviewer",
+                role = "REVIEWER"
+            )
+        )
+    }
 
     override suspend fun updateUserRole(userId: String, payload: RoleUpdateRequestDto): AuthUserDto {
-        throw UnsupportedOperationException("not needed")
+        updatedUserId = userId
+        updatedRole = payload.role
+        return AuthUserDto(
+            id = userId,
+            email = "reviewer@example.com",
+            display_name = "Reviewer",
+            role = payload.role
+        )
     }
 
     override suspend fun listProjects(): List<ProjectDto> = emptyList()
@@ -115,19 +125,17 @@ private class FailingApprovalApi : ControlTowerApi {
         throw UnsupportedOperationException("not needed")
     }
 
-    override suspend fun listApprovals(): List<ApprovalRequestDto> {
-        throw IllegalStateException("backend list failed")
-    }
+    override suspend fun listApprovals(): List<ApprovalRequestDto> = emptyList()
 
     override suspend fun getApproval(approvalId: String): ApprovalRequestDto {
-        throw IllegalStateException("backend approval fetch failed")
+        throw UnsupportedOperationException("not needed")
     }
 
     override suspend fun decideApproval(
         approvalId: String,
         payload: DecisionRequestDto
     ): ApprovalRequestDto {
-        throw IllegalStateException("backend decision failed")
+        throw UnsupportedOperationException("not needed")
     }
 
     override suspend fun listTestRuns(): List<TestRunDto> = emptyList()
@@ -154,6 +162,6 @@ private class FailingApprovalApi : ControlTowerApi {
     }
 
     override suspend fun resolveMCPApproval(approvalId: String): MCPGatewayDecisionDto {
-        throw IllegalStateException("backend resolve failed")
+        throw UnsupportedOperationException("not needed")
     }
 }

@@ -15,11 +15,14 @@ import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
+import com.aixion.controltower.core.api.dto.RoleChoicesDto
+import com.aixion.controltower.core.api.dto.RoleUpdateRequestDto
 import com.aixion.controltower.core.api.dto.TestRunDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
 import retrofit2.http.Body
 import retrofit2.http.GET
+import retrofit2.http.PATCH
 import retrofit2.http.POST
 import retrofit2.http.Path
 import retrofit2.http.Query
@@ -36,6 +39,18 @@ interface ControlTowerApi {
 
     @GET("auth/me")
     suspend fun me(): AuthUserDto
+
+    @GET("auth/roles")
+    suspend fun listRoleChoices(): RoleChoicesDto
+
+    @GET("auth/users")
+    suspend fun listUsers(): List<AuthUserDto>
+
+    @PATCH("auth/users/{userId}/role")
+    suspend fun updateUserRole(
+        @Path("userId") userId: String,
+        @Body payload: RoleUpdateRequestDto
+    ): AuthUserDto
 
     @GET("projects")
     suspend fun listProjects(): List<ProjectDto>

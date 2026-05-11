@@ -123,6 +123,14 @@ data class AuthResponseDto(
     val user: AuthUserDto
 )
 
+data class RoleChoicesDto(
+    val roles: List<String> = emptyList()
+)
+
+data class RoleUpdateRequestDto(
+    val role: String
+)
+
 data class TestRunDto(
     val id: String,
     val approval_request_id: String,
