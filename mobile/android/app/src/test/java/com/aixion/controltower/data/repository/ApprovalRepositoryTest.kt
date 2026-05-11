@@ -21,7 +21,7 @@ import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFailsWith
+import org.junit.Assert.fail
 import org.junit.Test
 
 class ApprovalRepositoryTest {
@@ -29,7 +29,7 @@ class ApprovalRepositoryTest {
     fun getApprovalThrowsWhenBackendFetchFails() = runTest {
         val repository = ApprovalRepository(FailingApprovalApi())
 
-        assertFailsWith<IllegalStateException> {
+        assertIllegalStateFailure {
             repository.getApproval("approval_missing")
         }
     }
@@ -38,7 +38,7 @@ class ApprovalRepositoryTest {
     fun decideThrowsWhenBackendDecisionFails() = runTest {
         val repository = ApprovalRepository(FailingApprovalApi())
 
-        assertFailsWith<IllegalStateException> {
+        assertIllegalStateFailure {
             repository.decide("approval_missing", "approve", "test")
         }
     }
@@ -47,7 +47,7 @@ class ApprovalRepositoryTest {
     fun resolveMCPApprovalThrowsWhenBackendResolveFails() = runTest {
         val repository = ApprovalRepository(FailingApprovalApi())
 
-        assertFailsWith<IllegalStateException> {
+        assertIllegalStateFailure {
             repository.resolveMCPApproval("approval_missing")
         }
     }
@@ -60,6 +60,16 @@ class ApprovalRepositoryTest {
 
         assertEquals("approval_critical", approvals.first().id)
     }
+}
+
+private suspend fun assertIllegalStateFailure(block: suspend () -> Unit) {
+    try {
+        block()
+    } catch (error: IllegalStateException) {
+        return
+    }
+
+    fail("Expected IllegalStateException to be thrown")
 }
 
 private class FailingApprovalApi : ControlTowerApi {
