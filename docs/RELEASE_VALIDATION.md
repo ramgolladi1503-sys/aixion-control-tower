@@ -2,7 +2,7 @@
 
 This checklist is the release/demo gate for the current Mobile Approval Console / Aixion Control Tower MVP.
 
-It does **not** prove production readiness. It proves whether the current build is demo-ready without lying about CI, Android reachability, MCP forwarding, auth, or audit traceability.
+It does **not** prove production readiness. It proves whether the current build is demo-ready without lying about CI, Android reachability, MCP forwarding, auth, audit traceability, or environment configuration.
 
 ## Release position
 
@@ -25,20 +25,23 @@ Do not call this production-grade until deployment, secrets, monitoring, role-ba
 4. Do not claim MCP wait mode unless the child MCP server receives **zero calls before approval** and **exactly one call after approval resolve**.
 5. Do not claim audit proof unless the audit trail shows request, decision, and forwarding events.
 6. Do not claim signed APK readiness until a real keystore-backed signing process exists.
+7. Do not claim production deployment is solved because profiles exist. Profiles reduce config confusion; they do not solve deployment.
 
 ## Evidence matrix
 
 | Area | Required evidence | Command or proof |
 | --- | --- | --- |
 | Backend tests | Full backend test suite passes locally or in CI | `cd backend && python -m pytest` |
+| Backend profile tests | Profile defaults and overrides are guarded | `cd backend && python -m pytest tests/test_settings.py` |
+| Environment profiles | Local/demo/test/production-like profiles are documented | `docs/ENVIRONMENT_PROFILES.md` |
 | MCP demo script | Script exits successfully | `cd backend && python scripts/validate_mcp_approval_demo.py` |
 | MCP pytest guard | Demo script is protected by pytest | `cd backend && python -m pytest tests/test_mcp_approval_demo_validation.py` |
 | Android tests | Android JVM tests pass | `cd mobile/android && ./gradlew testDebugUnitTest` |
 | Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
 | Android release variant | Release variant compiles | `cd mobile/android && ./gradlew assembleRelease` |
 | Android release process | Release limits and signing gap are documented | `docs/ANDROID_RELEASE_PROCESS.md` |
-| Auth-disabled demo | Fast local demo works without login | `AIXION_AUTH_ENABLED=false` path below |
-| Auth-enabled demo | Android `Acct` login/register works and protected screens load | `AIXION_AUTH_ENABLED=true` path below |
+| Auth-disabled demo | Fast local demo works without login | `AIXION_PROFILE=demo` / `AIXION_AUTH_ENABLED=false` path below |
+| Auth-enabled demo | Android `Acct` login/register works and protected screens load | `AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true` path below |
 | Physical phone demo | Phone reaches backend over LAN | `./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/` |
 | MCP approval path | Request waits, approval opens, phone approves, resolve forwards | Manual path below or runbook |
 | Exactly-once forwarding | Downstream receives one call after resolve and no duplicate on second resolve | Demo script/runbook proof |
@@ -60,6 +63,18 @@ Expected result:
 all backend tests pass
 ```
 
+Then run the focused profile guard:
+
+```bash
+python -m pytest tests/test_settings.py
+```
+
+Expected result:
+
+```text
+profile default and override tests pass
+```
+
 Then run the focused MCP proof guard:
 
 ```bash
@@ -74,7 +89,33 @@ test_mcp_approval_demo_validation_script_passes PASSED
 
 If this fails, stop. The product proof path is not safe enough for demo.
 
-## 2. MCP approval demo validation script
+## 2. Environment profile validation
+
+Profile documentation lives at:
+
+```text
+docs/ENVIRONMENT_PROFILES.md
+```
+
+Supported backend profiles:
+
+```text
+local       auth enabled, normal local database
+demo        auth disabled by default, demo database
+test        auth disabled by default, test/script database
+production  auth enabled, production-like behavior
+```
+
+Explicit env vars still override profile defaults:
+
+```bash
+AIXION_AUTH_ENABLED=true|false
+AIXION_DB_PATH=runtime/custom.sqlite3
+```
+
+Hard rule: `production` profile is production-like configuration only. It does not mean real deployment is production-ready.
+
+## 3. MCP approval demo validation script
 
 Run:
 
@@ -115,7 +156,7 @@ Hard failure meanings:
 | Child receives more than one call | Idempotency is broken. Serious bug. |
 | Missing audit event | Demo is not client-safe. |
 
-## 3. Android JVM tests
+## 4. Android JVM tests
 
 Run:
 
@@ -135,7 +176,7 @@ no fake success for failed decision/resolve paths
 
 If tests fail because of fake API drift or model drift, fix that before demo. Do not wave it away as “just tests”. For this product, tests are part of the proof story.
 
-## 4. Android debug build
+## 5. Android debug build
 
 Run:
 
@@ -152,7 +193,7 @@ BUILD SUCCESSFUL
 
 This proves a debug build. It does not prove signed release APK readiness.
 
-## 5. Android release variant build
+## 6. Android release variant build
 
 Run:
 
@@ -177,7 +218,7 @@ docs/ANDROID_RELEASE_PROCESS.md
 
 Hard rule: do not claim signed release readiness until a real keystore-backed signing process exists.
 
-## 6. Auth-disabled fast demo
+## 7. Auth-disabled fast demo
 
 Use this for the fastest backend/MCP proof.
 
@@ -185,14 +226,15 @@ Start backend:
 
 ```bash
 cd backend
-AIXION_AUTH_ENABLED=false uvicorn app.main:app --reload
+bash scripts/run_demo_server.sh
 ```
 
-Or for LAN/physical-phone demo:
+The script defaults to:
 
-```bash
-cd backend
-bash scripts/run_demo_server.sh
+```text
+AIXION_PROFILE=demo
+AIXION_AUTH_ENABLED=false
+AIXION_DB_PATH=runtime/aixion_control_tower_demo.sqlite3
 ```
 
 Expected behavior:
@@ -205,7 +247,7 @@ MCP approval path can be exercised quickly
 
 This mode is valid for demoing MCP wait mode. It is not valid for proving authenticated Android behavior.
 
-## 7. Auth-enabled Android demo
+## 8. Auth-enabled Android demo
 
 Use this to prove the real Android account/session path.
 
@@ -213,7 +255,7 @@ Start backend:
 
 ```bash
 cd backend
-AIXION_AUTH_ENABLED=true uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Build Android for emulator:
@@ -253,7 +295,7 @@ cleared token -> protected calls fail again
 
 That is correct. Do not treat missing-token failures as backend bugs when auth is intentionally enabled.
 
-## 8. Physical Android phone LAN demo
+## 9. Physical Android phone LAN demo
 
 Use this only when demoing on a real phone, not an emulator.
 
@@ -288,7 +330,7 @@ wrong for phone:    http://10.0.2.2:8000/
 
 If the phone cannot hit `/health`, the Android app will not work. Do not debug UI until network reachability is proven.
 
-## 9. MCP approval path manual demo
+## 10. MCP approval path manual demo
 
 The minimum valid demo path is:
 
@@ -318,7 +360,7 @@ Required proof points:
 
 If any one of these fails, the demo is not ready. Do not compensate with explanation. Fix the failing link.
 
-## 10. Audit trail proof
+## 11. Audit trail proof
 
 Audit must prove the control story, not just show logs.
 
@@ -337,12 +379,14 @@ The audit proof must answer two questions:
 
 If audit cannot answer both, the product story is incomplete.
 
-## 11. Known failure interpretations
+## 12. Known failure interpretations
 
 | Failure | Likely cause | Action |
 | --- | --- | --- |
 | GitHub Actions not visible | Connector/checks not inspected | Say “CI not verified”, not “green”. |
 | Backend pytest fails | Backend regression | Fix before demo. |
+| Settings tests fail | Profile default/override regression | Fix before demo. |
+| Invalid profile | `AIXION_PROFILE` typo | Use `local`, `demo`, `test`, or `production`. |
 | MCP script fails | Core product proof broken | Stop and fix. |
 | Android tests fail | Model/API/fake drift or real Android logic issue | Fix before demo. |
 | `assembleDebug` fails | Android compile/build issue | Fix before phone demo. |
@@ -357,7 +401,7 @@ If audit cannot answer both, the product story is incomplete.
 | Audit missing forwarding event | Traceability broken | Not demo-safe. |
 | Signed APK unavailable | Keystore/signing process missing | Do not claim signed release readiness. |
 
-## 12. What not to claim
+## 13. What not to claim
 
 Do **not** claim:
 
@@ -378,7 +422,7 @@ Unless each claim has direct evidence.
 Safe claim after this checklist passes:
 
 ```text
-This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
+This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
 ```
 
 Unsafe claim:
@@ -389,11 +433,12 @@ This is production ready.
 
 That would be dishonest.
 
-## 13. Final go/no-go gate
+## 14. Final go/no-go gate
 
 Release/demo is a **GO** only if all are true:
 
 - [ ] Backend full pytest passes.
+- [ ] Backend environment profile tests pass.
 - [ ] MCP validation script passes.
 - [ ] MCP validation pytest guard passes.
 - [ ] Android JVM tests pass.
@@ -410,6 +455,7 @@ Release/demo is a **GO** only if all are true:
 - [ ] Audit proves request, decision, and forwarding.
 - [ ] CI status is either verified or explicitly stated as unverified.
 - [ ] Signed APK status is explicitly stated as unavailable unless signing has been implemented.
+- [ ] Production deployment status is explicitly stated as incomplete unless deployment/secrets/monitoring are implemented.
 
 If any box is unchecked, the honest status is:
 

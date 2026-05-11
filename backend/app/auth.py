@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import secrets
 from datetime import timedelta
 
@@ -10,6 +9,7 @@ from fastapi import Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
 from .models import AuthUser, SessionToken, User, now_utc
+from .settings import get_settings
 from .store import store
 
 PBKDF2_ITERATIONS = 210_000
@@ -34,7 +34,7 @@ class AuthResponse(BaseModel):
 
 
 def auth_enabled() -> bool:
-    return os.getenv("AIXION_AUTH_ENABLED", "true").lower() == "true"
+    return get_settings().auth_enabled
 
 
 def _hash_secret(secret: str, salt: str) -> str:
@@ -108,7 +108,7 @@ def require_user(authorization: str | None = Header(default=None)) -> AuthUser:
     """Require a bearer session token.
 
     This replaces the API-key MVP guard. Local dev can still disable auth with
-    AIXION_AUTH_ENABLED=false, but production defaults to enabled.
+    AIXION_AUTH_ENABLED=false or AIXION_PROFILE=demo, but production defaults to enabled.
     """
     if not auth_enabled():
         return AuthUser(id="dev_user", email="dev@local", display_name="Local Dev", role="OWNER")

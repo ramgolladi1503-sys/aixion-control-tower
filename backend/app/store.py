@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import os
 import sqlite3
-from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel
@@ -22,6 +20,7 @@ from .models import (
     User,
     WorkOrder,
 )
+from .settings import get_settings
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -35,8 +34,7 @@ class SQLiteBackedStore:
     """
 
     def __init__(self) -> None:
-        db_path = os.getenv("AIXION_DB_PATH", "runtime/aixion_control_tower.sqlite3")
-        self.db_path = Path(db_path)
+        self.db_path = get_settings().db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.users: dict[str, User] = {}
         self.sessions: dict[str, SessionToken] = {}
