@@ -37,11 +37,12 @@ Do not call this production-grade until deployment, secrets, monitoring, role-ba
 | MCP demo script | Script exits successfully | `cd backend && python scripts/validate_mcp_approval_demo.py` |
 | MCP pytest guard | Demo script is protected by pytest | `cd backend && python -m pytest tests/test_mcp_approval_demo_validation.py` |
 | Android tests | Android JVM tests pass | `cd mobile/android && ./gradlew testDebugUnitTest` |
+| Android session lifecycle | Expired/invalid sessions are classified and cleared | `AuthFailureTest` + Account manual check |
 | Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
 | Android release variant | Release variant compiles | `cd mobile/android && ./gradlew assembleRelease` |
 | Android release process | Release limits and signing gap are documented | `docs/ANDROID_RELEASE_PROCESS.md` |
 | Auth-disabled demo | Fast local demo works without login | `AIXION_PROFILE=demo` / `AIXION_AUTH_ENABLED=false` path below |
-| Auth-enabled demo | Android `Acct` login/register works and protected screens load | `AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true` path below |
+| Auth-enabled demo | Android `Acct` login/register/session verification works and protected screens load | `AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true` path below |
 | Physical phone demo | Phone reaches backend over LAN | `./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/` |
 | MCP approval path | Request waits, approval opens, phone approves, resolve forwards | Manual path below or runbook |
 | Exactly-once forwarding | Downstream receives one call after resolve and no duplicate on second resolve | Demo script/runbook proof |
@@ -172,6 +173,7 @@ MCP-backed approval detection
 MCP pending queue helper behavior
 approval repository truthfulness
 no fake success for failed decision/resolve paths
+session/auth failure classification
 ```
 
 If tests fail because of fake API drift or model drift, fix that before demo. Do not wave it away as “just tests”. For this product, tests are part of the proof story.
@@ -278,19 +280,22 @@ Validation steps:
 2. Open `Acct`.
 3. Register with email, display name, and a password of at least 12 characters.
 4. Confirm session becomes active.
-5. Open Home, Review, MCP Queue, Audit, and Acct.
-6. Confirm protected screens load after login.
-7. Clear saved session from `Acct`.
-8. Confirm protected requests fail until login/register again.
-9. Login again.
-10. Confirm protected screens work again.
+5. Tap `Verify session`.
+6. Confirm session verification succeeds.
+7. Open Home, Review, MCP Queue, Audit, and Acct.
+8. Confirm protected screens load after login.
+9. Clear saved session from `Acct`.
+10. Confirm protected requests fail until login/register again.
+11. Login again.
+12. Confirm protected screens work again.
 
 Expected behavior:
 
 ```text
 not logged in + auth enabled -> protected calls fail
 logged in + valid token -> protected calls work
-cleared token -> protected calls fail again
+invalid/expired token -> Account clears saved session and asks operator to log in again
+network/backend failure -> saved token is not automatically cleared
 ```
 
 That is correct. Do not treat missing-token failures as backend bugs when auth is intentionally enabled.
@@ -393,6 +398,8 @@ If audit cannot answer both, the product story is incomplete.
 | `assembleRelease` fails | Release variant compile issue | Fix before claiming release variant readiness. |
 | Phone cannot reach backend | Wrong LAN IP, backend bound to localhost, firewall, different network | Prove `/health` from phone first. |
 | Android missing token | Auth enabled but no active session | Login/register through `Acct`. |
+| Android invalid/expired session | Saved bearer token is no longer usable | Account should clear saved session and ask for login. |
+| Android backend/network failure during session check | Backend unreachable, not necessarily invalid token | Do not clear token automatically. Fix backend/network first. |
 | Register button disabled | Password shorter than 12 characters | Use a 12+ character password. |
 | MCP Queue unavailable | Backend unreachable or API failing | Fix backend/network first. |
 | Linked approval opens wrong data | Mock fallback regression | Stop; this is unsafe. |
@@ -442,10 +449,11 @@ Release/demo is a **GO** only if all are true:
 - [ ] MCP validation script passes.
 - [ ] MCP validation pytest guard passes.
 - [ ] Android JVM tests pass.
+- [ ] Android session/auth failure classification tests pass.
 - [ ] Android debug build passes.
 - [ ] Android release variant build passes.
 - [ ] Auth-disabled fast demo path works.
-- [ ] Auth-enabled Android account path works.
+- [ ] Auth-enabled Android account/session path works.
 - [ ] Physical phone can reach backend over LAN, if using real phone.
 - [ ] MCP Queue shows pending request.
 - [ ] Linked approval opens the correct approval.
