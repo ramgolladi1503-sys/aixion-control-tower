@@ -69,3 +69,6 @@ jobs:
 
       - name: Build Android debug APK
         run: ./gradlew assembleDebug
+
+      - name: Build Android release variant
+        run: ./gradlew assembleRelease
