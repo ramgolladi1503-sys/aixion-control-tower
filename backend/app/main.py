@@ -9,6 +9,7 @@ from .audit_routes import router as audit_router
 from .auth import require_maintainer, require_reviewer
 from .auth_routes import router as auth_router
 from .github_runner import router as github_runner_router
+from .invite_routes import router as invite_router
 from .mcp_gateway_routes import router as mcp_gateway_router
 from .mcp_registry_routes import router as mcp_registry_router
 from .mcp_transport_routes import router as mcp_transport_router
@@ -43,6 +44,7 @@ app = FastAPI(
 )
 app.include_router(auth_router)
 app.include_router(role_router)
+app.include_router(invite_router)
 app.include_router(agent_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
@@ -68,6 +70,7 @@ def counts() -> dict[str, int]:
     return {
         "users": len(store.users),
         "sessions": len(store.sessions),
+        "invites": len(store.invites),
         "agents": len(store.external_agents),
         "devices": len(store.device_registrations),
         "projects": len(store.projects),
