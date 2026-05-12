@@ -40,6 +40,7 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Backend role management tests | Owner promotion/demotion and last-owner protection are tested | `cd backend && python -m pytest tests/test_role_management.py` |
 | Backend invite tests | Invite create/list/revoke and invite registration acceptance are tested | `cd backend && python -m pytest tests/test_invite_onboarding.py` |
 | Backend session tests | Owner-only session listing and force logout are tested | `cd backend && python -m pytest tests/test_session_management.py` |
+| Android session admin tests | Android session repository contract is tested | `cd mobile/android && ./gradlew testDebugUnitTest --tests '*SessionAdminRepositoryTest'` |
 | Role permissions | First-pass role matrix and management endpoints are documented | `docs/ROLE_PERMISSIONS.md` |
 | Invite onboarding | Invite admin and acceptance rules are documented | `docs/INVITE_ONBOARDING.md` |
 | Environment profiles | Local/demo/test/production-like profiles are documented | `docs/ENVIRONMENT_PROFILES.md` |
@@ -49,6 +50,7 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Android session lifecycle | Expired/invalid sessions are classified and cleared | `AuthFailureTest` + Account manual check |
 | Android role visibility | Account screen shows current backend role after `/auth/me` | Manual Account check |
 | Android invite registration | Account screen supports invite code for non-bootstrap registration | Manual Account check |
+| Android owner session controls | Account screen lists sessions and can expire another user's access | Manual Account check |
 | Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
 | Android release variant | Release variant compiles | `cd mobile/android && ./gradlew assembleRelease` |
 | Android release process | Release limits and signing gap are documented | `docs/ANDROID_RELEASE_PROCESS.md` |
@@ -98,7 +100,29 @@ profile, role, role-management, invite-management, invite-acceptance, session-ma
 
 If this fails, stop. The product proof path is not safe enough for demo.
 
-## 2. Role, invite, and session validation
+## 2. Android validation
+
+Run:
+
+```bash
+cd mobile/android
+./gradlew testDebugUnitTest
+./gradlew testDebugUnitTest --tests '*SessionAdminRepositoryTest'
+./gradlew assembleDebug
+./gradlew assembleRelease
+```
+
+Expected result:
+
+```text
+JVM tests pass
+debug build passes
+release variant compiles
+```
+
+If Android tests fail because of fake API drift or model drift, fix that before demo. Do not wave it away as “just tests”.
+
+## 3. Role, invite, and session validation
 
 Role documentation lives at:
 
@@ -132,9 +156,10 @@ Session rule:
 
 ```text
 OWNER can list session metadata
-OWNER can revoke another user's active sessions
-revoked session fails /auth/me with 401
-OWNER cannot revoke their own sessions through force-logout endpoint
+OWNER can expire another user's active sessions
+expired session fails /auth/me with 401
+OWNER cannot expire their own sessions through the access-management endpoint
+Android Account exposes owner access-management controls
 ```
 
 Known limitation:
@@ -142,12 +167,12 @@ Known limitation:
 ```text
 Invite acceptance exists.
 Session revocation exists.
-Invite email delivery, resend/rotate, dedicated Android invite-admin UX, Android session-admin UI, and full device metadata are still future work.
+Invite email delivery, resend/rotate, dedicated Android invite-admin UX, polished access-admin UX, and full device metadata are still future work.
 ```
 
 Hard rule: do not claim enterprise RBAC, enterprise onboarding, or enterprise session governance is complete.
 
-## 3. Environment profile validation
+## 4. Environment profile validation
 
 Profile documentation lives at:
 
@@ -173,7 +198,7 @@ AIXION_DB_PATH=runtime/custom.sqlite3
 
 Hard rule: `production` profile is production-like configuration only. It does not mean real deployment is production-ready.
 
-## 4. MCP approval demo validation script
+## 5. MCP approval demo validation script
 
 Run:
 
@@ -202,17 +227,6 @@ mutating MCP request submitted
 -> second resolve does not forward again
 -> audit contains request, decision, and exactly-one forwarding event
 ```
-
-## 5. Android JVM tests
-
-Run:
-
-```bash
-cd mobile/android
-./gradlew testDebugUnitTest
-```
-
-If tests fail because of fake API drift or model drift, fix that before demo. Do not wave it away as “just tests”. For this product, tests are part of the proof story.
 
 ## 6. Android debug build
 
@@ -318,14 +332,15 @@ Validation steps:
 6. Register a second user with the invited email, password, display name, and invite code.
 7. Confirm second user receives the invite role.
 8. Confirm Account shows the current backend role.
-9. Tap `Verify session`.
-10. Confirm session verification succeeds.
-11. Open Home, Review, MCP Queue, Audit, and Acct.
-12. Confirm protected screens load after login.
-13. Clear saved session from `Acct`.
-14. Confirm protected requests fail until login/register again.
-15. Login again.
-16. Confirm protected screens work again.
+9. Confirm owner role, invite, and access-management panels load.
+10. Tap `Verify session`.
+11. Confirm session verification succeeds.
+12. Open Home, Review, MCP Queue, Audit, and Acct.
+13. Confirm protected screens load after login.
+14. Clear saved session from `Acct`.
+15. Confirm protected requests fail until login/register again.
+16. Login again.
+17. Confirm protected screens work again.
 
 Expected behavior:
 
@@ -414,35 +429,6 @@ auth.invite_accepted appears in audit
 reusing the same invite code fails
 ```
 
-List invites:
-
-```bash
-curl -s http://localhost:8000/auth/invites \
-  -H "Authorization: Bearer $OWNER_TOKEN"
-```
-
-Expected behavior:
-
-```text
-invite metadata is returned
-invite code is not returned
-```
-
-Revoke a pending invite:
-
-```bash
-curl -s -X POST http://localhost:8000/auth/invites/INVITE_ID/revoke \
-  -H "Authorization: Bearer $OWNER_TOKEN"
-```
-
-Expected behavior:
-
-```text
-pending invite becomes REVOKED
-auth.invite_revoked appears in audit
-accepted invite returns 409 if revocation is attempted
-```
-
 ## 12. Owner session-management manual API check
 
 Create another user and session through the invite flow above, then list sessions:
@@ -460,7 +446,7 @@ token_hash is not returned
 active/revoked state is visible
 ```
 
-Force logout another user:
+Expire another user's active sessions:
 
 ```bash
 curl -s -X POST http://localhost:8000/auth/users/USER_ID/sessions/revoke \
@@ -471,9 +457,18 @@ Expected behavior:
 
 ```text
 active sessions for that user become revoked
-the revoked user's saved token fails /auth/me with 401
+the affected user's saved token fails /auth/me with 401
 auth.sessions_revoked appears in audit
-owner cannot revoke their own sessions through this endpoint; backend returns 409
+owner cannot expire their own sessions through this endpoint; backend returns 409
+```
+
+Android Account should show the same owner access-management flow:
+
+```text
+sessions visible
+active/revoked state visible
+Expire user access button visible for active sessions
+401 / 403 / 404 / 409 errors shown clearly
 ```
 
 ## 13. Physical Android phone LAN demo
@@ -606,7 +601,7 @@ Unless each claim has direct evidence.
 Safe claim after this checklist passes:
 
 ```text
-This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, owner-only role management, owner-only invite onboarding after bootstrap, owner-only force logout, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
+This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, owner-only role management, owner-only invite onboarding after bootstrap, owner-only access expiry, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
 ```
 
 Unsafe claim:
@@ -630,9 +625,11 @@ Release/demo is a **GO** only if all are true:
 - [ ] MCP validation script passes.
 - [ ] MCP validation pytest guard passes.
 - [ ] Android JVM tests pass.
-- [ ] Android session/auth failure classification tests pass.
+- [ ] Android session-auth failure classification tests pass.
+- [ ] Android SessionAdminRepositoryTest passes.
 - [ ] Android Account shows current backend role.
 - [ ] Android Account supports invite code registration.
+- [ ] Android Account supports owner access-management controls.
 - [ ] Android debug build passes.
 - [ ] Android release variant build passes.
 - [ ] Auth-disabled fast demo path works.
