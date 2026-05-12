@@ -132,6 +132,37 @@ data class RoleUpdateRequestDto(
     val role: String
 )
 
+data class InviteCreateRequestDto(
+    val email: String,
+    val role: String = "REVIEWER",
+    val expires_in_days: Int = 7
+)
+
+data class InviteDto(
+    val id: String,
+    val email: String,
+    val role: String,
+    val status: String,
+    val expires_at: String? = null,
+    val created_by_user_id: String,
+    val accepted_by_user_id: String? = null,
+    val created_at: String? = null,
+    val updated_at: String? = null
+)
+
+data class InviteCreateResponseDto(
+    val id: String,
+    val email: String,
+    val role: String,
+    val status: String,
+    val expires_at: String? = null,
+    val created_by_user_id: String,
+    val accepted_by_user_id: String? = null,
+    val created_at: String? = null,
+    val updated_at: String? = null,
+    val token: String
+)
+
 data class TestRunDto(
     val id: String,
     val approval_request_id: String,
