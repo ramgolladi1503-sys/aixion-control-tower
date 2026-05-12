@@ -15,7 +15,7 @@ Demo-ready MVP:            yes, if this checklist passes
 Production-grade product:  no
 ```
 
-Do not call this production-grade until deployment, secrets, monitoring, project-scoped roles, invite acceptance enforcement, signed release handling, and session lifecycle hardening exist.
+Do not call this production-grade until deployment, secrets, monitoring, project-scoped roles, invite delivery/rotation, signed release handling, and session lifecycle hardening exist.
 
 ## Hard rules
 
@@ -26,8 +26,8 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 5. Do not claim audit proof unless the audit trail shows request, decision, and forwarding events.
 6. Do not claim signed APK readiness until a real keystore-backed signing process exists.
 7. Do not claim production deployment is solved because profiles exist. Profiles reduce config confusion; they do not solve deployment.
-8. Do not claim enterprise RBAC is complete. This is first-pass owner/maintainer/reviewer enforcement with owner-only role management and invite administration, not project-scoped enterprise RBAC.
-9. Do not claim onboarding is production-grade until invite acceptance registration blocks open non-bootstrap registration.
+8. Do not claim enterprise RBAC is complete. This is first-pass owner/maintainer/reviewer enforcement with owner-only role management and invite onboarding, not project-scoped enterprise RBAC.
+9. Do not claim enterprise onboarding is complete until invite delivery, resend/rotate, and polished admin UX exist.
 
 ## Evidence matrix
 
@@ -37,15 +37,16 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Backend profile tests | Profile defaults and overrides are guarded | `cd backend && python -m pytest tests/test_settings.py` |
 | Backend role tests | Owner/maintainer/reviewer guards are tested | `cd backend && python -m pytest tests/test_role_permissions.py` |
 | Backend role management tests | Owner promotion/demotion and last-owner protection are tested | `cd backend && python -m pytest tests/test_role_management.py` |
-| Backend invite tests | Owner invite create/list/revoke behavior is tested | `cd backend && python -m pytest tests/test_invite_onboarding.py` |
+| Backend invite tests | Invite create/list/revoke and invite registration acceptance are tested | `cd backend && python -m pytest tests/test_invite_onboarding.py` |
 | Role permissions | First-pass role matrix and management endpoints are documented | `docs/ROLE_PERMISSIONS.md` |
-| Invite onboarding | Invite API scope and acceptance gap are documented | `docs/INVITE_ONBOARDING.md` |
+| Invite onboarding | Invite admin and acceptance rules are documented | `docs/INVITE_ONBOARDING.md` |
 | Environment profiles | Local/demo/test/production-like profiles are documented | `docs/ENVIRONMENT_PROFILES.md` |
 | MCP demo script | Script exits successfully | `cd backend && python scripts/validate_mcp_approval_demo.py` |
 | MCP pytest guard | Demo script is protected by pytest | `cd backend && python -m pytest tests/test_mcp_approval_demo_validation.py` |
 | Android tests | Android JVM tests pass | `cd mobile/android && ./gradlew testDebugUnitTest` |
 | Android session lifecycle | Expired/invalid sessions are classified and cleared | `AuthFailureTest` + Account manual check |
 | Android role visibility | Account screen shows current backend role after `/auth/me` | Manual Account check |
+| Android invite registration | Account screen supports invite code for non-bootstrap registration | Manual Account check |
 | Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
 | Android release variant | Release variant compiles | `cd mobile/android && ./gradlew assembleRelease` |
 | Android release process | Release limits and signing gap are documented | `docs/ANDROID_RELEASE_PROCESS.md` |
@@ -53,6 +54,7 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Auth-enabled demo | Android `Acct` login/register/session verification works and protected screens load | `AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true` path below |
 | Owner role management | Owner can list users and promote/demote while last owner is protected | API/manual validation below |
 | Owner invite management | Owner can create/list/revoke invites and audit events exist | API/manual validation below |
+| Invite acceptance | Non-bootstrap registration requires matching pending invite code | API/manual validation below |
 | Physical phone demo | Phone reaches backend over LAN | `./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/` |
 | MCP approval path | Request waits, approval opens, phone approves, resolve forwards | Manual path below or runbook |
 | Exactly-once forwarding | Downstream receives one call after resolve and no duplicate on second resolve | Demo script/runbook proof |
@@ -87,7 +89,7 @@ python -m pytest tests/test_mcp_approval_demo_validation.py
 Expected result:
 
 ```text
-profile, role, role-management, invite-management, and MCP proof guards pass
+profile, role, role-management, invite-management, invite-acceptance, and MCP proof guards pass
 ```
 
 If this fails, stop. The product proof path is not safe enough for demo.
@@ -114,22 +116,22 @@ MAINTAINER  create/execute/recover controlled work
 REVIEWER    inspect evidence and make approval decisions
 ```
 
-Current self-registration rule:
+Registration rule:
 
 ```text
-first registered user -> OWNER
-later registered users -> REVIEWER
+first registered user -> OWNER without invite
+later registered users -> require matching pending invite code
+later user role -> invite role
 ```
 
 Known limitation:
 
 ```text
-Invite creation/list/revoke exists.
-Invite acceptance registration is still future work.
-Open registration is not fully solved yet.
+Invite acceptance exists.
+Invite email delivery, resend/rotate, and dedicated Android invite-admin UX are still future work.
 ```
 
-Hard rule: do not claim enterprise RBAC or production onboarding is complete.
+Hard rule: do not claim enterprise RBAC or enterprise onboarding is complete.
 
 ## 3. Environment profile validation
 
@@ -296,22 +298,28 @@ Validation steps:
 
 1. Open Android app.
 2. Open `Acct`.
-3. Register with email, display name, and a password of at least 12 characters.
-4. Confirm session becomes active.
-5. Confirm Account shows the current backend role.
-6. Tap `Verify session`.
-7. Confirm session verification succeeds.
-8. Open Home, Review, MCP Queue, Audit, and Acct.
-9. Confirm protected screens load after login.
-10. Clear saved session from `Acct`.
-11. Confirm protected requests fail until login/register again.
-12. Login again.
-13. Confirm protected screens work again.
+3. Register the first user with email, display name, and a password of at least 12 characters. Leave invite code blank.
+4. Confirm first user becomes OWNER and session becomes active.
+5. Create an invite as OWNER.
+6. Register a second user with the invited email, password, display name, and invite code.
+7. Confirm second user receives the invite role.
+8. Confirm Account shows the current backend role.
+9. Tap `Verify session`.
+10. Confirm session verification succeeds.
+11. Open Home, Review, MCP Queue, Audit, and Acct.
+12. Confirm protected screens load after login.
+13. Clear saved session from `Acct`.
+14. Confirm protected requests fail until login/register again.
+15. Login again.
+16. Confirm protected screens work again.
 
 Expected behavior:
 
 ```text
 not logged in + auth enabled -> protected calls fail
+first registration with no users -> OWNER bootstrap
+later registration without invite code -> 403
+later registration with matching pending invite code -> success
 logged in + valid token -> protected calls work
 invalid/expired token -> Account clears saved session and asks operator to log in again
 network/backend failure -> saved token is not automatically cleared
@@ -330,14 +338,6 @@ OWNER_TOKEN=$(curl -s -X POST http://localhost:8000/auth/register \
   | python -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
 ```
 
-Register a second user:
-
-```bash
-curl -s -X POST http://localhost:8000/auth/register \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"reviewer@example.com","password":"valid-password-123","display_name":"Reviewer"}'
-```
-
 List users as owner:
 
 ```bash
@@ -345,7 +345,7 @@ curl -s http://localhost:8000/auth/users \
   -H "Authorization: Bearer $OWNER_TOKEN"
 ```
 
-Promote the reviewer:
+Promote or demote a user:
 
 ```bash
 curl -s -X PATCH http://localhost:8000/auth/users/USER_ID/role \
@@ -357,28 +357,47 @@ curl -s -X PATCH http://localhost:8000/auth/users/USER_ID/role \
 Expected behavior:
 
 ```text
-reviewer role changes to MAINTAINER
+user role changes
 auth.role_updated appears in audit
 attempting to demote the only OWNER returns 409
 ```
 
-## 11. Owner invite-management manual API check
+## 11. Owner invite-management and invite-acceptance manual API check
 
 Create invite:
 
 ```bash
-curl -s -X POST http://localhost:8000/auth/invites \
+INVITE_TOKEN=$(curl -s -X POST http://localhost:8000/auth/invites \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"email":"newuser@example.com","role":"REVIEWER"}'
+  -d '{"email":"newuser@example.com","role":"REVIEWER"}' \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["token"])')
 ```
 
 Expected behavior:
 
 ```text
-response includes one-time raw token
-stored invite contains token_hash, not raw token
+response includes one-time invite code
+stored invite contains token_hash, not the invite code
 auth.invite_created appears in audit
+```
+
+Register invited user:
+
+```bash
+curl -s -X POST http://localhost:8000/auth/register \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"newuser@example.com\",\"password\":\"valid-password-123\",\"display_name\":\"New User\",\"invite_token\":\"$INVITE_TOKEN\"}"
+```
+
+Expected behavior:
+
+```text
+user is created with invite role
+invite becomes ACCEPTED
+accepted_by_user_id is set
+auth.invite_accepted appears in audit
+reusing the same invite code fails
 ```
 
 List invites:
@@ -392,10 +411,10 @@ Expected behavior:
 
 ```text
 invite metadata is returned
-raw token is not returned
+invite code is not returned
 ```
 
-Revoke invite:
+Revoke a pending invite:
 
 ```bash
 curl -s -X POST http://localhost:8000/auth/invites/INVITE_ID/revoke \
@@ -486,7 +505,7 @@ mcp.approval_requested
 approval.decision
 FORWARDED_AFTER_APPROVAL
 auth.role_updated, when role management is exercised
-auth.invite_created and auth.invite_revoked, when invite management is exercised
+auth.invite_created, auth.invite_accepted, and auth.invite_revoked when invite onboarding is exercised
 ```
 
 ## 15. Known failure interpretations
@@ -498,12 +517,12 @@ auth.invite_created and auth.invite_revoked, when invite management is exercised
 | Settings tests fail | Profile default/override regression | Fix before demo. |
 | Role tests fail | Role default/permission regression | Fix before demo. |
 | Role management tests fail | Owner promotion/demotion regression | Fix before demo. |
-| Invite tests fail | Invite administration regression | Fix before demo. |
+| Invite tests fail | Invite administration or acceptance regression | Fix before demo. |
 | Invalid profile | `AIXION_PROFILE` typo | Use `local`, `demo`, `test`, or `production`. |
-| 403 forbidden after login | User role lacks permission for that action | Use the correct role or owner promotion path. |
+| 403 on later registration | Missing invite code or email mismatch | Use the owner-issued invite code for that exact email. |
+| 409 on invite registration | Invite is accepted, revoked, or expired | Create a fresh invite if appropriate. |
 | Last owner demotion returns 409 | Correct safety guard | Create/promote another owner before demoting. |
 | Invite duplicate returns 409 | Existing pending invite for that email | Reuse or revoke the old invite. |
-| Invite accepted/revoked/expired returns 409 during reuse | Correct lifecycle guard | Create a fresh invite if appropriate. |
 | MCP script fails | Core product proof broken | Stop and fix. |
 | Android tests fail | Model/API/fake drift or real Android logic issue | Fix before demo. |
 | `assembleDebug` fails | Android compile/build issue | Fix before phone demo. |
@@ -524,8 +543,7 @@ signed APK is ready
 production deployment is ready
 secrets are production-safe
 enterprise RBAC is complete
-invite onboarding is production-grade
-open registration is solved
+enterprise invite onboarding is complete
 session lifecycle is production-grade
 monitoring/observability exists
 all errors are polished
@@ -537,7 +555,7 @@ Unless each claim has direct evidence.
 Safe claim after this checklist passes:
 
 ```text
-This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, owner-only role management, owner-only invite administration, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
+This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, owner-only role management, owner-only invite onboarding after bootstrap, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
 ```
 
 Unsafe claim:
@@ -562,12 +580,14 @@ Release/demo is a **GO** only if all are true:
 - [ ] Android JVM tests pass.
 - [ ] Android session/auth failure classification tests pass.
 - [ ] Android Account shows current backend role.
+- [ ] Android Account supports invite code registration.
 - [ ] Android debug build passes.
 - [ ] Android release variant build passes.
 - [ ] Auth-disabled fast demo path works.
 - [ ] Auth-enabled Android account/session path works.
 - [ ] Owner role-management API path works.
 - [ ] Owner invite-management API path works.
+- [ ] Invite acceptance registration path works.
 - [ ] Physical phone can reach backend over LAN, if using real phone.
 - [ ] MCP Queue shows pending request.
 - [ ] Linked approval opens the correct approval.
@@ -578,7 +598,7 @@ Release/demo is a **GO** only if all are true:
 - [ ] CI status is either verified or explicitly stated as unverified.
 - [ ] Signed APK status is explicitly stated as unavailable unless signing has been implemented.
 - [ ] Production deployment status is explicitly stated as incomplete unless deployment/secrets/monitoring are implemented.
-- [ ] Enterprise RBAC status is explicitly stated as incomplete unless project-scoped roles/invites/session revocation are implemented.
+- [ ] Enterprise RBAC status is explicitly stated as incomplete unless project-scoped roles/session revocation are implemented.
 
 If any box is unchecked, the honest status is:
 

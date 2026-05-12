@@ -111,6 +111,14 @@ fun AuthScreen(
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )
+        OutlinedTextField(
+            value = state.inviteCode,
+            onValueChange = viewModel::updateInviteCode,
+            label = { Text("Invite code") },
+            supportingText = { Text("First owner can register without this. Later users need an owner invite.") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             Button(
