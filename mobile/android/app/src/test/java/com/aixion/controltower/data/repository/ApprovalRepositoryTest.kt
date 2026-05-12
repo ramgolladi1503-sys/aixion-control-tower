@@ -8,6 +8,9 @@ import com.aixion.controltower.core.api.dto.AuthUserDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
+import com.aixion.controltower.core.api.dto.InviteCreateRequestDto
+import com.aixion.controltower.core.api.dto.InviteCreateResponseDto
+import com.aixion.controltower.core.api.dto.InviteDto
 import com.aixion.controltower.core.api.dto.LoginRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.api.dto.MCPPendingHealthDto
@@ -94,6 +97,16 @@ private class FailingApprovalApi : ControlTowerApi {
     override suspend fun listUsers(): List<AuthUserDto> = emptyList()
 
     override suspend fun updateUserRole(userId: String, payload: RoleUpdateRequestDto): AuthUserDto {
+        throw UnsupportedOperationException("not needed")
+    }
+
+    override suspend fun createInvite(payload: InviteCreateRequestDto): InviteCreateResponseDto {
+        throw UnsupportedOperationException("not needed")
+    }
+
+    override suspend fun listInvites(): List<InviteDto> = emptyList()
+
+    override suspend fun revokeInvite(inviteId: String): InviteDto {
         throw UnsupportedOperationException("not needed")
     }
 

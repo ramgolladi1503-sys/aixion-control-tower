@@ -28,41 +28,46 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-class RoleAdminRepositoryTest {
+class InviteAdminRepositoryTest {
     @Test
-    fun listRolesReturnsBackendRoleChoices() = runTest {
-        val repository = RoleAdminRepository(RoleAdminApi())
+    fun createInviteSendsEmailRoleAndExpiry() = runTest {
+        val api = InviteAdminApi()
+        val repository = InviteAdminRepository(api)
 
-        assertEquals(listOf("OWNER", "MAINTAINER", "REVIEWER"), repository.listRoles())
+        val created = repository.createInvite(" new@example.com ", "MAINTAINER", expiresInDays = 14)
+
+        assertEquals("new@example.com", api.createdPayload?.email)
+        assertEquals("MAINTAINER", api.createdPayload?.role)
+        assertEquals(14, api.createdPayload?.expires_in_days)
+        assertEquals("token_once", created.token)
     }
 
     @Test
-    fun listUsersReturnsBackendUsers() = runTest {
-        val repository = RoleAdminRepository(RoleAdminApi())
+    fun listInvitesReturnsBackendInvites() = runTest {
+        val repository = InviteAdminRepository(InviteAdminApi())
 
-        val users = repository.listUsers()
+        val invites = repository.listInvites()
 
-        assertEquals(2, users.size)
-        assertEquals("owner@example.com", users[0].email)
-        assertEquals("REVIEWER", users[1].role)
+        assertEquals(2, invites.size)
+        assertEquals("new@example.com", invites[0].email)
+        assertEquals("PENDING", invites[0].status)
     }
 
     @Test
-    fun updateRoleSendsRequestedRole() = runTest {
-        val api = RoleAdminApi()
-        val repository = RoleAdminRepository(api)
+    fun revokeInviteCallsBackendAndReturnsUpdatedInvite() = runTest {
+        val api = InviteAdminApi()
+        val repository = InviteAdminRepository(api)
 
-        val updated = repository.updateRole("user_reviewer", "MAINTAINER")
+        val revoked = repository.revokeInvite("invite_pending")
 
-        assertEquals("user_reviewer", api.updatedUserId)
-        assertEquals("MAINTAINER", api.updatedRole)
-        assertEquals("MAINTAINER", updated.role)
+        assertEquals("invite_pending", api.revokedInviteId)
+        assertEquals("REVOKED", revoked.status)
     }
 }
 
-private class RoleAdminApi : ControlTowerApi {
-    var updatedUserId: String? = null
-    var updatedRole: String? = null
+private class InviteAdminApi : ControlTowerApi {
+    var createdPayload: InviteCreateRequestDto? = null
+    var revokedInviteId: String? = null
 
     override suspend fun health(): Map<String, String> = emptyMap()
 
@@ -82,42 +87,53 @@ private class RoleAdminApi : ControlTowerApi {
         return RoleChoicesDto(roles = listOf("OWNER", "MAINTAINER", "REVIEWER"))
     }
 
-    override suspend fun listUsers(): List<AuthUserDto> {
+    override suspend fun listUsers(): List<AuthUserDto> = emptyList()
+
+    override suspend fun updateUserRole(userId: String, payload: RoleUpdateRequestDto): AuthUserDto {
+        throw UnsupportedOperationException("not needed")
+    }
+
+    override suspend fun createInvite(payload: InviteCreateRequestDto): InviteCreateResponseDto {
+        createdPayload = payload
+        return InviteCreateResponseDto(
+            id = "invite_new",
+            email = payload.email,
+            role = payload.role,
+            status = "PENDING",
+            created_by_user_id = "user_owner",
+            token = "token_once"
+        )
+    }
+
+    override suspend fun listInvites(): List<InviteDto> {
         return listOf(
-            AuthUserDto(
-                id = "user_owner",
-                email = "owner@example.com",
-                display_name = "Owner",
-                role = "OWNER"
+            InviteDto(
+                id = "invite_pending",
+                email = "new@example.com",
+                role = "REVIEWER",
+                status = "PENDING",
+                created_by_user_id = "user_owner"
             ),
-            AuthUserDto(
-                id = "user_reviewer",
-                email = "reviewer@example.com",
-                display_name = "Reviewer",
-                role = "REVIEWER"
+            InviteDto(
+                id = "invite_accepted",
+                email = "accepted@example.com",
+                role = "MAINTAINER",
+                status = "ACCEPTED",
+                created_by_user_id = "user_owner",
+                accepted_by_user_id = "user_accepted"
             )
         )
     }
 
-    override suspend fun updateUserRole(userId: String, payload: RoleUpdateRequestDto): AuthUserDto {
-        updatedUserId = userId
-        updatedRole = payload.role
-        return AuthUserDto(
-            id = userId,
-            email = "reviewer@example.com",
-            display_name = "Reviewer",
-            role = payload.role
-        )
-    }
-
-    override suspend fun createInvite(payload: InviteCreateRequestDto): InviteCreateResponseDto {
-        throw UnsupportedOperationException("not needed")
-    }
-
-    override suspend fun listInvites(): List<InviteDto> = emptyList()
-
     override suspend fun revokeInvite(inviteId: String): InviteDto {
-        throw UnsupportedOperationException("not needed")
+        revokedInviteId = inviteId
+        return InviteDto(
+            id = inviteId,
+            email = "new@example.com",
+            role = "REVIEWER",
+            status = "REVOKED",
+            created_by_user_id = "user_owner"
+        )
     }
 
     override suspend fun listProjects(): List<ProjectDto> = emptyList()
