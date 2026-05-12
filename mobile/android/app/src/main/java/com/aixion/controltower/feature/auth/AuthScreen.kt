@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.api.dto.AuthUserDto
+import com.aixion.controltower.core.api.dto.InviteDto
 import com.aixion.controltower.core.ui.theme.RiskCritical
 import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.TowerAccent
@@ -36,14 +37,17 @@ import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 @Composable
 fun AuthScreen(
     viewModel: AuthViewModel = viewModel(),
-    roleAdminViewModel: RoleAdminViewModel = viewModel()
+    roleAdminViewModel: RoleAdminViewModel = viewModel(),
+    inviteAdminViewModel: InviteAdminViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsState()
     val roleState by roleAdminViewModel.state.collectAsState()
+    val inviteState by inviteAdminViewModel.state.collectAsState()
 
     LaunchedEffect(state.authenticated) {
         if (state.authenticated) {
             roleAdminViewModel.refresh()
+            inviteAdminViewModel.refresh()
         }
     }
 
@@ -160,6 +164,15 @@ fun AuthScreen(
                 onRefresh = roleAdminViewModel::refresh,
                 onUpdateRole = roleAdminViewModel::updateRole
             )
+            InviteManagementPanel(
+                state = inviteState,
+                roles = roleState.roles.ifEmpty { listOf("OWNER", "MAINTAINER", "REVIEWER") },
+                onEmailChange = inviteAdminViewModel::updateInviteEmail,
+                onRoleChange = inviteAdminViewModel::updateSelectedRole,
+                onCreate = inviteAdminViewModel::createInvite,
+                onRefresh = inviteAdminViewModel::refresh,
+                onRevoke = inviteAdminViewModel::revokeInvite
+            )
         }
     }
 }
@@ -218,6 +231,121 @@ private fun RoleManagementPanel(
                 updating = state.updatingUserId == user.id,
                 onUpdateRole = onUpdateRole
             )
+        }
+    }
+}
+
+@Composable
+private fun InviteManagementPanel(
+    state: InviteAdminUiState,
+    roles: List<String>,
+    onEmailChange: (String) -> Unit,
+    onRoleChange: (String) -> Unit,
+    onCreate: () -> Unit,
+    onRefresh: () -> Unit,
+    onRevoke: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(TowerSurface, RoundedCornerShape(22.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Owner invite management",
+                    color = TowerTextPrimary,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Create, list, and revoke invites from the phone. Non-owners will see backend 403 here.",
+                    color = TowerTextMuted,
+                    fontSize = 12.sp
+                )
+            }
+            OutlinedButton(onClick = onRefresh, enabled = !state.loading) {
+                Text(if (state.loading) "Loading..." else "Refresh")
+            }
+        }
+
+        OutlinedTextField(
+            value = state.inviteEmail,
+            onValueChange = onEmailChange,
+            label = { Text("Invite email") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            roles.forEach { role ->
+                OutlinedButton(
+                    onClick = { onRoleChange(role) },
+                    enabled = !state.loading,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(if (state.selectedRole == role) "✓ ${role.take(5)}" else role.take(5))
+                }
+            }
+        }
+
+        Button(
+            onClick = onCreate,
+            enabled = !state.loading && state.inviteEmail.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (state.loading) "Working..." else "Create invite")
+        }
+
+        state.latestInviteCode?.let { code ->
+            Text(
+                text = "Invite code shown once: $code",
+                color = RiskLow,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        state.message?.let { message ->
+            Text(text = message, color = TowerAccent, fontSize = 13.sp)
+        }
+        state.errorMessage?.let { error ->
+            Text(text = error, color = RiskCritical, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+
+        if (!state.loading && state.invites.isEmpty() && state.errorMessage == null) {
+            Text(text = "No invites loaded yet.", color = TowerTextMuted, fontSize = 13.sp)
+        }
+
+        state.invites.forEach { invite ->
+            InviteCard(invite = invite, loading = state.loading, onRevoke = onRevoke)
+        }
+    }
+}
+
+@Composable
+private fun InviteCard(
+    invite: InviteDto,
+    loading: Boolean,
+    onRevoke: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(TowerBackground, RoundedCornerShape(18.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(text = invite.email, color = TowerTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+        Text(text = "Role: ${invite.role} • Status: ${invite.status}", color = TowerAccent, fontSize = 13.sp)
+        invite.accepted_by_user_id?.let { acceptedBy ->
+            Text(text = "Accepted by: $acceptedBy", color = TowerTextMuted, fontSize = 12.sp)
+        }
+        if (invite.status == "PENDING") {
+            OutlinedButton(onClick = { onRevoke(invite.id) }, enabled = !loading) {
+                Text("Revoke")
+            }
         }
     }
 }
