@@ -8,9 +8,9 @@ Set `AIXION_PROFILE` to one of:
 
 ```text
 local
- demo
- test
- production
+demo
+test
+production
 ```
 
 If `AIXION_PROFILE` is omitted, the backend uses `local`.
