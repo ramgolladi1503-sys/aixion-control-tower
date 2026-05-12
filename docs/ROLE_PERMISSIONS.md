@@ -8,7 +8,7 @@ This is not enterprise RBAC yet. It is the minimum serious permission boundary n
 
 | Role | Purpose |
 | --- | --- |
-| `OWNER` | Owns the control tower, manages agents, manages user roles, manages invites, and controls all operational surfaces. |
+| `OWNER` | Owns the control tower, manages agents, manages user roles, manages invites, manages sessions, and controls all operational surfaces. |
 | `MAINTAINER` | Can create and execute controlled work, register MCP child servers, recover queues, and run GitHub execution paths. |
 | `REVIEWER` | Can inspect work and make approval decisions from the mobile approval flow. |
 
@@ -102,6 +102,33 @@ See:
 docs/INVITE_ONBOARDING.md
 ```
 
+## Owner session management
+
+The backend exposes a first-pass owner-only session control layer.
+
+| Endpoint | Access | Purpose |
+| --- | --- | --- |
+| `GET /auth/sessions` | `OWNER` only | List session metadata without exposing token hashes. |
+| `POST /auth/users/{user_id}/sessions/revoke` | `OWNER` only | Revoke active sessions for another user. |
+
+Session rules:
+
+```text
+session list never returns token_hash
+owner can revoke another user's active sessions
+owner cannot revoke their own sessions through the force-logout endpoint
+revoked sessions immediately fail /auth/me with 401
+successful revocation writes auth.sessions_revoked audit event
+```
+
+Audit behavior:
+
+```text
+auth.sessions_revoked
+```
+
+This is not full enterprise session governance yet. It does not include device fingerprinting, IP/User-Agent metadata, refresh-token rotation, or Android UI for session management.
+
 ## Permission matrix
 
 | Area | OWNER | MAINTAINER | REVIEWER |
@@ -113,6 +140,7 @@ docs/INVITE_ONBOARDING.md
 | List users | Yes | No | No |
 | Promote/demote users | Yes | No | No |
 | Create/list/revoke invites | Yes | No | No |
+| List/revoke sessions | Yes | No | No |
 | Read projects, ideas, work orders | Yes | Yes | Yes |
 | Read approvals/grouped approvals | Yes | Yes | Yes |
 | Read test runs | Yes | Yes | Yes |
@@ -156,11 +184,12 @@ trigger GitHub execution
 recover/retry MCP queue items
 manage user roles
 manage invites
+manage sessions
 ```
 
 ## Why maintainers can execute
 
-Maintainers are trusted operators. They can create work and run execution paths, but they do not manage external agents, users, or invites.
+Maintainers are trusted operators. They can create work and run execution paths, but they do not manage external agents, users, invites, or sessions.
 
 Maintainer can:
 
@@ -179,12 +208,13 @@ register external agents
 list external agent credentials/surfaces
 manage user roles
 manage invites
+manage sessions
 act as owner
 ```
 
-## Why agent, user, and invite management are owner-only
+## Why agent, user, invite, and session management are owner-only
 
-External agents can create approvals and initiate powerful workflows. User role changes decide who can approve, execute, and administer those workflows. Invites decide who can enter the system next.
+External agents can create approvals and initiate powerful workflows. User role changes decide who can approve, execute, and administer those workflows. Invites decide who can enter the system next. Sessions decide who remains logged in.
 
 Only owner can:
 
@@ -195,6 +225,8 @@ inspect agent configuration
 list users
 promote or demote users
 create/list/revoke invites
+list sessions
+force logout another user
 ```
 
 ## Auth-disabled profile behavior
@@ -213,7 +245,7 @@ Do not confuse auth-disabled demo behavior with production security.
 
 ## Remaining gaps
 
-Role and invite onboarding are improved, but this is still not enterprise RBAC.
+Role, invite onboarding, and session revocation are improved, but this is still not enterprise RBAC.
 
 Missing:
 
@@ -222,8 +254,9 @@ email delivery for invites
 invite resend/rotate
 dedicated Android invite-admin screen
 project-scoped roles
-role and invite audit UI polish
-session revocation by owner
+role/invite/session audit UI polish
+Android session-management UI
+refresh-token rotation
 production deployment/secrets/monitoring
 ```
 
@@ -232,7 +265,7 @@ production deployment/secrets/monitoring
 After this layer passes CI, it is safe to claim:
 
 ```text
-The backend now enforces first-pass role boundaries, owner-only role management, owner-only invite administration, and invite-token registration after bootstrap.
+The backend now enforces first-pass role boundaries, owner-only role management, owner-only invite administration, invite-token registration after bootstrap, and owner-only session revocation for force logout.
 ```
 
 ## Unsafe claim
@@ -242,10 +275,11 @@ Do not claim:
 ```text
 Enterprise RBAC is complete.
 Enterprise onboarding is complete.
+Enterprise session governance is complete.
 ```
 
 Those would be false.
 
 ## Brutal truth
 
-Auth without roles means every logged-in user is too powerful. Roles without owner administration are clumsy. Owner administration without invite acceptance leaves onboarding weak. This layer finally closes open non-bootstrap registration, but enterprise onboarding still needs delivery, rotation, project scoping, and revocation polish.
+Auth without roles means every logged-in user is too powerful. Roles without owner administration are clumsy. Owner administration without invite acceptance leaves onboarding weak. Invite onboarding without session revocation leaves stale access hanging around. This layer finally adds force logout, but enterprise governance still needs device metadata, rotation, project scoping, and admin UI polish.
