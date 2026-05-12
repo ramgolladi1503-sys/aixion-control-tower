@@ -57,6 +57,7 @@ def test_invalid_boolean_fails_fast() -> None:
 
 def test_production_requires_explicit_operational_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.delenv("AIXION_AUTH_ENABLED", raising=False)
     monkeypatch.delenv("AIXION_DB_PATH", raising=False)
     monkeypatch.delenv("GITHUB_" + "TOKEN", raising=False)
     monkeypatch.delenv("FCM_" + "SERVER_" + "KEY", raising=False)
@@ -87,6 +88,7 @@ def test_production_rejects_disabled_auth(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_production_rejects_demo_or_test_database_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.delenv("AIXION_AUTH_ENABLED", raising=False)
     monkeypatch.setenv("AIXION_DB_PATH", "runtime/aixion_control_tower_demo.sqlite3")
     monkeypatch.setenv("GITHUB_" + "TOKEN", "configured")
     monkeypatch.setenv("FCM_" + "SERVER_" + "KEY", "configured")
@@ -98,6 +100,7 @@ def test_production_rejects_demo_or_test_database_paths(monkeypatch: pytest.Monk
 
 def test_valid_production_environment_passes_startup_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
     monkeypatch.setenv("AIXION_DB_PATH", "runtime/prod.sqlite3")
     monkeypatch.setenv("GITHUB_" + "TOKEN", "configured")
     monkeypatch.setenv("FCM_" + "SERVER_" + "KEY", "configured")
@@ -110,6 +113,7 @@ def test_valid_production_environment_passes_startup_validation(monkeypatch: pyt
 
 def test_invalid_production_environment_fails_startup_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.delenv("AIXION_AUTH_ENABLED", raising=False)
     monkeypatch.delenv("AIXION_DB_PATH", raising=False)
     monkeypatch.delenv("GITHUB_" + "TOKEN", raising=False)
     monkeypatch.delenv("FCM_" + "SERVER_" + "KEY", raising=False)
