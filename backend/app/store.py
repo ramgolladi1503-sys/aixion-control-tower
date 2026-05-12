@@ -5,6 +5,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
+from .database_migrations import get_applied_migrations, run_migrations
 from .models import (
     ApprovalRequest,
     AuditEvent,
@@ -59,16 +60,11 @@ class SQLiteBackedStore:
 
     def _init_db(self) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS kv_store (
-                    entity_type TEXT NOT NULL,
-                    entity_id TEXT NOT NULL,
-                    payload TEXT NOT NULL,
-                    PRIMARY KEY (entity_type, entity_id)
-                )
-                """
-            )
+            run_migrations(conn)
+
+    def applied_migrations(self) -> list[dict[str, str]]:
+        with self._connect() as conn:
+            return get_applied_migrations(conn)
 
     def _load_entities(self, entity_type: str, model: type[T]) -> dict[str, T]:
         with self._connect() as conn:
