@@ -22,7 +22,7 @@ from .models import (
     User,
     WorkOrder,
 )
-from .settings import get_settings
+from .settings import validate_startup_environment
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -36,7 +36,7 @@ class SQLiteBackedStore:
     """
 
     def __init__(self) -> None:
-        self.db_path = get_settings().db_path
+        self.db_path = validate_startup_environment().db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.users: dict[str, User] = {}
         self.sessions: dict[str, SessionToken] = {}
