@@ -4,7 +4,7 @@ Invite onboarding closes the biggest remaining auth hole after owner-only role m
 
 ## Current scope
 
-The backend now supports owner-controlled invite administration and invite-token registration acceptance.
+The backend supports owner-controlled invite administration and invite-token registration acceptance.
 
 Invite administration:
 
@@ -18,6 +18,15 @@ Registration acceptance:
 
 ```text
 POST /auth/register
+```
+
+Android Account now supports:
+
+```text
+enter invite code during registration
+owner create invite
+owner list invites
+owner revoke pending invite
 ```
 
 Registration rule:
@@ -93,6 +102,31 @@ pending duplicate invite for the same email returns 409
 successful creation writes auth.invite_created audit event
 ```
 
+## Android owner invite management
+
+The Android Account screen includes an owner invite-management panel after login.
+
+Owner can:
+
+```text
+enter invited email
+choose OWNER / MAINTAINER / REVIEWER
+create invite
+copy the one-time invite code shown after creation
+refresh invite list
+revoke pending invite
+see accepted invite metadata
+```
+
+Non-owner behavior:
+
+```text
+backend returns 403
+Android shows a clear owner-only error
+```
+
+The invite code is intentionally shown only immediately after creation. The list endpoint never returns it.
+
 ## Register with invite
 
 The first user can bootstrap without an invite and becomes OWNER.
@@ -130,14 +164,12 @@ auth.invite_accepted audit event is written
 
 ## Android registration
 
-Android Account registration now includes an invite code field.
+Android Account registration includes an invite code field.
 
 ```text
 first owner: leave invite code blank
 later users: paste owner-issued invite code
 ```
-
-This is intentionally a basic Account-screen input, not a polished invite-admin UX.
 
 ## List invites
 
@@ -174,6 +206,8 @@ successful revocation writes auth.invite_revoked audit event
 
 ## Validation commands
 
+Backend validation:
+
 ```bash
 cd backend
 python -m pytest tests/test_invite_onboarding.py
@@ -181,12 +215,20 @@ python -m pytest tests/test_role_management.py
 python -m pytest
 ```
 
-Android contract validation:
+Android validation:
 
 ```bash
 cd mobile/android
 ./gradlew testDebugUnitTest
 ./gradlew assembleDebug
+./gradlew assembleRelease
+```
+
+Focused Android invite-admin test:
+
+```bash
+cd mobile/android
+./gradlew testDebugUnitTest --tests '*InviteAdminRepositoryTest'
 ```
 
 ## Remaining gaps
@@ -198,7 +240,7 @@ Missing:
 ```text
 email delivery for invites
 invite resend/rotate
-dedicated Android invite-admin screen
+polished dedicated Android admin screen
 role/invite audit UI polish
 project-scoped invites or project-scoped roles
 owner session revocation
