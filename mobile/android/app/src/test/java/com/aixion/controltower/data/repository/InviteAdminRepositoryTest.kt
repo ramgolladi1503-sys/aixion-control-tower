@@ -21,6 +21,8 @@ import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
 import com.aixion.controltower.core.api.dto.RoleChoicesDto
 import com.aixion.controltower.core.api.dto.RoleUpdateRequestDto
+import com.aixion.controltower.core.api.dto.SessionDto
+import com.aixion.controltower.core.api.dto.SessionRevokeResponseDto
 import com.aixion.controltower.core.api.dto.TestRunDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
@@ -134,6 +136,12 @@ private class InviteAdminApi : ControlTowerApi {
             status = "REVOKED",
             created_by_user_id = "user_owner"
         )
+    }
+
+    override suspend fun listSessions(): List<SessionDto> = emptyList()
+
+    override suspend fun revokeUserSessions(userId: String): SessionRevokeResponseDto {
+        throw UnsupportedOperationException("not needed")
     }
 
     override suspend fun listProjects(): List<ProjectDto> = emptyList()
