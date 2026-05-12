@@ -20,6 +20,8 @@ import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
 import com.aixion.controltower.core.api.dto.RoleChoicesDto
 import com.aixion.controltower.core.api.dto.RoleUpdateRequestDto
+import com.aixion.controltower.core.api.dto.SessionDto
+import com.aixion.controltower.core.api.dto.SessionRevokeResponseDto
 import com.aixion.controltower.core.api.dto.TestRunDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
@@ -63,6 +65,12 @@ interface ControlTowerApi {
 
     @POST("auth/invites/{inviteId}/revoke")
     suspend fun revokeInvite(@Path("inviteId") inviteId: String): InviteDto
+
+    @GET("auth/sessions")
+    suspend fun listSessions(): List<SessionDto>
+
+    @POST("auth/users/{userId}/sessions/revoke")
+    suspend fun revokeUserSessions(@Path("userId") userId: String): SessionRevokeResponseDto
 
     @GET("projects")
     suspend fun listProjects(): List<ProjectDto>

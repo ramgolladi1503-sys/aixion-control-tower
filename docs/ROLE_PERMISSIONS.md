@@ -109,16 +109,25 @@ The backend exposes a first-pass owner-only session control layer.
 | Endpoint | Access | Purpose |
 | --- | --- | --- |
 | `GET /auth/sessions` | `OWNER` only | List session metadata without exposing token hashes. |
-| `POST /auth/users/{user_id}/sessions/revoke` | `OWNER` only | Revoke active sessions for another user. |
+| `POST /auth/users/{user_id}/sessions/revoke` | `OWNER` only | Expire active sessions for another user. |
 
 Session rules:
 
 ```text
 session list never returns token_hash
-owner can revoke another user's active sessions
-owner cannot revoke their own sessions through the force-logout endpoint
-revoked sessions immediately fail /auth/me with 401
-successful revocation writes auth.sessions_revoked audit event
+owner can expire another user's active sessions
+owner cannot expire their own sessions through the endpoint
+expired sessions immediately fail /auth/me with 401
+successful action writes auth.sessions_revoked audit event
+```
+
+Android Account now exposes an owner access-management panel:
+
+```text
+list active/revoked sessions
+show user email, role, session id, and expiry
+expire another user's active sessions
+surface 401 / 403 / 404 / 409 operator errors clearly
 ```
 
 Audit behavior:
@@ -127,7 +136,7 @@ Audit behavior:
 auth.sessions_revoked
 ```
 
-This is not full enterprise session governance yet. It does not include device fingerprinting, IP/User-Agent metadata, refresh-token rotation, or Android UI for session management.
+This is not full enterprise session governance yet. It does not include device fingerprinting, IP/User-Agent metadata, refresh-token rotation, or a polished dedicated Android admin screen.
 
 ## Permission matrix
 
@@ -140,7 +149,7 @@ This is not full enterprise session governance yet. It does not include device f
 | List users | Yes | No | No |
 | Promote/demote users | Yes | No | No |
 | Create/list/revoke invites | Yes | No | No |
-| List/revoke sessions | Yes | No | No |
+| List/expire sessions | Yes | No | No |
 | Read projects, ideas, work orders | Yes | Yes | Yes |
 | Read approvals/grouped approvals | Yes | Yes | Yes |
 | Read test runs | Yes | Yes | Yes |
@@ -226,7 +235,7 @@ list users
 promote or demote users
 create/list/revoke invites
 list sessions
-force logout another user
+expire another user's access
 ```
 
 ## Auth-disabled profile behavior
@@ -255,7 +264,7 @@ invite resend/rotate
 dedicated Android invite-admin screen
 project-scoped roles
 role/invite/session audit UI polish
-Android session-management UI
+polished dedicated Android access-admin screen
 refresh-token rotation
 production deployment/secrets/monitoring
 ```
@@ -265,7 +274,7 @@ production deployment/secrets/monitoring
 After this layer passes CI, it is safe to claim:
 
 ```text
-The backend now enforces first-pass role boundaries, owner-only role management, owner-only invite administration, invite-token registration after bootstrap, and owner-only session revocation for force logout.
+The backend now enforces first-pass role boundaries, owner-only role management, owner-only invite administration, invite-token registration after bootstrap, and owner-only session revocation for force logout. Android Account now exposes owner controls for roles, invites, and session access.
 ```
 
 ## Unsafe claim
@@ -282,4 +291,4 @@ Those would be false.
 
 ## Brutal truth
 
-Auth without roles means every logged-in user is too powerful. Roles without owner administration are clumsy. Owner administration without invite acceptance leaves onboarding weak. Invite onboarding without session revocation leaves stale access hanging around. This layer finally adds force logout, but enterprise governance still needs device metadata, rotation, project scoping, and admin UI polish.
+Auth without roles means every logged-in user is too powerful. Roles without owner administration are clumsy. Owner administration without invite acceptance leaves onboarding weak. Invite onboarding without session revocation leaves stale access hanging around. This layer makes session control usable from Android, but enterprise governance still needs device metadata, rotation, project scoping, and admin UI polish.
