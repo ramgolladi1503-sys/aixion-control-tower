@@ -7,6 +7,9 @@ import com.aixion.controltower.core.api.dto.AuthUserDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
+import com.aixion.controltower.core.api.dto.InviteCreateRequestDto
+import com.aixion.controltower.core.api.dto.InviteCreateResponseDto
+import com.aixion.controltower.core.api.dto.InviteDto
 import com.aixion.controltower.core.api.dto.LoginRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.api.dto.MCPPendingHealthDto
@@ -51,6 +54,15 @@ interface ControlTowerApi {
         @Path("userId") userId: String,
         @Body payload: RoleUpdateRequestDto
     ): AuthUserDto
+
+    @POST("auth/invites")
+    suspend fun createInvite(@Body payload: InviteCreateRequestDto): InviteCreateResponseDto
+
+    @GET("auth/invites")
+    suspend fun listInvites(): List<InviteDto>
+
+    @POST("auth/invites/{inviteId}/revoke")
+    suspend fun revokeInvite(@Path("inviteId") inviteId: String): InviteDto
 
     @GET("projects")
     suspend fun listProjects(): List<ProjectDto>
