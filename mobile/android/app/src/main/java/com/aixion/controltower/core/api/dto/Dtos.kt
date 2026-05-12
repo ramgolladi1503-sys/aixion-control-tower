@@ -163,6 +163,23 @@ data class InviteCreateResponseDto(
     val token: String
 )
 
+data class SessionDto(
+    val id: String,
+    val user_id: String,
+    val user_email: String,
+    val user_role: String,
+    val created_at: String? = null,
+    val expires_at: String? = null,
+    val revoked: Boolean = false,
+    val active: Boolean = false
+)
+
+data class SessionRevokeResponseDto(
+    val target_user_id: String,
+    val target_email: String,
+    val revoked_sessions_count: Int
+)
+
 data class TestRunDto(
     val id: String,
     val approval_request_id: String,
