@@ -165,4 +165,3 @@ def test_validation_runner_requires_task_selector() -> None:
 
     assert result.success is False
     assert result.reason == "Provide task_id or set first_approved=true."
-}
