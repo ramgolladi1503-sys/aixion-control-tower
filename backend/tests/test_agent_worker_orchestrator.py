@@ -6,7 +6,6 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.agent_worker_github_branch import GitHubBranchCreateResult
-from app.agent_worker_github_files import GitHubFileApplyItem
 from app.agent_worker_github_pr import GitHubPullRequestCreateResult
 from app.agent_worker_orchestrator import run_approved_agent_task_worker_flow
 from app.agent_worker_validation_runner import CommandExecutionResult
@@ -227,4 +226,3 @@ def test_orchestrator_reports_missing_task() -> None:
 
     assert result.success is False
     assert result.reason == "Agent task not found."
-}
