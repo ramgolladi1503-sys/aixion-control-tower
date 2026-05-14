@@ -19,9 +19,7 @@ from .models import (
     TestRun,
     WorkOrder,
 )
-from .risk_engine import assess_approval_request
 from .settings import get_settings
-from .store import store
 
 DEMO_PROJECT_ID = "project_demo_aixion_control"
 DEMO_IDEA_ID = "idea_demo_mobile_approval"
@@ -41,7 +39,14 @@ class DemoDataResult:
     message: str
 
 
+def _store():
+    from .store import store
+
+    return store
+
+
 def _counts() -> dict[str, int]:
+    store = _store()
     return {
         "projects": len(store.projects),
         "ideas": len(store.ideas),
@@ -60,7 +65,10 @@ def _assert_demo_reset_allowed(profile: str) -> None:
 
 
 def seed_demo_data(*, force: bool = False) -> DemoDataResult:
+    from .risk_engine import assess_approval_request
+
     settings = get_settings()
+    store = _store()
     if force:
         _assert_demo_reset_allowed(settings.profile)
         store.reset()
@@ -185,6 +193,7 @@ def seed_demo_data(*, force: bool = False) -> DemoDataResult:
 def reset_demo_data() -> DemoDataResult:
     settings = get_settings()
     _assert_demo_reset_allowed(settings.profile)
+    store = _store()
     store.reset()
     return DemoDataResult(
         action="reset",
