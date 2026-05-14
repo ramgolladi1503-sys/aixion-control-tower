@@ -3,7 +3,7 @@ package com.aixion.controltower.feature.agenttasks
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.aixion.controltower.core.api.ApiClient
+import com.aixion.controltower.core.api.AgentTasksApiClient
 import com.aixion.controltower.core.model.AgentTaskEventSummary
 import com.aixion.controltower.core.model.AgentTaskSummary
 import com.aixion.controltower.data.repository.AgentTasksRepository
@@ -27,12 +27,17 @@ data class AgentTasksUiState(
 
     val activeCount: Int
         get() = tasks.count { task ->
-            task.status.name in setOf("RECEIVED", "PLANNING", "WAITING_FOR_APPROVAL", "APPROVED", "EXECUTING", "TESTING")
+            task.status.name == "RECEIVED" ||
+                task.status.name == "PLANNING" ||
+                task.status.name == "WAITING_FOR_APPROVAL" ||
+                task.status.name == "APPROVED" ||
+                task.status.name == "EXECUTING" ||
+                task.status.name == "TESTING"
         }
 }
 
 class AgentTasksViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = AgentTasksRepository(ApiClient.create(application.applicationContext))
+    private val repository = AgentTasksRepository(AgentTasksApiClient.create(application.applicationContext))
 
     private val _state = MutableStateFlow(AgentTasksUiState())
     val state: StateFlow<AgentTasksUiState> = _state.asStateFlow()
