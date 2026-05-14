@@ -48,6 +48,20 @@ enum class MCPPendingStatus {
     DEAD_LETTER
 }
 
+enum class AgentTaskStatus {
+    RECEIVED,
+    PLANNING,
+    WAITING_FOR_APPROVAL,
+    APPROVED,
+    DENIED,
+    EXECUTING,
+    TESTING,
+    READY_FOR_PR,
+    FAILED,
+    CANCELLED,
+    DONE
+}
+
 data class ProjectSummary(
     val id: String,
     val name: String,
@@ -189,6 +203,45 @@ data class RuntimeReadinessSummary(
     val hasSecretWarnings: Boolean
         get() = !githubTokenConfigured || !fcmServerKeyConfigured
 }
+
+data class AgentTaskSummary(
+    val id: String,
+    val provider: String,
+    val title: String,
+    val goal: String,
+    val context: String,
+    val status: AgentTaskStatus,
+    val requestedAction: String,
+    val repository: String?,
+    val branchPreference: String?,
+    val riskHint: RiskLevel?,
+    val requiresApproval: Boolean,
+    val approvalRequestId: String?,
+    val sourceUrl: String?,
+    val sourceSessionId: String?,
+    val sourceTaskId: String?,
+    val createdAt: String?,
+    val updatedAt: String?
+) {
+    val sourceLabel: String
+        get() = provider.ifBlank { "MANUAL" }
+
+    val needsHumanReview: Boolean
+        get() = status == AgentTaskStatus.WAITING_FOR_APPROVAL || status == AgentTaskStatus.RECEIVED || status == AgentTaskStatus.PLANNING
+
+    val hasLinkedApproval: Boolean
+        get() = !approvalRequestId.isNullOrBlank()
+}
+
+data class AgentTaskEventSummary(
+    val id: String,
+    val taskId: String,
+    val eventType: String,
+    val message: String,
+    val status: AgentTaskStatus?,
+    val actor: String,
+    val createdAt: String?
+)
 
 data class MCPPendingSummary(
     val id: String,
