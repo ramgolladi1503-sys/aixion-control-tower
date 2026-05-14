@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException
 
 from .agent_routes import router as agent_router
+from .agent_task_routes import router as agent_task_router
 from .approval_integrity import compute_approval_payload_hash
 from .approval_lifecycle import grouped_approvals
 from .audit_routes import router as audit_router
@@ -49,6 +50,7 @@ app.include_router(role_router)
 app.include_router(invite_router)
 app.include_router(session_router)
 app.include_router(agent_router)
+app.include_router(agent_task_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
 app.include_router(mcp_gateway_router)

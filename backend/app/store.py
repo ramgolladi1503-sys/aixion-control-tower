@@ -5,6 +5,8 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
+from .agent_task_models import AgentTask, AgentTaskEvent
+
 from .database_migrations import get_applied_migrations, run_migrations
 from .models import (
     ApprovalRequest,
@@ -43,6 +45,8 @@ class SQLiteBackedStore:
         self.invites: dict[str, Invite] = {}
         self.external_agents: dict[str, ExternalAgent] = {}
         self.device_registrations: dict[str, DeviceRegistration] = {}
+        self.agent_tasks: dict[str, AgentTask] = {}
+        self.agent_task_events: dict[str, AgentTaskEvent] = {}
         self.projects: dict[str, Project] = {}
         self.mcp_child_servers: dict[str, MCPChildServer] = {}
         self.ideas: dict[str, Idea] = {}
@@ -80,6 +84,8 @@ class SQLiteBackedStore:
         self.invites = self._load_entities("invite", Invite)
         self.external_agents = self._load_entities("external_agent", ExternalAgent)
         self.device_registrations = self._load_entities("device_registration", DeviceRegistration)
+        self.agent_tasks = self._load_entities("agent_task", AgentTask)
+        self.agent_task_events = self._load_entities("agent_task_event", AgentTaskEvent)
         self.projects = self._load_entities("project", Project)
         self.mcp_child_servers = self._load_entities("mcp_child_server", MCPChildServer)
         self.ideas = self._load_entities("idea", Idea)
@@ -98,6 +104,8 @@ class SQLiteBackedStore:
             self._write_map(conn, "invite", self.invites)
             self._write_map(conn, "external_agent", self.external_agents)
             self._write_map(conn, "device_registration", self.device_registrations)
+            self._write_map(conn, "agent_task", self.agent_tasks)
+            self._write_map(conn, "agent_task_event", self.agent_task_events)
             self._write_map(conn, "project", self.projects)
             self._write_map(conn, "mcp_child_server", self.mcp_child_servers)
             self._write_map(conn, "idea", self.ideas)
@@ -131,6 +139,8 @@ class SQLiteBackedStore:
         self.invites.clear()
         self.external_agents.clear()
         self.device_registrations.clear()
+        self.agent_tasks.clear()
+        self.agent_task_events.clear()
         self.projects.clear()
         self.mcp_child_servers.clear()
         self.ideas.clear()
