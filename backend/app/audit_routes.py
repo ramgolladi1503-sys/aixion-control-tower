@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from .auth import require_reviewer
+from .auth import require_owner, require_reviewer
 from .models import AuditEvent, AuthUser
+from .recovery_routes import (
+    RecoverySnapshot,
+    RecoveryValidationRequest,
+    RecoveryValidationResponse,
+    export_recovery_snapshot,
+    validate_recovery_snapshot,
+)
 from .store import store
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 ReviewerDependency = Depends(require_reviewer)
+OwnerDependency = Depends(require_owner)
 
 
 @router.get("/events", response_model=list[AuditEvent])
@@ -44,3 +52,16 @@ def get_audit_event(
     if event is None:
         raise HTTPException(status_code=404, detail="Audit event not found")
     return event
+
+
+@router.get("/recovery/export", response_model=RecoverySnapshot)
+def export_recovery(_: AuthUser = OwnerDependency) -> RecoverySnapshot:
+    return export_recovery_snapshot(_)
+
+
+@router.post("/recovery/validate", response_model=RecoveryValidationResponse)
+def validate_recovery(
+    payload: RecoveryValidationRequest,
+    _: AuthUser = OwnerDependency,
+) -> RecoveryValidationResponse:
+    return validate_recovery_snapshot(payload.snapshot)
