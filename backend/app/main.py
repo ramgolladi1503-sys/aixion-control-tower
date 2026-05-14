@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException
 
 from .agent_routes import router as agent_router
-from .agent_task_routes import router as agent_task_router
+from .agent_task_routes import propagate_approval_decision_to_agent_task, router as agent_task_router
 from .approval_integrity import compute_approval_payload_hash
 from .approval_lifecycle import grouped_approvals
 from .audit_routes import router as audit_router
@@ -356,6 +356,7 @@ def decide_approval(approval_id: str, payload: DecisionCreate, user: AuthUser = 
         },
         actor=user.email,
     )
+    propagate_approval_decision_to_agent_task(request, previous_status, user.email)
     create_notification(
         title=f"Approval {request.status.lower()}: {request.title}",
         body=payload.reason or "Decision recorded from mobile review.",
