@@ -61,7 +61,7 @@ def _approval_payload(project: Project) -> dict:
     }
 
 
-def test_create_agent_task_approval_links_task_and_moves_to_waiting() -> None:
+def test_create_agent_task_approval_links_task_moves_to_waiting_and_notifies() -> None:
     project = _project()
     task = _task(project)
 
@@ -71,17 +71,23 @@ def test_create_agent_task_approval_links_task_and_moves_to_waiting() -> None:
     approval = response.json()
     updated_task = client.get(f"/agent/tasks/{task['id']}").json()
     events = client.get(f"/agent/tasks/{task['id']}/events").json()
+    approval_event = next(event for event in events if event["event_type"] == "APPROVAL_CREATED")
+    notification_id = approval_event["metadata"]["notification_id"]
+    notification = store.notifications[notification_id]
 
     assert updated_task["approval_request_id"] == approval["id"]
     assert updated_task["status"] == "WAITING_FOR_APPROVAL"
     assert approval["source_provider"] == "CHATGPT"
     assert approval["source_task_url"] == "https://chat.openai.com/demo-task"
-    assert any(event["event_type"] == "APPROVAL_CREATED" for event in events)
+    assert notification.entity_type == "agent_task"
+    assert notification.entity_id == task["id"]
+    assert notification.title == "Agent task approval needed: Prepare implementation plan"
+    assert notification.user_id == task["created_by_user_id"]
     assert any(event.event_type == "agent_task.approval_created" for event in store.audit_events)
-    assert any(notification.entity_id == approval["id"] for notification in store.notifications.values())
+    assert any(event.details.get("notification_id") == notification_id for event in store.audit_events)
 
 
-def test_linked_approval_approve_updates_agent_task_status() -> None:
+def test_linked_approval_approve_updates_agent_task_status_and_notifies() -> None:
     project = _project()
     task = _task(project)
     approval = client.post(f"/agent/tasks/{task['id']}/approval", json=_approval_payload(project)).json()
@@ -89,15 +95,21 @@ def test_linked_approval_approve_updates_agent_task_status() -> None:
     decision = client.post(f"/approvals/{approval['id']}/approve")
     updated_task = client.get(f"/agent/tasks/{task['id']}").json()
     events = client.get(f"/agent/tasks/{task['id']}/events").json()
+    approval_event = next(event for event in events if event["event_type"] == "APPROVED")
+    notification_id = approval_event["metadata"]["notification_id"]
+    notification = store.notifications[notification_id]
 
     assert decision.status_code == 200
     assert decision.json()["status"] == "APPROVED"
     assert updated_task["status"] == "APPROVED"
-    assert any(event["event_type"] == "APPROVED" for event in events)
+    assert notification.entity_type == "agent_task"
+    assert notification.entity_id == task["id"]
+    assert notification.title == "Agent task approved: Prepare implementation plan"
     assert any(event.event_type == "agent_task.approval_decision_propagated" for event in store.audit_events)
+    assert any(event.details.get("notification_id") == notification_id for event in store.audit_events)
 
 
-def test_linked_approval_deny_updates_agent_task_status() -> None:
+def test_linked_approval_deny_updates_agent_task_status_and_notifies() -> None:
     project = _project()
     task = _task(project)
     approval = client.post(f"/agent/tasks/{task['id']}/approval", json=_approval_payload(project)).json()
@@ -105,11 +117,16 @@ def test_linked_approval_deny_updates_agent_task_status() -> None:
     decision = client.post(f"/approvals/{approval['id']}/deny", json={"decision": "deny", "reason": "Not ready"})
     updated_task = client.get(f"/agent/tasks/{task['id']}").json()
     events = client.get(f"/agent/tasks/{task['id']}/events").json()
+    denied_event = next(event for event in events if event["event_type"] == "DENIED")
+    notification_id = denied_event["metadata"]["notification_id"]
+    notification = store.notifications[notification_id]
 
     assert decision.status_code == 200
     assert decision.json()["status"] == "DENIED"
     assert updated_task["status"] == "DENIED"
-    assert any(event["event_type"] == "DENIED" for event in events)
+    assert notification.entity_type == "agent_task"
+    assert notification.entity_id == task["id"]
+    assert notification.title == "Agent task denied: Prepare implementation plan"
 
 
 def test_agent_task_approval_rejects_duplicate_link() -> None:
