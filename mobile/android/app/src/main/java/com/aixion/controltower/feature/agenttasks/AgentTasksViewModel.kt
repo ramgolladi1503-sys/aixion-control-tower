@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 data class AgentTasksUiState(
     val loading: Boolean = true,
     val selectedTaskId: String? = null,
+    val pendingDeepLinkTaskId: String? = null,
     val errorMessage: String? = null,
     val tasks: List<AgentTaskSummary> = emptyList(),
     val selectedEvents: List<AgentTaskEventSummary> = emptyList()
@@ -46,18 +47,35 @@ class AgentTasksViewModel(application: Application) : AndroidViewModel(applicati
         refresh()
     }
 
+    fun openFromDeepLink(taskId: String) {
+        val current = _state.value
+        if (current.selectedTaskId == taskId) return
+        _state.value = current.copy(selectedTaskId = taskId, pendingDeepLinkTaskId = taskId, selectedEvents = emptyList())
+        if (current.tasks.any { it.id == taskId }) {
+            loadEvents(taskId)
+        } else {
+            refresh()
+        }
+    }
+
     fun refresh() {
         viewModelScope.launch {
             _state.value = _state.value.copy(loading = true, errorMessage = null)
             runCatching {
                 repository.listAgentTasks()
             }.onSuccess { tasks ->
-                val selectedTaskId = _state.value.selectedTaskId?.takeIf { id -> tasks.any { it.id == id } }
+                val pendingDeepLinkTaskId = _state.value.pendingDeepLinkTaskId
+                val selectedTaskId = when {
+                    pendingDeepLinkTaskId != null && tasks.any { it.id == pendingDeepLinkTaskId } -> pendingDeepLinkTaskId
+                    _state.value.selectedTaskId != null && tasks.any { it.id == _state.value.selectedTaskId } -> _state.value.selectedTaskId
+                    else -> null
+                }
                 _state.value = _state.value.copy(
                     loading = false,
                     errorMessage = null,
                     tasks = tasks,
                     selectedTaskId = selectedTaskId,
+                    pendingDeepLinkTaskId = null,
                     selectedEvents = if (selectedTaskId == null) emptyList() else _state.value.selectedEvents
                 )
                 selectedTaskId?.let { loadEvents(it) }
@@ -74,12 +92,12 @@ class AgentTasksViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun selectTask(taskId: String) {
-        _state.value = _state.value.copy(selectedTaskId = taskId, selectedEvents = emptyList())
+        _state.value = _state.value.copy(selectedTaskId = taskId, pendingDeepLinkTaskId = null, selectedEvents = emptyList())
         loadEvents(taskId)
     }
 
     fun clearSelection() {
-        _state.value = _state.value.copy(selectedTaskId = null, selectedEvents = emptyList())
+        _state.value = _state.value.copy(selectedTaskId = null, pendingDeepLinkTaskId = null, selectedEvents = emptyList())
     }
 
     private fun loadEvents(taskId: String) {
