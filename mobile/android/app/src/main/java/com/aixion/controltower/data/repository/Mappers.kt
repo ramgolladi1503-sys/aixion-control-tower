@@ -1,5 +1,7 @@
 package com.aixion.controltower.data.repository
 
+import com.aixion.controltower.core.api.dto.AgentTaskDto
+import com.aixion.controltower.core.api.dto.AgentTaskEventDto
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.FileChangeDto
@@ -9,6 +11,9 @@ import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.RuntimeReadinessDto
 import com.aixion.controltower.core.api.dto.TestRunDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
+import com.aixion.controltower.core.model.AgentTaskEventSummary
+import com.aixion.controltower.core.model.AgentTaskStatus
+import com.aixion.controltower.core.model.AgentTaskSummary
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.AuditEventSummary
@@ -45,6 +50,17 @@ fun String.toMCPPendingStatusOrDefault(): MCPPendingStatus {
     return runCatching {
         MCPPendingStatus.valueOf(uppercase())
     }.getOrDefault(MCPPendingStatus.WAITING_FOR_APPROVAL)
+}
+
+fun String.toAgentTaskStatusOrDefault(): AgentTaskStatus {
+    return runCatching {
+        AgentTaskStatus.valueOf(uppercase())
+    }.getOrDefault(AgentTaskStatus.RECEIVED)
+}
+
+fun String?.toNullableRiskLevel(): RiskLevel? {
+    if (isNullOrBlank()) return null
+    return runCatching { RiskLevel.valueOf(uppercase()) }.getOrNull()
 }
 
 fun ProjectDto.toUiSummary(
@@ -145,6 +161,40 @@ fun RuntimeReadinessDto.toUiSummary(): RuntimeReadinessSummary {
         fcmServerKeyConfigured = fcm_server_key_configured,
         errors = errors,
         warnings = warnings
+    )
+}
+
+fun AgentTaskDto.toUiSummary(): AgentTaskSummary {
+    return AgentTaskSummary(
+        id = id,
+        provider = provider,
+        title = title,
+        goal = goal,
+        context = context,
+        status = status.toAgentTaskStatusOrDefault(),
+        requestedAction = requested_action,
+        repository = repository,
+        branchPreference = branch_preference,
+        riskHint = risk_hint.toNullableRiskLevel(),
+        requiresApproval = requires_approval,
+        approvalRequestId = approval_request_id,
+        sourceUrl = source_url,
+        sourceSessionId = source_session_id,
+        sourceTaskId = source_task_id,
+        createdAt = created_at,
+        updatedAt = updated_at
+    )
+}
+
+fun AgentTaskEventDto.toUiSummary(): AgentTaskEventSummary {
+    return AgentTaskEventSummary(
+        id = id,
+        taskId = task_id,
+        eventType = event_type,
+        message = message,
+        status = status?.toAgentTaskStatusOrDefault(),
+        actor = actor,
+        createdAt = created_at
     )
 }
 
