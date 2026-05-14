@@ -3,19 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
-from .models import AuditEvent, new_id
+from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
+from .models import AuditEvent
 from .store import store
-
-TERMINAL_STATUSES = {
-    AgentTaskStatus.DENIED,
-    AgentTaskStatus.FAILED,
-    AgentTaskStatus.CANCELLED,
-    AgentTaskStatus.DONE,
-}
 
 
 @dataclass
@@ -73,56 +67,6 @@ def _audit(event_type: str, entity_id: str, details: dict[str, Any], actor: str)
     return event
 
 
-def _first_approved_task() -> AgentTask | None:
-    candidates = [
-        task
-        for task in store.agent_tasks.values()
-        if task.status == AgentTaskStatus.APPROVED and task.approval_request_id and _is_lease_available(task)
-    ]
-    return sorted(candidates, key=lambda task: task.updated_at)[0] if candidates else None
-
-
-def _is_lease_available(task: AgentTask) -> bool:
-    if not task.worker_lease_owner:
-        return True
-    if task.worker_lease_expires_at is None:
-        return False
-    return task.worker_lease_expires_at <= _now()
-
-
-def _validate_task(task: AgentTask | None, task_id: str | None) -> str | None:
-    if task is None:
-        return f"Agent task not found or unavailable: {task_id or 'first-approved'}"
-    if task.status in TERMINAL_STATUSES:
-        return f"Agent task is terminal: {task.status}"
-    if task.status != AgentTaskStatus.APPROVED:
-        return f"Agent task is not approved: {task.status}"
-    if not task.approval_request_id:
-        return "Agent task is approved but missing approval_request_id"
-    if not _is_lease_available(task):
-        return f"Agent task already leased by {task.worker_lease_owner} until {task.worker_lease_expires_at}"
-    return None
-
-
-def _claim_task(task: AgentTask, worker_id: str, lease_seconds: int) -> str:
-    lease_token = new_id("agent_task_lease")
-    task.worker_lease_owner = worker_id
-    task.worker_lease_token = lease_token
-    task.worker_lease_expires_at = _now() + timedelta(seconds=lease_seconds)
-    task.updated_at = _now()
-    _audit(
-        "agent_worker.task_claimed",
-        task.id,
-        {
-            "worker_id": worker_id,
-            "lease_token": lease_token,
-            "lease_expires_at": task.worker_lease_expires_at.isoformat(),
-        },
-        actor=worker_id,
-    )
-    return lease_token
-
-
 def _release_task(task: AgentTask, lease_token: str | None, worker_id: str) -> None:
     if lease_token and task.worker_lease_token != lease_token:
         _audit(
@@ -157,23 +101,34 @@ def run_agent_worker_dry_run(
             reason="Provide task_id or set first_approved=true.",
         )
 
-    task = _first_approved_task() if first_approved and not task_id else store.agent_tasks.get(str(task_id))
-    validation_error = _validate_task(task, task_id)
-    if validation_error or task is None:
+    claim = (
+        claim_first_approved_agent_task_for_worker(worker_id=worker_id, lease_seconds=lease_seconds)
+        if first_approved and not task_id
+        else claim_agent_task_for_worker(task_id=str(task_id), worker_id=worker_id, lease_seconds=lease_seconds)
+    )
+    if not claim.success or claim.task is None:
         return AgentWorkerDryRunResult(
             success=False,
-            task_id=task.id if task else task_id,
+            task_id=claim.task_id,
             worker_id=worker_id,
-            final_status=task.status if task else None,
-            reason=validation_error or "Agent task not eligible for dry-run.",
+            lease_token=claim.lease_token,
+            final_status=claim.task.status if claim.task else None,
+            reason=claim.reason,
         )
 
-    lease_token = _claim_task(task, worker_id, lease_seconds)
+    task = claim.task
+    lease_token = claim.lease_token
+    _audit(
+        "agent_worker.task_claimed",
+        task.id,
+        claim.to_metadata(),
+        actor=worker_id,
+    )
 
     started = _append_worker_event(
         task,
         AgentTaskEventType.EXECUTION_STARTED,
-        "Dry-run worker claimed approved task and started lifecycle proof. No repository mutation will be performed.",
+        "Dry-run worker transactionally claimed approved task and started lifecycle proof. No repository mutation will be performed.",
         AgentTaskStatus.EXECUTING,
         worker_id,
         lease_token,
@@ -183,6 +138,7 @@ def run_agent_worker_dry_run(
             "branch_preference": task.branch_preference,
             "event_count_before": len(_task_events(task.id)),
             "lease_expires_at": task.worker_lease_expires_at.isoformat() if task.worker_lease_expires_at else None,
+            "claim_mode": "sqlite_begin_immediate",
         },
     )
     _audit(
@@ -204,7 +160,7 @@ def run_agent_worker_dry_run(
             "repository_mutated": False,
             "branch_created": False,
             "pull_request_opened": False,
-            "safe_next_step": "Implement real worker mutation behind the same claim/lease guard.",
+            "safe_next_step": "Implement real worker mutation behind the same transactional claim guard.",
         },
     )
     _audit(
