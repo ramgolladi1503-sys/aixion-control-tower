@@ -14,7 +14,7 @@ It writes lifecycle evidence into the AgentTask timeline so Android can show tha
 finds an approved AgentTask
 checks it has a linked approval_request_id
 checks worker claim lease availability
-claims the task with worker_lease_owner / worker_lease_token / worker_lease_expires_at
+transactionally claims the task with worker_lease_owner / worker_lease_token / worker_lease_expires_at
 writes EXECUTION_STARTED with status EXECUTING
 writes RESULT_READY with status DONE
 releases the worker lease after success
@@ -79,7 +79,7 @@ Eligibility refusal does not mark the task failed. That is intentional. A task t
 
 ## Claim lease behavior
 
-The dry-run worker now uses a basic claim lease before writing execution events.
+The dry-run worker now uses a claim lease before writing execution events.
 
 Lease fields live on AgentTask:
 
@@ -99,7 +99,27 @@ first-approved selection skips actively leased tasks
 successful dry-run releases the lease
 ```
 
-This is not full multi-worker concurrency control yet. It is the first guardrail that prevents two workers from casually processing the same approved task.
+## Transactional claim behavior
+
+Worker claim now goes through `backend/app/agent_worker_claims.py` and uses SQLite `BEGIN IMMEDIATE` around the read-check-update cycle for the AgentTask JSON payload.
+
+That gives this MVP a stronger single-writer claim boundary:
+
+```text
+worker opens SQLite writer transaction
+worker reads latest AgentTask payload
+worker validates APPROVED + linked approval + lease availability
+worker writes lease owner/token/expiry in the same transaction
+in-memory store copy is refreshed for current process use
+```
+
+Hard limit:
+
+```text
+This is not a full distributed lock manager.
+It is a SQLite-backed transactional claim guard for the current MVP persistence model.
+A production worker fleet should still move to normalized task rows, conditional updates, and explicit retry/heartbeat semantics.
+```
 
 ## Success timeline
 
@@ -116,6 +136,7 @@ Both events include metadata:
 dry_run=true
 worker_id=<worker id>
 lease_token=<lease token>
+claim_mode=sqlite_begin_immediate
 ```
 
 The final result event also records:
@@ -132,7 +153,7 @@ Run:
 
 ```bash
 cd backend
-python -m pytest tests/test_agent_worker_dry_run.py
+python -m pytest tests/test_agent_worker_claims.py tests/test_agent_worker_dry_run.py
 python -m pytest
 ```
 
