@@ -1,10 +1,10 @@
 package com.aixion.controltower.data.repository
 
-import com.aixion.controltower.core.api.ControlTowerApi
+import com.aixion.controltower.core.api.AgentTasksApi
 import com.aixion.controltower.core.model.AgentTaskEventSummary
 import com.aixion.controltower.core.model.AgentTaskSummary
 
-class AgentTasksRepository(private val api: ControlTowerApi) {
+class AgentTasksRepository(private val api: AgentTasksApi) {
     suspend fun listAgentTasks(): List<AgentTaskSummary> {
         return try {
             api.listAgentTasks().map { it.toUiSummary() }
