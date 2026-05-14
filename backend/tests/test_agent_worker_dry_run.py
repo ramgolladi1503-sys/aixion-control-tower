@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -32,24 +33,31 @@ def _approved_task() -> AgentTask:
     return task
 
 
-def test_dry_run_writes_execution_and_result_events() -> None:
+def test_dry_run_claims_releases_and_writes_execution_and_result_events() -> None:
     task = _approved_task()
 
     result = run_agent_worker_dry_run(task_id=task.id, worker_id="test-worker")
 
     assert result.success is True
     assert result.task_id == task.id
+    assert result.lease_token is not None
     assert result.final_status == AgentTaskStatus.DONE
     assert result.started_event_id in store.agent_task_events
     assert result.result_event_id in store.agent_task_events
     assert store.agent_tasks[task.id].status == AgentTaskStatus.DONE
+    assert store.agent_tasks[task.id].worker_lease_owner is None
+    assert store.agent_tasks[task.id].worker_lease_token is None
+    assert store.agent_tasks[task.id].worker_lease_expires_at is None
 
     events = [event for event in store.agent_task_events.values() if event.task_id == task.id]
     assert [event.event_type for event in events] == ["EXECUTION_STARTED", "RESULT_READY"]
     assert all(event.metadata["dry_run"] is True for event in events)
+    assert all(event.metadata["lease_token"] == result.lease_token for event in events)
     assert all(event.actor == "test-worker" for event in events)
+    assert any(event.event_type == "agent_worker.task_claimed" for event in store.audit_events)
     assert any(event.event_type == "agent_worker.dry_run_started" for event in store.audit_events)
     assert any(event.event_type == "agent_worker.dry_run_completed" for event in store.audit_events)
+    assert any(event.event_type == "agent_worker.task_released" for event in store.audit_events)
 
 
 def test_dry_run_first_approved_picks_eligible_task() -> None:
@@ -122,3 +130,50 @@ def test_dry_run_refuses_terminal_task() -> None:
     assert result.success is False
     assert result.reason == "Agent task is terminal: FAILED"
     assert store.agent_task_events == {}
+
+
+def test_dry_run_refuses_active_lease() -> None:
+    task = _approved_task()
+    task.worker_lease_owner = "other-worker"
+    task.worker_lease_token = "lease_active"
+    task.worker_lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    store.persist()
+
+    result = run_agent_worker_dry_run(task_id=task.id, worker_id="test-worker")
+
+    assert result.success is False
+    assert "already leased by other-worker" in result.reason
+    assert store.agent_tasks[task.id].status == AgentTaskStatus.APPROVED
+    assert store.agent_task_events == {}
+
+
+def test_dry_run_can_take_expired_lease() -> None:
+    task = _approved_task()
+    task.worker_lease_owner = "old-worker"
+    task.worker_lease_token = "lease_expired"
+    task.worker_lease_expires_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    store.persist()
+
+    result = run_agent_worker_dry_run(task_id=task.id, worker_id="new-worker")
+
+    assert result.success is True
+    assert result.lease_token is not None
+    assert result.lease_token != "lease_expired"
+    assert store.agent_tasks[task.id].status == AgentTaskStatus.DONE
+    assert store.agent_tasks[task.id].worker_lease_owner is None
+
+
+def test_first_approved_skips_active_leased_task_and_uses_next_available() -> None:
+    leased = _approved_task()
+    leased.worker_lease_owner = "busy-worker"
+    leased.worker_lease_token = "lease_busy"
+    leased.worker_lease_expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    available = _approved_task()
+    store.persist()
+
+    result = run_agent_worker_dry_run(first_approved=True, worker_id="test-worker")
+
+    assert result.success is True
+    assert result.task_id == available.id
+    assert store.agent_tasks[leased.id].status == AgentTaskStatus.APPROVED
+    assert store.agent_tasks[available.id].status == AgentTaskStatus.DONE
