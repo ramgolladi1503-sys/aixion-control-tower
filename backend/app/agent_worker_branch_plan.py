@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
 from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
 from .models import AuditEvent
 from .store import store
