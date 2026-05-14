@@ -10,9 +10,13 @@ from .agent_task_models import (
     AgentTaskEventType,
     AgentTaskStatus,
 )
+from .agent_task_notifications import (
+    notify_agent_task_approval_created,
+    notify_agent_task_approval_decision,
+    notify_agent_task_worker_status,
+)
 from .auth import require_maintainer, require_reviewer
 from .models import AgentProvider, ApprovalRequest, ApprovalRequestCreate, ApprovalStatus, AuditEvent, AuthUser, now_utc
-from .notifications import create_notification
 from .risk_engine import assess_approval_request
 from .store import store
 
@@ -38,6 +42,7 @@ def append_system_task_event(
     status: AgentTaskStatus | None = None,
     actor: str = "system",
     metadata: dict | None = None,
+    notify_worker_status: bool = False,
 ) -> AgentTaskEvent:
     if status is not None:
         task.status = status
@@ -51,6 +56,10 @@ def append_system_task_event(
         metadata=metadata or {},
     )
     store.agent_task_events[event.id] = event
+    if notify_worker_status and status is not None:
+        notification = notify_agent_task_worker_status(task)
+        if notification:
+            event.metadata = {**event.metadata, "notification_id": notification.id}
     return event
 
 
@@ -81,6 +90,7 @@ def propagate_approval_decision_to_agent_task(
         task_status = task.status
         message = f"Linked approval moved from {previous_status} to {approval_request.status}."
 
+    notification = notify_agent_task_approval_decision(task, approval_request)
     append_system_task_event(
         task,
         event_type,
@@ -91,6 +101,7 @@ def propagate_approval_decision_to_agent_task(
             "approval_request_id": approval_request.id,
             "previous_status": previous_status,
             "new_status": approval_request.status,
+            "notification_id": notification.id,
         },
     )
     audit(
@@ -101,6 +112,7 @@ def propagate_approval_decision_to_agent_task(
             "previous_status": previous_status,
             "new_status": approval_request.status,
             "task_status": task.status,
+            "notification_id": notification.id,
         },
         actor=actor,
     )
@@ -189,11 +201,17 @@ def append_agent_task_event(
         status=payload.status,
         actor=user.email,
         metadata=payload.metadata,
+        notify_worker_status=True,
     )
     audit(
         "agent_task.event_recorded",
         task.id,
-        {"event_type": event.event_type, "status": event.status, "message": event.message},
+        {
+            "event_type": event.event_type,
+            "status": event.status,
+            "message": event.message,
+            "notification_id": event.metadata.get("notification_id"),
+        },
         actor=user.email,
     )
     store.persist()
@@ -236,6 +254,7 @@ def create_agent_task_approval(
     task.approval_request_id = request.id
     task.status = AgentTaskStatus.WAITING_FOR_APPROVAL
     task.updated_at = now_utc()
+    notification = notify_agent_task_approval_created(task, request)
 
     append_system_task_event(
         task,
@@ -243,7 +262,7 @@ def create_agent_task_approval(
         "Approval request created for agent task.",
         status=task.status,
         actor=user.email,
-        metadata={"approval_request_id": request.id, "risk_level": request.risk.level},
+        metadata={"approval_request_id": request.id, "risk_level": request.risk.level, "notification_id": notification.id},
     )
     audit(
         "agent_task.approval_created",
@@ -254,14 +273,9 @@ def create_agent_task_approval(
             "risk_level": request.risk.level,
             "approval_status": request.status,
             "task_status": task.status,
+            "notification_id": notification.id,
         },
         actor=user.email,
-    )
-    create_notification(
-        title=f"Approval needed: {request.title}",
-        body=f"{request.risk.level} risk agent task approval waiting for review.",
-        entity_type="approval_request",
-        entity_id=request.id,
     )
     store.persist()
     return request
