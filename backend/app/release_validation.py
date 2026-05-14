@@ -10,6 +10,7 @@ from .audit_routes import AUDIT_EXPORT_MAX_LIMIT, AuditRetentionPolicy
 from .models import AuthUser, UserRole, now_utc
 from .ops_routes import build_runtime_readiness
 from .recovery_routes import RECOVERY_FORMAT_VERSION, export_recovery_snapshot, validate_recovery_snapshot
+from .release_demo_evidence import DemoReleaseEvidence, build_demo_release_evidence
 from .settings import get_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +37,7 @@ class BackendReleaseValidationSummary(BaseModel):
     audit_archive_retention_days: int
     audit_deletion_job_enabled: bool
     audit_export_max_limit: int
+    demo_evidence: DemoReleaseEvidence
     github_token_configured: bool
     fcm_server_key_configured: bool
     warnings: list[str] = Field(default_factory=list)
@@ -55,12 +57,13 @@ def build_backend_release_validation_summary() -> BackendReleaseValidationSummar
     settings = get_settings()
     readiness = build_runtime_readiness()
     audit_policy = AuditRetentionPolicy()
+    demo_evidence = build_demo_release_evidence()
 
     recovery_snapshot = export_recovery_snapshot(_release_probe_owner())
     recovery_validation = validate_recovery_snapshot(recovery_snapshot)
 
     errors = [*readiness.errors, *recovery_validation.errors]
-    warnings = [*readiness.warnings, *recovery_validation.warnings]
+    warnings = [*readiness.warnings, *recovery_validation.warnings, *demo_evidence.warnings]
     decision: Literal["PASS", "REVIEW_REQUIRED"] = (
         "PASS" if readiness.status == "ready" and recovery_validation.valid and not errors else "REVIEW_REQUIRED"
     )
@@ -84,6 +87,7 @@ def build_backend_release_validation_summary() -> BackendReleaseValidationSummar
         audit_archive_retention_days=audit_policy.recommended_archive_retention_days,
         audit_deletion_job_enabled=audit_policy.deletion_job_enabled,
         audit_export_max_limit=AUDIT_EXPORT_MAX_LIMIT,
+        demo_evidence=demo_evidence,
         github_token_configured=readiness.github_token_configured,
         fcm_server_key_configured=readiness.fcm_server_key_configured,
         warnings=warnings,
@@ -106,6 +110,7 @@ def _markdown_code_list(values: list[str]) -> str:
 def render_backend_release_validation_markdown(
     summary: BackendReleaseValidationSummary,
 ) -> str:
+    smoke_decision = summary.demo_evidence.demo_smoke_report_decision or "not available"
     return f"""# Backend Release Validation Summary
 
 Generated at: `{summary.generated_at.isoformat()}`
@@ -154,6 +159,19 @@ Recovery errors:
 - Recommended archive retention days: `{summary.audit_archive_retention_days}`
 - Audit deletion job enabled: `{summary.audit_deletion_job_enabled}`
 - Audit export max limit: `{summary.audit_export_max_limit}`
+
+## Demo readiness evidence
+
+- Demo seed tooling available: `{summary.demo_evidence.demo_seed_available}`
+- Demo seed project id: `{summary.demo_evidence.demo_seed_project_id}`
+- Demo seed approval id: `{summary.demo_evidence.demo_seed_approval_id}`
+- Demo seed docs: `{summary.demo_evidence.demo_seed_doc_path}`
+- Demo smoke report path: `{summary.demo_evidence.demo_smoke_report_path}`
+- Demo smoke report available: `{summary.demo_evidence.demo_smoke_report_available}`
+- Demo smoke report decision: `{smoke_decision}`
+- Demo smoke docs: `{summary.demo_evidence.demo_smoke_doc_path}`
+- Demo readiness runbook: `{summary.demo_evidence.demo_readiness_runbook_path}`
+- Known limitations: `{summary.demo_evidence.known_limitations_path}`
 
 ## Overall warnings
 
