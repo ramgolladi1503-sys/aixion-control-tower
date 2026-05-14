@@ -18,6 +18,10 @@ def setup_function() -> None:
     store.reset()
 
 
+def _normalize_utc_text(value: str) -> str:
+    return value.replace("Z", "+00:00")
+
+
 def _seed_audit_events() -> list[AuditEvent]:
     base_time = now_utc()
     events = [
@@ -148,8 +152,8 @@ def test_export_audit_events_filters_by_created_window() -> None:
     assert response.status_code == 200
     body = response.json()
     assert [event["id"] for event in body["events"]] == [events[2].id, events[1].id]
-    assert body["filters"]["created_after"] == created_after
-    assert body["filters"]["created_before"] == created_before
+    assert _normalize_utc_text(body["filters"]["created_after"]) == created_after
+    assert _normalize_utc_text(body["filters"]["created_before"]) == created_before
 
 
 def test_get_audit_event_by_id_and_missing_404() -> None:
