@@ -33,6 +33,7 @@ from .models import (
     now_utc,
 )
 from .notifications import create_notification, router as notifications_router
+from .ops_routes import router as ops_router
 from .risk_engine import assess_approval_request, assess_work_order
 from .role_routes import router as role_router
 from .session_routes import router as session_router
@@ -54,6 +55,7 @@ app.include_router(mcp_gateway_router)
 app.include_router(mcp_registry_router)
 app.include_router(mcp_transport_router)
 app.include_router(audit_router)
+app.include_router(ops_router)
 ReviewerDependency = Depends(require_reviewer)
 MaintainerDependency = Depends(require_maintainer)
 
