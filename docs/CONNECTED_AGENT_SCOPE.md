@@ -69,6 +69,11 @@ Android needs an Agent Tasks screen showing provider, project, task title, statu
 
 A Codex/GitHub worker should claim approved tasks, create a safe branch, apply changes, run tests, commit, open a PR, write task events, write audit events, and report failures clearly.
 
+See:
+
+- `docs/AGENT_WORKER_CONTRACT.md`
+- `docs/AGENT_WORKER_DRY_RUN_PLAN.md`
+
 ## GPT Actions requirement
 
 Aixion needs a GPT Actions/OpenAPI contract so ChatGPT or a Custom GPT can create tasks and check status safely. The contract must expose only safe agent operations, not owner-only controls or unsafe reset operations.
@@ -89,15 +94,23 @@ Already strong:
 - demo smoke validation
 - seeded demo data
 - release/demo evidence chain
+- AgentTask and AgentTaskEvent models
+- agent task ingestion API
+- task-to-approval bridge
+- provider model for CHATGPT, CODEX, CLAUDE, CURSOR, GITHUB_ACTIONS, MANUAL, OTHER
+- GPT Actions/OpenAPI contract
+- Android Agent Tasks screen
+- agent task timeline/events
+- Codex/GitHub worker contract documentation
 
 Not fully built yet:
 
-- ChatGPT direct task ingestion
-- Codex worker loop
+- production ChatGPT direct task ingestion validation
+- Codex/GitHub worker implementation
 - Claude/external-agent adapter
-- GPT Actions/OpenAPI contract
-- Android Agent Tasks timeline
 - agent-task notification lifecycle
 - public secure callback/deployment path
+- task cancellation endpoint
+- adaptive Android layout polish for tablets/folds/flips
 
-Hard truth: without this connected-agent layer, Aixion is a strong approval console. With this layer, it becomes the mobile control tower originally intended.
+Hard truth: Aixion is now past approval-console foundation and into connected-agent control-tower territory. It still needs the actual worker loop before it can claim end-to-end connected-agent execution.
