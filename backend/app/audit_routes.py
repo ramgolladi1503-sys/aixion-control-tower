@@ -22,7 +22,7 @@ ReviewerDependency = Depends(require_reviewer)
 MaintainerDependency = Depends(require_maintainer)
 OwnerDependency = Depends(require_owner)
 
-AUDIT_EXPORT_MAX_LIMIT = 5_000
+AUDIT_EXPORT_MAX_LIMIT = 1_000
 AUDIT_RETENTION_POLICY_VERSION = "aixion-audit-retention-v1"
 REDACTED_DETAIL_VALUE = "[REDACTED]"
 SENSITIVE_DETAIL_KEY_MARKERS = (
@@ -195,6 +195,11 @@ def export_audit_events(
         ),
         events=exported_events,
     )
+
+
+@router.get("/retention-policy", response_model=AuditRetentionPolicy)
+def get_audit_retention_policy(_: AuthUser = MaintainerDependency) -> AuditRetentionPolicy:
+    return AuditRetentionPolicy()
 
 
 @router.get("/events/{audit_event_id}", response_model=AuditEvent)
