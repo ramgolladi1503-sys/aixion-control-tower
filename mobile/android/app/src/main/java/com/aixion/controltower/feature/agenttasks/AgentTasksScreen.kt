@@ -14,6 +14,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -40,10 +41,17 @@ import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 @Composable
 fun AgentTasksScreen(
     viewModel: AgentTasksViewModel = viewModel(),
+    deepLinkTaskId: String? = null,
     onOpenApproval: (String) -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
     val selectedTask = state.selectedTask
+
+    LaunchedEffect(deepLinkTaskId) {
+        deepLinkTaskId?.takeIf { it.isNotBlank() }?.let { taskId ->
+            viewModel.openFromDeepLink(taskId)
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
