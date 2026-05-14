@@ -134,4 +134,3 @@ def test_first_approved_branch_plan_uses_available_task() -> None:
     assert result.success is True
     assert result.task_id == task.id
     assert result.planned_branch == "feature/first-approved-plan"
-}
