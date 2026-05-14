@@ -15,6 +15,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.feature.agenttasks.AgentTasksScreen
 import com.aixion.controltower.feature.approvals.ApprovalDetailScreen
 import com.aixion.controltower.feature.approvals.ApprovalInboxScreen
 import com.aixion.controltower.feature.approvals.ApprovalsViewModel
@@ -88,11 +89,19 @@ fun ControlTowerApp() {
                             }
                         )
                     }
+                    composable(Route.AgentTasks.value) {
+                        AgentTasksScreen(
+                            onOpenApproval = { linkedApprovalId ->
+                                approvalsViewModel.openApprovalById(linkedApprovalId)
+                                navController.navigate(Route.ApprovalDetail.value)
+                            }
+                        )
+                    }
                     composable(Route.MCPQueue.value) {
                         MCPQueueScreen(
                             viewModel = mcpQueueViewModel,
-                            onOpenApproval = { approvalId ->
-                                approvalsViewModel.openApprovalById(approvalId)
+                            onOpenApproval = { linkedApprovalId ->
+                                approvalsViewModel.openApprovalById(linkedApprovalId)
                                 navController.navigate(Route.ApprovalDetail.value)
                             }
                         )
