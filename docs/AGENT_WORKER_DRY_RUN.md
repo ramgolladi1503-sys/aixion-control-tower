@@ -13,8 +13,11 @@ It writes lifecycle evidence into the AgentTask timeline so Android can show tha
 ```text
 finds an approved AgentTask
 checks it has a linked approval_request_id
+checks worker claim lease availability
+claims the task with worker_lease_owner / worker_lease_token / worker_lease_expires_at
 writes EXECUTION_STARTED with status EXECUTING
 writes RESULT_READY with status DONE
+releases the worker lease after success
 writes audit events
 persists state
 ```
@@ -47,6 +50,12 @@ cd backend
 python scripts/run_agent_worker_dry_run.py --first-approved
 ```
 
+Set lease duration:
+
+```bash
+python scripts/run_agent_worker_dry_run.py --task-id agent_task_xxx --lease-seconds 300
+```
+
 Print JSON:
 
 ```bash
@@ -63,9 +72,34 @@ task does not exist
 task status is not APPROVED
 task is DENIED, FAILED, CANCELLED, or DONE
 task is APPROVED but missing approval_request_id
+task has an active worker lease owned by another worker
 ```
 
 Eligibility refusal does not mark the task failed. That is intentional. A task that was never eligible for worker execution is not a worker failure.
+
+## Claim lease behavior
+
+The dry-run worker now uses a basic claim lease before writing execution events.
+
+Lease fields live on AgentTask:
+
+```text
+worker_lease_owner
+worker_lease_token
+worker_lease_expires_at
+```
+
+Rules:
+
+```text
+task with no lease can be claimed
+task with expired lease can be claimed by a new worker
+task with active lease is refused
+first-approved selection skips actively leased tasks
+successful dry-run releases the lease
+```
+
+This is not full multi-worker concurrency control yet. It is the first guardrail that prevents two workers from casually processing the same approved task.
 
 ## Success timeline
 
@@ -81,6 +115,7 @@ Both events include metadata:
 ```text
 dry_run=true
 worker_id=<worker id>
+lease_token=<lease token>
 ```
 
 The final result event also records:
@@ -103,6 +138,6 @@ python -m pytest
 
 ## Why this matters
 
-This proves the worker reporting loop before the product starts changing files or opening pull requests. That sequencing matters. If worker lifecycle, approval status, and Android timeline reporting are not proven first, repository mutation will make failures harder to reason about.
+This proves the worker reporting loop before the product starts changing files or opening pull requests. That sequencing matters. If worker lifecycle, approval status, Android timeline reporting, and claim semantics are not proven first, repository mutation will make failures harder to reason about.
 
-Hard truth: this is not autonomous delivery yet. It is the smallest honest proof that approved work can move through the worker reporting loop and appear as evidence in Aixion.
+Hard truth: this is not autonomous delivery yet. It is the smallest honest proof that approved work can move through a claimed worker reporting loop and appear as evidence in Aixion.

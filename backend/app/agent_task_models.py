@@ -72,6 +72,9 @@ class AgentTask(AgentTaskCreate):
     external_agent_id: str | None = None
     external_agent_name: str | None = None
     approval_request_id: str | None = None
+    worker_lease_owner: str | None = None
+    worker_lease_expires_at: datetime | None = None
+    worker_lease_token: str | None = None
     created_by_user_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
