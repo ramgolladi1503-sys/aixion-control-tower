@@ -18,9 +18,10 @@ This is not worker execution yet. It is the contract layer that allows a GPT to 
 
 ```text
 docs/gpt-actions/openapi.yaml
+docs/PUBLIC_HTTPS_CALLBACK_GUIDE.md
 ```
 
-Use this OpenAPI file as the Custom GPT action schema.
+Use the OpenAPI file as the Custom GPT action schema. Use the public HTTPS guide before trying to connect ChatGPT, Android, workers, or MCP clients to the backend.
 
 ## Exposed operations
 
@@ -67,10 +68,29 @@ For a demo, generate a token through `/auth/login` and configure the Custom GPT 
 
 For production, do not reuse a personal owner session forever. Create a scoped external-agent credential model or a dedicated maintainer/reviewer account with limited access and rotation.
 
+## Public HTTPS requirement
+
+Custom GPT Actions cannot reliably call a laptop-only `localhost` backend.
+
+Before testing GPT Actions, follow:
+
+```text
+docs/PUBLIC_HTTPS_CALLBACK_GUIDE.md
+```
+
+Minimum requirement:
+
+```text
+public HTTPS backend URL
+valid bearer token
+server URL in openapi.yaml updated to the public backend
+GET /projects works from the GPT Action test console
+```
+
 ## Custom GPT setup
 
-1. Deploy Aixion backend to an HTTPS URL.
-2. Confirm auth is enabled outside local/demo mode.
+1. Deploy Aixion backend to an HTTPS URL or expose a short-lived demo tunnel.
+2. Confirm auth is enabled outside intentional demo mode.
 3. Open the Custom GPT builder.
 4. Add an Action.
 5. Import `docs/gpt-actions/openapi.yaml`.
@@ -154,4 +174,4 @@ Server URL points to HTTPS, not localhost
 
 ## Current limitation
 
-This does not make ChatGPT execute code or open PRs. That belongs to the Codex/GitHub worker contract. This PR only gives GPT Actions a safe doorway into the existing connected-agent task and approval flow.
+This does not make ChatGPT execute code or open PRs. That belongs to the Codex/GitHub worker contract. This contract only gives GPT Actions a safe doorway into the existing connected-agent task and approval flow.
