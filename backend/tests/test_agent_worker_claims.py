@@ -117,4 +117,3 @@ def test_claim_first_approved_reports_when_no_available_task_exists() -> None:
 
     assert result.success is False
     assert result.reason == "No approved, linked, lease-available agent task found."
-}
