@@ -81,6 +81,44 @@ def test_append_agent_task_event_updates_status_and_timeline() -> None:
     assert any(event.event_type == "agent_task.event_recorded" for event in store.audit_events)
 
 
+def test_append_agent_task_worker_done_event_creates_notification() -> None:
+    task = client.post(
+        "/agent/tasks",
+        json={"provider": "CODEX", "title": "Worker result", "goal": "Report worker completion", "requested_action": "OTHER"},
+    ).json()
+
+    response = client.post(
+        f"/agent/tasks/{task['id']}/events",
+        json={"event_type": "RESULT_READY", "message": "Dry-run result ready", "status": "DONE"},
+    )
+
+    assert response.status_code == 200
+    event = response.json()
+    notification_id = event["metadata"]["notification_id"]
+    notification = store.notifications[notification_id]
+    assert notification.entity_type == "agent_task"
+    assert notification.entity_id == task["id"]
+    assert notification.title == "Agent task done: Worker result"
+    assert notification.user_id == task["created_by_user_id"]
+    assert any(audit_event.details.get("notification_id") == notification_id for audit_event in store.audit_events)
+
+
+def test_append_agent_task_testing_event_does_not_create_notification() -> None:
+    task = client.post(
+        "/agent/tasks",
+        json={"provider": "CODEX", "title": "Test only", "goal": "Report tests", "requested_action": "OTHER"},
+    ).json()
+
+    response = client.post(
+        f"/agent/tasks/{task['id']}/events",
+        json={"event_type": "TESTS_STARTED", "message": "Running backend tests", "status": "TESTING"},
+    )
+
+    assert response.status_code == 200
+    assert "notification_id" not in response.json()["metadata"]
+    assert store.notifications == {}
+
+
 def test_create_agent_task_rejects_missing_project() -> None:
     response = client.post(
         "/agent/tasks",
