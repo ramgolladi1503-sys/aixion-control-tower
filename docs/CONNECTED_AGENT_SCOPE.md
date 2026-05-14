@@ -82,6 +82,10 @@ Aixion needs a GPT Actions/OpenAPI contract so ChatGPT or a Custom GPT can creat
 
 External agents cannot reliably call a laptop-only localhost backend. Demo mode may use a secure temporary tunnel. Production mode needs a deployed HTTPS backend with token authentication, rate limiting, and audit logging.
 
+See:
+
+- `docs/PUBLIC_HTTPS_CALLBACK_GUIDE.md`
+
 ## Current honest status
 
 Already strong:
@@ -101,16 +105,21 @@ Already strong:
 - GPT Actions/OpenAPI contract
 - Android Agent Tasks screen
 - agent task timeline/events
+- AgentTask notification lifecycle
 - Codex/GitHub worker contract documentation
+- dry-run worker lifecycle
+- transactional worker claim foundation
+- public HTTPS callback/deployment guide
 
 Not fully built yet:
 
 - production ChatGPT direct task ingestion validation
 - Codex/GitHub worker implementation
 - Claude/external-agent adapter
-- agent-task notification lifecycle
-- public secure callback/deployment path
 - task cancellation endpoint
+- Android deep-link routing into exact task/approval screens
+- real device FCM proof
+- notification retry queue
 - adaptive Android layout polish for tablets/folds/flips
 
 Hard truth: Aixion is now past approval-console foundation and into connected-agent control-tower territory. It still needs the actual worker loop before it can claim end-to-end connected-agent execution.
