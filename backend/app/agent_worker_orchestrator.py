@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
 from .agent_worker_github_branch import AgentWorkerGitHubBranchResult, GitHubBranchClient, run_agent_worker_github_branch_creation
 from .agent_worker_github_files import AgentWorkerGitHubFilesResult, GitHubFileClient, run_agent_worker_github_file_application
 from .agent_worker_github_pr import AgentWorkerGitHubPRResult, GitHubPullRequestClient, run_agent_worker_github_pr_creation
