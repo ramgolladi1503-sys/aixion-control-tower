@@ -1,5 +1,7 @@
 package com.aixion.controltower.core.api
 
+import com.aixion.controltower.core.api.dto.AgentTaskDto
+import com.aixion.controltower.core.api.dto.AgentTaskEventDto
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.AuthResponseDto
@@ -101,6 +103,20 @@ interface ControlTowerApi {
         @Path("approvalId") approvalId: String,
         @Body payload: DecisionRequestDto
     ): ApprovalRequestDto
+
+    @GET("agent/tasks")
+    suspend fun listAgentTasks(
+        @Query("provider") provider: String? = null,
+        @Query("status") status: String? = null,
+        @Query("project_id") projectId: String? = null,
+        @Query("limit") limit: Int = 100
+    ): List<AgentTaskDto>
+
+    @GET("agent/tasks/{taskId}")
+    suspend fun getAgentTask(@Path("taskId") taskId: String): AgentTaskDto
+
+    @GET("agent/tasks/{taskId}/events")
+    suspend fun listAgentTaskEvents(@Path("taskId") taskId: String): List<AgentTaskEventDto>
 
     @GET("test-runs")
     suspend fun listTestRuns(): List<TestRunDto>
