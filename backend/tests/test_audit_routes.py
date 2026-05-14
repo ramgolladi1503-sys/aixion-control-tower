@@ -141,7 +141,8 @@ def test_export_audit_events_filters_by_created_window() -> None:
     created_before = events[2].created_at.isoformat()
 
     response = client.get(
-        f"/audit/export?created_after={created_after}&created_before={created_before}"
+        "/audit/export",
+        params={"created_after": created_after, "created_before": created_before},
     )
 
     assert response.status_code == 200
