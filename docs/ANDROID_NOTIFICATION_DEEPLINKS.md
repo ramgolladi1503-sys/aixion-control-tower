@@ -71,6 +71,13 @@ tapping approval_request notification opens Approval Detail
 unknown entity_type does not crash the app
 ```
 
+For full real-device proof, use:
+
+```text
+docs/FCM_REAL_DEVICE_VALIDATION.md
+docs/templates/FCM_REAL_DEVICE_EVIDENCE_TEMPLATE.md
+```
+
 ## Current limits
 
 ```text
