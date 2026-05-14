@@ -1,0 +1,460 @@
+openapi: 3.1.0
+info:
+  title: Aixion Control Tower External Agent Actions
+  version: 0.1.0
+  description: >-
+    Safe GPT Actions contract for external agents to create Aixion agent tasks,
+    read task status, record task timeline events, and list projects. This
+    contract intentionally excludes owner-only controls, destructive operations,
+    reset routes, raw GitHub execution, and approval decision endpoints.
+servers:
+  - url: https://YOUR_AIXION_BACKEND_HOST
+    description: Replace with the deployed HTTPS Aixion backend host.
+security:
+  - bearerAuth: []
+tags:
+  - name: Projects
+    description: Read-only project discovery for routing agent tasks.
+  - name: Agent Tasks
+    description: Safe external-agent task intake and timeline operations.
+paths:
+  /projects:
+    get:
+      operationId: listProjects
+      tags:
+        - Projects
+      summary: List projects
+      description: Returns projects the authenticated caller can view.
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: Project list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Project"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /agent/tasks:
+    post:
+      operationId: createAgentTask
+      tags:
+        - Agent Tasks
+      summary: Create an agent task
+      description: Creates a task intake record for external agent work.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentTaskCreate"
+            examples:
+              docsTask:
+                summary: Documentation task
+                value:
+                  provider: CHATGPT
+                  project_id: project_tradebot
+                  title: Draft release notes for approval bridge
+                  goal: Summarize the approval bridge change and validation evidence.
+                  context: Include what changed, tests run, and remaining limitations.
+                  source_session_id: chatgpt-session-2026-05-15
+                  requested_action: GENERATE_DOCS
+                  repository: ramgolladi1503-sys/aixion-control-tower
+                  branch_preference: feature/release-notes
+                  risk_hint: LOW
+                  requires_approval: true
+                  metadata:
+                    source: custom-gpt-action
+      responses:
+        "200":
+          description: Created agent task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentTask"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+  /agent/tasks/{task_id}:
+    get:
+      operationId: getAgentTask
+      tags:
+        - Agent Tasks
+      summary: Get an agent task
+      description: Returns one agent task by ID.
+      x-openai-isConsequential: false
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: Agent task ID returned by createAgentTask.
+          schema:
+            type: string
+            example: agent_task_123abc456def
+      responses:
+        "200":
+          description: Agent task.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentTask"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /agent/tasks/{task_id}/events:
+    post:
+      operationId: appendAgentTaskEvent
+      tags:
+        - Agent Tasks
+      summary: Append task event
+      description: Records progress, failure, PR, or result status on an agent task.
+      x-openai-isConsequential: true
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          description: Agent task ID to append the event to.
+          schema:
+            type: string
+            example: agent_task_123abc456def
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentTaskEventCreate"
+            examples:
+              planningNote:
+                summary: Planning note
+                value:
+                  event_type: PLAN_RECEIVED
+                  message: Drafted a plan and waiting for approval before implementation.
+                  status: PLANNING
+                  metadata:
+                    evidence_url: https://github.com/ramgolladi1503-sys/aixion-control-tower/pull/80
+              failure:
+                summary: Failure report
+                value:
+                  event_type: FAILED
+                  message: Could not proceed because the repository branch was unavailable.
+                  status: FAILED
+                  metadata:
+                    error_code: BRANCH_NOT_FOUND
+      responses:
+        "200":
+          description: Created task event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentTaskEvent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Aixion session token
+      description: Use an Aixion bearer session token from /auth/login.
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or expired bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: Authenticated caller lacks the required role.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Requested resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Request body failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationErrorResponse"
+  schemas:
+    AgentProvider:
+      type: string
+      enum:
+        - CODEX
+        - CHATGPT
+        - CLAUDE
+        - CURSOR
+        - GITHUB_ACTIONS
+        - MANUAL
+        - OTHER
+    AgentTaskRequestedAction:
+      type: string
+      enum:
+        - CREATE_WORK_ORDER
+        - CREATE_APPROVAL
+        - REVIEW_ARCHITECTURE
+        - GENERATE_DOCS
+        - OTHER
+    AgentTaskStatus:
+      type: string
+      enum:
+        - RECEIVED
+        - PLANNING
+        - WAITING_FOR_APPROVAL
+        - APPROVED
+        - DENIED
+        - EXECUTING
+        - TESTING
+        - READY_FOR_PR
+        - FAILED
+        - CANCELLED
+        - DONE
+    AgentTaskEventType:
+      type: string
+      enum:
+        - TASK_CREATED
+        - PLAN_RECEIVED
+        - APPROVAL_CREATED
+        - APPROVED
+        - DENIED
+        - EXECUTION_STARTED
+        - TESTS_STARTED
+        - TESTS_PASSED
+        - TESTS_FAILED
+        - PR_CREATED
+        - RESULT_READY
+        - FAILED
+        - CANCELLED
+        - DONE
+        - NOTE
+    ProjectMode:
+      type: string
+      enum:
+        - STRICT
+        - MANUAL
+        - ASSISTED
+        - LOW_RISK_AUTO
+        - LOCKDOWN
+    RiskLevel:
+      type: string
+      enum:
+        - LOW
+        - MEDIUM
+        - HIGH
+        - CRITICAL
+        - BLOCKED
+    Project:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - mode
+        - rules
+        - created_at
+      properties:
+        id:
+          type: string
+          example: project_tradebot
+        name:
+          type: string
+          example: Tradebot
+        description:
+          type: string
+          example: Options trading signal and execution control system.
+        mode:
+          $ref: "#/components/schemas/ProjectMode"
+        rules:
+          type: array
+          items:
+            type: string
+          example:
+            - Execution changes require tests
+            - No direct main branch edits
+        created_at:
+          type: string
+          format: date-time
+    AgentTaskCreate:
+      type: object
+      required:
+        - title
+        - goal
+      properties:
+        provider:
+          $ref: "#/components/schemas/AgentProvider"
+          default: MANUAL
+        project_id:
+          type:
+            - string
+            - "null"
+          description: Optional project ID from listProjects.
+          example: project_tradebot
+        title:
+          type: string
+          description: Short task title visible in Aixion.
+          example: Add Android Agent Tasks screen
+        goal:
+          type: string
+          description: Clear outcome the agent is being asked to produce.
+          example: Build an Android screen that shows agent tasks and latest events.
+        context:
+          type: string
+          default: ""
+          description: Useful background, constraints, and acceptance notes.
+        source_url:
+          type:
+            - string
+            - "null"
+          description: Optional source conversation, PR, issue, or run URL.
+        source_session_id:
+          type:
+            - string
+            - "null"
+          description: Optional external provider session or conversation ID.
+        source_task_id:
+          type:
+            - string
+            - "null"
+          description: Optional external provider task ID.
+        requested_action:
+          $ref: "#/components/schemas/AgentTaskRequestedAction"
+          default: CREATE_WORK_ORDER
+        repository:
+          type:
+            - string
+            - "null"
+          example: ramgolladi1503-sys/aixion-control-tower
+        branch_preference:
+          type:
+            - string
+            - "null"
+          example: feature/pr81-android-agent-tasks
+        risk_hint:
+          anyOf:
+            - $ref: "#/components/schemas/RiskLevel"
+            - type: "null"
+        requires_approval:
+          type: boolean
+          default: true
+        metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+    AgentTask:
+      allOf:
+        - $ref: "#/components/schemas/AgentTaskCreate"
+        - type: object
+          required:
+            - id
+            - status
+            - approval_request_id
+            - created_at
+            - updated_at
+          properties:
+            id:
+              type: string
+              example: agent_task_123abc456def
+            status:
+              $ref: "#/components/schemas/AgentTaskStatus"
+            external_agent_id:
+              type:
+                - string
+                - "null"
+            external_agent_name:
+              type:
+                - string
+                - "null"
+            approval_request_id:
+              type:
+                - string
+                - "null"
+              example: approval_123abc456def
+            created_by_user_id:
+              type:
+                - string
+                - "null"
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+    AgentTaskEventCreate:
+      type: object
+      properties:
+        event_type:
+          $ref: "#/components/schemas/AgentTaskEventType"
+          default: NOTE
+        message:
+          type: string
+          default: ""
+          description: Human-readable progress, result, or failure note.
+        status:
+          anyOf:
+            - $ref: "#/components/schemas/AgentTaskStatus"
+            - type: "null"
+          description: Optional status to move the task to.
+        metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+    AgentTaskEvent:
+      allOf:
+        - $ref: "#/components/schemas/AgentTaskEventCreate"
+        - type: object
+          required:
+            - id
+            - task_id
+            - actor
+            - created_at
+          properties:
+            id:
+              type: string
+              example: agent_task_event_123abc456def
+            task_id:
+              type: string
+              example: agent_task_123abc456def
+            actor:
+              type: string
+              example: builder@example.com
+            created_at:
+              type: string
+              format: date-time
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          example: Agent task not found
+    ValidationErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
