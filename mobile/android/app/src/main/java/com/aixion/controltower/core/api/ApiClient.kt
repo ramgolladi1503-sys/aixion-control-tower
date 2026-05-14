@@ -16,6 +16,23 @@ object ApiClient {
         baseUrl: String = defaultBaseUrl,
         accessToken: String = ""
     ): ControlTowerApi {
+        return createService(context, baseUrl, accessToken, ControlTowerApi::class.java)
+    }
+
+    fun createOps(
+        context: Context? = null,
+        baseUrl: String = defaultBaseUrl,
+        accessToken: String = ""
+    ): OpsApi {
+        return createService(context, baseUrl, accessToken, OpsApi::class.java)
+    }
+
+    private fun <T> createService(
+        context: Context?,
+        baseUrl: String,
+        accessToken: String,
+        serviceClass: Class<T>
+    ): T {
         val client = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val resolvedToken = accessToken.ifBlank {
@@ -34,6 +51,6 @@ object ApiClient {
             .client(client)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
-            .create(ControlTowerApi::class.java)
+            .create(serviceClass)
     }
 }
