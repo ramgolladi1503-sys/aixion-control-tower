@@ -7,6 +7,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -32,15 +33,34 @@ import com.aixion.controltower.feature.tests.TestRunsScreen
 import com.aixion.controltower.feature.workorders.WorkOrdersScreen
 import com.aixion.controltower.navigation.Route
 import com.aixion.controltower.navigation.bottomRoutes
+import com.aixion.controltower.notifications.NotificationDeepLink
 
 @Composable
-fun ControlTowerApp() {
+fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
     ControlTowerTheme {
         val navController = rememberNavController()
         val approvalsViewModel: ApprovalsViewModel = viewModel()
         val mcpQueueViewModel: MCPQueueViewModel = viewModel()
         val backStackEntry = navController.currentBackStackEntryAsState().value
         val currentRoute = backStackEntry?.destination?.route ?: Route.Home.value
+
+        LaunchedEffect(notificationDeepLink) {
+            when (notificationDeepLink) {
+                is NotificationDeepLink.AgentTask -> {
+                    navController.navigate(Route.AgentTasks.value) {
+                        launchSingleTop = true
+                        popUpTo(Route.Home.value) { saveState = true }
+                        restoreState = true
+                    }
+                }
+                is NotificationDeepLink.ApprovalRequest -> {
+                    approvalsViewModel.openApprovalById(notificationDeepLink.entityId)
+                    navController.navigate(Route.ApprovalDetail.value) { launchSingleTop = true }
+                }
+                is NotificationDeepLink.Unknown,
+                null -> Unit
+            }
+        }
 
         Scaffold(
             containerColor = TowerBackground,
@@ -91,6 +111,7 @@ fun ControlTowerApp() {
                     }
                     composable(Route.AgentTasks.value) {
                         AgentTasksScreen(
+                            deepLinkTaskId = (notificationDeepLink as? NotificationDeepLink.AgentTask)?.entityId,
                             onOpenApproval = { linkedApprovalId ->
                                 approvalsViewModel.openApprovalById(linkedApprovalId)
                                 navController.navigate(Route.ApprovalDetail.value)
