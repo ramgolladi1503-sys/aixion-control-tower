@@ -161,6 +161,35 @@ data class AuditEventSummary(
     val timestamp: String
 )
 
+data class RuntimeReadinessSummary(
+    val status: String,
+    val generatedAt: String?,
+    val profile: String,
+    val authEnabled: Boolean,
+    val dbReachable: Boolean,
+    val migrationsApplied: Boolean,
+    val expectedMigrationIds: List<String>,
+    val appliedMigrationIds: List<String>,
+    val recoverySnapshotAvailable: Boolean,
+    val recoveryFormatVersion: String,
+    val githubTokenConfigured: Boolean,
+    val fcmServerKeyConfigured: Boolean,
+    val errors: List<String>,
+    val warnings: List<String>
+) {
+    val isReady: Boolean
+        get() = status.equals("ready", ignoreCase = true) && errors.isEmpty()
+
+    val readinessLabel: String
+        get() = if (isReady) "Ready" else "Needs review"
+
+    val missingMigrationIds: List<String>
+        get() = expectedMigrationIds.filterNot { expected -> expected in appliedMigrationIds }
+
+    val hasSecretWarnings: Boolean
+        get() = !githubTokenConfigured || !fcmServerKeyConfigured
+}
+
 data class MCPPendingSummary(
     val id: String,
     val projectId: String,

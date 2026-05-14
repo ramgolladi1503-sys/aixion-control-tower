@@ -6,6 +6,7 @@ import com.aixion.controltower.core.api.dto.FileChangeDto
 import com.aixion.controltower.core.api.dto.MCPPendingHealthDto
 import com.aixion.controltower.core.api.dto.MCPPendingRequestDto
 import com.aixion.controltower.core.api.dto.ProjectDto
+import com.aixion.controltower.core.api.dto.RuntimeReadinessDto
 import com.aixion.controltower.core.api.dto.TestRunDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -17,6 +18,7 @@ import com.aixion.controltower.core.model.MCPPendingStatus
 import com.aixion.controltower.core.model.MCPPendingSummary
 import com.aixion.controltower.core.model.ProjectSummary
 import com.aixion.controltower.core.model.RiskLevel
+import com.aixion.controltower.core.model.RuntimeReadinessSummary
 import com.aixion.controltower.core.model.TestRunSummary
 import com.aixion.controltower.core.model.WorkOrderSummary
 
@@ -124,6 +126,25 @@ fun AuditEventDto.toUiSummary(): AuditEventSummary {
         actor = actor,
         details = detailsText.ifBlank { entity_id },
         timestamp = created_at ?: "recent"
+    )
+}
+
+fun RuntimeReadinessDto.toUiSummary(): RuntimeReadinessSummary {
+    return RuntimeReadinessSummary(
+        status = status,
+        generatedAt = generated_at,
+        profile = profile,
+        authEnabled = auth_enabled,
+        dbReachable = db_reachable,
+        migrationsApplied = migrations_applied,
+        expectedMigrationIds = expected_migration_ids,
+        appliedMigrationIds = applied_migration_ids,
+        recoverySnapshotAvailable = recovery_snapshot_available,
+        recoveryFormatVersion = recovery_format_version,
+        githubTokenConfigured = github_token_configured,
+        fcmServerKeyConfigured = fcm_server_key_configured,
+        errors = errors,
+        warnings = warnings
     )
 }
 

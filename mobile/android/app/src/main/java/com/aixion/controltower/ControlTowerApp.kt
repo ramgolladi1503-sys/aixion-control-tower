@@ -25,6 +25,7 @@ import com.aixion.controltower.feature.diff.DiffViewerScreen
 import com.aixion.controltower.feature.home.HomeScreen
 import com.aixion.controltower.feature.mcp.MCPQueueScreen
 import com.aixion.controltower.feature.mcp.MCPQueueViewModel
+import com.aixion.controltower.feature.ops.RuntimeReadinessScreen
 import com.aixion.controltower.feature.projects.ProjectsScreen
 import com.aixion.controltower.feature.tests.TestRunsScreen
 import com.aixion.controltower.feature.workorders.WorkOrdersScreen
@@ -97,6 +98,7 @@ fun ControlTowerApp() {
                         )
                     }
                     composable(Route.Account.value) { AuthScreen() }
+                    composable(Route.Ops.value) { RuntimeReadinessScreen() }
                     composable(Route.Tests.value) { TestRunsScreen() }
                     composable(Route.Audit.value) { AuditTrailScreen() }
                     composable(Route.Diff.value) { DiffViewerScreen(viewModel = approvalsViewModel) }
