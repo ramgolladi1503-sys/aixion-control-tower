@@ -7,9 +7,9 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.main import app
 from app.models import AgentProvider, Project
 from app.store import store
-from app.main import app
 
 client = TestClient(app)
 REPOSITORY = "ramgolladi1503-sys/aixion-control-tower"
@@ -186,4 +186,3 @@ def test_simulator_warns_when_secret_is_missing() -> None:
     assert body["auth_ready"] is False
     assert "Connector secret is not configured; live webhook calls will be refused." in body["warnings"]
     assert body["task_preview"]["title"] == "Missing secret"
-}
