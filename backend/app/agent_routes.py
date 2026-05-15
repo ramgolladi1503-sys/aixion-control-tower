@@ -65,14 +65,6 @@ def list_agents(_: AuthUser = OwnerDependency) -> list[ExternalAgentPublic]:
     return [to_public_agent(agent) for agent in store.external_agents.values()]
 
 
-@router.get("/{agent_id}", response_model=ExternalAgentPublic)
-def get_agent(agent_id: str, _: AuthUser = OwnerDependency) -> ExternalAgentPublic:
-    agent = store.external_agents.get(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="External agent not found")
-    return to_public_agent(agent)
-
-
 @router.post("/approvals", response_model=ApprovalRequest)
 def create_agent_approval(payload: ApprovalRequestCreate, agent: ExternalAgent = Depends(require_external_agent)) -> ApprovalRequest:
     assert_agent_can(agent, AgentAction.CREATE_APPROVAL, project_id=payload.project_id)
@@ -212,3 +204,11 @@ def append_agent_owned_task_event(
     )
     store.persist()
     return event
+
+
+@router.get("/{agent_id}", response_model=ExternalAgentPublic)
+def get_agent(agent_id: str, _: AuthUser = OwnerDependency) -> ExternalAgentPublic:
+    agent = store.external_agents.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="External agent not found")
+    return to_public_agent(agent)
