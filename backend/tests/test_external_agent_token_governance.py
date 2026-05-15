@@ -41,19 +41,25 @@ def _task_payload(project_id: str) -> dict:
     }
 
 
-def _register_agent(project: Project) -> tuple[str, str]:
-    response = client.post(
-        "/agents",
-        json={
-            "provider": "CHATGPT",
-            "display_name": "Governed GPT",
-            "auth_type": "API_KEY",
-            "allowed_project_ids": [project.id],
-            "allowed_repositories": [REPOSITORY],
-            "allowed_actions": ["CREATE_AGENT_TASK", "READ_AGENT_TASK"],
-            "enabled": True,
-        },
-    )
+def _register_agent(
+    project: Project,
+    *,
+    token_expires_at: str | None = None,
+    rate_limit_per_minute: int = 60,
+) -> tuple[str, str]:
+    payload = {
+        "provider": "CHATGPT",
+        "display_name": "Governed GPT",
+        "auth_type": "API_KEY",
+        "allowed_project_ids": [project.id],
+        "allowed_repositories": [REPOSITORY],
+        "allowed_actions": ["CREATE_AGENT_TASK", "READ_AGENT_TASK"],
+        "enabled": True,
+        "rate_limit_per_minute": rate_limit_per_minute,
+    }
+    if token_expires_at is not None:
+        payload["token_expires_at"] = token_expires_at
+    response = client.post("/agents", json=payload)
     assert response.status_code == 200
     body = response.json()
     return body["agent"]["id"], body["agent_token"]
@@ -61,7 +67,12 @@ def _register_agent(project: Project) -> tuple[str, str]:
 
 def test_agent_registration_exposes_owner_visible_credential_status() -> None:
     project = _project()
-    agent_id, _ = _register_agent(project)
+    expires_at = (now_utc() + timedelta(days=1)).isoformat()
+    agent_id, _ = _register_agent(
+        project,
+        token_expires_at=expires_at,
+        rate_limit_per_minute=3,
+    )
 
     response = client.get(f"/agents/{agent_id}/credentials")
 
@@ -69,7 +80,8 @@ def test_agent_registration_exposes_owner_visible_credential_status() -> None:
     credentials = response.json()
     assert credentials["credential_state"] == "ACTIVE"
     assert credentials["token_present"] is True
-    assert credentials["rate_limit_per_minute"] == 60
+    assert credentials["token_expires_at"] is not None
+    assert credentials["rate_limit_per_minute"] == 3
 
 
 def test_successful_external_agent_auth_updates_last_used_timestamp() -> None:
@@ -185,6 +197,22 @@ def test_external_agent_token_expiry_is_enforced() -> None:
         event.event_type == "agent.auth_failed" and event.details["reason"] == "token_expired"
         for event in store.audit_events
     )
+
+
+def test_external_agent_registration_expiry_is_enforced() -> None:
+    project = _project()
+    expired_at = (now_utc() - timedelta(minutes=1)).isoformat()
+    agent_id, token = _register_agent(project, token_expires_at=expired_at)
+
+    response = client.post(
+        "/agents/tasks",
+        json=_task_payload(project.id),
+        headers=_headers(agent_id, token),
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "External agent token expired"
+    assert client.get(f"/agents/{agent_id}/credentials").json()["credential_state"] == "EXPIRED"
 
 
 def test_external_agent_rate_limit_blocks_excess_requests() -> None:
