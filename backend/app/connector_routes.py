@@ -31,6 +31,7 @@ from .connector_schema_mapper import (
     preview_connector_schema_mapping,
     set_connector_schema_mapper,
 )
+from .connector_templates import ConnectorTemplate, ConnectorTemplateList, connector_templates, get_connector_template
 from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
 from .models import AuditEvent, AuthUser, now_utc
 from .store import store
@@ -138,6 +139,16 @@ def create_connector(payload: ConnectorCreate, user: AuthUser = OwnerDependency)
 @router.get("", response_model=list[ConnectorPublic])
 def list_connectors(_: AuthUser = OwnerDependency) -> list[ConnectorPublic]:
     return [_to_public(connector) for connector in store.agent_connectors.values()]
+
+
+@router.get("/templates", response_model=ConnectorTemplateList)
+def list_connector_templates(_: AuthUser = OwnerDependency) -> ConnectorTemplateList:
+    return ConnectorTemplateList(templates=connector_templates())
+
+
+@router.get("/templates/{template_id}", response_model=ConnectorTemplate)
+def get_connector_template_route(template_id: str, _: AuthUser = OwnerDependency) -> ConnectorTemplate:
+    return get_connector_template(template_id)
 
 
 @router.post("/{connector_id}/webhook", response_model=ConnectorWebhookResponse)
