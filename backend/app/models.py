@@ -222,62 +222,7 @@ class MCPChildServerCreate(BaseModel):
 class MCPChildServer(MCPChildServerCreate):
     id: str = Field(default_factory=lambda: new_id("mcp_server"))
     created_at: datetime = Field(default_factory=now_utc)
-
-
-class MCPCallRequest(BaseModel):
-    project_id: str
-    server_id: str | None = None
-    tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    agent_name: str = "mcp-client"
-    session_id: str | None = None
-    source_url: str | None = None
-
-
-class MCPCallResponse(BaseModel):
-    status: str
-    pending_request_id: str | None = None
-    approval_request_id: str | None = None
-    result: dict[str, Any] | None = None
-
-
-class MCPApprovalDecision(BaseModel):
-    approval_request_id: str
-    status: ApprovalStatus
-
-
-class MCPPendingRequest(BaseModel):
-    id: str = Field(default_factory=lambda: new_id("mcp_pending"))
-    project_id: str
-    server_id: str | None = None
-    approval_request_id: str
-    tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
-    agent_name: str
-    session_id: str | None = None
-    source_url: str | None = None
-    status: MCPPendingStatus = MCPPendingStatus.WAITING_FOR_APPROVAL
-    attempts: int = 0
-    max_attempts: int = 3
-    lease_owner: str | None = None
-    lease_expires_at: datetime | None = None
-    last_error: str | None = None
-    dead_letter_reason: str | None = None
-    created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
-
-
-class MCPPendingSummary(BaseModel):
-    pending: int
-    forwarding: int
-    dead_letter: int
-    orphaned: int
-
-
-class MCPRecoveryRequest(BaseModel):
-    reason: str = "operator-triggered"
-    lease_owner: str = "operator"
-    lease_seconds: int = 60
 
 
 class IdeaCreate(BaseModel):
@@ -299,27 +244,20 @@ class WorkOrderCreate(BaseModel):
     tasks: list[str] = Field(default_factory=list)
     affected_areas: list[str] = Field(default_factory=list)
     required_tests: list[str] = Field(default_factory=list)
-    rollback_plan: str
+    rollback_plan: str = ""
 
 
 class WorkOrder(WorkOrderCreate):
-    id: str = Field(default_factory=lambda: new_id("work_order"))
-    status: str = "DRAFT"
-    risk_level: RiskLevel = RiskLevel.LOW
+    id: str = Field(default_factory=lambda: new_id("work"))
+    risk_level: RiskLevel = RiskLevel.MEDIUM
     created_at: datetime = Field(default_factory=now_utc)
 
 
 class FileChange(BaseModel):
     path: str
-    change_type: str
+    change_type: str = "update"
     diff: str
     new_content: str | None = None
-
-
-class RiskAssessment(BaseModel):
-    level: RiskLevel
-    blocked: bool = False
-    reasons: list[str] = Field(default_factory=list)
 
 
 class ApprovalRequestCreate(BaseModel):
@@ -327,48 +265,87 @@ class ApprovalRequestCreate(BaseModel):
     work_order_id: str | None = None
     title: str
     summary: str
-    agent_name: str
+    agent_name: str = "manual-agent"
     target_branch: str
-    files: list[FileChange] = Field(default_factory=list)
+    files: list[FileChange]
     test_plan: list[str] = Field(default_factory=list)
-    rollback_plan: str
+    rollback_plan: str = ""
     source_provider: AgentProvider | None = None
     source_agent_id: str | None = None
     source_agent_name: str | None = None
     source_session_id: str | None = None
     source_task_url: str | None = None
 
-    @field_validator("files")
-    @classmethod
-    def require_file_paths(cls, files: list[FileChange]) -> list[FileChange]:
-        for file in files:
-            if not file.path.strip():
-                raise ValueError("File path cannot be empty")
-        return files
+
+class RiskAssessment(BaseModel):
+    level: RiskLevel
+    reasons: list[str] = Field(default_factory=list)
+    blocked: bool = False
+    required_actions: list[str] = Field(default_factory=list)
 
 
 class ApprovalRequest(ApprovalRequestCreate):
     id: str = Field(default_factory=lambda: new_id("approval"))
     status: ApprovalStatus = ApprovalStatus.REQUESTED
     risk: RiskAssessment
-    approved_payload_hash: str | None = None
+    source_provider: AgentProvider = AgentProvider.MANUAL
+    source_agent_id: str | None = None
+    source_agent_name: str | None = None
+    source_session_id: str | None = None
+    source_task_url: str | None = None
     created_by_user_id: str | None = None
     verified_source: bool = False
+    approved_payload_hash: str | None = None
+    approved_at: datetime | None = None
+    approved_by_user_id: str | None = None
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+    @field_validator("source_provider", mode="before")
+    @classmethod
+    def default_manual_source_provider(cls, value: AgentProvider | str | None) -> AgentProvider | str:
+        return AgentProvider.MANUAL if value is None else value
+
+
+class MCPPendingRequest(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("mcp_pending"))
+    project_id: str
+    approval_request_id: str
+    server_name: str
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    session_id: str | None = None
+    requested_by: str = "mcp-client"
+    status: MCPPendingStatus = MCPPendingStatus.WAITING_FOR_APPROVAL
+    attempts: int = 0
+    max_attempts: int = 3
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None
+    last_error: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
 
 class DecisionCreate(BaseModel):
-    status: ApprovalStatus
-    decided_by: str = "operator"
-    notes: str = ""
+    decision: str
+    reason: str = ""
+
+
+class ApprovalGroups(BaseModel):
+    action_required: list[ApprovalRequest] = Field(default_factory=list)
+    approved_waiting: list[ApprovalRequest] = Field(default_factory=list)
+    executing: list[ApprovalRequest] = Field(default_factory=list)
+    ready_for_pr: list[ApprovalRequest] = Field(default_factory=list)
+    failed: list[ApprovalRequest] = Field(default_factory=list)
+    completed: list[ApprovalRequest] = Field(default_factory=list)
+    history: list[ApprovalRequest] = Field(default_factory=list)
 
 
 class TestRunCreate(BaseModel):
     approval_request_id: str
     command: str
     status: str
-    output_summary: str
+    output_summary: str = ""
 
 
 class TestRun(TestRunCreate):
@@ -382,35 +359,27 @@ class Notification(BaseModel):
     body: str
     entity_type: str
     entity_id: str
-    status: NotificationStatus = NotificationStatus.UNREAD
     user_id: str | None = None
-    channel: str = "IN_APP"
+    status: NotificationStatus = NotificationStatus.UNREAD
     push_status: str = "PENDING"
+    push_error: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
-    read_at: datetime | None = None
 
 
 class DeviceRegistration(BaseModel):
     id: str = Field(default_factory=lambda: new_id("device"))
     user_id: str | None = None
-    platform: str = "ANDROID"
-    fcm_token_hash: str
-    fcm_token_preview: str
+    platform: str = "android"
+    token: str
+    app_version: str = ""
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
-
-
-class ApprovalGroups(BaseModel):
-    action_required: list[ApprovalRequest]
-    ready_for_pr: list[ApprovalRequest]
-    completed: list[ApprovalRequest]
-    blocked: list[ApprovalRequest]
 
 
 class AuditEvent(BaseModel):
     id: str = Field(default_factory=lambda: new_id("audit"))
     event_type: str
+    actor: str = "system"
     entity_id: str
-    actor: str
     details: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=now_utc)
