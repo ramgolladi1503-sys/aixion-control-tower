@@ -47,12 +47,14 @@ fun HomeScreen(
     val state by viewModel.state.collectAsState()
     val heroTitle = when {
         state.loading -> "Loading command state"
+        state.hasError -> "Backend sync failed"
         state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"
         state.blockedCount > 0 -> "${state.blockedCount} blocked actions need attention"
         else -> "All clear"
     }
     val heroSubtitle = when {
         state.loading -> "Syncing approvals, worker state, and execution queues."
+        state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then refresh."
         state.actionRequiredCount > 0 -> "AI/code execution stays paused until the right human decision exists."
         state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
         else -> "No human action needed right now. Keep building, but keep the tower watching."
@@ -66,7 +68,7 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            HomeHeader(loading = state.loading)
+            HomeHeader(loading = state.loading, hasError = state.hasError)
         }
 
         item {
@@ -78,8 +80,16 @@ fun HomeScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         StatusBadge(
-                            label = if (state.actionRequiredCount > 0) "APPROVAL QUEUE" else "COMMAND STATE",
-                            color = if (state.actionRequiredCount > 0) RiskMedium else RiskLow
+                            label = when {
+                                state.hasError -> "BACKEND ERROR"
+                                state.actionRequiredCount > 0 -> "APPROVAL QUEUE"
+                                else -> "COMMAND STATE"
+                            },
+                            color = when {
+                                state.hasError -> RiskCritical
+                                state.actionRequiredCount > 0 -> RiskMedium
+                                else -> RiskLow
+                            }
                         )
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         Text(
@@ -99,6 +109,15 @@ fun HomeScreen(
                     }
                     ForgedLogoMark(size = 56.dp, color = TowerTextPrimary.copy(alpha = 0.82f))
                 }
+            }
+        }
+
+        state.errorMessage?.let { message ->
+            item {
+                ErrorPanel(
+                    title = "Live backend data unavailable",
+                    body = message
+                )
             }
         }
 
@@ -147,7 +166,14 @@ fun HomeScreen(
             )
         }
 
-        if (state.actionRequiredApprovals.isEmpty()) {
+        if (state.hasError) {
+            item {
+                EmptyHomePanel(
+                    title = "No fallback approvals loaded",
+                    body = "This is intentional. Authenticated product screens now wait for real backend data instead of silently showing demo data."
+                )
+            }
+        } else if (state.actionRequiredApprovals.isEmpty()) {
             item {
                 EmptyHomePanel(
                     title = "No approvals waiting",
@@ -160,7 +186,7 @@ fun HomeScreen(
             }
         }
 
-        if (state.githubExecutionApprovals.isNotEmpty()) {
+        if (!state.hasError && state.githubExecutionApprovals.isNotEmpty()) {
             item {
                 TowerSectionHeader(
                     title = "Awaiting GitHub Execution",
@@ -179,7 +205,7 @@ fun HomeScreen(
 }
 
 @Composable
-private fun HomeHeader(loading: Boolean) {
+private fun HomeHeader(loading: Boolean, hasError: Boolean) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -202,8 +228,37 @@ private fun HomeHeader(loading: Boolean) {
             )
         }
         StatusBadge(
-            label = if (loading) "SYNCING" else "CONNECTED",
-            color = if (loading) RiskMedium else RiskLow
+            label = when {
+                loading -> "SYNCING"
+                hasError -> "OFFLINE"
+                else -> "CONNECTED"
+            },
+            color = when {
+                loading -> RiskMedium
+                hasError -> RiskCritical
+                else -> RiskLow
+            }
+        )
+    }
+}
+
+@Composable
+private fun ErrorPanel(title: String, body: String) {
+    TowerPanel(elevated = true) {
+        StatusBadge(label = "REAL DATA REQUIRED", color = RiskCritical)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = title,
+            color = TowerTextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = body,
+            color = TowerTextMuted,
+            fontSize = 13.sp,
+            lineHeight = 19.sp
         )
     }
 }
