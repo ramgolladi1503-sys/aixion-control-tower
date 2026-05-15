@@ -19,6 +19,7 @@ import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
+import com.aixion.controltower.core.api.dto.RegistrationResponseDto
 import com.aixion.controltower.core.api.dto.RoleChoicesDto
 import com.aixion.controltower.core.api.dto.RoleUpdateRequestDto
 import com.aixion.controltower.core.api.dto.SessionDto
@@ -73,7 +74,7 @@ private class InviteAdminApi : BaseFakeControlTowerApi() {
 
     override suspend fun health(): Map<String, String> = emptyMap()
 
-    override suspend fun register(payload: RegisterRequestDto): AuthResponseDto {
+    override suspend fun register(payload: RegisterRequestDto): RegistrationResponseDto {
         throw UnsupportedOperationException("not needed")
     }
 
