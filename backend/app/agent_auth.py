@@ -18,6 +18,10 @@ def _safe_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+def _action_value(action: AgentAction | str) -> str:
+    return action.value if isinstance(action, AgentAction) else str(action)
+
+
 def to_public_agent(agent: ExternalAgent) -> ExternalAgentPublic:
     return ExternalAgentPublic(
         id=agent.id,
@@ -72,8 +76,10 @@ def require_external_agent(x_aixion_agent_id: str | None = Header(default=None),
 
 
 def assert_agent_can(agent: ExternalAgent, action: AgentAction, project_id: str | None = None, repository_full_name: str | None = None) -> None:
-    if action not in agent.allowed_actions:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Agent is not allowed to perform {action}")
+    action_value = _action_value(action)
+    allowed_actions = {_action_value(allowed_action) for allowed_action in agent.allowed_actions}
+    if action_value not in allowed_actions:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Agent is not allowed to perform {action_value}")
     if project_id and agent.allowed_project_ids and project_id not in agent.allowed_project_ids:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent is not allowed for this project")
     if repository_full_name and agent.allowed_repositories and repository_full_name not in agent.allowed_repositories:
