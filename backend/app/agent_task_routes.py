@@ -15,6 +15,13 @@ from .agent_task_notifications import (
     notify_agent_task_approval_decision,
     notify_agent_task_worker_status,
 )
+from .agent_task_retry import (
+    AgentTaskRetryRequest,
+    AgentTaskRetrySummary,
+    append_retry_requested_event,
+    audit_retry_requested,
+    retry_summary,
+)
 from .auth import require_maintainer, require_reviewer
 from .models import AgentProvider, ApprovalRequest, ApprovalRequestCreate, ApprovalStatus, AuditEvent, AuthUser, now_utc
 from .risk_engine import assess_approval_request
@@ -182,6 +189,42 @@ def list_agent_task_events(task_id: str, _: AuthUser = ReviewerDependency) -> li
     if task_id not in store.agent_tasks:
         raise HTTPException(status_code=404, detail="Agent task not found")
     return sorted(_task_events(task_id), key=lambda event: event.created_at)
+
+
+@router.get("/{task_id}/retry", response_model=AgentTaskRetrySummary)
+def get_agent_task_retry_summary(
+    task_id: str,
+    max_retries: int = Query(default=3, ge=0, le=10),
+    _: AuthUser = ReviewerDependency,
+) -> AgentTaskRetrySummary:
+    task = store.agent_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+    return retry_summary(task, max_retries=max_retries)
+
+
+@router.post("/{task_id}/retry", response_model=AgentTaskEvent)
+def retry_agent_task(
+    task_id: str,
+    payload: AgentTaskRetryRequest,
+    user: AuthUser = MaintainerDependency,
+) -> AgentTaskEvent:
+    task = store.agent_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+    summary = retry_summary(task, max_retries=payload.max_retries)
+    if not summary.retry_allowed:
+        raise HTTPException(status_code=409, detail=summary.reason)
+    event = append_retry_requested_event(
+        task,
+        actor=user.email,
+        reason=payload.reason,
+        retry_count=summary.retry_count,
+        max_retries=payload.max_retries,
+    )
+    audit_retry_requested(task, actor=user.email, event=event)
+    store.persist()
+    return event
 
 
 @router.post("/{task_id}/events", response_model=AgentTaskEvent)
