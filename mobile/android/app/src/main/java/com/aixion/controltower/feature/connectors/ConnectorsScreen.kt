@@ -1,6 +1,5 @@
 package com.aixion.controltower.feature.connectors
 
-import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -96,7 +95,6 @@ fun ConnectorsScreen(viewModel: ConnectorsViewModel = viewModel()) {
                 connector = connector,
                 selectedTemplate = state.selectedTemplate,
                 webhookUrl = state.webhookUrl(connector),
-                setupText = state.setupText(connector, state.selectedTemplate),
                 onCopyWebhook = { copy("Webhook URL", state.webhookUrl(connector)) },
                 onCopySetup = { copy("Connector setup", state.setupText(connector, state.selectedTemplate)) },
                 onToggle = { viewModel.toggle(connector) },
@@ -172,7 +170,6 @@ private fun ConnectorCard(
     connector: ConnectorDto,
     selectedTemplate: ConnectorTemplateDto?,
     webhookUrl: String,
-    setupText: String,
     onCopyWebhook: () -> Unit,
     onCopySetup: () -> Unit,
     onToggle: () -> Unit,
