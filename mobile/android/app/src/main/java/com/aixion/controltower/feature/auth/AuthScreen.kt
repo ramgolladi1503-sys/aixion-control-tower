@@ -76,8 +76,8 @@ fun AuthScreen(
         SessionStatePanel(state = state)
 
         TowerSectionHeader(
-            title = "Backend Access",
-            subtitle = "Authenticate this Android device against the Control Tower backend before owner controls are available."
+            title = "Access flow",
+            subtitle = "Use the sequence in order: register, verify email, then log in. The app stays locked until that sequence is complete."
         )
 
         AuthForm(state = state, viewModel = viewModel)
@@ -119,14 +119,14 @@ private fun AccountHero(state: AuthUiState) {
                     label = when {
                         state.authenticated -> "SESSION ACTIVE"
                         state.verificationRequired -> "EMAIL VERIFICATION REQUIRED"
-                        state.emailVerified -> "EMAIL VERIFIED"
+                        state.emailVerified -> "READY TO LOGIN"
                         else -> "ACCESS REQUIRED"
                     },
                     color = if (state.authenticated || state.emailVerified) RiskLow else RiskMedium
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
-                    text = "Account",
+                    text = AuthUxCopy.heroTitle(state),
                     color = TowerTextPrimary,
                     fontSize = 28.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -134,7 +134,7 @@ private fun AccountHero(state: AuthUiState) {
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = "Connect Android to the authenticated Control Tower backend.",
+                    text = AuthUxCopy.heroSubtitle(state),
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
@@ -149,14 +149,11 @@ private fun AccountHero(state: AuthUiState) {
 private fun SessionStatePanel(state: AuthUiState) {
     TowerPanel(elevated = true) {
         StatusBadge(
-            label = when {
-                state.authenticated -> "Session active"
-                state.verificationRequired -> "Verify email before login"
-                else -> "No active session"
-            },
+            label = AuthUxCopy.sessionLabel(state),
             color = when {
                 state.authenticated -> RiskLow
                 state.verificationRequired -> RiskMedium
+                state.emailVerified -> RiskLow
                 else -> TowerAccent
             }
         )
@@ -169,12 +166,14 @@ private fun SessionStatePanel(state: AuthUiState) {
 @Composable
 private fun AuthForm(state: AuthUiState, viewModel: AuthViewModel) {
     TowerPanel(elevated = true) {
+        Text("1. Register or log in", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text("Register creates the account only. It does not unlock the app until email verification succeeds.", color = TowerTextMuted, fontSize = 12.sp)
         OutlinedTextField(value = state.email, onValueChange = viewModel::updateEmail, label = { Text("Email") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
         OutlinedTextField(
             value = state.password,
             onValueChange = viewModel::updatePassword,
             label = { Text("Password") },
-            supportingText = { Text("Registration requires at least 12 characters.") },
+            supportingText = { Text(AuthUxCopy.PASSWORD_REQUIREMENTS) },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
             visualTransformation = PasswordVisualTransformation()
@@ -190,14 +189,17 @@ private fun AuthForm(state: AuthUiState, viewModel: AuthViewModel) {
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = viewModel::login, enabled = !state.loading && !state.verificationRequired, modifier = Modifier.weight(1f)) { Text(if (state.loading) "Working..." else "Login") }
-            OutlinedButton(onClick = viewModel::register, enabled = !state.loading && state.password.length >= 12, modifier = Modifier.weight(1f)) { Text("Register") }
+            Button(onClick = viewModel::login, enabled = AuthUxCopy.canAttemptLogin(state), modifier = Modifier.weight(1f)) { Text(AuthUxCopy.primaryLoginLabel(state)) }
+            OutlinedButton(onClick = viewModel::register, enabled = AuthUxCopy.canAttemptRegister(state), modifier = Modifier.weight(1f)) { Text("Register") }
         }
 
-        if (state.verificationRequired || state.devVerificationCode != null) {
+        if (state.verificationRequired || state.devVerificationCode != null || state.emailVerified) {
             TowerPanel(elevated = false) {
-                Text("Email verification", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Text("Registration does not grant app access until this email is verified.", color = TowerTextMuted, fontSize = 12.sp)
+                Text("2. Verify email", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(AuthUxCopy.verificationGuidance(state), color = TowerTextMuted, fontSize = 12.sp)
+                if (state.emailVerified) {
+                    Text("Email is verified. Use Login now to open the app.", color = RiskLow, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
                 state.devVerificationCode?.let { Text("Dev verification code: $it", color = RiskLow, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
                 OutlinedTextField(
                     value = state.verificationCode,
@@ -207,14 +209,14 @@ private fun AuthForm(state: AuthUiState, viewModel: AuthViewModel) {
                     singleLine = true
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = viewModel::verifyEmail, enabled = !state.loading && state.verificationCode.isNotBlank(), modifier = Modifier.weight(1f)) { Text("Verify email") }
-                    OutlinedButton(onClick = viewModel::resendVerification, enabled = !state.loading && state.email.isNotBlank(), modifier = Modifier.weight(1f)) { Text("Resend") }
+                    Button(onClick = viewModel::verifyEmail, enabled = AuthUxCopy.canAttemptVerify(state), modifier = Modifier.weight(1f)) { Text("Verify email") }
+                    OutlinedButton(onClick = viewModel::resendVerification, enabled = AuthUxCopy.canAttemptResend(state), modifier = Modifier.weight(1f)) { Text("Resend code") }
                 }
             }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = viewModel::refreshSession, enabled = !state.loading, modifier = Modifier.weight(1f)) { Text("Verify session") }
+            OutlinedButton(onClick = viewModel::refreshSession, enabled = !state.loading, modifier = Modifier.weight(1f)) { Text("Verify saved session") }
             OutlinedButton(onClick = viewModel::logout, enabled = !state.loading, modifier = Modifier.weight(1f)) { Text("Clear session") }
         }
     }
