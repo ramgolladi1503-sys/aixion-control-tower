@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -28,6 +30,10 @@ from .store import store
 
 CONNECTOR_RATE_LIMIT_WINDOW = timedelta(minutes=1)
 MAX_WEBHOOK_METADATA_KEYS = 50
+HMAC_SIGNATURE_VERSION = "v1"
+HMAC_TIMESTAMP_TOLERANCE_SECONDS = 300
+HMAC_NONCE_TTL_SECONDS = 600
+HMAC_MAX_TRACKED_NONCES = 200
 
 
 class ConnectorWebhookPayload(BaseModel):
@@ -120,11 +126,99 @@ def _enforce_connector_rate_limit(connector: AgentConnector) -> None:
     connector.updated_at = now
 
 
-def _expected_hmac(secret_hash: str, body: bytes) -> str:
-    return hmac.new(secret_hash.encode("utf-8"), body, "sha256").hexdigest()
+def _body_hash(body: bytes) -> str:
+    return hashlib.sha256(body).hexdigest()
 
 
-def _authenticate_connector(connector: AgentConnector, *, body: bytes, authorization: str | None, x_aixion_connector_signature: str | None) -> None:
+def _hmac_v1_signing_payload(*, timestamp: str, nonce: str, body: bytes) -> str:
+    return f"{HMAC_SIGNATURE_VERSION}.{timestamp}.{nonce}.{_body_hash(body)}"
+
+
+def expected_hmac_v1_signature(secret_hash: str, *, timestamp: str, nonce: str, body: bytes) -> str:
+    signing_payload = _hmac_v1_signing_payload(timestamp=timestamp, nonce=nonce, body=body)
+    return hmac.new(secret_hash.encode("utf-8"), signing_payload.encode("utf-8"), "sha256").hexdigest()
+
+
+def _extract_hmac_signature(signature_header: str) -> str:
+    signature = signature_header.strip()
+    prefix = f"{HMAC_SIGNATURE_VERSION}="
+    if signature.startswith(prefix):
+        return signature.removeprefix(prefix).strip()
+    return signature
+
+
+def _parse_unix_timestamp(timestamp: str | None) -> int:
+    if not timestamp:
+        raise HTTPException(status_code=401, detail="Missing connector HMAC timestamp")
+    try:
+        return int(timestamp)
+    except ValueError as error:
+        raise HTTPException(status_code=401, detail="Invalid connector HMAC timestamp") from error
+
+
+def _clean_hmac_nonce_history(connector: AgentConnector, now_epoch: int) -> dict[str, int]:
+    raw_history = connector.config.get("hmac_nonce_history")
+    history = raw_history if isinstance(raw_history, dict) else {}
+    cleaned: dict[str, int] = {}
+    for nonce, seen_at in history.items():
+        try:
+            seen_at_int = int(seen_at)
+        except (TypeError, ValueError):
+            continue
+        if now_epoch - seen_at_int <= HMAC_NONCE_TTL_SECONDS:
+            cleaned[str(nonce)] = seen_at_int
+    if len(cleaned) > HMAC_MAX_TRACKED_NONCES:
+        cleaned = dict(sorted(cleaned.items(), key=lambda item: item[1])[-HMAC_MAX_TRACKED_NONCES:])
+    return cleaned
+
+
+def _assert_hmac_v1_not_replayed(connector: AgentConnector, nonce: str, now_epoch: int) -> None:
+    history = _clean_hmac_nonce_history(connector, now_epoch)
+    if nonce in history:
+        connector.config = {**connector.config, "hmac_nonce_history": history}
+        connector.updated_at = now_utc()
+        raise HTTPException(status_code=401, detail="Connector HMAC nonce has already been used")
+    history[nonce] = now_epoch
+    connector.config = {**connector.config, "hmac_nonce_history": history}
+    connector.updated_at = now_utc()
+
+
+def _authenticate_hmac_v1(
+    connector: AgentConnector,
+    *,
+    stored_hash: str,
+    body: bytes,
+    signature: str | None,
+    signature_version: str | None,
+    timestamp: str | None,
+    nonce: str | None,
+) -> None:
+    if signature_version != HMAC_SIGNATURE_VERSION:
+        raise HTTPException(status_code=401, detail="Unsupported connector HMAC signature version")
+    if not signature:
+        raise HTTPException(status_code=401, detail="Missing connector HMAC signature")
+    if not nonce or len(nonce) > 128:
+        raise HTTPException(status_code=401, detail="Invalid connector HMAC nonce")
+    timestamp_epoch = _parse_unix_timestamp(timestamp)
+    now_epoch = int(time.time())
+    if abs(now_epoch - timestamp_epoch) > HMAC_TIMESTAMP_TOLERANCE_SECONDS:
+        raise HTTPException(status_code=401, detail="Connector HMAC timestamp is stale")
+    expected = expected_hmac_v1_signature(stored_hash, timestamp=str(timestamp_epoch), nonce=nonce, body=body)
+    if not safe_equal(_extract_hmac_signature(signature), expected):
+        raise HTTPException(status_code=401, detail="Invalid connector HMAC signature")
+    _assert_hmac_v1_not_replayed(connector, nonce, now_epoch)
+
+
+def _authenticate_connector(
+    connector: AgentConnector,
+    *,
+    body: bytes,
+    authorization: str | None,
+    x_aixion_connector_signature: str | None,
+    x_aixion_signature_version: str | None,
+    x_aixion_timestamp: str | None,
+    x_aixion_nonce: str | None,
+) -> None:
     if connector.status != ConnectorStatus.ENABLED:
         record_connector_auth_failure(connector, "connector disabled")
         store.persist()
@@ -148,14 +242,20 @@ def _authenticate_connector(connector: AgentConnector, *, body: bytes, authoriza
             store.persist()
             raise HTTPException(status_code=401, detail="Invalid connector bearer token")
     elif connector.auth_type == ConnectorAuthType.HMAC:
-        if not x_aixion_connector_signature:
-            record_connector_auth_failure(connector, "missing hmac signature")
+        try:
+            _authenticate_hmac_v1(
+                connector,
+                stored_hash=str(stored_hash),
+                body=body,
+                signature=x_aixion_connector_signature,
+                signature_version=x_aixion_signature_version,
+                timestamp=x_aixion_timestamp,
+                nonce=x_aixion_nonce,
+            )
+        except HTTPException as error:
+            record_connector_auth_failure(connector, str(error.detail))
             store.persist()
-            raise HTTPException(status_code=401, detail="Missing connector HMAC signature")
-        if not safe_equal(str(x_aixion_connector_signature), _expected_hmac(str(stored_hash), body)):
-            record_connector_auth_failure(connector, "invalid hmac signature")
-            store.persist()
-            raise HTTPException(status_code=401, detail="Invalid connector HMAC signature")
+            raise
     else:
         raise HTTPException(status_code=401, detail="Unsupported connector auth type")
     record_connector_auth_success(connector)
@@ -206,9 +306,25 @@ def _append_task_event_from_connector(connector: AgentConnector, payload: Connec
     return ConnectorWebhookResponse(accepted=True, action=AgentAction.APPEND_AGENT_TASK_EVENT, connector_id=connector.id, task_id=task.id, event_id=event.id, message="AgentTask event appended")
 
 
-async def handle_connector_webhook(connector: AgentConnector, request: Request, authorization: str | None = Header(default=None), x_aixion_connector_signature: str | None = Header(default=None)) -> ConnectorWebhookResponse:
+async def handle_connector_webhook(
+    connector: AgentConnector,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_aixion_connector_signature: str | None = Header(default=None),
+    x_aixion_signature_version: str | None = Header(default=None),
+    x_aixion_timestamp: str | None = Header(default=None),
+    x_aixion_nonce: str | None = Header(default=None),
+) -> ConnectorWebhookResponse:
     body = await request.body()
-    _authenticate_connector(connector, body=body, authorization=authorization, x_aixion_connector_signature=x_aixion_connector_signature)
+    _authenticate_connector(
+        connector,
+        body=body,
+        authorization=authorization,
+        x_aixion_connector_signature=x_aixion_connector_signature,
+        x_aixion_signature_version=x_aixion_signature_version,
+        x_aixion_timestamp=x_aixion_timestamp,
+        x_aixion_nonce=x_aixion_nonce,
+    )
     _enforce_connector_rate_limit(connector)
     try:
         raw_payload = await request.json()
