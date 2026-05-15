@@ -126,8 +126,9 @@ def create_agent_task(payload: AgentTaskCreate, agent: ExternalAgent = Depends(r
     if payload.project_id and payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    task_payload = payload.model_dump(exclude={"provider", "metadata"})
     task = AgentTask(
-        **payload.model_dump(exclude={"provider"}),
+        **task_payload,
         provider=agent.provider,
         external_agent_id=agent.id,
         external_agent_name=agent.display_name,
