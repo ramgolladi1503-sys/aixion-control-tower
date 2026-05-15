@@ -16,7 +16,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -43,9 +42,7 @@ import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.RiskMedium
 import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
-import com.aixion.controltower.core.ui.theme.TowerBorderSoft
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerSurfaceRaised
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
@@ -336,15 +333,13 @@ private fun DecisionPanel(
             OutlinedButton(
                 onClick = onReject,
                 modifier = Modifier.weight(1f),
-                enabled = !isBlocked,
-                colors = OutlinedButtonDefaults.outlinedButtonColors(contentColor = RiskCritical)
-            ) { Text("Reject") }
+                enabled = !isBlocked
+            ) { Text("Reject", color = RiskCritical) }
             OutlinedButton(
                 onClick = onRevise,
                 modifier = Modifier.weight(1f),
-                enabled = !isBlocked,
-                colors = OutlinedButtonDefaults.outlinedButtonColors(contentColor = TowerTextPrimary)
-            ) { Text("Revise") }
+                enabled = !isBlocked
+            ) { Text("Revise", color = TowerTextPrimary) }
         }
     }
 }
