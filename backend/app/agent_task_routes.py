@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from .agent_task_cancel import (
+    AgentTaskCancelRequest,
+    AgentTaskCancelSummary,
+    append_cancel_requested_event,
+    audit_cancel_requested,
+    cancel_summary,
+)
 from .agent_task_models import (
     AgentTask,
     AgentTaskCreate,
@@ -189,6 +196,32 @@ def list_agent_task_events(task_id: str, _: AuthUser = ReviewerDependency) -> li
     if task_id not in store.agent_tasks:
         raise HTTPException(status_code=404, detail="Agent task not found")
     return sorted(_task_events(task_id), key=lambda event: event.created_at)
+
+
+@router.get("/{task_id}/cancel", response_model=AgentTaskCancelSummary)
+def get_agent_task_cancel_summary(task_id: str, _: AuthUser = ReviewerDependency) -> AgentTaskCancelSummary:
+    task = store.agent_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+    return cancel_summary(task)
+
+
+@router.post("/{task_id}/cancel", response_model=AgentTaskEvent)
+def cancel_agent_task(
+    task_id: str,
+    payload: AgentTaskCancelRequest,
+    user: AuthUser = MaintainerDependency,
+) -> AgentTaskEvent:
+    task = store.agent_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+    summary = cancel_summary(task)
+    if not summary.cancel_allowed:
+        raise HTTPException(status_code=409, detail=summary.reason)
+    event = append_cancel_requested_event(task, actor=user.email, reason=payload.reason)
+    audit_cancel_requested(task, actor=user.email, event=event)
+    store.persist()
+    return event
 
 
 @router.get("/{task_id}/retry", response_model=AgentTaskRetrySummary)
