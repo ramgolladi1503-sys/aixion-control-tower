@@ -4,12 +4,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -17,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -26,15 +28,18 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.AgentTaskEventSummary
 import com.aixion.controltower.core.model.AgentTaskStatus
 import com.aixion.controltower.core.model.AgentTaskSummary
+import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
+import com.aixion.controltower.core.ui.components.TowerHeroPanel
+import com.aixion.controltower.core.ui.components.TowerPanel
+import com.aixion.controltower.core.ui.components.TowerSectionHeader
 import com.aixion.controltower.core.ui.theme.RiskCritical
 import com.aixion.controltower.core.ui.theme.RiskHigh
 import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.RiskMedium
 import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
-import com.aixion.controltower.core.ui.theme.TowerSurface
-import com.aixion.controltower.core.ui.theme.TowerSurfaceRaised
+import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
@@ -58,41 +63,23 @@ fun AgentTasksScreen(
             .fillMaxSize()
             .background(TowerBackground)
             .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Agent Tasks",
-                        color = TowerTextPrimary,
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = if (state.loading) {
-                            "Loading connected-agent work..."
-                        } else {
-                            "Track ChatGPT, Codex, Claude, Cursor, GitHub Actions, and manual agent work."
-                        },
-                        color = TowerTextMuted,
-                        fontSize = 14.sp
-                    )
-                }
-                Button(onClick = { viewModel.refresh() }) {
-                    Text("Refresh")
-                }
-            }
+            AgentTasksHero(
+                loading = state.loading,
+                total = state.tasks.size,
+                active = state.activeCount,
+                waiting = state.waitingForApprovalCount,
+                onRefresh = { viewModel.refresh() }
+            )
             state.errorMessage?.let { error ->
+                Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
                     text = "Backend error: $error",
                     color = RiskCritical,
                     fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(top = 8.dp)
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
@@ -118,21 +105,27 @@ fun AgentTasksScreen(
             }
         }
 
+        item {
+            TowerSectionHeader(
+                title = "Agent Work Queue",
+                subtitle = "Track connected-agent work before it becomes approval, execution, PR, or failure evidence."
+            )
+        }
+
         if (!state.loading && state.tasks.isEmpty()) {
             item {
-                Text(
-                    text = if (state.errorMessage == null) {
-                        "No agent tasks found yet. Create one from GPT Actions, Codex, or the backend task API."
-                    } else {
-                        "Agent task list unavailable. Fix backend/auth connectivity before trusting this screen."
-                    },
-                    color = TowerTextMuted,
-                    fontSize = 15.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(TowerSurface, RoundedCornerShape(22.dp))
-                        .padding(18.dp)
-                )
+                TowerPanel(elevated = true) {
+                    Text(
+                        text = if (state.errorMessage == null) {
+                            "No agent tasks found yet. Create one from GPT Actions, Codex, or the backend task API."
+                        } else {
+                            "Agent task list unavailable. Fix backend/auth connectivity before trusting this screen."
+                        },
+                        color = TowerTextMuted,
+                        fontSize = 15.sp,
+                        lineHeight = 21.sp
+                    )
+                }
             }
         }
 
@@ -150,23 +143,70 @@ fun AgentTasksScreen(
 }
 
 @Composable
-private fun AgentTaskSummaryCard(total: Int, active: Int, waiting: Int) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(TowerSurface, RoundedCornerShape(24.dp))
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+private fun AgentTasksHero(
+    loading: Boolean,
+    total: Int,
+    active: Int,
+    waiting: Int,
+    onRefresh: () -> Unit
+) {
+    TowerHeroPanel {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                StatusBadge(label = if (loading) "SYNCING" else "AGENT CONTROL", color = if (loading) RiskMedium else RiskLow)
+                Spacer(modifier = Modifier.height(TowerSpacing.md))
+                Text(
+                    text = "Agent Tasks",
+                    color = TowerTextPrimary,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 32.sp
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                Text(
+                    text = if (loading) {
+                        "Loading connected-agent work..."
+                    } else {
+                        "Track ChatGPT, Codex, Claude, Cursor, GitHub Actions, and manual agent work."
+                    },
+                    color = TowerTextMuted,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
+            }
+            ForgedLogoMark(size = 52.dp, color = TowerTextPrimary.copy(alpha = 0.78f))
+        }
+        Spacer(modifier = Modifier.height(TowerSpacing.lg))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = "TOTAL $total", color = TowerAccent)
             StatusBadge(label = "ACTIVE $active", color = RiskMedium)
             StatusBadge(label = "WAITING $waiting", color = if (waiting > 0) RiskHigh else RiskLow)
         }
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Button(onClick = onRefresh, modifier = Modifier.fillMaxWidth()) {
+            Text("Refresh")
+        }
+    }
+}
+
+@Composable
+private fun AgentTaskSummaryCard(total: Int, active: Int, waiting: Int) {
+    TowerPanel(elevated = true) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusBadge(label = "TOTAL $total", color = TowerAccent)
+            StatusBadge(label = "ACTIVE $active", color = RiskMedium)
+            StatusBadge(label = "WAITING $waiting", color = if (waiting > 0) RiskHigh else RiskLow)
+        }
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text(
             text = "Connected-agent work should be visible here before it becomes approvals, PRs, failures, or final evidence.",
             color = TowerTextMuted,
-            fontSize = 13.sp
+            fontSize = 13.sp,
+            lineHeight = 19.sp
         )
     }
 }
@@ -178,13 +218,7 @@ private fun AgentTaskCard(
     onSelect: () -> Unit,
     onOpenApproval: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(if (selected) TowerSurfaceRaised else TowerSurface, RoundedCornerShape(22.dp))
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
+    TowerPanel(elevated = selected) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = task.status.name, color = task.statusColor())
             StatusBadge(label = task.sourceLabel, color = TowerAccent)
@@ -195,8 +229,9 @@ private fun AgentTaskCard(
                 StatusBadge(label = "APPROVAL", color = RiskHigh)
             }
         }
-        Text(task.title, color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        Text(task.goal, color = TowerTextMuted, fontSize = 13.sp)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(task.title, color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 23.sp)
+        Text(task.goal, color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
         task.repository?.takeIf { it.isNotBlank() }?.let { repository ->
             Text("Repo: $repository", color = TowerTextMuted, fontSize = 12.sp)
         }
@@ -208,6 +243,7 @@ private fun AgentTaskCard(
             color = TowerTextMuted,
             fontSize = 12.sp
         )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         OutlinedButton(onClick = onSelect, modifier = Modifier.fillMaxWidth()) {
             Text(if (selected) "Timeline loaded" else "View timeline")
         }
@@ -226,18 +262,13 @@ private fun SelectedTaskTimelineCard(
     onBack: () -> Unit,
     onOpenApproval: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(TowerSurfaceRaised, RoundedCornerShape(24.dp))
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
+    TowerHeroPanel {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = "TIMELINE", color = TowerAccent)
             StatusBadge(label = task.provider, color = task.statusColor())
         }
-        Text(task.title, color = TowerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Text(task.title, color = TowerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, lineHeight = 25.sp)
         if (task.approvalRequestId != null) {
             Button(onClick = onOpenApproval, modifier = Modifier.fillMaxWidth()) {
                 Text("Open approval ${task.approvalRequestId}")
@@ -256,18 +287,13 @@ private fun SelectedTaskTimelineCard(
 
 @Composable
 private fun AgentTaskEventRow(event: AgentTaskEventSummary) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(TowerSurface, RoundedCornerShape(16.dp))
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
+    TowerPanel(elevated = false) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = event.eventType, color = TowerAccent)
             event.status?.let { status -> StatusBadge(label = status.name, color = status.statusColor()) }
         }
-        Text(event.message.ifBlank { "No message" }, color = TowerTextPrimary, fontSize = 14.sp)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(event.message.ifBlank { "No message" }, color = TowerTextPrimary, fontSize = 14.sp, lineHeight = 20.sp)
         Text(
             text = "${event.actor} • ${event.createdAt ?: "recent"}",
             color = TowerTextMuted,
