@@ -4,6 +4,7 @@ import argparse
 import json
 import shlex
 import subprocess
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +12,11 @@ from typing import Any, Callable
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
-from .agent_worker_validation_plan import validate_validation_plan
+from .agent_worker_validation_plan import (
+    allowed_prefix_for_command,
+    validate_validation_plan,
+    validation_policy_metadata,
+)
 from .models import ApprovalRequest, AuditEvent
 from .store import store
 
@@ -25,6 +30,10 @@ class CommandExecutionResult:
     exit_code: int
     timed_out: bool = False
     output_summary: str = ""
+    duration_ms: int = 0
+    output_truncated: bool = False
+    output_chars: int = 0
+    allowed_prefix: str = "UNKNOWN"
 
     @property
     def passed(self) -> bool:
@@ -84,11 +93,23 @@ def _linked_approval(task: AgentTask) -> ApprovalRequest | None:
     return store.approval_requests.get(task.approval_request_id)
 
 
-def _summarize_output(output: str) -> str:
+def _summarize_output(output: str) -> tuple[str, bool, int]:
     cleaned = output.strip()
-    if len(cleaned) <= MAX_OUTPUT_CHARS:
-        return cleaned
-    return cleaned[-MAX_OUTPUT_CHARS:]
+    output_chars = len(cleaned)
+    if output_chars <= MAX_OUTPUT_CHARS:
+        return cleaned, False, output_chars
+    return cleaned[-MAX_OUTPUT_CHARS:], True, output_chars
+
+
+def _normalize_result_artifact(result: CommandExecutionResult) -> CommandExecutionResult:
+    if not result.allowed_prefix or result.allowed_prefix == "UNKNOWN":
+        result.allowed_prefix = allowed_prefix_for_command(result.command)
+    if result.output_chars == 0 and result.output_summary:
+        result.output_chars = len(result.output_summary)
+    if len(result.output_summary) > MAX_OUTPUT_CHARS:
+        result.output_summary = result.output_summary[-MAX_OUTPUT_CHARS:]
+        result.output_truncated = True
+    return result
 
 
 def execute_validation_command(
@@ -98,6 +119,7 @@ def execute_validation_command(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> CommandExecutionResult:
     args = shlex.split(command)
+    started = time.monotonic()
     try:
         completed = subprocess.run(
             args,
@@ -108,25 +130,50 @@ def execute_validation_command(
             check=False,
             shell=False,
         )
+        duration_ms = int((time.monotonic() - started) * 1000)
         combined_output = "\n".join(part for part in [completed.stdout, completed.stderr] if part)
+        summary, truncated, output_chars = _summarize_output(combined_output)
         return CommandExecutionResult(
             command=command,
             exit_code=completed.returncode,
             timed_out=False,
-            output_summary=_summarize_output(combined_output),
+            output_summary=summary,
+            duration_ms=duration_ms,
+            output_truncated=truncated,
+            output_chars=output_chars,
+            allowed_prefix=allowed_prefix_for_command(command),
         )
     except subprocess.TimeoutExpired as error:
+        duration_ms = int((time.monotonic() - started) * 1000)
         output = "\n".join(
             part.decode("utf-8", errors="replace") if isinstance(part, bytes) else part
             for part in [error.stdout, error.stderr]
             if part
         )
+        summary, truncated, output_chars = _summarize_output(output or f"Command timed out after {timeout_seconds}s.")
         return CommandExecutionResult(
             command=command,
             exit_code=124,
             timed_out=True,
-            output_summary=_summarize_output(output or f"Command timed out after {timeout_seconds}s."),
+            output_summary=summary,
+            duration_ms=duration_ms,
+            output_truncated=truncated,
+            output_chars=output_chars,
+            allowed_prefix=allowed_prefix_for_command(command),
         )
+
+
+def _artifact_summary(results: list[CommandExecutionResult]) -> dict[str, Any]:
+    return {
+        "artifact_type": "validation_command_artifact_summary",
+        "command_count": len(results),
+        "passed_count": sum(1 for result in results if result.passed),
+        "failed_count": sum(1 for result in results if not result.passed),
+        "timed_out_count": sum(1 for result in results if result.timed_out),
+        "total_duration_ms": sum(max(result.duration_ms, 0) for result in results),
+        "output_truncated": any(result.output_truncated for result in results),
+        "max_output_chars": MAX_OUTPUT_CHARS,
+    }
 
 
 def _append_validation_event(
@@ -141,6 +188,7 @@ def _append_validation_event(
 ) -> AgentTaskEvent:
     task.status = status
     task.updated_at = _now()
+    normalized_results = [_normalize_result_artifact(result) for result in results] if results is not None else []
     event = AgentTaskEvent(
         task_id=task.id,
         event_type=event_type,
@@ -151,9 +199,11 @@ def _append_validation_event(
             "worker_id": worker_id,
             "lease_token": lease_token,
             "approval_request_id": approval.id,
-            "command_count": len(results) if results is not None else len(approval.test_plan),
+            "command_count": len(normalized_results) if results is not None else len(approval.test_plan),
             "commands_executed": results is not None,
-            "results": [asdict(result) for result in results] if results is not None else [],
+            "results": [asdict(result) for result in normalized_results],
+            "artifact_summary": _artifact_summary(normalized_results) if results is not None else {},
+            "validation_policy": validation_policy_metadata(),
             "runner_type": "validation_command_runner",
         },
     )
@@ -201,7 +251,7 @@ def run_agent_worker_validation_commands(
         _audit(
             "agent_worker.validation_run_refused",
             task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "reason": validation_error},
+            {"worker_id": worker_id, "lease_token": lease_token, "reason": validation_error, "validation_policy": validation_policy_metadata()},
             actor=worker_id,
         )
         _release_task(task, lease_token, worker_id)
@@ -231,14 +281,14 @@ def run_agent_worker_validation_commands(
     _audit(
         "agent_worker.validation_run_started",
         task.id,
-        {"worker_id": worker_id, "lease_token": lease_token, "approval_request_id": approval.id},
+        {"worker_id": worker_id, "lease_token": lease_token, "approval_request_id": approval.id, "validation_policy": validation_policy_metadata()},
         actor=worker_id,
     )
 
     results: list[CommandExecutionResult] = []
     for command in approval.test_plan:
         runner = executor or (lambda cmd: execute_validation_command(cmd, cwd=run_cwd, timeout_seconds=timeout_seconds))
-        result = runner(command)
+        result = _normalize_result_artifact(runner(command))
         results.append(result)
         if not result.passed:
             break
@@ -266,6 +316,7 @@ def run_agent_worker_validation_commands(
             "approval_request_id": approval.id,
             "passed": all_passed,
             "command_count": len(results),
+            "artifact_summary": _artifact_summary(results),
         },
         actor=worker_id,
     )
