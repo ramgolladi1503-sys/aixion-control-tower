@@ -18,6 +18,7 @@ from .auth import (
     resend_verification,
     verify_email,
 )
+from .email_policy import validate_registration_email_deliverability
 from .invite_routes import record_invite_event, validate_invite_token
 from .models import AuthUser, InviteStatus, now_utc
 from .password_policy import validate_password_policy
@@ -26,15 +27,16 @@ from .store import store
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _validate_registration_password(payload: RegisterRequest) -> None:
+def _validate_registration_payload(payload: RegisterRequest) -> None:
     try:
+        validate_registration_email_deliverability(str(payload.email))
         validate_password_policy(payload.password, str(payload.email))
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
 
 
 def register_with_invite(payload: RegisterRequest) -> RegistrationResponse:
-    _validate_registration_password(payload)
+    _validate_registration_payload(payload)
     normalized_email = str(payload.email).lower().strip()
     invite = validate_invite_token(payload.invite_token or "")
     if invite.email != normalized_email:
@@ -56,7 +58,7 @@ def register_with_invite(payload: RegisterRequest) -> RegistrationResponse:
 
 @router.post("/register", response_model=RegistrationResponse)
 def register(payload: RegisterRequest) -> RegistrationResponse:
-    _validate_registration_password(payload)
+    _validate_registration_payload(payload)
     if not store.users:
         user = create_user(
             email=payload.email,
