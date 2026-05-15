@@ -39,11 +39,36 @@ fun ConnectorsScreen(viewModel: ConnectorsViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
     val clipboard = LocalClipboardManager.current
 
-    fun copy(label: String, value: String) {
-        clipboard.setText(AnnotatedString(value))
-        viewModel.markCopied(label)
-    }
+    ConnectorsContent(
+        state = state,
+        onCopy = { label, value ->
+            clipboard.setText(AnnotatedString(value))
+            viewModel.markCopied(label)
+        },
+        onHideOneTimeSecret = viewModel::hideOneTimeSecret,
+        onTemplateSelected = viewModel::selectTemplate,
+        onCreateSelectedTemplateConnector = viewModel::createSelectedTemplateConnector,
+        onToggle = viewModel::toggle,
+        onIssueSecret = viewModel::issueSecret,
+        onRevokeSecret = viewModel::revokeSecret,
+        onApplyMapper = viewModel::applyTemplateMapper,
+        onPreviewMapper = viewModel::previewTemplateMapper
+    )
+}
 
+@Composable
+fun ConnectorsContent(
+    state: ConnectorsUiState,
+    onCopy: (String, String) -> Unit = { _, _ -> },
+    onHideOneTimeSecret: () -> Unit = {},
+    onTemplateSelected: (String) -> Unit = {},
+    onCreateSelectedTemplateConnector: () -> Unit = {},
+    onToggle: (ConnectorDto) -> Unit = {},
+    onIssueSecret: (ConnectorDto) -> Unit = {},
+    onRevokeSecret: (ConnectorDto) -> Unit = {},
+    onApplyMapper: (ConnectorDto) -> Unit = {},
+    onPreviewMapper: (ConnectorDto) -> Unit = {}
+) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -72,8 +97,8 @@ fun ConnectorsScreen(viewModel: ConnectorsViewModel = viewModel()) {
             if (state.lastSecret.isNotBlank()) {
                 OneTimeCredentialPanel(
                     secret = state.lastSecret,
-                    onCopy = { copy("One-time connector credential", state.lastSecret) },
-                    onHide = viewModel::hideOneTimeSecret
+                    onCopy = { onCopy("One-time connector credential", state.lastSecret) },
+                    onHide = onHideOneTimeSecret
                 )
             }
             if (state.preview.isNotBlank()) {
@@ -85,8 +110,8 @@ fun ConnectorsScreen(viewModel: ConnectorsViewModel = viewModel()) {
             TemplatePanel(
                 templates = state.templates,
                 selectedTemplateId = state.selectedTemplateId,
-                onTemplateSelected = viewModel::selectTemplate,
-                onCreate = viewModel::createSelectedTemplateConnector
+                onTemplateSelected = onTemplateSelected,
+                onCreate = onCreateSelectedTemplateConnector
             )
         }
 
@@ -95,13 +120,13 @@ fun ConnectorsScreen(viewModel: ConnectorsViewModel = viewModel()) {
                 connector = connector,
                 selectedTemplate = state.selectedTemplate,
                 webhookUrl = state.webhookUrl(connector),
-                onCopyWebhook = { copy("Webhook URL", state.webhookUrl(connector)) },
-                onCopySetup = { copy("Connector setup", state.setupText(connector, state.selectedTemplate)) },
-                onToggle = { viewModel.toggle(connector) },
-                onIssueSecret = { viewModel.issueSecret(connector) },
-                onRevokeSecret = { viewModel.revokeSecret(connector) },
-                onApplyMapper = { viewModel.applyTemplateMapper(connector) },
-                onPreviewMapper = { viewModel.previewTemplateMapper(connector) }
+                onCopyWebhook = { onCopy("Webhook URL", state.webhookUrl(connector)) },
+                onCopySetup = { onCopy("Connector setup", state.setupText(connector, state.selectedTemplate)) },
+                onToggle = { onToggle(connector) },
+                onIssueSecret = { onIssueSecret(connector) },
+                onRevokeSecret = { onRevokeSecret(connector) },
+                onApplyMapper = { onApplyMapper(connector) },
+                onPreviewMapper = { onPreviewMapper(connector) }
             )
         }
     }
