@@ -402,3 +402,22 @@ data class ConnectorSchemaMapperPreviewResponseDto(
     val mapper_enabled: Boolean = false,
     val warnings: List<String> = emptyList()
 )
+
+data class ConnectorSimulationRequestDto(
+    val sample_payload: Map<String, Any?> = emptyMap(),
+    val mapper: ConnectorSchemaMapperDto? = null,
+    val validate_secret_configured: Boolean = true
+)
+
+data class ConnectorSimulationResponseDto(
+    val accepted: Boolean = false,
+    val connector_id: String,
+    val action: String? = null,
+    val normalized_payload: Map<String, Any?> = emptyMap(),
+    val task_preview: Map<String, Any?>? = null,
+    val event_preview: Map<String, Any?>? = null,
+    val auth_ready: Boolean = false,
+    val scope_ready: Boolean = false,
+    val errors: List<String> = emptyList(),
+    val warnings: List<String> = emptyList()
+)

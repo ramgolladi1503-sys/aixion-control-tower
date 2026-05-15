@@ -1,12 +1,11 @@
 package com.aixion.controltower.data.repository
 
 import com.aixion.controltower.core.api.ControlTowerApi
-import com.aixion.controltower.core.api.dto.ConnectorCreateDto
 import com.aixion.controltower.core.api.dto.ConnectorDto
 import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperDto
-import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperPreviewRequestDto
-import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperPreviewResponseDto
 import com.aixion.controltower.core.api.dto.ConnectorSecretRequestDto
+import com.aixion.controltower.core.api.dto.ConnectorSimulationRequestDto
+import com.aixion.controltower.core.api.dto.ConnectorSimulationResponseDto
 import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
 
 class ConnectorRepository(private val api: ControlTowerApi) {
@@ -36,10 +35,10 @@ class ConnectorRepository(private val api: ControlTowerApi) {
         api.updateConnectorSchemaMapper(connectorId, mapper)
     }
 
-    suspend fun previewMapper(connectorId: String, template: ConnectorTemplateDto): ConnectorSchemaMapperPreviewResponseDto {
-        return api.previewConnectorSchemaMapper(
+    suspend fun simulateTemplatePayload(connectorId: String, template: ConnectorTemplateDto): ConnectorSimulationResponseDto {
+        return api.simulateConnectorWebhook(
             connectorId,
-            ConnectorSchemaMapperPreviewRequestDto(sample_payload = template.sample_payload, mapper = template.mapper)
+            ConnectorSimulationRequestDto(sample_payload = template.sample_payload, mapper = template.mapper)
         )
     }
 }
