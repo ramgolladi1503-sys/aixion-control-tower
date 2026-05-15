@@ -1,83 +1,147 @@
 # Aixion Control Tower
 
-Aixion Control Tower is a mobile-first AI project execution cockpit for serious builders who want AI agents to move work forward without giving them uncontrolled access to code, infrastructure, or critical decisions.
+Aixion Control Tower is a mobile-first approval and execution control plane for AI-assisted software work.
 
-It captures raw ideas from mobile, converts them into structured project plans, creates agent work orders, reviews proposed file changes, scores risk, enforces approval policies, triggers tests, tracks execution, and safely applies approved changes through GitHub branches and pull requests.
+It lets builders capture ideas, turn them into structured work, route AI-generated changes through mobile approval, gate risky execution, validate approved work, and open GitHub pull requests without giving agents uncontrolled access to critical systems.
 
 > Think from your phone. Let agents work. Approve with evidence. Ship with control.
 
-## Why This Exists
+## What It Is
 
-AI coding tools are good at producing code, but the workflow around them is still weak. Developers either stay tied to a laptop to approve every change, or they give agents too much autonomy and hope nothing breaks.
+Aixion Control Tower is not a ChatGPT wrapper and not a generic GitHub mobile client.
 
-Aixion Control Tower is the missing control layer:
+It is a human-in-the-loop control tower for:
 
-- mobile idea capture
-- project brain and memory
-- agent work orders
-- risk-based approval
-- mobile diff review
-- test gating
-- GitHub branch and PR workflow
-- audit trail for every agent action
+```text
+AI-generated code changes
+GitHub branch and PR execution
+MCP mutating tool-call approval
+external-agent task intake
+mobile approval and audit trails
+```
 
-## Product Positioning
+The product principle is simple:
 
-Aixion Control Tower is not a ChatGPT wrapper and not a generic GitHub mobile client. It is a human-in-the-loop control tower for AI-assisted software execution.
+```text
+Agents can move work forward, but execution must stay inside approval, validation, rollback, and audit boundaries.
+```
 
-The core principle is simple:
+## Core Capabilities
 
-> AI-generated work should be controlled by risk, evidence, tests, rollback plans, and traceability.
+```text
+mobile project/work-order control
+approval inbox and diff review
+risk-aware approve/reject/revise flow
+GitHub branch/file/PR worker path
+approved AgentTask worker orchestration
+retry and cancellation controls
+MCP gateway wait-mode approval queue
+connector registry for external agents
+scoped external AgentTask access
+generic inbound connector webhook
+connector schema mapper
+connector templates for OpenClaw, Antigravity, Gemini/custom, Claude/Cursor, and local bridge
+Android connector management screen
+connector simulator for safe sample payload testing
+HMAC v1 callback hardening
+containerized validation runner with fail-closed behavior
+role/session/invite owner controls
+audit-first execution model
+runtime readiness checks
+```
 
-## MVP Goal
+## End-to-End Flow
 
-The MVP proves one end-to-end workflow:
-
-1. Capture an idea.
-2. Generate a project spec.
-3. Create an agent work order.
-4. Receive a proposed file change.
-5. Score the risk.
-6. Review the diff.
-7. Approve, reject, or request revision.
-8. Apply approved changes to a branch.
-9. Run tests.
-10. Store an audit event.
+```text
+idea / external agent / MCP request
+-> structured task or approval request
+-> risk and scope controls
+-> mobile review
+-> approve / reject / revise
+-> branch creation
+-> file application
+-> isolated workspace
+-> containerized validation
+-> pull request opened for human review
+-> audit trail retained
+```
 
 ## Non-Negotiable Rules
 
-- No direct `main` branch edits by agents.
-- No credential or secret file edits from mobile.
-- No high-risk approval without a diff.
-- No critical approval without a test plan and rollback plan.
-- No patch application without audit logging.
-- No silent agent actions.
-- No auto-merge in the MVP.
+```text
+No direct main branch edits by agents.
+No auto-merge in the MVP/release candidate.
+No silent mutating MCP tool calls.
+No external-agent action outside its configured scope.
+No connector webhook execution without authentication.
+No HMAC callback replay within the nonce window.
+No approved worker PR creation if validation fails.
+No production startup with unsafe missing configuration.
+```
 
 ## Repository Structure
 
 ```text
-backend/      FastAPI MVP backend for projects, ideas, work orders, approvals, risk scoring, and audit logs
-mobile/       Android/mobile app specification and future React Native implementation
-agent-runner/ Future worker layer for patch application, test execution, and GitHub workflows
-docs/         Product scope, MVP spec, architecture, risk model, approval engine, and elite roadmap
-examples/     Sample approval requests and work orders
+backend/      FastAPI backend: approvals, agents, MCP gateway, connectors, GitHub worker, audit, runtime readiness
+mobile/       Android app: approvals, diff review, agent tasks, MCP queue, connectors, owner controls
+docs/         Product, architecture, validation, release, connector, and deployment documentation
+examples/     Sample approval/work-order artifacts where applicable
 ```
 
-## Documentation
+## Important Documentation
 
 Start here:
 
-- [Product Scope](docs/PRODUCT_SCOPE.md)
-- [MVP Specification](docs/MVP_SPEC.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Approval Engine](docs/APPROVAL_ENGINE.md)
-- [Risk Engine](docs/RISK_ENGINE.md)
-- [Security Model](docs/SECURITY_MODEL.md)
-- [Elite Roadmap](docs/ELITE_ROADMAP.md)
+```text
+docs/DEMO_SCRIPT.md
+docs/FINAL_RELEASE_CHECKLIST.md
+docs/PLAY_STORE_READINESS.md
+docs/CONNECTED_AGENT_SCOPE.md
+docs/CONNECTOR_TEMPLATES.md
+docs/CONNECTOR_SCHEMA_MAPPER.md
+docs/CONNECTOR_SIMULATOR.md
+docs/PUBLIC_CONNECTOR_CALLBACK_HARDENING.md
+docs/CONTAINERIZED_VALIDATION_RUNNER.md
+```
 
-## Current Status
+Legacy/product docs remain useful for background:
 
-Phase: MVP foundation.
+```text
+docs/PRODUCT_SCOPE.md
+docs/MVP_SPEC.md
+docs/ARCHITECTURE.md
+docs/APPROVAL_ENGINE.md
+docs/RISK_ENGINE.md
+docs/SECURITY_MODEL.md
+docs/ELITE_ROADMAP.md
+```
 
-The first build focuses on backend workflow correctness before adding complex agent autonomy.
+## Release Status
+
+```text
+Status: release-candidate / demo-ready control tower
+Backend P0: effectively complete
+Android MVP control flow: effectively complete
+Configurable external-agent platform: effectively complete
+Remaining work: release validation, deployment rehearsal, real-device testing, packaging, Play Store readiness, and UX polish
+```
+
+## What Not To Overclaim
+
+Aixion Control Tower is strong release-candidate software, but it is not magic.
+
+```text
+It is not a high-assurance sandbox for arbitrary untrusted code.
+It is not enterprise-grade vault-backed credential management yet.
+It is not a replacement for real CI/CD.
+It is not a fully autonomous merge bot.
+It is not Play Store-ready until packaging, privacy, policy, signing, and backend deployment are complete.
+```
+
+## Demo Positioning
+
+Use this line:
+
+```text
+Aixion lets agents move fast, but only inside a controlled approval, validation, and audit boundary.
+```
