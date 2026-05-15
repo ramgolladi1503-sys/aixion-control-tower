@@ -64,7 +64,11 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
             )?.let { target ->
                 navController.navigate(target) {
                     launchSingleTop = true
-                    popUpTo(Route.Auth.value) { inclusive = target != Route.Auth.value }
+                    if (target == Route.Auth.value) {
+                        popUpTo(currentRoute) { inclusive = true }
+                    } else {
+                        popUpTo(Route.Auth.value) { inclusive = true }
+                    }
                 }
             }
         }
