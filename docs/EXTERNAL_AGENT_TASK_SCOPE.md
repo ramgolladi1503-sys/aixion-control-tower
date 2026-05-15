@@ -86,6 +86,8 @@ basic per-agent rate limiting
 owner-visible credential status
 ```
 
+Initial registration and later token rotation can set `token_expires_at` and `rate_limit_per_minute`.
+
 See `docs/EXTERNAL_AGENT_TOKEN_GOVERNANCE.md` for the credential lifecycle rules.
 
 ## Scope rules
@@ -136,7 +138,9 @@ no MCP admin routes
     "READ_AGENT_TASK",
     "APPEND_AGENT_TASK_EVENT"
   ],
-  "enabled": true
+  "enabled": true,
+  "token_expires_at": "2026-06-15T00:00:00Z",
+  "rate_limit_per_minute": 60
 }
 ```
 
