@@ -79,7 +79,7 @@ private suspend fun assertIllegalStateFailure(block: suspend () -> Unit) {
     fail("Expected IllegalStateException to be thrown")
 }
 
-private class FailingApprovalApi : ControlTowerApi {
+private class FailingApprovalApi : BaseFakeControlTowerApi() {
     override suspend fun health(): Map<String, String> = emptyMap()
 
     override suspend fun register(payload: RegisterRequestDto): AuthResponseDto {

@@ -67,7 +67,7 @@ class InviteAdminRepositoryTest {
     }
 }
 
-private class InviteAdminApi : ControlTowerApi {
+private class InviteAdminApi : BaseFakeControlTowerApi() {
     var createdPayload: InviteCreateRequestDto? = null
     var revokedInviteId: String? = null
 

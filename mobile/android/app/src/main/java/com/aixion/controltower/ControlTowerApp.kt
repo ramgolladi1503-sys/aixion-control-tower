@@ -23,6 +23,7 @@ import com.aixion.controltower.feature.approvals.ApprovalsViewModel
 import com.aixion.controltower.feature.audit.AuditTrailScreen
 import com.aixion.controltower.feature.auth.AuthScreen
 import com.aixion.controltower.feature.command.CommandChatScreen
+import com.aixion.controltower.feature.connectors.ConnectorsScreen
 import com.aixion.controltower.feature.diff.DiffViewerScreen
 import com.aixion.controltower.feature.home.HomeScreen
 import com.aixion.controltower.feature.mcp.MCPQueueScreen
@@ -118,6 +119,7 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             }
                         )
                     }
+                    composable(Route.Connectors.value) { ConnectorsScreen() }
                     composable(Route.MCPQueue.value) {
                         MCPQueueScreen(
                             viewModel = mcpQueueViewModel,
