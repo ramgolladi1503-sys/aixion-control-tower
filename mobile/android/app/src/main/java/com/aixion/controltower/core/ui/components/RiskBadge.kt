@@ -1,6 +1,8 @@
 package com.aixion.controltower.core.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -18,7 +20,6 @@ import com.aixion.controltower.core.ui.theme.RiskCritical
 import com.aixion.controltower.core.ui.theme.RiskHigh
 import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 
 @Composable
@@ -31,28 +32,24 @@ fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier) {
         RiskLevel.BLOCKED -> RiskBlocked
     }
 
-    Box(
-        modifier = modifier
-            .background(color.copy(alpha = 0.16f), RoundedCornerShape(999.dp))
-            .padding(horizontal = 10.dp, vertical = 5.dp)
-    ) {
-        Text(
-            text = risk.name,
-            color = color,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold
-        )
-    }
+    StatusBadge(label = risk.name, color = color, modifier = modifier)
 }
 
 @Composable
 fun StatusBadge(label: String, color: Color, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
-            .background(color.copy(alpha = 0.14f), RoundedCornerShape(999.dp))
+            .background(color.copy(alpha = 0.11f), RoundedCornerShape(999.dp))
+            .border(BorderStroke(1.dp, color.copy(alpha = 0.34f)), RoundedCornerShape(999.dp))
             .padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
-        Text(text = label, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        Text(
+            text = label.uppercase(),
+            color = color,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.8.sp
+        )
     }
 }
 
