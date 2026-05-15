@@ -5,7 +5,7 @@ import hmac
 import secrets
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from .connector_models import AgentConnector, ConnectorAuthType, ConnectorHealthStatus, ConnectorPublic, ConnectorStatus
 from .models import new_id, now_utc
