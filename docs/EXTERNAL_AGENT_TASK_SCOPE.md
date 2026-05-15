@@ -72,6 +72,22 @@ X-Aixion-Agent-Token: aixion_agent_xxx
 
 The token is returned once during agent registration and stored only as a hash.
 
+## Token governance
+
+External-agent tokens now have a dedicated governance layer:
+
+```text
+rotation
+revocation
+optional expiry
+last-used tracking
+failed-auth audit events
+basic per-agent rate limiting
+owner-visible credential status
+```
+
+See `docs/EXTERNAL_AGENT_TOKEN_GOVERNANCE.md` for the credential lifecycle rules.
+
 ## Scope rules
 
 The external agent must have:
@@ -124,6 +140,15 @@ no MCP admin routes
 }
 ```
 
+## Example token rotation
+
+```json
+{
+  "token_expires_at": "2026-06-15T00:00:00Z",
+  "rate_limit_per_minute": 60
+}
+```
+
 ## Example task creation
 
 ```json
@@ -158,9 +183,10 @@ Run:
 ```bash
 cd backend
 python -m pytest tests/test_external_agent_task_scope.py
+python -m pytest tests/test_external_agent_token_governance.py
 python -m pytest
 ```
 
 ## Hard truth
 
-This improves external-agent safety, but it is not full production token governance. Token rotation, per-token expiry, per-endpoint rate limits, and revocation UX still need dedicated hardening.
+Scoped AgentTask access is now materially safer because tokens can be rotated, revoked, expired, monitored, and rate-limited. The remaining production gap is isolated execution and distributed credential/rate-limit enforcement, not basic token lifecycle control.
