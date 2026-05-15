@@ -4,7 +4,6 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from .agent_task_models import AgentTaskEventType, AgentTaskStatus
 from .connector_models import AgentConnector, ConnectorStatus
 from .connector_schema_mapper import ConnectorSchemaMapperConfig, normalize_connector_payload
 from .connector_webhook import ConnectorWebhookPayload
