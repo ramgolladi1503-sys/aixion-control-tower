@@ -47,6 +47,7 @@ def register_with_invite(payload: RegisterRequest) -> RegistrationResponse:
         password=payload.password,
         display_name=payload.display_name,
         role=invite.role,
+        email_verified=False,
     )
     invite.status = InviteStatus.ACCEPTED
     invite.accepted_by_user_id = user.id
@@ -64,6 +65,7 @@ def register(payload: RegisterRequest) -> RegistrationResponse:
             email=payload.email,
             password=payload.password,
             display_name=payload.display_name,
+            email_verified=False,
         )
         return create_registration_response(user)
 

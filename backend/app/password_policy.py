@@ -24,13 +24,12 @@ def validate_password_policy(password: str, email: str | None = None) -> str:
         if local_part and len(local_part) >= 4 and local_part in lowered:
             raise ValueError("Password must not contain the email username")
 
-    groups = 0
-    groups += any(character in string.ascii_lowercase for character in password)
-    groups += any(character in string.ascii_uppercase for character in password)
-    groups += any(character in string.digits for character in password)
-    groups += any(character in string.punctuation for character in password)
-    if groups < 3:
-        raise ValueError("Password must include at least three of: lowercase, uppercase, number, symbol")
+    has_lower = any(character in string.ascii_lowercase for character in password)
+    has_upper = any(character in string.ascii_uppercase for character in password)
+    has_digit = any(character in string.digits for character in password)
+    has_symbol = any(character in string.punctuation for character in password)
+    if not has_lower or not has_upper or not has_digit or not has_symbol:
+        raise ValueError("Password must include lowercase, uppercase, number, and symbol")
 
     if _contains_obvious_sequence(lowered):
         raise ValueError("Password must not contain obvious keyboard or numeric sequences")

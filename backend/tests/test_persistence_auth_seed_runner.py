@@ -43,7 +43,20 @@ def test_bearer_auth_can_block_requests(monkeypatch) -> None:
     )
     assert register.status_code == 200
 
-    token = register.json()["access_token"]
+    verification_code = register.json()["dev_verification_code"]
+    verify = client.post(
+        "/auth/verify-email",
+        json={"email": "tester@example.com", "code": verification_code},
+    )
+    assert verify.status_code == 200
+
+    login = client.post(
+        "/auth/login",
+        json={"email": "tester@example.com", "password": "StrongPass123!"},
+    )
+    assert login.status_code == 200
+
+    token = login.json()["access_token"]
     authorized = client.get("/projects", headers={"Authorization": f"Bearer {token}"})
     assert authorized.status_code == 200
 

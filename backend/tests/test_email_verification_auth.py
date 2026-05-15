@@ -11,10 +11,16 @@ from app.main import app
 from app.store import store
 
 client = TestClient(app)
-PASSWORD = "valid-password-123"
+PASSWORD = "ValidPassword123!"
 
 
-def setup_function() -> None:
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def reset_auth_store(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
+    monkeypatch.setenv("AIXION_PROFILE", "test")
     store.reset()
 
 
