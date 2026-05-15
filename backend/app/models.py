@@ -113,6 +113,11 @@ class User(BaseModel):
     password_hash: str
     password_salt: str
     disabled: bool = False
+    email_verified: bool = False
+    email_verification_hash: str | None = None
+    email_verification_salt: str | None = None
+    email_verification_expires_at: datetime | None = None
+    email_verification_sent_at: datetime | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
@@ -144,6 +149,7 @@ class AuthUser(BaseModel):
     email: str
     display_name: str
     role: UserRole
+    email_verified: bool = False
 
 
 class AgentCreate(BaseModel):
