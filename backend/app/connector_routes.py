@@ -22,6 +22,15 @@ from .connector_models import (
     ConnectorStatus,
     ConnectorUpdate,
 )
+from .connector_schema_mapper import (
+    ConnectorSchemaMapperConfig,
+    ConnectorSchemaMapperPreviewRequest,
+    ConnectorSchemaMapperPreviewResponse,
+    ConnectorSchemaMapperStatus,
+    get_connector_schema_mapper_status,
+    preview_connector_schema_mapping,
+    set_connector_schema_mapper,
+)
 from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
 from .models import AuditEvent, AuthUser, now_utc
 from .store import store
@@ -142,6 +151,26 @@ async def connector_webhook(
     return await handle_connector_webhook(connector, request, authorization, x_aixion_connector_signature)
 
 
+@router.get("/{connector_id}/schema-mapper", response_model=ConnectorSchemaMapperStatus)
+def get_connector_mapper(connector_id: str, _: AuthUser = OwnerDependency) -> ConnectorSchemaMapperStatus:
+    return get_connector_schema_mapper_status(_get_connector_or_404(connector_id))
+
+
+@router.put("/{connector_id}/schema-mapper", response_model=ConnectorSchemaMapperStatus)
+def update_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperConfig, user: AuthUser = OwnerDependency) -> ConnectorSchemaMapperStatus:
+    connector = _get_connector_or_404(connector_id)
+    status = set_connector_schema_mapper(connector, payload)
+    connector.updated_at = now_utc()
+    _audit("connector.schema_mapper_updated", connector.id, {"mapper_enabled": status.mapper_enabled, "mapped_fields": list(payload.field_paths.keys())}, actor=user.email)
+    store.persist()
+    return status
+
+
+@router.post("/{connector_id}/schema-mapper/preview", response_model=ConnectorSchemaMapperPreviewResponse)
+def preview_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperPreviewRequest, _: AuthUser = OwnerDependency) -> ConnectorSchemaMapperPreviewResponse:
+    return preview_connector_schema_mapping(_get_connector_or_404(connector_id), payload)
+
+
 @router.get("/{connector_id}", response_model=ConnectorPublic)
 def get_connector(connector_id: str, _: AuthUser = OwnerDependency) -> ConnectorPublic:
     return _to_public(_get_connector_or_404(connector_id))
@@ -156,7 +185,7 @@ def update_connector(connector_id: str, payload: ConnectorUpdate, user: AuthUser
     for field_name, value in update.items():
         if field_name == "enabled":
             connector.status = ConnectorStatus.ENABLED if value else ConnectorStatus.DISABLED
-            connector.health_status = ConnectorHealthStatus.UNKNOWN if value else ConnectorHealthStatus.DISABLED
+            connector.health_status = ConnectorHealthStatus.UNKNOWN if value else ConnectorStatus.DISABLED
         elif field_name == "config":
             connector.config = {**connector.config, **(value or {})}
         elif hasattr(connector, field_name):
