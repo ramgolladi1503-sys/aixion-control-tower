@@ -158,9 +158,20 @@ async def connector_webhook(
     request: Request,
     authorization: str | None = Header(default=None),
     x_aixion_connector_signature: str | None = Header(default=None),
+    x_aixion_signature_version: str | None = Header(default=None),
+    x_aixion_timestamp: str | None = Header(default=None),
+    x_aixion_nonce: str | None = Header(default=None),
 ) -> ConnectorWebhookResponse:
     connector = _get_connector_or_404(connector_id)
-    return await handle_connector_webhook(connector, request, authorization, x_aixion_connector_signature)
+    return await handle_connector_webhook(
+        connector,
+        request,
+        authorization,
+        x_aixion_connector_signature,
+        x_aixion_signature_version,
+        x_aixion_timestamp,
+        x_aixion_nonce,
+    )
 
 
 @router.post("/{connector_id}/simulate", response_model=ConnectorSimulationResponse)
