@@ -18,6 +18,7 @@ data class AuthUiState(
     val inviteCode: String = "",
     val loading: Boolean = false,
     val authenticated: Boolean = false,
+    val sessionChecked: Boolean = false,
     val userLabel: String? = null,
     val message: String? = null
 )
@@ -28,7 +29,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         context = application.applicationContext
     )
 
-    private val _state = MutableStateFlow(AuthUiState(authenticated = repository.hasSavedToken()))
+    private val _state = MutableStateFlow(AuthUiState())
     val state: StateFlow<AuthUiState> = _state.asStateFlow()
 
     init {
@@ -54,7 +55,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun login() {
         val current = _state.value
         viewModelScope.launch {
-            _state.value = current.copy(loading = true, message = null)
+            _state.value = current.copy(loading = true, sessionChecked = false, message = null)
             runCatching {
                 repository.login(current.email, current.password)
                 repository.currentUserLabel()
@@ -62,13 +63,16 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(
                     loading = false,
                     authenticated = true,
+                    sessionChecked = true,
                     userLabel = label,
                     message = "Logged in."
                 )
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     loading = false,
-                    authenticated = repository.hasSavedToken(),
+                    authenticated = false,
+                    sessionChecked = true,
+                    userLabel = null,
                     message = "Login failed: ${AuthFailure.operatorMessage(error)}"
                 )
             }
@@ -78,7 +82,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun register() {
         val current = _state.value
         viewModelScope.launch {
-            _state.value = current.copy(loading = true, message = null)
+            _state.value = current.copy(loading = true, sessionChecked = false, message = null)
             runCatching {
                 repository.register(current.email, current.password, current.displayName, current.inviteCode)
                 repository.currentUserLabel()
@@ -86,13 +90,16 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(
                     loading = false,
                     authenticated = true,
+                    sessionChecked = true,
                     userLabel = label,
                     message = "Registered and logged in."
                 )
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     loading = false,
-                    authenticated = repository.hasSavedToken(),
+                    authenticated = false,
+                    sessionChecked = true,
+                    userLabel = null,
                     message = "Registration failed: ${AuthFailure.operatorMessage(error)}"
                 )
             }
@@ -101,42 +108,41 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshSession() {
         if (!repository.hasSavedToken()) {
-            _state.value = _state.value.copy(authenticated = false, userLabel = null)
+            _state.value = _state.value.copy(
+                loading = false,
+                authenticated = false,
+                sessionChecked = true,
+                userLabel = null
+            )
             return
         }
         viewModelScope.launch {
-            _state.value = _state.value.copy(loading = true, message = null)
+            _state.value = _state.value.copy(loading = true, authenticated = false, sessionChecked = false, message = "Verifying saved session...")
             runCatching {
                 repository.currentUserLabel()
             }.onSuccess { label ->
                 _state.value = _state.value.copy(
                     loading = false,
                     authenticated = true,
+                    sessionChecked = true,
                     userLabel = label,
                     message = "Session verified."
                 )
             }.onFailure { error ->
-                if (AuthFailure.shouldClearSavedSession(error)) {
-                    repository.logout()
-                    _state.value = _state.value.copy(
-                        loading = false,
-                        authenticated = false,
-                        userLabel = null,
-                        message = AuthFailure.operatorMessage(error)
-                    )
-                } else {
-                    _state.value = _state.value.copy(
-                        loading = false,
-                        authenticated = repository.hasSavedToken(),
-                        message = "Saved token found, but session check failed: ${AuthFailure.operatorMessage(error)}"
-                    )
-                }
+                repository.logout()
+                _state.value = _state.value.copy(
+                    loading = false,
+                    authenticated = false,
+                    sessionChecked = true,
+                    userLabel = null,
+                    message = AuthFailure.operatorMessage(error)
+                )
             }
         }
     }
 
     fun logout() {
         repository.logout()
-        _state.value = AuthUiState(message = "Logged out.")
+        _state.value = AuthUiState(sessionChecked = true, message = "Logged out.")
     }
 }
