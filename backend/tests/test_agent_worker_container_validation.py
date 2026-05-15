@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.agent_worker_container_validation import ContainerValidationExecutor, ContainerValidationPolicy, ContainerRuntime
+from app.agent_worker_container_validation import ContainerValidationExecutor, ContainerValidationPolicy
 from app.agent_worker_validation_runner import CommandExecutionResult
 
 
