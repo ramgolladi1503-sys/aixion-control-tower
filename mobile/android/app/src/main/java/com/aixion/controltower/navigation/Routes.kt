@@ -1,6 +1,7 @@
 package com.aixion.controltower.navigation
 
 sealed class Route(val value: String, val label: String) {
+    data object Auth : Route("auth", "Login")
     data object Home : Route("home", "Home")
     data object Projects : Route("projects", "Projects")
     data object Command : Route("command", "Command")
