@@ -11,7 +11,11 @@ from .agent_auth import (
     to_credential_status,
     to_public_agent,
 )
-from .agent_credential_models import AgentCredentialStatus, AgentTokenRotateRequest
+from .agent_credential_models import (
+    AgentCreateWithCredentialPolicy,
+    AgentCredentialStatus,
+    AgentTokenRotateRequest,
+)
 from .agent_task_models import (
     AgentTask,
     AgentTaskCreate,
@@ -22,7 +26,6 @@ from .agent_task_models import (
 from .auth import require_owner
 from .models import (
     AgentAction,
-    AgentCreate,
     AgentRegistrationResponse,
     ApprovalRequest,
     ApprovalRequestCreate,
@@ -65,7 +68,7 @@ def _get_agent_or_404(agent_id: str) -> ExternalAgent:
 
 @router.post("", response_model=AgentRegistrationResponse)
 def create_agent(
-    payload: AgentCreate,
+    payload: AgentCreateWithCredentialPolicy,
     user: AuthUser = OwnerDependency,
 ) -> AgentRegistrationResponse:
     response = register_external_agent(payload, user)
