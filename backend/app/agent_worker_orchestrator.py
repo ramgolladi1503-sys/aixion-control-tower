@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
-from .agent_worker_container_validation import ContainerValidationExecutor, ContainerValidationPolicy, container_validation_policy_metadata
+from .agent_worker_container_validation import ContainerRuntime, ContainerValidationExecutor, ContainerValidationPolicy, container_validation_policy_metadata
 from .agent_worker_github_branch import AgentWorkerGitHubBranchResult, GitHubBranchClient, run_agent_worker_github_branch_creation
 from .agent_worker_github_files import AgentWorkerGitHubFilesResult, GitHubFileClient, run_agent_worker_github_file_application
 from .agent_worker_github_pr import AgentWorkerGitHubPRResult, GitHubPullRequestClient, run_agent_worker_github_pr_creation
@@ -108,6 +108,7 @@ def _build_container_validation_executor(
     validation_cwd: Path | None,
     timeout_seconds: int,
     worker_id: str,
+    container_runtime: ContainerRuntime | None = None,
 ) -> Callable[[str], CommandExecutionResult] | None:
     if validation_cwd is None:
         return None
@@ -118,7 +119,7 @@ def _build_container_validation_executor(
         {"worker_id": worker_id, "container_validation_policy": container_validation_policy_metadata(policy)},
         actor=worker_id,
     )
-    return ContainerValidationExecutor(cwd=validation_cwd, timeout_seconds=timeout_seconds, policy=policy)
+    return ContainerValidationExecutor(cwd=validation_cwd, timeout_seconds=timeout_seconds, policy=policy, runtime=container_runtime)
 
 
 def run_approved_agent_task_worker_flow(
@@ -137,6 +138,7 @@ def run_approved_agent_task_worker_flow(
     use_isolated_workspace: bool = True,
     use_container_validation: bool = True,
     validation_executor: Callable[[str], CommandExecutionResult] | None = None,
+    container_runtime: ContainerRuntime | None = None,
 ) -> AgentWorkerOrchestrationResult:
     task = _task(task_id)
     if task is None:
@@ -162,7 +164,7 @@ def run_approved_agent_task_worker_flow(
 
         effective_executor = validation_executor
         if effective_executor is None and use_container_validation:
-            effective_executor = _build_container_validation_executor(validation_cwd=validation_cwd, timeout_seconds=timeout_seconds, worker_id=f"{worker_id}:validation")
+            effective_executor = _build_container_validation_executor(validation_cwd=validation_cwd, timeout_seconds=timeout_seconds, worker_id=f"{worker_id}:validation", container_runtime=container_runtime)
             if effective_executor is None:
                 return _failure_result(task_id=task.id, worker_id=worker_id, reason="Validation step failed: container validation requires an isolated workspace.", branch_result=branch_result, file_result=file_result, workspace_result=workspace_result)
 
