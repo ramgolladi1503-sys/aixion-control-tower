@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.agent_worker_container_validation import ContainerValidationPolicy
 from app.agent_worker_github_branch import GitHubBranchCreateResult
 from app.agent_worker_github_pr import GitHubPullRequestCreateResult
 from app.agent_worker_orchestrator import run_approved_agent_task_worker_flow
@@ -112,6 +114,14 @@ class FakeWorkspaceRunner:
         from app.agent_worker_workspace import WorkspaceCommandResult
 
         return WorkspaceCommandResult(command=command, exit_code=0, output_summary="ok")
+
+
+class UnavailableContainerRuntime:
+    def available(self) -> bool:
+        return False
+
+    def run_validation(self, *, command: str, cwd: Path, policy: ContainerValidationPolicy, timeout_seconds: int) -> CommandExecutionResult:
+        raise AssertionError("container runtime should not run when unavailable")
 
 
 def setup_function() -> None:
@@ -243,6 +253,7 @@ def test_orchestrator_defaults_to_container_validation_and_fails_closed_without_
         file_client=file_client,
         pr_client=pr_client,
         workspace_runner=FakeWorkspaceRunner(),
+        container_runtime=UnavailableContainerRuntime(),
     )
 
     assert result.success is False
