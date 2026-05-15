@@ -15,8 +15,11 @@ data class ApprovalsUiState(
     val loading: Boolean = true,
     val approvals: List<ApprovalSummary> = emptyList(),
     val selectedApproval: ApprovalSummary? = null,
-    val lastActionMessage: String? = null
-)
+    val lastActionMessage: String? = null,
+    val errorMessage: String? = null
+) {
+    val hasError: Boolean = errorMessage != null
+}
 
 class ApprovalsViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ApprovalRepository(ApiClient.create(application.applicationContext))
@@ -30,12 +33,21 @@ class ApprovalsViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun refresh() {
         viewModelScope.launch {
-            val approvals = repository.listApprovals()
-            _state.value = ApprovalsUiState(
-                loading = false,
-                approvals = approvals,
-                selectedApproval = approvals.firstOrNull()
-            )
+            _state.value = _state.value.copy(loading = true, errorMessage = null)
+            runCatching {
+                repository.listApprovals()
+            }.onSuccess { approvals ->
+                _state.value = ApprovalsUiState(
+                    loading = false,
+                    approvals = approvals,
+                    selectedApproval = approvals.firstOrNull()
+                )
+            }.onFailure { error ->
+                _state.value = ApprovalsUiState(
+                    loading = false,
+                    errorMessage = "Backend approval sync failed. No mock approvals shown. ${error.message ?: "Retry when the backend is reachable."}"
+                )
+            }
         }
     }
 
