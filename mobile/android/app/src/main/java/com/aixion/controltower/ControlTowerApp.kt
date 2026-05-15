@@ -8,6 +8,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -22,6 +24,7 @@ import com.aixion.controltower.feature.approvals.ApprovalInboxScreen
 import com.aixion.controltower.feature.approvals.ApprovalsViewModel
 import com.aixion.controltower.feature.audit.AuditTrailScreen
 import com.aixion.controltower.feature.auth.AuthScreen
+import com.aixion.controltower.feature.auth.AuthViewModel
 import com.aixion.controltower.feature.command.CommandChatScreen
 import com.aixion.controltower.feature.connectors.ConnectorsScreen
 import com.aixion.controltower.feature.diff.DiffViewerScreen
@@ -32,6 +35,7 @@ import com.aixion.controltower.feature.ops.RuntimeReadinessScreen
 import com.aixion.controltower.feature.projects.ProjectsScreen
 import com.aixion.controltower.feature.tests.TestRunsScreen
 import com.aixion.controltower.feature.workorders.WorkOrdersScreen
+import com.aixion.controltower.navigation.AuthSessionGate
 import com.aixion.controltower.navigation.Route
 import com.aixion.controltower.navigation.bottomRoutes
 import com.aixion.controltower.notifications.NotificationDeepLink
@@ -40,12 +44,35 @@ import com.aixion.controltower.notifications.NotificationDeepLink
 fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
     ControlTowerTheme {
         val navController = rememberNavController()
+        val authViewModel: AuthViewModel = viewModel()
+        val authState by authViewModel.state.collectAsState()
         val approvalsViewModel: ApprovalsViewModel = viewModel()
         val mcpQueueViewModel: MCPQueueViewModel = viewModel()
         val backStackEntry = navController.currentBackStackEntryAsState().value
-        val currentRoute = backStackEntry?.destination?.route ?: Route.Home.value
+        val currentRoute = backStackEntry?.destination?.route ?: Route.Auth.value
+        val showMainShell = AuthSessionGate.shouldShowMainShell(
+            authenticated = authState.authenticated,
+            sessionChecked = authState.sessionChecked,
+            currentRoute = currentRoute
+        )
 
-        LaunchedEffect(notificationDeepLink) {
+        LaunchedEffect(currentRoute, authState.authenticated, authState.sessionChecked) {
+            AuthSessionGate.redirectRoute(
+                currentRoute = currentRoute,
+                authenticated = authState.authenticated,
+                sessionChecked = authState.sessionChecked
+            )?.let { target ->
+                navController.navigate(target) {
+                    launchSingleTop = true
+                    popUpTo(Route.Auth.value) { inclusive = target != Route.Auth.value }
+                }
+            }
+        }
+
+        LaunchedEffect(notificationDeepLink, authState.authenticated, authState.sessionChecked) {
+            if (!AuthSessionGate.canOpenProtectedRoute(authState.authenticated, authState.sessionChecked)) {
+                return@LaunchedEffect
+            }
             when (notificationDeepLink) {
                 is NotificationDeepLink.AgentTask -> {
                     navController.navigate(Route.AgentTasks.value) {
@@ -66,20 +93,22 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
         Scaffold(
             containerColor = TowerBackground,
             bottomBar = {
-                NavigationBar {
-                    bottomRoutes.forEach { route ->
-                        NavigationBarItem(
-                            selected = currentRoute == route.value,
-                            onClick = {
-                                navController.navigate(route.value) {
-                                    launchSingleTop = true
-                                    popUpTo(Route.Home.value) { saveState = true }
-                                    restoreState = true
-                                }
-                            },
-                            label = { Text(route.label) },
-                            icon = { Text(route.label.take(1)) }
-                        )
+                if (showMainShell) {
+                    NavigationBar {
+                        bottomRoutes.forEach { route ->
+                            NavigationBarItem(
+                                selected = currentRoute == route.value,
+                                onClick = {
+                                    navController.navigate(route.value) {
+                                        launchSingleTop = true
+                                        popUpTo(Route.Home.value) { saveState = true }
+                                        restoreState = true
+                                    }
+                                },
+                                label = { Text(route.label) },
+                                icon = { Text(route.label.take(1)) }
+                            )
+                        }
                     }
                 }
             }
@@ -89,7 +118,8 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                     .padding(padding)
                     .background(TowerBackground)
             ) {
-                NavHost(navController = navController, startDestination = Route.Home.value) {
+                NavHost(navController = navController, startDestination = Route.Auth.value) {
+                    composable(Route.Auth.value) { AuthScreen(viewModel = authViewModel) }
                     composable(Route.Home.value) {
                         HomeScreen(
                             onApprovalSelected = { approval ->
@@ -129,7 +159,7 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             }
                         )
                     }
-                    composable(Route.Account.value) { AuthScreen() }
+                    composable(Route.Account.value) { AuthScreen(viewModel = authViewModel) }
                     composable(Route.Ops.value) { RuntimeReadinessScreen() }
                     composable(Route.Tests.value) { TestRunsScreen() }
                     composable(Route.Audit.value) { AuditTrailScreen() }
