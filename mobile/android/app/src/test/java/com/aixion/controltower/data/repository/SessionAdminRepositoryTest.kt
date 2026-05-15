@@ -55,7 +55,7 @@ class SessionAdminRepositoryTest {
     }
 }
 
-private class SessionAdminApi : ControlTowerApi {
+private class SessionAdminApi : BaseFakeControlTowerApi() {
     var clearedUserId: String? = null
 
     override suspend fun health(): Map<String, String> = emptyMap()
