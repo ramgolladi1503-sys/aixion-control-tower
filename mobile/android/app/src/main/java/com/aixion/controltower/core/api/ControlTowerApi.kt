@@ -4,6 +4,17 @@ import com.aixion.controltower.core.api.dto.ApprovalRequestDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.AuthResponseDto
 import com.aixion.controltower.core.api.dto.AuthUserDto
+import com.aixion.controltower.core.api.dto.ConnectorCreateDto
+import com.aixion.controltower.core.api.dto.ConnectorCredentialStatusDto
+import com.aixion.controltower.core.api.dto.ConnectorDto
+import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperDto
+import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperPreviewRequestDto
+import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperPreviewResponseDto
+import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperStatusDto
+import com.aixion.controltower.core.api.dto.ConnectorSecretIssueResponseDto
+import com.aixion.controltower.core.api.dto.ConnectorSecretRequestDto
+import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
+import com.aixion.controltower.core.api.dto.ConnectorTemplateListDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
@@ -29,6 +40,7 @@ import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.PATCH
 import retrofit2.http.POST
+import retrofit2.http.PUT
 import retrofit2.http.Path
 import retrofit2.http.Query
 
@@ -52,10 +64,7 @@ interface ControlTowerApi {
     suspend fun listUsers(): List<AuthUserDto>
 
     @PATCH("auth/users/{userId}/role")
-    suspend fun updateUserRole(
-        @Path("userId") userId: String,
-        @Body payload: RoleUpdateRequestDto
-    ): AuthUserDto
+    suspend fun updateUserRole(@Path("userId") userId: String, @Body payload: RoleUpdateRequestDto): AuthUserDto
 
     @POST("auth/invites")
     suspend fun createInvite(@Body payload: InviteCreateRequestDto): InviteCreateResponseDto
@@ -97,16 +106,55 @@ interface ControlTowerApi {
     suspend fun getApproval(@Path("approvalId") approvalId: String): ApprovalRequestDto
 
     @POST("approvals/{approvalId}/decision")
-    suspend fun decideApproval(
-        @Path("approvalId") approvalId: String,
-        @Body payload: DecisionRequestDto
-    ): ApprovalRequestDto
+    suspend fun decideApproval(@Path("approvalId") approvalId: String, @Body payload: DecisionRequestDto): ApprovalRequestDto
 
     @GET("test-runs")
     suspend fun listTestRuns(): List<TestRunDto>
 
     @GET("audit")
     suspend fun listAuditEvents(): List<AuditEventDto>
+
+    @GET("connectors")
+    suspend fun listConnectors(): List<ConnectorDto>
+
+    @POST("connectors")
+    suspend fun createConnector(@Body payload: ConnectorCreateDto): ConnectorDto
+
+    @GET("connectors/templates")
+    suspend fun listConnectorTemplates(): ConnectorTemplateListDto
+
+    @GET("connectors/templates/{templateId}")
+    suspend fun getConnectorTemplate(@Path("templateId") templateId: String): ConnectorTemplateDto
+
+    @POST("connectors/{connectorId}/enable")
+    suspend fun enableConnector(@Path("connectorId") connectorId: String): ConnectorDto
+
+    @POST("connectors/{connectorId}/disable")
+    suspend fun disableConnector(@Path("connectorId") connectorId: String): ConnectorDto
+
+    @GET("connectors/{connectorId}/credentials")
+    suspend fun getConnectorCredentials(@Path("connectorId") connectorId: String): ConnectorCredentialStatusDto
+
+    @POST("connectors/{connectorId}/secret/issue")
+    suspend fun issueConnectorSecret(@Path("connectorId") connectorId: String, @Body payload: ConnectorSecretRequestDto): ConnectorSecretIssueResponseDto
+
+    @POST("connectors/{connectorId}/secret/rotate")
+    suspend fun rotateConnectorSecret(@Path("connectorId") connectorId: String, @Body payload: ConnectorSecretRequestDto): ConnectorSecretIssueResponseDto
+
+    @POST("connectors/{connectorId}/secret/revoke")
+    suspend fun revokeConnectorSecret(@Path("connectorId") connectorId: String): ConnectorDto
+
+    @GET("connectors/{connectorId}/schema-mapper")
+    suspend fun getConnectorSchemaMapper(@Path("connectorId") connectorId: String): ConnectorSchemaMapperStatusDto
+
+    @PUT("connectors/{connectorId}/schema-mapper")
+    suspend fun updateConnectorSchemaMapper(@Path("connectorId") connectorId: String, @Body payload: ConnectorSchemaMapperDto): ConnectorSchemaMapperStatusDto
+
+    @POST("connectors/{connectorId}/schema-mapper/preview")
+    suspend fun previewConnectorSchemaMapper(
+        @Path("connectorId") connectorId: String,
+        @Body payload: ConnectorSchemaMapperPreviewRequestDto
+    ): ConnectorSchemaMapperPreviewResponseDto
 
     @GET("mcp-gateway/pending-requests")
     suspend fun listMCPPendingRequests(
@@ -116,23 +164,14 @@ interface ControlTowerApi {
     ): List<MCPPendingRequestDto>
 
     @GET("mcp-gateway/pending-requests/health")
-    suspend fun getMCPPendingHealth(
-        @Query("project_id") projectId: String? = null
-    ): MCPPendingHealthDto
+    suspend fun getMCPPendingHealth(@Query("project_id") projectId: String? = null): MCPPendingHealthDto
 
     @GET("mcp-gateway/pending-requests/{pendingRequestId}")
-    suspend fun getMCPPendingRequest(
-        @Path("pendingRequestId") pendingRequestId: String
-    ): MCPPendingRequestDto
+    suspend fun getMCPPendingRequest(@Path("pendingRequestId") pendingRequestId: String): MCPPendingRequestDto
 
     @POST("mcp-gateway/pending-requests/{pendingRequestId}/retry")
-    suspend fun retryMCPPendingRequest(
-        @Path("pendingRequestId") pendingRequestId: String,
-        @Body payload: PendingRetryRequestDto
-    ): MCPPendingRequestDto
+    suspend fun retryMCPPendingRequest(@Path("pendingRequestId") pendingRequestId: String, @Body payload: PendingRetryRequestDto): MCPPendingRequestDto
 
     @POST("mcp-gateway/approvals/{approvalId}/resolve")
-    suspend fun resolveMCPApproval(
-        @Path("approvalId") approvalId: String
-    ): MCPGatewayDecisionDto
+    suspend fun resolveMCPApproval(@Path("approvalId") approvalId: String): MCPGatewayDecisionDto
 }
