@@ -31,11 +31,15 @@ import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
+import com.aixion.controltower.core.api.dto.RegistrationResponseDto
+import com.aixion.controltower.core.api.dto.ResendVerificationRequestDto
 import com.aixion.controltower.core.api.dto.RoleChoicesDto
 import com.aixion.controltower.core.api.dto.RoleUpdateRequestDto
 import com.aixion.controltower.core.api.dto.SessionDto
 import com.aixion.controltower.core.api.dto.SessionRevokeResponseDto
 import com.aixion.controltower.core.api.dto.TestRunDto
+import com.aixion.controltower.core.api.dto.VerifyEmailRequestDto
+import com.aixion.controltower.core.api.dto.VerifyEmailResponseDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
 import retrofit2.http.Body
@@ -51,7 +55,13 @@ interface ControlTowerApi {
     suspend fun health(): Map<String, String>
 
     @POST("auth/register")
-    suspend fun register(@Body payload: RegisterRequestDto): AuthResponseDto
+    suspend fun register(@Body payload: RegisterRequestDto): RegistrationResponseDto
+
+    @POST("auth/verify-email")
+    suspend fun verifyEmail(@Body payload: VerifyEmailRequestDto): VerifyEmailResponseDto
+
+    @POST("auth/resend-verification")
+    suspend fun resendVerification(@Body payload: ResendVerificationRequestDto): RegistrationResponseDto
 
     @POST("auth/login")
     suspend fun login(@Body payload: LoginRequestDto): AuthResponseDto
