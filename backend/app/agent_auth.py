@@ -11,11 +11,11 @@ from .agent_credential_models import (
     AgentCredentialRecord,
     AgentCredentialState,
     AgentCredentialStatus,
+    AgentCreateWithCredentialPolicy,
 )
 from .models import (
     AgentAction,
     AgentAuthType,
-    AgentCreate,
     AgentRegistrationResponse,
     AuditEvent,
     AuthUser,
@@ -164,7 +164,10 @@ def _enforce_agent_rate_limit(agent: ExternalAgent) -> None:
     credential.updated_at = now
 
 
-def register_external_agent(payload: AgentCreate, user: AuthUser) -> AgentRegistrationResponse:
+def register_external_agent(
+    payload: AgentCreateWithCredentialPolicy,
+    user: AuthUser,
+) -> AgentRegistrationResponse:
     raw_token = None
     secret_hash = None
     if payload.auth_type in {AgentAuthType.API_KEY, AgentAuthType.WEBHOOK_SECRET}:
@@ -182,7 +185,11 @@ def register_external_agent(payload: AgentCreate, user: AuthUser) -> AgentRegist
         secret_hash=secret_hash,
     )
     store.external_agents[agent.id] = agent
-    store.external_agent_credentials[agent.id] = AgentCredentialRecord(agent_id=agent.id)
+    store.external_agent_credentials[agent.id] = AgentCredentialRecord(
+        agent_id=agent.id,
+        token_expires_at=payload.token_expires_at,
+        rate_limit_per_minute=payload.rate_limit_per_minute,
+    )
     store.persist()
     return AgentRegistrationResponse(agent=to_public_agent(agent), agent_token=raw_token)
 
