@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from .models import AgentAuthType, new_id, now_utc
+from .models import AgentAuthType, AgentCreate, new_id, now_utc
 
 
 class AgentCredentialState(StrEnum):
@@ -47,6 +47,11 @@ class AgentCredentialStatus(BaseModel):
     rate_limit_per_minute: int
     rate_limit_window_started_at: datetime | None = None
     rate_limit_request_count: int = 0
+
+
+class AgentCreateWithCredentialPolicy(AgentCreate):
+    token_expires_at: datetime | None = None
+    rate_limit_per_minute: int = Field(default=60, ge=1, le=1000)
 
 
 class AgentTokenRotateRequest(BaseModel):
