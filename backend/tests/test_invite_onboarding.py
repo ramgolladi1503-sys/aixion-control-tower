@@ -15,7 +15,7 @@ from app.models import AuthUser, InviteStatus, UserRole
 from app.store import store
 
 
-PASSWORD = "valid-password-123"
+PASSWORD = "ValidPassword123!"
 
 
 def setup_function() -> None:
@@ -205,9 +205,12 @@ def test_registration_accepts_matching_pending_invite_and_assigns_invite_role(mo
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["access_token"]
+    assert payload["verification_required"] is True
+    assert payload["dev_verification_code"]
     assert payload["user"]["email"] == "maintainer@example.com"
     assert payload["user"]["role"] == UserRole.MAINTAINER
+    assert payload["user"]["email_verified"] is False
+    assert "access_token" not in payload
     assert store.invites[invite.id].status == InviteStatus.ACCEPTED
     assert store.invites[invite.id].accepted_by_user_id == payload["user"]["id"]
     assert store.audit_events[-1].event_type == "auth.invite_accepted"

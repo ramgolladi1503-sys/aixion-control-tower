@@ -103,7 +103,8 @@ data class AuthUserDto(
     val id: String,
     val email: String,
     val display_name: String,
-    val role: String
+    val role: String,
+    val email_verified: Boolean = false
 )
 
 data class LoginRequestDto(
@@ -118,10 +119,32 @@ data class RegisterRequestDto(
     val invite_token: String? = null
 )
 
+data class VerifyEmailRequestDto(
+    val email: String,
+    val code: String
+)
+
+data class ResendVerificationRequestDto(
+    val email: String
+)
+
 data class AuthResponseDto(
     val access_token: String,
     val token_type: String = "bearer",
     val user: AuthUserDto
+)
+
+data class RegistrationResponseDto(
+    val user: AuthUserDto,
+    val verification_required: Boolean = true,
+    val message: String,
+    val dev_verification_code: String? = null
+)
+
+data class VerifyEmailResponseDto(
+    val user: AuthUserDto,
+    val verified: Boolean = true,
+    val message: String
 )
 
 data class RoleChoicesDto(

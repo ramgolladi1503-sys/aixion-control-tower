@@ -32,17 +32,23 @@ import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
+import com.aixion.controltower.core.api.dto.RegistrationResponseDto
+import com.aixion.controltower.core.api.dto.ResendVerificationRequestDto
 import com.aixion.controltower.core.api.dto.RoleChoicesDto
 import com.aixion.controltower.core.api.dto.RoleUpdateRequestDto
 import com.aixion.controltower.core.api.dto.SessionDto
 import com.aixion.controltower.core.api.dto.SessionRevokeResponseDto
 import com.aixion.controltower.core.api.dto.TestRunDto
+import com.aixion.controltower.core.api.dto.VerifyEmailRequestDto
+import com.aixion.controltower.core.api.dto.VerifyEmailResponseDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
 
 open class BaseFakeControlTowerApi : ControlTowerApi {
     override suspend fun health(): Map<String, String> = emptyMap()
-    override suspend fun register(payload: RegisterRequestDto): AuthResponseDto = unsupported()
+    override suspend fun register(payload: RegisterRequestDto): RegistrationResponseDto = unsupported()
+    override suspend fun verifyEmail(payload: VerifyEmailRequestDto): VerifyEmailResponseDto = unsupported()
+    override suspend fun resendVerification(payload: ResendVerificationRequestDto): RegistrationResponseDto = unsupported()
     override suspend fun login(payload: LoginRequestDto): AuthResponseDto = unsupported()
     override suspend fun me(): AuthUserDto = unsupported()
     override suspend fun listRoleChoices(): RoleChoicesDto = RoleChoicesDto()

@@ -116,8 +116,13 @@ private fun AccountHero(state: AuthUiState) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 StatusBadge(
-                    label = if (state.authenticated) "SESSION ACTIVE" else "ACCESS REQUIRED",
-                    color = if (state.authenticated) RiskLow else RiskMedium
+                    label = when {
+                        state.authenticated -> "SESSION ACTIVE"
+                        state.verificationRequired -> "EMAIL VERIFICATION REQUIRED"
+                        state.emailVerified -> "EMAIL VERIFIED"
+                        else -> "ACCESS REQUIRED"
+                    },
+                    color = if (state.authenticated || state.emailVerified) RiskLow else RiskMedium
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
@@ -144,8 +149,16 @@ private fun AccountHero(state: AuthUiState) {
 private fun SessionStatePanel(state: AuthUiState) {
     TowerPanel(elevated = true) {
         StatusBadge(
-            label = if (state.authenticated) "Session active" else "No active session",
-            color = if (state.authenticated) RiskLow else TowerAccent
+            label = when {
+                state.authenticated -> "Session active"
+                state.verificationRequired -> "Verify email before login"
+                else -> "No active session"
+            },
+            color = when {
+                state.authenticated -> RiskLow
+                state.verificationRequired -> RiskMedium
+                else -> TowerAccent
+            }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         state.userLabel?.let { Text(text = it, color = TowerTextPrimary, fontSize = 14.sp) }
@@ -177,8 +190,27 @@ private fun AuthForm(state: AuthUiState, viewModel: AuthViewModel) {
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = viewModel::login, enabled = !state.loading, modifier = Modifier.weight(1f)) { Text(if (state.loading) "Working..." else "Login") }
+            Button(onClick = viewModel::login, enabled = !state.loading && !state.verificationRequired, modifier = Modifier.weight(1f)) { Text(if (state.loading) "Working..." else "Login") }
             OutlinedButton(onClick = viewModel::register, enabled = !state.loading && state.password.length >= 12, modifier = Modifier.weight(1f)) { Text("Register") }
+        }
+
+        if (state.verificationRequired || state.devVerificationCode != null) {
+            TowerPanel(elevated = false) {
+                Text("Email verification", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Registration does not grant app access until this email is verified.", color = TowerTextMuted, fontSize = 12.sp)
+                state.devVerificationCode?.let { Text("Dev verification code: $it", color = RiskLow, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                OutlinedTextField(
+                    value = state.verificationCode,
+                    onValueChange = viewModel::updateVerificationCode,
+                    label = { Text("Verification code") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = viewModel::verifyEmail, enabled = !state.loading && state.verificationCode.isNotBlank(), modifier = Modifier.weight(1f)) { Text("Verify email") }
+                    OutlinedButton(onClick = viewModel::resendVerification, enabled = !state.loading && state.email.isNotBlank(), modifier = Modifier.weight(1f)) { Text("Resend") }
+                }
+            }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
