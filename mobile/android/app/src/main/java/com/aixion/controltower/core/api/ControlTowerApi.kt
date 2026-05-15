@@ -13,6 +13,8 @@ import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperPreviewResponse
 import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperStatusDto
 import com.aixion.controltower.core.api.dto.ConnectorSecretIssueResponseDto
 import com.aixion.controltower.core.api.dto.ConnectorSecretRequestDto
+import com.aixion.controltower.core.api.dto.ConnectorSimulationRequestDto
+import com.aixion.controltower.core.api.dto.ConnectorSimulationResponseDto
 import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
 import com.aixion.controltower.core.api.dto.ConnectorTemplateListDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
@@ -155,6 +157,12 @@ interface ControlTowerApi {
         @Path("connectorId") connectorId: String,
         @Body payload: ConnectorSchemaMapperPreviewRequestDto
     ): ConnectorSchemaMapperPreviewResponseDto
+
+    @POST("connectors/{connectorId}/simulate")
+    suspend fun simulateConnectorWebhook(
+        @Path("connectorId") connectorId: String,
+        @Body payload: ConnectorSimulationRequestDto
+    ): ConnectorSimulationResponseDto
 
     @GET("mcp-gateway/pending-requests")
     suspend fun listMCPPendingRequests(
