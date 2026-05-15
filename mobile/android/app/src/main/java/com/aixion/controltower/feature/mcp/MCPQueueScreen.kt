@@ -4,18 +4,20 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -25,15 +27,18 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.MCPPendingHealthSummary
 import com.aixion.controltower.core.model.MCPPendingStatus
 import com.aixion.controltower.core.model.MCPPendingSummary
+import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
+import com.aixion.controltower.core.ui.components.TowerHeroPanel
+import com.aixion.controltower.core.ui.components.TowerPanel
+import com.aixion.controltower.core.ui.components.TowerSectionHeader
 import com.aixion.controltower.core.ui.theme.RiskCritical
 import com.aixion.controltower.core.ui.theme.RiskHigh
 import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.RiskMedium
 import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
-import com.aixion.controltower.core.ui.theme.TowerSurface
-import com.aixion.controltower.core.ui.theme.TowerSurfaceRaised
+import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
@@ -49,39 +54,25 @@ fun MCPQueueScreen(
             .fillMaxSize()
             .background(TowerBackground)
             .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            Text(
-                text = "MCP Queue",
-                color = TowerTextPrimary,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = if (state.loading) {
-                    "Loading MCP queue state..."
-                } else {
-                    "Watch blocked, forwarding, retryable, and dead-lettered MCP work."
-                },
-                color = TowerTextMuted,
-                fontSize = 14.sp
+            MCPQueueHero(
+                loading = state.loading,
+                health = state.health,
+                pendingCount = state.pendingRequests.size
             )
             state.message?.let { message ->
-                Text(
-                    text = message,
-                    color = TowerAccent,
-                    fontSize = 13.sp,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                Text(text = message, color = TowerAccent, fontSize = 13.sp)
             }
             state.errorMessage?.let { error ->
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
                     text = "Backend error: $error",
                     color = RiskCritical,
                     fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(top = 8.dp)
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
@@ -90,21 +81,27 @@ fun MCPQueueScreen(
             item { MCPHealthCard(health) }
         }
 
+        item {
+            TowerSectionHeader(
+                title = "Pending MCP Work",
+                subtitle = "Mutating child-server tool calls stay visible here until approval, forwarding, or recovery is complete."
+            )
+        }
+
         if (!state.loading && state.pendingRequests.isEmpty()) {
             item {
-                Text(
-                    text = if (state.errorMessage == null) {
-                        "No MCP pending work found."
-                    } else {
-                        "MCP queue unavailable. Fix backend connectivity instead of trusting mock queue data."
-                    },
-                    color = TowerTextMuted,
-                    fontSize = 15.sp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(TowerSurface, RoundedCornerShape(22.dp))
-                        .padding(18.dp)
-                )
+                TowerPanel(elevated = true) {
+                    Text(
+                        text = if (state.errorMessage == null) {
+                            "No MCP pending work found."
+                        } else {
+                            "MCP queue unavailable. Fix backend connectivity instead of trusting mock queue data."
+                        },
+                        color = TowerTextMuted,
+                        fontSize = 15.sp,
+                        lineHeight = 21.sp
+                    )
+                }
             }
         }
 
@@ -120,14 +117,57 @@ fun MCPQueueScreen(
 }
 
 @Composable
+private fun MCPQueueHero(
+    loading: Boolean,
+    health: MCPPendingHealthSummary?,
+    pendingCount: Int
+) {
+    TowerHeroPanel {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                StatusBadge(
+                    label = if (loading) "SYNCING" else "MCP WAIT MODE",
+                    color = if (health?.isHealthy == false) RiskCritical else if (loading) RiskMedium else RiskLow
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.md))
+                Text(
+                    text = "MCP Queue",
+                    color = TowerTextPrimary,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 32.sp
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                Text(
+                    text = if (loading) {
+                        "Loading MCP queue state..."
+                    } else {
+                        "Watch blocked, forwarding, retryable, and dead-lettered MCP work."
+                    },
+                    color = TowerTextMuted,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
+            }
+            ForgedLogoMark(size = 52.dp, color = TowerTextPrimary.copy(alpha = 0.78f))
+        }
+        Spacer(modifier = Modifier.height(TowerSpacing.lg))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusBadge(label = "PENDING $pendingCount", color = TowerAccent)
+            health?.let {
+                StatusBadge(label = "ATTENTION ${it.attentionRequired}", color = if (it.attentionRequired > 0) RiskCritical else RiskLow)
+            }
+        }
+    }
+}
+
+@Composable
 private fun MCPHealthCard(health: MCPPendingHealthSummary) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(TowerSurface, RoundedCornerShape(24.dp))
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+    TowerPanel(elevated = true) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(
                 label = if (health.isHealthy) "HEALTHY" else "ATTENTION",
@@ -135,6 +175,7 @@ private fun MCPHealthCard(health: MCPPendingHealthSummary) {
             )
             StatusBadge(label = "TOTAL ${health.total}", color = TowerAccent)
         }
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             MCPMetric("Waiting", health.waitingForApproval.toString(), TowerAccent, Modifier.weight(1f))
             MCPMetric("Forwarding", health.forwarding.toString(), RiskMedium, Modifier.weight(1f))
@@ -143,22 +184,20 @@ private fun MCPHealthCard(health: MCPPendingHealthSummary) {
             MCPMetric("Dead", health.deadLetter.toString(), RiskCritical, Modifier.weight(1f))
             MCPMetric("Retryable", health.retryable.toString(), RiskHigh, Modifier.weight(1f))
         }
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = "Attention required: ${health.attentionRequired} • Active leases: ${health.activeLeases} • Expired leases: ${health.expiredLeases}",
             color = TowerTextMuted,
-            fontSize = 13.sp
+            fontSize = 13.sp,
+            lineHeight = 19.sp
         )
     }
 }
 
 @Composable
 private fun MCPMetric(label: String, value: String, color: Color, modifier: Modifier = Modifier) {
-    Column(
-        modifier = modifier
-            .background(TowerSurfaceRaised, RoundedCornerShape(18.dp))
-            .padding(12.dp)
-    ) {
-        Text(text = value, color = color, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+    TowerPanel(modifier = modifier, elevated = false) {
+        Text(text = value, color = color, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
         Text(text = label, color = TowerTextMuted, fontSize = 12.sp)
     }
 }
@@ -170,13 +209,7 @@ private fun MCPPendingCard(
     onOpenApproval: () -> Unit,
     onRecover: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(TowerSurface, RoundedCornerShape(22.dp))
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
+    TowerPanel(elevated = true) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = pending.status.name, color = pending.statusColor())
             if (pending.needsOperatorAttention) {
@@ -185,11 +218,13 @@ private fun MCPPendingCard(
                 StatusBadge(label = "RETRYABLE", color = RiskHigh)
             }
         }
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = "${pending.serverName}.${pending.toolName}",
             color = TowerTextPrimary,
             fontSize = 18.sp,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 23.sp
         )
         Text(
             text = "Approval ${pending.approvalRequestId} • requested by ${pending.requestedBy}",
@@ -210,10 +245,8 @@ private fun MCPPendingCard(
                 fontWeight = FontWeight.Bold
             )
         }
-        OutlinedButton(
-            onClick = onOpenApproval,
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        OutlinedButton(onClick = onOpenApproval, modifier = Modifier.fillMaxWidth()) {
             Text("Open linked approval")
         }
         if (pending.canRecoverFromMobile()) {
