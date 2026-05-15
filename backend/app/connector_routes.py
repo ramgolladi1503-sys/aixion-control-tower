@@ -3,6 +3,17 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from .auth import require_owner
+from .connector_credentials import (
+    ConnectorCredentialStatus,
+    ConnectorSecretIssueRequest,
+    ConnectorSecretIssueResponse,
+    connector_credential_status,
+    issue_connector_secret,
+    mark_connector_health_check,
+    record_connector_auth_failure,
+    record_connector_auth_success,
+    revoke_connector_secret,
+)
 from .connector_models import (
     AgentConnector,
     ConnectorCreate,
@@ -24,6 +35,14 @@ def _audit(event_type: str, entity_id: str, details: dict, actor: str = "system"
     return event
 
 
+def _safe_config(config: dict) -> dict:
+    return {
+        key: value
+        for key, value in config.items()
+        if key not in {"secret_hash", "secret_hint", "secret_revoked_at", "secret_rotated_at"}
+    }
+
+
 def _to_public(connector: AgentConnector) -> ConnectorPublic:
     return ConnectorPublic(
         id=connector.id,
@@ -39,12 +58,12 @@ def _to_public(connector: AgentConnector) -> ConnectorPublic:
         allowed_repositories=connector.allowed_repositories,
         allowed_actions=connector.allowed_actions,
         rate_limit_per_minute=connector.rate_limit_per_minute,
-        secret_configured=bool(connector.secret_ref),
+        secret_configured=bool(connector.secret_ref and connector.config.get("secret_hash")),
         last_used_at=connector.last_used_at,
         last_health_check_at=connector.last_health_check_at,
         failed_auth_count=connector.failed_auth_count,
         last_error=connector.last_error,
-        config=connector.config,
+        config=_safe_config(connector.config),
         created_at=connector.created_at,
         updated_at=connector.updated_at,
     )
@@ -77,7 +96,7 @@ def _connector_details(connector: AgentConnector) -> dict:
         "allowed_repositories": connector.allowed_repositories,
         "allowed_actions": connector.allowed_actions,
         "rate_limit_per_minute": connector.rate_limit_per_minute,
-        "secret_configured": bool(connector.secret_ref),
+        "secret_configured": bool(connector.secret_ref and connector.config.get("secret_hash")),
     }
 
 
@@ -126,6 +145,8 @@ def update_connector(connector_id: str, payload: ConnectorUpdate, user: AuthUser
         if field_name == "enabled":
             connector.status = ConnectorStatus.ENABLED if value else ConnectorStatus.DISABLED
             connector.health_status = ConnectorHealthStatus.UNKNOWN if value else ConnectorHealthStatus.DISABLED
+        elif field_name == "config":
+            connector.config = {**connector.config, **(value or {})}
         elif hasattr(connector, field_name):
             setattr(connector, field_name, value)
     connector.updated_at = now_utc()
@@ -169,5 +190,80 @@ def enable_connector(connector_id: str, user: AuthUser = OwnerDependency) -> Con
         {"previous_status": previous_status, "new_status": connector.status},
         actor=user.email,
     )
+    store.persist()
+    return _to_public(connector)
+
+
+@router.get("/{connector_id}/credentials", response_model=ConnectorCredentialStatus)
+def get_connector_credentials(connector_id: str, _: AuthUser = OwnerDependency) -> ConnectorCredentialStatus:
+    return connector_credential_status(_get_connector_or_404(connector_id))
+
+
+@router.post("/{connector_id}/secret/issue", response_model=ConnectorSecretIssueResponse)
+def issue_connector_secret_route(
+    connector_id: str,
+    payload: ConnectorSecretIssueRequest | None = None,
+    user: AuthUser = OwnerDependency,
+) -> ConnectorSecretIssueResponse:
+    connector = _get_connector_or_404(connector_id)
+    secret, secret_ref, secret_hint = issue_connector_secret(connector)
+    _audit(
+        "connector.secret_issued",
+        connector.id,
+        {"secret_ref": secret_ref, "secret_hint": secret_hint, "note": payload.note if payload else ""},
+        actor=user.email,
+    )
+    store.persist()
+    return ConnectorSecretIssueResponse(connector=_to_public(connector), secret=secret, secret_hint=secret_hint)
+
+
+@router.post("/{connector_id}/secret/rotate", response_model=ConnectorSecretIssueResponse)
+def rotate_connector_secret_route(
+    connector_id: str,
+    payload: ConnectorSecretIssueRequest | None = None,
+    user: AuthUser = OwnerDependency,
+) -> ConnectorSecretIssueResponse:
+    connector = _get_connector_or_404(connector_id)
+    secret, secret_ref, secret_hint = issue_connector_secret(connector)
+    _audit(
+        "connector.secret_rotated",
+        connector.id,
+        {"secret_ref": secret_ref, "secret_hint": secret_hint, "note": payload.note if payload else ""},
+        actor=user.email,
+    )
+    store.persist()
+    return ConnectorSecretIssueResponse(connector=_to_public(connector), secret=secret, secret_hint=secret_hint)
+
+
+@router.post("/{connector_id}/secret/revoke", response_model=ConnectorPublic)
+def revoke_connector_secret_route(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
+    connector = _get_connector_or_404(connector_id)
+    revoke_connector_secret(connector)
+    _audit("connector.secret_revoked", connector.id, {"secret_configured": False}, actor=user.email)
+    store.persist()
+    return _to_public(connector)
+
+
+@router.post("/{connector_id}/health/success", response_model=ConnectorPublic)
+def mark_connector_success(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
+    connector = _get_connector_or_404(connector_id)
+    record_connector_auth_success(connector)
+    mark_connector_health_check(connector, healthy=True)
+    _audit("connector.health_success", connector.id, _connector_details(connector), actor=user.email)
+    store.persist()
+    return _to_public(connector)
+
+
+@router.post("/{connector_id}/health/failure", response_model=ConnectorPublic)
+def mark_connector_failure(
+    connector_id: str,
+    payload: ConnectorSecretIssueRequest | None = None,
+    user: AuthUser = OwnerDependency,
+) -> ConnectorPublic:
+    connector = _get_connector_or_404(connector_id)
+    reason = payload.note if payload and payload.note else "manual health failure"
+    record_connector_auth_failure(connector, reason)
+    mark_connector_health_check(connector, healthy=False, reason=reason)
+    _audit("connector.health_failure", connector.id, {**_connector_details(connector), "reason": reason}, actor=user.email)
     store.persist()
     return _to_public(connector)
