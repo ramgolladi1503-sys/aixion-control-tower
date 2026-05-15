@@ -35,7 +35,15 @@ Rotate a token:
 POST /agents/{agent_id}/token/rotate
 ```
 
-Optional rotation body:
+Revoke a token:
+
+```http
+POST /agents/{agent_id}/token/revoke
+```
+
+## Registration policy fields
+
+External-agent registration can set the first token policy:
 
 ```json
 {
@@ -44,11 +52,22 @@ Optional rotation body:
 }
 ```
 
-Revoke a token:
+`token_expires_at` is optional. If omitted, the issued token does not expire automatically in this MVP layer.
 
-```http
-POST /agents/{agent_id}/token/revoke
+`rate_limit_per_minute` defaults to `60` and is enforced per agent over a one-minute window.
+
+## Rotation policy fields
+
+Token rotation accepts the same credential policy fields:
+
+```json
+{
+  "token_expires_at": "2026-06-15T00:00:00Z",
+  "rate_limit_per_minute": 60
+}
 ```
+
+Rotation returns a new one-time token, clears previous revocation state, resets the rate-limit window, and invalidates the old token.
 
 ## Credential states
 
