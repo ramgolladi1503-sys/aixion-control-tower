@@ -19,7 +19,8 @@ import kotlinx.coroutines.launch
 data class HomeUiState(
     val loading: Boolean = true,
     val projects: List<ProjectSummary> = emptyList(),
-    val approvals: List<ApprovalSummary> = emptyList()
+    val approvals: List<ApprovalSummary> = emptyList(),
+    val errorMessage: String? = null
 ) {
     val actionRequiredApprovals: List<ApprovalSummary> = approvals.filter { it.requiresHumanAction }
     val githubExecutionApprovals: List<ApprovalSummary> = approvals.filter { it.isAwaitingGitHubExecution }
@@ -30,6 +31,7 @@ data class HomeUiState(
     val actionRequiredCount: Int = actionRequiredApprovals.size
     val githubExecutionCount: Int = githubExecutionApprovals.size
     val failedTestsCount: Int = approvals.count { it.status == ApprovalStatus.TESTS_FAILED }
+    val hasError: Boolean = errorMessage != null
 }
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
@@ -46,10 +48,20 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refresh() {
         viewModelScope.launch {
-            val projects = projectRepository.listProjects()
-            val projectNames = projects.associate { it.id to it.name }
-            val approvals = approvalRepository.listApprovals(projectNames)
-            _state.value = HomeUiState(loading = false, projects = projects, approvals = approvals)
+            _state.value = _state.value.copy(loading = true, errorMessage = null)
+            runCatching {
+                val projects = projectRepository.listProjects()
+                val projectNames = projects.associate { it.id to it.name }
+                val approvals = approvalRepository.listApprovals(projectNames)
+                HomeUiState(loading = false, projects = projects, approvals = approvals)
+            }.onSuccess { nextState ->
+                _state.value = nextState
+            }.onFailure { error ->
+                _state.value = HomeUiState(
+                    loading = false,
+                    errorMessage = "Backend sync failed. No mock data shown. ${error.message ?: "Retry when the backend is reachable."}"
+                )
+            }
         }
     }
 }
