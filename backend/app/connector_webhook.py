@@ -22,6 +22,7 @@ from .connector_credentials import (
     safe_equal,
 )
 from .connector_models import AgentConnector, ConnectorAuthType, ConnectorStatus
+from .connector_schema_mapper import normalize_connector_payload
 from .models import AgentAction, AgentProvider, AuditEvent, RiskLevel, now_utc
 from .store import store
 
@@ -211,7 +212,8 @@ async def handle_connector_webhook(connector: AgentConnector, request: Request, 
     _enforce_connector_rate_limit(connector)
     try:
         raw_payload = await request.json()
-        payload = ConnectorWebhookPayload.model_validate(raw_payload)
+        normalized_payload = normalize_connector_payload(connector, raw_payload)
+        payload = ConnectorWebhookPayload.model_validate(normalized_payload)
     except Exception as error:
         record_connector_auth_failure(connector, "invalid webhook payload")
         _audit("connector.webhook_refused", connector.id, {"reason": "invalid webhook payload", "error": str(error)}, actor=f"connector:{connector.id}")
