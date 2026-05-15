@@ -1,9 +1,7 @@
 from __future__ import annotations
+import pytest
 
-import os
 
-os.environ.setdefault("AIXION_AUTH_ENABLED", "true")
-os.environ.setdefault("AIXION_PROFILE", "test")
 
 from fastapi.testclient import TestClient
 
@@ -14,7 +12,6 @@ client = TestClient(app)
 PASSWORD = "ValidPassword123!"
 
 
-import pytest
 
 
 @pytest.fixture(autouse=True)
