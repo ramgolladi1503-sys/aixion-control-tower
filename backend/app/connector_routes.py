@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from .auth import require_owner
 from .connector_credentials import (
@@ -22,6 +22,7 @@ from .connector_models import (
     ConnectorStatus,
     ConnectorUpdate,
 )
+from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
 from .models import AuditEvent, AuthUser, now_utc
 from .store import store
 
@@ -128,6 +129,17 @@ def create_connector(payload: ConnectorCreate, user: AuthUser = OwnerDependency)
 @router.get("", response_model=list[ConnectorPublic])
 def list_connectors(_: AuthUser = OwnerDependency) -> list[ConnectorPublic]:
     return [_to_public(connector) for connector in store.agent_connectors.values()]
+
+
+@router.post("/{connector_id}/webhook", response_model=ConnectorWebhookResponse)
+async def connector_webhook(
+    connector_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_aixion_connector_signature: str | None = Header(default=None),
+) -> ConnectorWebhookResponse:
+    connector = _get_connector_or_404(connector_id)
+    return await handle_connector_webhook(connector, request, authorization, x_aixion_connector_signature)
 
 
 @router.get("/{connector_id}", response_model=ConnectorPublic)
