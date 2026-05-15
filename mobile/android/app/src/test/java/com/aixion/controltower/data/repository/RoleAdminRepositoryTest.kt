@@ -62,7 +62,7 @@ class RoleAdminRepositoryTest {
     }
 }
 
-private class RoleAdminApi : ControlTowerApi {
+private class RoleAdminApi : BaseFakeControlTowerApi() {
     var updatedUserId: String? = null
     var updatedRole: String? = null
 
