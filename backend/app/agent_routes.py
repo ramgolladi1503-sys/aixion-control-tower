@@ -124,7 +124,7 @@ def create_agent_task(payload: AgentTaskCreate, agent: ExternalAgent = Depends(r
         provider=agent.provider,
         external_agent_id=agent.id,
         external_agent_name=agent.display_name,
-        metadata={**payload.metadata, "external_agent_scoped": True},
+        metadata={**(payload.metadata or {}), "external_agent_scoped": True},
     )
     store.agent_tasks[task.id] = task
     event = AgentTaskEvent(
@@ -193,7 +193,7 @@ def append_agent_owned_task_event(
         message=payload.message,
         status=payload.status,
         actor=f"agent:{agent.id}",
-        metadata={**payload.metadata, "agent_id": agent.id, "external_agent_scoped": True},
+        metadata={**(payload.metadata or {}), "agent_id": agent.id, "external_agent_scoped": True},
     )
     store.agent_task_events[event.id] = event
     audit(
