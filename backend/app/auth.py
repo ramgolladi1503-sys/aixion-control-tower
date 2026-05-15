@@ -114,7 +114,14 @@ def _dev_verification_code(code: str) -> str | None:
     return code if get_settings().profile in {"local", "demo", "test"} else None
 
 
-def create_user(email: str, password: str, display_name: str = "", role: UserRole | None = None) -> User:
+def create_user(
+    email: str,
+    password: str,
+    display_name: str = "",
+    role: UserRole | None = None,
+    *,
+    email_verified: bool = True,
+) -> User:
     normalized_email = email.lower().strip()
     if any(user.email.lower() == normalized_email for user in store.users.values()):
         raise HTTPException(status_code=409, detail="User already exists")
@@ -126,7 +133,7 @@ def create_user(email: str, password: str, display_name: str = "", role: UserRol
         role=role or _default_role_for_new_user(),
         password_salt=salt,
         password_hash=_hash_secret(password, salt),
-        email_verified=False,
+        email_verified=email_verified,
     )
     store.users[user.id] = user
     store.persist()
