@@ -107,6 +107,13 @@ class FakePRClient:
         )
 
 
+class FakeWorkspaceRunner:
+    def run(self, command: list[str], *, cwd=None):
+        from app.agent_worker_workspace import WorkspaceCommandResult
+
+        return WorkspaceCommandResult(command=command, exit_code=0, output_summary="ok")
+
+
 def setup_function() -> None:
     store.reset()
 
@@ -219,6 +226,32 @@ def test_orchestrator_stops_when_validation_fails() -> None:
     assert summary.event_type == "FAILED"
     assert summary.metadata["orchestration_success"] is False
     assert any(audit.event_type == "agent_worker.orchestration_failed" for audit in store.audit_events)
+
+
+def test_orchestrator_defaults_to_container_validation_and_fails_closed_without_runtime() -> None:
+    project = _project()
+    approval = _approval(project)
+    task = _approved_task(approval)
+    branch_client = FakeBranchClient()
+    file_client = FakeFileClient(branch_client)
+    pr_client = FakePRClient(branch_client)
+
+    result = run_approved_agent_task_worker_flow(
+        task_id=task.id,
+        worker_id="orchestrator",
+        branch_client=branch_client,
+        file_client=file_client,
+        pr_client=pr_client,
+        workspace_runner=FakeWorkspaceRunner(),
+    )
+
+    assert result.success is False
+    assert result.pr_result is None
+    assert result.validation_result is not None
+    assert result.validation_result.results[0].exit_code == 127
+    assert "Container runtime unavailable" in result.validation_result.results[0].output_summary
+    assert store.agent_tasks[task.id].status == AgentTaskStatus.FAILED
+    assert any(audit.event_type == "agent_worker.container_validation_configured" for audit in store.audit_events)
 
 
 def test_orchestrator_reports_missing_task() -> None:
