@@ -32,10 +32,23 @@ MAX_VALIDATION_COMMANDS = 12
 MAX_COMMAND_LENGTH = 220
 
 
+@dataclass(frozen=True)
+class ValidationExecutionPolicy:
+    policy_version: str = "aixion-validation-execution-policy-v1"
+    allowed_command_prefixes: tuple[str, ...] = ALLOWED_COMMAND_PREFIXES
+    dangerous_tokens: tuple[str, ...] = tuple(sorted(DANGEROUS_TOKENS))
+    dangerous_substrings: tuple[str, ...] = DANGEROUS_SUBSTRINGS
+    max_validation_commands: int = MAX_VALIDATION_COMMANDS
+    max_command_length: int = MAX_COMMAND_LENGTH
+    shell_execution_allowed: bool = False
+    network_fetch_commands_allowed: bool = False
+
+
 @dataclass
 class ValidationCommandPlanItem:
     command: str
     allowed_prefix: str
+    policy_version: str = "aixion-validation-execution-policy-v1"
 
 
 @dataclass
@@ -56,6 +69,14 @@ class AgentWorkerValidationPlanResult:
         payload = asdict(self)
         payload["generated_at"] = self.generated_at.isoformat()
         return payload
+
+
+def get_validation_execution_policy() -> ValidationExecutionPolicy:
+    return ValidationExecutionPolicy()
+
+
+def validation_policy_metadata(policy: ValidationExecutionPolicy | None = None) -> dict[str, Any]:
+    return asdict(policy or get_validation_execution_policy())
 
 
 def _now() -> datetime:
@@ -90,56 +111,68 @@ def _linked_approval(task: AgentTask) -> ApprovalRequest | None:
     return store.approval_requests.get(task.approval_request_id)
 
 
-def validate_validation_command(command: str) -> str | None:
+def validate_validation_command(command: str, policy: ValidationExecutionPolicy | None = None) -> str | None:
+    active_policy = policy or get_validation_execution_policy()
     clean = command.strip()
     if not clean:
         return "Validation command is empty."
-    if len(clean) > MAX_COMMAND_LENGTH:
+    if len(clean) > active_policy.max_command_length:
         return f"Validation command is too long: {clean[:80]}"
-    if any(substring in clean for substring in DANGEROUS_SUBSTRINGS):
+    if any(substring in clean for substring in active_policy.dangerous_substrings):
         return f"Validation command contains dangerous operation: {clean}"
     try:
         tokens = shlex.split(clean)
     except ValueError as error:
         return f"Validation command cannot be parsed: {error}"
-    if any(token in DANGEROUS_TOKENS for token in tokens):
+    if any(token in set(active_policy.dangerous_tokens) for token in tokens):
         return f"Validation command contains shell control token: {clean}"
-    for prefix in ALLOWED_COMMAND_PREFIXES:
+    for prefix in active_policy.allowed_command_prefixes:
         if clean == prefix or clean.startswith(f"{prefix} "):
             return None
     return f"Validation command is not allowlisted: {clean}"
 
 
-def validate_validation_plan(approval: ApprovalRequest | None) -> str | None:
+def validate_validation_plan(approval: ApprovalRequest | None, policy: ValidationExecutionPolicy | None = None) -> str | None:
+    active_policy = policy or get_validation_execution_policy()
     if approval is None:
         return "Linked approval request not found."
     if not approval.test_plan:
         return "Linked approval has no validation commands."
-    if len(approval.test_plan) > MAX_VALIDATION_COMMANDS:
-        return f"Too many validation commands: {len(approval.test_plan)} > {MAX_VALIDATION_COMMANDS}"
+    if len(approval.test_plan) > active_policy.max_validation_commands:
+        return f"Too many validation commands: {len(approval.test_plan)} > {active_policy.max_validation_commands}"
     seen_commands: set[str] = set()
     for command in approval.test_plan:
         normalized = command.strip()
         if normalized in seen_commands:
             return f"Duplicate validation command: {normalized}"
         seen_commands.add(normalized)
-        failure = validate_validation_command(command)
+        failure = validate_validation_command(command, policy=active_policy)
         if failure:
             return failure
     return None
 
 
-def _allowed_prefix_for(command: str) -> str:
+def _allowed_prefix_for(command: str, policy: ValidationExecutionPolicy | None = None) -> str:
+    active_policy = policy or get_validation_execution_policy()
     clean = command.strip()
-    for prefix in ALLOWED_COMMAND_PREFIXES:
+    for prefix in active_policy.allowed_command_prefixes:
         if clean == prefix or clean.startswith(f"{prefix} "):
             return prefix
     return "UNKNOWN"
 
 
-def _plan_items(approval: ApprovalRequest) -> list[ValidationCommandPlanItem]:
+def allowed_prefix_for_command(command: str) -> str:
+    return _allowed_prefix_for(command)
+
+
+def _plan_items(approval: ApprovalRequest, policy: ValidationExecutionPolicy | None = None) -> list[ValidationCommandPlanItem]:
+    active_policy = policy or get_validation_execution_policy()
     return [
-        ValidationCommandPlanItem(command=command.strip(), allowed_prefix=_allowed_prefix_for(command))
+        ValidationCommandPlanItem(
+            command=command.strip(),
+            allowed_prefix=_allowed_prefix_for(command, active_policy),
+            policy_version=active_policy.policy_version,
+        )
         for command in approval.test_plan
     ]
 
@@ -150,6 +183,7 @@ def _append_validation_plan_event(
     worker_id: str,
     lease_token: str | None,
     items: list[ValidationCommandPlanItem],
+    policy: ValidationExecutionPolicy,
 ) -> AgentTaskEvent:
     event = AgentTaskEvent(
         task_id=task.id,
@@ -166,6 +200,7 @@ def _append_validation_plan_event(
             "commands": [asdict(item) for item in items],
             "commands_executed": False,
             "plan_type": "validation_command_dry_run",
+            "validation_policy": validation_policy_metadata(policy),
         },
     )
     store.agent_task_events[event.id] = event
@@ -204,12 +239,13 @@ def run_agent_worker_validation_plan_dry_run(
     task = claim.task
     lease_token = claim.lease_token
     approval = _linked_approval(task)
-    validation_error = validate_validation_plan(approval)
+    policy = get_validation_execution_policy()
+    validation_error = validate_validation_plan(approval, policy=policy)
     if validation_error:
         _audit(
             "agent_worker.validation_plan_refused",
             task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "reason": validation_error},
+            {"worker_id": worker_id, "lease_token": lease_token, "reason": validation_error, "validation_policy": validation_policy_metadata(policy)},
             actor=worker_id,
         )
         _release_task(task, lease_token, worker_id)
@@ -225,8 +261,8 @@ def run_agent_worker_validation_plan_dry_run(
         )
 
     assert approval is not None
-    items = _plan_items(approval)
-    event = _append_validation_plan_event(task, approval, worker_id, lease_token, items)
+    items = _plan_items(approval, policy=policy)
+    event = _append_validation_plan_event(task, approval, worker_id, lease_token, items, policy)
     _audit(
         "agent_worker.validation_plan_dry_run_completed",
         task.id,
@@ -236,6 +272,7 @@ def run_agent_worker_validation_plan_dry_run(
             "approval_request_id": approval.id,
             "command_count": len(items),
             "commands_executed": False,
+            "validation_policy": validation_policy_metadata(policy),
         },
         actor=worker_id,
     )

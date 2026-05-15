@@ -59,7 +59,7 @@ def test_validation_runner_records_passed_commands() -> None:
 
     def fake_executor(command: str) -> CommandExecutionResult:
         calls.append(command)
-        return CommandExecutionResult(command=command, exit_code=0, output_summary=f"passed {command}")
+        return CommandExecutionResult(command=command, exit_code=0, output_summary=f"passed {command}", duration_ms=7)
 
     result = run_agent_worker_validation_commands(task_id=task.id, worker_id="runner", executor=fake_executor)
 
@@ -77,10 +77,16 @@ def test_validation_runner_records_passed_commands() -> None:
     finished = store.agent_task_events[result.finished_event_id]
     assert started.event_type == "TESTS_STARTED"
     assert started.status == AgentTaskStatus.TESTING
+    assert started.metadata["validation_policy"]["policy_version"] == "aixion-validation-execution-policy-v1"
     assert finished.event_type == "TESTS_PASSED"
     assert finished.status == AgentTaskStatus.APPROVED
     assert finished.metadata["commands_executed"] is True
     assert finished.metadata["results"][0]["output_summary"] == "passed python -m pytest"
+    assert finished.metadata["results"][0]["allowed_prefix"] == "python -m pytest"
+    assert finished.metadata["results"][0]["duration_ms"] == 7
+    assert finished.metadata["artifact_summary"]["passed_count"] == 2
+    assert finished.metadata["artifact_summary"]["failed_count"] == 0
+    assert finished.metadata["artifact_summary"]["total_duration_ms"] == 14
     assert any(audit.event_type == "agent_worker.validation_run_started" for audit in store.audit_events)
     assert any(audit.event_type == "agent_worker.validation_run_completed" for audit in store.audit_events)
 
@@ -93,7 +99,7 @@ def test_validation_runner_stops_on_first_failure_and_marks_task_failed() -> Non
 
     def fake_executor(command: str) -> CommandExecutionResult:
         calls.append(command)
-        return CommandExecutionResult(command=command, exit_code=1, output_summary="failed")
+        return CommandExecutionResult(command=command, exit_code=1, output_summary="failed", duration_ms=5)
 
     result = run_agent_worker_validation_commands(task_id=task.id, worker_id="runner", executor=fake_executor)
 
@@ -107,6 +113,7 @@ def test_validation_runner_stops_on_first_failure_and_marks_task_failed() -> Non
     assert finished.event_type == "TESTS_FAILED"
     assert finished.status == AgentTaskStatus.FAILED
     assert finished.metadata["results"][0]["exit_code"] == 1
+    assert finished.metadata["artifact_summary"]["failed_count"] == 1
 
 
 def test_validation_runner_records_timeout_failure() -> None:
@@ -115,13 +122,33 @@ def test_validation_runner_records_timeout_failure() -> None:
     task = _approved_task(approval)
 
     def fake_executor(command: str) -> CommandExecutionResult:
-        return CommandExecutionResult(command=command, exit_code=124, timed_out=True, output_summary="timed out")
+        return CommandExecutionResult(command=command, exit_code=124, timed_out=True, output_summary="timed out", duration_ms=120000)
 
     result = run_agent_worker_validation_commands(task_id=task.id, worker_id="runner", executor=fake_executor)
 
     assert result.success is False
     assert result.results[0].timed_out is True
     assert store.agent_tasks[task.id].status == AgentTaskStatus.FAILED
+    finished = store.agent_task_events[result.finished_event_id]
+    assert finished.metadata["artifact_summary"]["timed_out_count"] == 1
+
+
+def test_validation_runner_truncates_large_output_artifact() -> None:
+    project = _project()
+    approval = _approval(project, test_plan=["python -m pytest"])
+    task = _approved_task(approval)
+    huge_output = "x" * 5000
+
+    def fake_executor(command: str) -> CommandExecutionResult:
+        return CommandExecutionResult(command=command, exit_code=0, output_summary=huge_output)
+
+    result = run_agent_worker_validation_commands(task_id=task.id, worker_id="runner", executor=fake_executor)
+
+    assert result.success is True
+    finished = store.agent_task_events[result.finished_event_id]
+    assert len(finished.metadata["results"][0]["output_summary"]) == 4000
+    assert finished.metadata["results"][0]["output_truncated"] is True
+    assert finished.metadata["artifact_summary"]["output_truncated"] is True
 
 
 def test_validation_runner_refuses_non_allowlisted_command_before_execution() -> None:
@@ -143,6 +170,8 @@ def test_validation_runner_refuses_non_allowlisted_command_before_execution() ->
     assert store.agent_tasks[task.id].status == AgentTaskStatus.APPROVED
     assert store.agent_tasks[task.id].worker_lease_owner is None
     assert any(audit.event_type == "agent_worker.validation_run_refused" for audit in store.audit_events)
+    refusal = next(audit for audit in store.audit_events if audit.event_type == "agent_worker.validation_run_refused")
+    assert refusal.details["validation_policy"]["shell_execution_allowed"] is False
 
 
 def test_validation_runner_refuses_missing_approval() -> None:
