@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
+from .agent_worker_container_validation import ContainerValidationExecutor, ContainerValidationPolicy, container_validation_policy_metadata
 from .agent_worker_github_branch import AgentWorkerGitHubBranchResult, GitHubBranchClient, run_agent_worker_github_branch_creation
 from .agent_worker_github_files import AgentWorkerGitHubFilesResult, GitHubFileClient, run_agent_worker_github_file_application
 from .agent_worker_github_pr import AgentWorkerGitHubPRResult, GitHubPullRequestClient, run_agent_worker_github_pr_creation
@@ -102,6 +103,24 @@ def _should_prepare_workspace(use_isolated_workspace: bool, validation_executor,
     return not (validation_executor is not None and workspace_runner is None and cwd is None)
 
 
+def _build_container_validation_executor(
+    *,
+    validation_cwd: Path | None,
+    timeout_seconds: int,
+    worker_id: str,
+) -> Callable[[str], CommandExecutionResult] | None:
+    if validation_cwd is None:
+        return None
+    policy = ContainerValidationPolicy()
+    _audit(
+        "agent_worker.container_validation_configured",
+        str(validation_cwd),
+        {"worker_id": worker_id, "container_validation_policy": container_validation_policy_metadata(policy)},
+        actor=worker_id,
+    )
+    return ContainerValidationExecutor(cwd=validation_cwd, timeout_seconds=timeout_seconds, policy=policy)
+
+
 def run_approved_agent_task_worker_flow(
     *,
     task_id: str,
@@ -116,13 +135,14 @@ def run_approved_agent_task_worker_flow(
     pr_client: GitHubPullRequestClient | None = None,
     workspace_runner: WorkspaceCommandRunner | None = None,
     use_isolated_workspace: bool = True,
+    use_container_validation: bool = True,
     validation_executor: Callable[[str], CommandExecutionResult] | None = None,
 ) -> AgentWorkerOrchestrationResult:
     task = _task(task_id)
     if task is None:
         return AgentWorkerOrchestrationResult(success=False, task_id=task_id, worker_id=worker_id, reason="Agent task not found.")
 
-    _audit("agent_worker.orchestration_started", task.id, {"worker_id": worker_id}, actor=worker_id)
+    _audit("agent_worker.orchestration_started", task.id, {"worker_id": worker_id, "container_validation_required": use_container_validation}, actor=worker_id)
     branch_result = run_agent_worker_github_branch_creation(task_id=task.id, worker_id=f"{worker_id}:branch", lease_seconds=lease_seconds, source_branch=source_branch, client=branch_client)
     if not branch_result.success:
         return _failure_result(task_id=task.id, worker_id=worker_id, reason=f"Branch step failed: {branch_result.reason}", branch_result=branch_result)
@@ -140,7 +160,13 @@ def run_approved_agent_task_worker_flow(
                 return _failure_result(task_id=task.id, worker_id=worker_id, reason=f"Workspace step failed: {workspace_result.reason}", branch_result=branch_result, file_result=file_result, workspace_result=workspace_result)
             validation_cwd = workspace_result.repository_path
 
-        validation_result = run_agent_worker_validation_commands(task_id=task.id, worker_id=f"{worker_id}:validation", lease_seconds=lease_seconds, cwd=validation_cwd, timeout_seconds=timeout_seconds, executor=validation_executor)
+        effective_executor = validation_executor
+        if effective_executor is None and use_container_validation:
+            effective_executor = _build_container_validation_executor(validation_cwd=validation_cwd, timeout_seconds=timeout_seconds, worker_id=f"{worker_id}:validation")
+            if effective_executor is None:
+                return _failure_result(task_id=task.id, worker_id=worker_id, reason="Validation step failed: container validation requires an isolated workspace.", branch_result=branch_result, file_result=file_result, workspace_result=workspace_result)
+
+        validation_result = run_agent_worker_validation_commands(task_id=task.id, worker_id=f"{worker_id}:validation", lease_seconds=lease_seconds, cwd=validation_cwd, timeout_seconds=timeout_seconds, executor=effective_executor)
         if not validation_result.success:
             return _failure_result(task_id=task.id, worker_id=worker_id, reason=f"Validation step failed: {validation_result.reason}", branch_result=branch_result, file_result=file_result, workspace_result=workspace_result, validation_result=validation_result)
 
@@ -149,8 +175,8 @@ def run_approved_agent_task_worker_flow(
             return _failure_result(task_id=task.id, worker_id=worker_id, reason=f"PR step failed: {pr_result.reason}", branch_result=branch_result, file_result=file_result, workspace_result=workspace_result, validation_result=validation_result, pr_result=pr_result)
 
         completed_task = _task(task.id) or task
-        event = _append_summary_event(completed_task, worker_id, True, "Approved AgentTask worker flow completed and PR is ready for human review.", {"branch": branch_result.branch, "files_written": file_result.files_written, "files_deleted": file_result.files_deleted, "commits_created": file_result.commits_created, **_workspace_summary(workspace_result), "validation_commands": validation_result.command_count, "pull_request_url": pr_result.pull_request_url, "pull_request_number": pr_result.pull_request_number})
-        _audit("agent_worker.orchestration_completed", completed_task.id, {"worker_id": worker_id, "pull_request_url": pr_result.pull_request_url, "pull_request_number": pr_result.pull_request_number, **_workspace_summary(workspace_result)}, actor=worker_id)
+        event = _append_summary_event(completed_task, worker_id, True, "Approved AgentTask worker flow completed and PR is ready for human review.", {"branch": branch_result.branch, "files_written": file_result.files_written, "files_deleted": file_result.files_deleted, "commits_created": file_result.commits_created, **_workspace_summary(workspace_result), "validation_commands": validation_result.command_count, "container_validation_required": use_container_validation, "pull_request_url": pr_result.pull_request_url, "pull_request_number": pr_result.pull_request_number})
+        _audit("agent_worker.orchestration_completed", completed_task.id, {"worker_id": worker_id, "pull_request_url": pr_result.pull_request_url, "pull_request_number": pr_result.pull_request_number, "container_validation_required": use_container_validation, **_workspace_summary(workspace_result)}, actor=worker_id)
         store.persist()
         return AgentWorkerOrchestrationResult(True, completed_task.id, worker_id, branch_result, file_result, workspace_result, validation_result, pr_result, event.id, completed_task.status, "Approved AgentTask worker flow completed and PR is ready for human review.")
     finally:
@@ -168,13 +194,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cwd", default=None)
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--no-isolated-workspace", action="store_true")
+    parser.add_argument("--no-container-validation", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    result = run_approved_agent_task_worker_flow(task_id=args.task_id, worker_id=args.worker_id, lease_seconds=args.lease_seconds, source_branch=args.source_branch, base_branch=args.base_branch, cwd=Path(args.cwd) if args.cwd else None, timeout_seconds=args.timeout_seconds, use_isolated_workspace=not args.no_isolated_workspace)
+    result = run_approved_agent_task_worker_flow(task_id=args.task_id, worker_id=args.worker_id, lease_seconds=args.lease_seconds, source_branch=args.source_branch, base_branch=args.base_branch, cwd=Path(args.cwd) if args.cwd else None, timeout_seconds=args.timeout_seconds, use_isolated_workspace=not args.no_isolated_workspace, use_container_validation=not args.no_container_validation)
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True, default=str))
     else:
