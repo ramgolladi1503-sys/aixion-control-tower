@@ -120,12 +120,12 @@ class ConnectorsViewModel(application: Application) : AndroidViewModel(applicati
         val template = _state.value.selectedTemplate ?: return
         viewModelScope.launch {
             runCatching {
-                val preview = repository.previewMapper(connector.id, template)
+                val simulation = repository.simulateTemplatePayload(connector.id, template)
                 _state.value = _state.value.copy(
-                    preview = "mapper=${preview.mapper_enabled}, normalized=${preview.normalized_payload}, warnings=${preview.warnings}"
+                    preview = "accepted=${simulation.accepted}, auth=${simulation.auth_ready}, scope=${simulation.scope_ready}, action=${simulation.action}, errors=${simulation.errors}, warnings=${simulation.warnings}, normalized=${simulation.normalized_payload}"
                 )
             }.onFailure { error ->
-                _state.value = _state.value.copy(error = error.message ?: "Failed to preview mapper")
+                _state.value = _state.value.copy(error = error.message ?: "Failed to simulate connector payload")
             }
         }
     }
