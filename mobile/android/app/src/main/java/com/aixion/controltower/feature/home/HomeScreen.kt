@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -22,13 +23,19 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.components.ApprovalCard
+import com.aixion.controltower.core.ui.components.ForgedLogoMark
+import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.StatusCard
+import com.aixion.controltower.core.ui.components.TowerHeroPanel
+import com.aixion.controltower.core.ui.components.TowerPanel
+import com.aixion.controltower.core.ui.components.TowerSectionHeader
 import com.aixion.controltower.core.ui.theme.RiskBlocked
 import com.aixion.controltower.core.ui.theme.RiskCritical
 import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.RiskMedium
 import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
@@ -38,27 +45,60 @@ fun HomeScreen(
     onApprovalSelected: (ApprovalSummary) -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
+    val heroTitle = when {
+        state.loading -> "Loading command state"
+        state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"
+        state.blockedCount > 0 -> "${state.blockedCount} blocked actions need attention"
+        else -> "All clear"
+    }
+    val heroSubtitle = when {
+        state.loading -> "Syncing approvals, worker state, and execution queues."
+        state.actionRequiredCount > 0 -> "AI/code execution stays paused until the right human decision exists."
+        state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
+        else -> "No human action needed right now. Keep building, but keep the tower watching."
+    }
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .background(TowerBackground)
             .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            Column {
-                Text(
-                    text = "Control Tower",
-                    color = TowerTextPrimary,
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = if (state.loading) "Loading command state..." else "AI-agent work grouped by the next real owner.",
-                    color = TowerTextMuted,
-                    fontSize = 14.sp
-                )
+            HomeHeader(loading = state.loading)
+        }
+
+        item {
+            TowerHeroPanel {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        StatusBadge(
+                            label = if (state.actionRequiredCount > 0) "APPROVAL QUEUE" else "COMMAND STATE",
+                            color = if (state.actionRequiredCount > 0) RiskMedium else RiskLow
+                        )
+                        Spacer(modifier = Modifier.height(TowerSpacing.md))
+                        Text(
+                            text = heroTitle,
+                            color = TowerTextPrimary,
+                            fontSize = 28.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            lineHeight = 33.sp
+                        )
+                        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                        Text(
+                            text = heroSubtitle,
+                            color = TowerTextMuted,
+                            fontSize = 14.sp,
+                            lineHeight = 20.sp
+                        )
+                    }
+                    ForgedLogoMark(size = 56.dp, color = TowerTextPrimary.copy(alpha = 0.82f))
+                }
             }
         }
 
@@ -101,21 +141,17 @@ fun HomeScreen(
         }
 
         item {
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Action Required",
-                color = TowerTextPrimary,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
+            TowerSectionHeader(
+                title = "Action Required",
+                subtitle = "Requests that need human judgment before execution can continue."
             )
         }
 
         if (state.actionRequiredApprovals.isEmpty()) {
             item {
-                Text(
-                    text = "No human action needed right now.",
-                    color = TowerTextMuted,
-                    fontSize = 13.sp
+                EmptyHomePanel(
+                    title = "No approvals waiting",
+                    body = "The approval queue is clear. New AI/code actions will appear here when review is required."
                 )
             }
         } else {
@@ -126,16 +162,67 @@ fun HomeScreen(
 
         if (state.githubExecutionApprovals.isNotEmpty()) {
             item {
-                Text(
-                    text = "Awaiting GitHub Execution",
-                    color = TowerTextPrimary,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
+                TowerSectionHeader(
+                    title = "Awaiting GitHub Execution",
+                    subtitle = "Approved work that still needs branch, validation, or PR completion."
                 )
             }
             items(state.githubExecutionApprovals.take(3)) { approval ->
                 ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
         }
+
+        item {
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        }
+    }
+}
+
+@Composable
+private fun HomeHeader(loading: Boolean) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column {
+            Text(
+                text = "AIXION",
+                color = TowerTextPrimary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 2.2.sp
+            )
+            Text(
+                text = "CONTROL TOWER",
+                color = TowerTextMuted,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
+                letterSpacing = 1.8.sp
+            )
+        }
+        StatusBadge(
+            label = if (loading) "SYNCING" else "CONNECTED",
+            color = if (loading) RiskMedium else RiskLow
+        )
+    }
+}
+
+@Composable
+private fun EmptyHomePanel(title: String, body: String) {
+    TowerPanel(elevated = true) {
+        Text(
+            text = title,
+            color = TowerTextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = body,
+            color = TowerTextMuted,
+            fontSize = 13.sp,
+            lineHeight = 19.sp
+        )
     }
 }
