@@ -31,6 +31,7 @@ from .connector_schema_mapper import (
     preview_connector_schema_mapping,
     set_connector_schema_mapper,
 )
+from .connector_simulator import ConnectorSimulationRequest, ConnectorSimulationResponse, simulate_connector_webhook
 from .connector_templates import ConnectorTemplate, ConnectorTemplateList, connector_templates, get_connector_template
 from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
 from .models import AuditEvent, AuthUser, now_utc
@@ -162,6 +163,11 @@ async def connector_webhook(
     return await handle_connector_webhook(connector, request, authorization, x_aixion_connector_signature)
 
 
+@router.post("/{connector_id}/simulate", response_model=ConnectorSimulationResponse)
+def simulate_connector_webhook_route(connector_id: str, payload: ConnectorSimulationRequest, _: AuthUser = OwnerDependency) -> ConnectorSimulationResponse:
+    return simulate_connector_webhook(_get_connector_or_404(connector_id), payload)
+
+
 @router.get("/{connector_id}/schema-mapper", response_model=ConnectorSchemaMapperStatus)
 def get_connector_mapper(connector_id: str, _: AuthUser = OwnerDependency) -> ConnectorSchemaMapperStatus:
     return get_connector_schema_mapper_status(_get_connector_or_404(connector_id))
@@ -196,7 +202,7 @@ def update_connector(connector_id: str, payload: ConnectorUpdate, user: AuthUser
     for field_name, value in update.items():
         if field_name == "enabled":
             connector.status = ConnectorStatus.ENABLED if value else ConnectorStatus.DISABLED
-            connector.health_status = ConnectorHealthStatus.UNKNOWN if value else ConnectorStatus.DISABLED
+            connector.health_status = ConnectorHealthStatus.UNKNOWN if value else ConnectorHealthStatus.DISABLED
         elif field_name == "config":
             connector.config = {**connector.config, **(value or {})}
         elif hasattr(connector, field_name):
