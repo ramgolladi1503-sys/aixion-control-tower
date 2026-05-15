@@ -9,6 +9,7 @@ from .approval_lifecycle import grouped_approvals
 from .audit_routes import router as audit_router
 from .auth import require_maintainer, require_reviewer
 from .auth_routes import router as auth_router
+from .connector_routes import router as connector_router
 from .github_runner import router as github_runner_router
 from .invite_routes import router as invite_router
 from .mcp_gateway_routes import router as mcp_gateway_router
@@ -51,6 +52,7 @@ app.include_router(invite_router)
 app.include_router(session_router)
 app.include_router(agent_router)
 app.include_router(agent_task_router)
+app.include_router(connector_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
 app.include_router(mcp_gateway_router)
@@ -78,6 +80,7 @@ def counts() -> dict[str, int]:
         "sessions": len(store.sessions),
         "invites": len(store.invites),
         "agents": len(store.external_agents),
+        "connectors": len(store.agent_connectors),
         "devices": len(store.device_registrations),
         "projects": len(store.projects),
         "ideas": len(store.ideas),

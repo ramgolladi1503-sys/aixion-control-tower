@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from .agent_credential_models import AgentCredentialRecord
 from .agent_task_models import AgentTask, AgentTaskEvent
+from .connector_models import AgentConnector
 
 from .database_migrations import get_applied_migrations, run_migrations
 from .models import (
@@ -46,6 +47,7 @@ class SQLiteBackedStore:
         self.invites: dict[str, Invite] = {}
         self.external_agents: dict[str, ExternalAgent] = {}
         self.external_agent_credentials: dict[str, AgentCredentialRecord] = {}
+        self.agent_connectors: dict[str, AgentConnector] = {}
         self.device_registrations: dict[str, DeviceRegistration] = {}
         self.agent_tasks: dict[str, AgentTask] = {}
         self.agent_task_events: dict[str, AgentTaskEvent] = {}
@@ -89,6 +91,7 @@ class SQLiteBackedStore:
             "external_agent_credential",
             AgentCredentialRecord,
         )
+        self.agent_connectors = self._load_entities("agent_connector", AgentConnector)
         self.device_registrations = self._load_entities("device_registration", DeviceRegistration)
         self.agent_tasks = self._load_entities("agent_task", AgentTask)
         self.agent_task_events = self._load_entities("agent_task_event", AgentTaskEvent)
@@ -110,6 +113,7 @@ class SQLiteBackedStore:
             self._write_map(conn, "invite", self.invites)
             self._write_map(conn, "external_agent", self.external_agents)
             self._write_map(conn, "external_agent_credential", self.external_agent_credentials)
+            self._write_map(conn, "agent_connector", self.agent_connectors)
             self._write_map(conn, "device_registration", self.device_registrations)
             self._write_map(conn, "agent_task", self.agent_tasks)
             self._write_map(conn, "agent_task_event", self.agent_task_events)
@@ -150,6 +154,7 @@ class SQLiteBackedStore:
         self.invites.clear()
         self.external_agents.clear()
         self.external_agent_credentials.clear()
+        self.agent_connectors.clear()
         self.device_registrations.clear()
         self.agent_tasks.clear()
         self.agent_task_events.clear()
