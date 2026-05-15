@@ -16,6 +16,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "AIXION_API_BASE_URL", "\"${aixionApiBaseUrl.get()}\"")
     }
 
@@ -52,6 +53,10 @@ dependencies {
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("com.google.firebase:firebase-messaging:24.1.0")
     debugImplementation("androidx.compose.ui:ui-tooling:1.7.5")
+    debugImplementation("androidx.compose.ui:ui-test-manifest:1.7.5")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.7.5")
 }

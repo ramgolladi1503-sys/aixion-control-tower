@@ -33,7 +33,21 @@ fun ApprovalInboxScreen(
     onApprovalSelected: (ApprovalSummary) -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
-    val pending = state.approvals.filter { it.status == ApprovalStatus.PENDING_REVIEW }
+    ApprovalInboxContent(
+        state = state,
+        onApprovalSelected = { approval ->
+            viewModel.selectApproval(approval)
+            onApprovalSelected(approval)
+        }
+    )
+}
+
+@Composable
+fun ApprovalInboxContent(
+    state: ApprovalsUiState,
+    onApprovalSelected: (ApprovalSummary) -> Unit = {}
+) {
+    val pending = state.approvals.filter { it.status == ApprovalStatus.PENDING_REVIEW || it.status == ApprovalStatus.REQUESTED }
     val blocked = state.approvals.filter { it.status == ApprovalStatus.BLOCKED }
     val approved = state.approvals.filter { it.status == ApprovalStatus.APPROVED }
 
@@ -64,10 +78,7 @@ fun ApprovalInboxScreen(
         items(state.approvals) { approval ->
             ApprovalCard(
                 approval = approval,
-                onClick = {
-                    viewModel.selectApproval(approval)
-                    onApprovalSelected(approval)
-                }
+                onClick = { onApprovalSelected(approval) }
             )
         }
     }
