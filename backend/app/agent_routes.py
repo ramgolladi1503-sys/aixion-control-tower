@@ -2,12 +2,30 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .agent_auth import assert_agent_can, register_external_agent, require_external_agent, to_public_agent
-from .agent_task_models import AgentTask, AgentTaskCreate, AgentTaskEvent, AgentTaskEventCreate, AgentTaskEventType
+from .agent_auth import (
+    assert_agent_can,
+    register_external_agent,
+    require_external_agent,
+    revoke_external_agent_token,
+    rotate_external_agent_token,
+    to_credential_status,
+    to_public_agent,
+)
+from .agent_credential_models import (
+    AgentCreateWithCredentialPolicy,
+    AgentCredentialStatus,
+    AgentTokenRotateRequest,
+)
+from .agent_task_models import (
+    AgentTask,
+    AgentTaskCreate,
+    AgentTaskEvent,
+    AgentTaskEventCreate,
+    AgentTaskEventType,
+)
 from .auth import require_owner
 from .models import (
     AgentAction,
-    AgentCreate,
     AgentRegistrationResponse,
     ApprovalRequest,
     ApprovalRequestCreate,
@@ -41,8 +59,18 @@ def _assert_agent_owns_task(agent: ExternalAgent, task: AgentTask) -> None:
         raise HTTPException(status_code=403, detail="Agent is not allowed for this task")
 
 
+def _get_agent_or_404(agent_id: str) -> ExternalAgent:
+    agent = store.external_agents.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="External agent not found")
+    return agent
+
+
 @router.post("", response_model=AgentRegistrationResponse)
-def create_agent(payload: AgentCreate, user: AuthUser = OwnerDependency) -> AgentRegistrationResponse:
+def create_agent(
+    payload: AgentCreateWithCredentialPolicy,
+    user: AuthUser = OwnerDependency,
+) -> AgentRegistrationResponse:
     response = register_external_agent(payload, user)
     audit(
         "agent.registered",
@@ -54,9 +82,13 @@ def create_agent(payload: AgentCreate, user: AuthUser = OwnerDependency) -> Agen
             "allowed_project_ids": response.agent.allowed_project_ids,
             "allowed_repositories": response.agent.allowed_repositories,
             "allowed_actions": response.agent.allowed_actions,
+            "credential_state": to_credential_status(
+                _get_agent_or_404(response.agent.id)
+            ).credential_state,
         },
         actor=user.email,
     )
+    store.persist()
     return response
 
 
@@ -66,7 +98,10 @@ def list_agents(_: AuthUser = OwnerDependency) -> list[ExternalAgentPublic]:
 
 
 @router.post("/approvals", response_model=ApprovalRequest)
-def create_agent_approval(payload: ApprovalRequestCreate, agent: ExternalAgent = Depends(require_external_agent)) -> ApprovalRequest:
+def create_agent_approval(
+    payload: ApprovalRequestCreate,
+    agent: ExternalAgent = Depends(require_external_agent),
+) -> ApprovalRequest:
     assert_agent_can(agent, AgentAction.CREATE_APPROVAL, project_id=payload.project_id)
     if payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -104,7 +139,10 @@ def create_agent_approval(payload: ApprovalRequestCreate, agent: ExternalAgent =
     )
     create_notification(
         title=f"Approval from {agent.provider}: {request.title}",
-        body=f"{request.risk.level} risk request from {agent.display_name} on {request.target_branch}",
+        body=(
+            f"{request.risk.level} risk request from "
+            f"{agent.display_name} on {request.target_branch}"
+        ),
         entity_type="approval_request",
         entity_id=request.id,
     )
@@ -113,8 +151,16 @@ def create_agent_approval(payload: ApprovalRequestCreate, agent: ExternalAgent =
 
 
 @router.post("/tasks", response_model=AgentTask)
-def create_agent_task(payload: AgentTaskCreate, agent: ExternalAgent = Depends(require_external_agent)) -> AgentTask:
-    assert_agent_can(agent, AgentAction.CREATE_AGENT_TASK, project_id=payload.project_id, repository_full_name=payload.repository)
+def create_agent_task(
+    payload: AgentTaskCreate,
+    agent: ExternalAgent = Depends(require_external_agent),
+) -> AgentTask:
+    assert_agent_can(
+        agent,
+        AgentAction.CREATE_AGENT_TASK,
+        project_id=payload.project_id,
+        repository_full_name=payload.repository,
+    )
     if payload.project_id and payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -133,7 +179,11 @@ def create_agent_task(payload: AgentTaskCreate, agent: ExternalAgent = Depends(r
         message="Agent task received from scoped external agent.",
         status=task.status,
         actor=f"agent:{agent.id}",
-        metadata={"provider": agent.provider, "agent_id": agent.id, "requested_action": task.requested_action},
+        metadata={
+            "provider": agent.provider,
+            "agent_id": agent.id,
+            "requested_action": task.requested_action,
+        },
     )
     store.agent_task_events[event.id] = event
     audit(
@@ -154,7 +204,10 @@ def create_agent_task(payload: AgentTaskCreate, agent: ExternalAgent = Depends(r
 
 
 @router.get("/tasks/{task_id}", response_model=AgentTask)
-def get_agent_owned_task(task_id: str, agent: ExternalAgent = Depends(require_external_agent)) -> AgentTask:
+def get_agent_owned_task(
+    task_id: str,
+    agent: ExternalAgent = Depends(require_external_agent),
+) -> AgentTask:
     assert_agent_can(agent, AgentAction.READ_AGENT_TASK)
     task = store.agent_tasks.get(task_id)
     if not task:
@@ -164,7 +217,10 @@ def get_agent_owned_task(task_id: str, agent: ExternalAgent = Depends(require_ex
 
 
 @router.get("/tasks/{task_id}/events", response_model=list[AgentTaskEvent])
-def list_agent_owned_task_events(task_id: str, agent: ExternalAgent = Depends(require_external_agent)) -> list[AgentTaskEvent]:
+def list_agent_owned_task_events(
+    task_id: str,
+    agent: ExternalAgent = Depends(require_external_agent),
+) -> list[AgentTaskEvent]:
     assert_agent_can(agent, AgentAction.READ_AGENT_TASK)
     task = store.agent_tasks.get(task_id)
     if not task:
@@ -206,9 +262,60 @@ def append_agent_owned_task_event(
     return event
 
 
+@router.get("/{agent_id}/credentials", response_model=AgentCredentialStatus)
+def get_agent_credentials(
+    agent_id: str,
+    _: AuthUser = OwnerDependency,
+) -> AgentCredentialStatus:
+    return to_credential_status(_get_agent_or_404(agent_id))
+
+
+@router.post("/{agent_id}/token/rotate", response_model=AgentRegistrationResponse)
+def rotate_agent_token(
+    agent_id: str,
+    payload: AgentTokenRotateRequest | None = None,
+    user: AuthUser = OwnerDependency,
+) -> AgentRegistrationResponse:
+    agent = _get_agent_or_404(agent_id)
+    response = rotate_external_agent_token(
+        agent,
+        token_expires_at=payload.token_expires_at if payload else None,
+        rate_limit_per_minute=payload.rate_limit_per_minute if payload else None,
+    )
+    credential_status = to_credential_status(agent)
+    audit(
+        "agent.token_rotated",
+        agent.id,
+        {
+            "credential_state": credential_status.credential_state,
+            "token_expires_at": credential_status.token_expires_at,
+            "token_rotated_at": credential_status.token_rotated_at,
+            "rate_limit_per_minute": credential_status.rate_limit_per_minute,
+        },
+        actor=user.email,
+    )
+    store.persist()
+    return response
+
+
+@router.post("/{agent_id}/token/revoke", response_model=ExternalAgentPublic)
+def revoke_agent_token(agent_id: str, user: AuthUser = OwnerDependency) -> ExternalAgentPublic:
+    agent = _get_agent_or_404(agent_id)
+    public_agent = revoke_external_agent_token(agent)
+    credential_status = to_credential_status(agent)
+    audit(
+        "agent.token_revoked",
+        agent.id,
+        {
+            "credential_state": credential_status.credential_state,
+            "token_revoked_at": credential_status.token_revoked_at,
+        },
+        actor=user.email,
+    )
+    store.persist()
+    return public_agent
+
+
 @router.get("/{agent_id}", response_model=ExternalAgentPublic)
 def get_agent(agent_id: str, _: AuthUser = OwnerDependency) -> ExternalAgentPublic:
-    agent = store.external_agents.get(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="External agent not found")
-    return to_public_agent(agent)
+    return to_public_agent(_get_agent_or_404(agent_id))
