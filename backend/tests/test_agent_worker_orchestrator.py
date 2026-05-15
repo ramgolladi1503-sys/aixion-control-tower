@@ -113,6 +113,8 @@ class FakeWorkspaceRunner:
     def run(self, command: list[str], *, cwd=None):
         from app.agent_worker_workspace import WorkspaceCommandResult
 
+        if command[:2] == ["git", "clone"]:
+            Path(command[-1]).mkdir(parents=True, exist_ok=True)
         return WorkspaceCommandResult(command=command, exit_code=0, output_summary="ok")
 
 
