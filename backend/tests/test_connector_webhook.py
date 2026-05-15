@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import time
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -71,11 +72,22 @@ def _bearer(secret: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {secret}"}
 
 
-def _hmac_headers(secret: str, payload: dict) -> dict[str, str]:
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+def _compact_json(payload: dict) -> str:
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def _hmac_v1_headers(secret: str, body: str, *, nonce: str = "nonce_1", timestamp: int | None = None) -> dict[str, str]:
+    timestamp_value = str(timestamp or int(time.time()))
     secret_hash = hashlib.sha256(secret.encode("utf-8")).hexdigest()
-    signature = hmac.new(secret_hash.encode("utf-8"), body, "sha256").hexdigest()
-    return {"X-Aixion-Connector-Signature": signature}
+    body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    signing_payload = f"v1.{timestamp_value}.{nonce}.{body_hash}"
+    signature = hmac.new(secret_hash.encode("utf-8"), signing_payload.encode("utf-8"), "sha256").hexdigest()
+    return {
+        "X-Aixion-Signature-Version": "v1",
+        "X-Aixion-Timestamp": timestamp_value,
+        "X-Aixion-Nonce": nonce,
+        "X-Aixion-Connector-Signature": f"v1={signature}",
+    }
 
 
 def test_bearer_connector_webhook_creates_agent_task() -> None:
@@ -99,19 +111,70 @@ def test_bearer_connector_webhook_creates_agent_task() -> None:
     assert store.agent_connectors[connector["id"]].last_used_at is not None
 
 
-def test_hmac_connector_webhook_creates_agent_task() -> None:
+def test_hmac_connector_webhook_creates_agent_task_with_v1_signature() -> None:
     project = _project()
     connector, secret = _connector(project.id, auth_type="HMAC")
     payload = _task_payload(project.id)
+    body = _compact_json(payload)
 
     response = client.post(
         f"/connectors/{connector['id']}/webhook",
-        content=json.dumps(payload, separators=(",", ":")),
-        headers={**_hmac_headers(secret, payload), "Content-Type": "application/json"},
+        content=body,
+        headers={**_hmac_v1_headers(secret, body), "Content-Type": "application/json"},
     )
 
     assert response.status_code == 200
     assert response.json()["task_id"] in store.agent_tasks
+
+
+def test_hmac_connector_webhook_rejects_replayed_nonce() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    payload = _task_payload(project.id)
+    body = _compact_json(payload)
+    headers = {**_hmac_v1_headers(secret, body, nonce="replay_nonce"), "Content-Type": "application/json"}
+
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    second = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert second.status_code == 401
+    assert second.json()["detail"] == "Connector HMAC nonce has already been used"
+
+
+def test_hmac_connector_webhook_rejects_stale_timestamp() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    payload = _task_payload(project.id)
+    body = _compact_json(payload)
+    stale_timestamp = int(time.time()) - 1_000
+
+    response = client.post(
+        f"/connectors/{connector['id']}/webhook",
+        content=body,
+        headers={**_hmac_v1_headers(secret, body, nonce="stale_nonce", timestamp=stale_timestamp), "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Connector HMAC timestamp is stale"
+
+
+def test_hmac_connector_webhook_rejects_missing_signature_version() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    payload = _task_payload(project.id)
+    body = _compact_json(payload)
+    headers = _hmac_v1_headers(secret, body, nonce="missing_version")
+    headers.pop("X-Aixion-Signature-Version")
+
+    response = client.post(
+        f"/connectors/{connector['id']}/webhook",
+        content=body,
+        headers={**headers, "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Unsupported connector HMAC signature version"
 
 
 def test_connector_webhook_appends_event_to_owned_task() -> None:
