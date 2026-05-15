@@ -5,6 +5,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
+from .agent_credential_models import AgentCredentialRecord
 from .agent_task_models import AgentTask, AgentTaskEvent
 
 from .database_migrations import get_applied_migrations, run_migrations
@@ -44,6 +45,7 @@ class SQLiteBackedStore:
         self.sessions: dict[str, SessionToken] = {}
         self.invites: dict[str, Invite] = {}
         self.external_agents: dict[str, ExternalAgent] = {}
+        self.external_agent_credentials: dict[str, AgentCredentialRecord] = {}
         self.device_registrations: dict[str, DeviceRegistration] = {}
         self.agent_tasks: dict[str, AgentTask] = {}
         self.agent_task_events: dict[str, AgentTaskEvent] = {}
@@ -83,6 +85,10 @@ class SQLiteBackedStore:
         self.sessions = self._load_entities("session", SessionToken)
         self.invites = self._load_entities("invite", Invite)
         self.external_agents = self._load_entities("external_agent", ExternalAgent)
+        self.external_agent_credentials = self._load_entities(
+            "external_agent_credential",
+            AgentCredentialRecord,
+        )
         self.device_registrations = self._load_entities("device_registration", DeviceRegistration)
         self.agent_tasks = self._load_entities("agent_task", AgentTask)
         self.agent_task_events = self._load_entities("agent_task_event", AgentTaskEvent)
@@ -103,6 +109,7 @@ class SQLiteBackedStore:
             self._write_map(conn, "session", self.sessions)
             self._write_map(conn, "invite", self.invites)
             self._write_map(conn, "external_agent", self.external_agents)
+            self._write_map(conn, "external_agent_credential", self.external_agent_credentials)
             self._write_map(conn, "device_registration", self.device_registrations)
             self._write_map(conn, "agent_task", self.agent_tasks)
             self._write_map(conn, "agent_task_event", self.agent_task_events)
@@ -117,7 +124,11 @@ class SQLiteBackedStore:
             self._write_list(conn, "audit_event", self.audit_events)
 
     @staticmethod
-    def _write_map(conn: sqlite3.Connection, entity_type: str, values: dict[str, BaseModel]) -> None:
+    def _write_map(
+        conn: sqlite3.Connection,
+        entity_type: str,
+        values: dict[str, BaseModel],
+    ) -> None:
         for entity_id, model in values.items():
             conn.execute(
                 "INSERT INTO kv_store(entity_type, entity_id, payload) VALUES (?, ?, ?)",
@@ -138,6 +149,7 @@ class SQLiteBackedStore:
         self.sessions.clear()
         self.invites.clear()
         self.external_agents.clear()
+        self.external_agent_credentials.clear()
         self.device_registrations.clear()
         self.agent_tasks.clear()
         self.agent_task_events.clear()
