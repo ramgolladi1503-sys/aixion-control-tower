@@ -14,6 +14,8 @@ import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperPreviewResponse
 import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperStatusDto
 import com.aixion.controltower.core.api.dto.ConnectorSecretIssueResponseDto
 import com.aixion.controltower.core.api.dto.ConnectorSecretRequestDto
+import com.aixion.controltower.core.api.dto.ConnectorSimulationRequestDto
+import com.aixion.controltower.core.api.dto.ConnectorSimulationResponseDto
 import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
 import com.aixion.controltower.core.api.dto.ConnectorTemplateListDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
@@ -79,6 +81,11 @@ open class BaseFakeControlTowerApi : ControlTowerApi {
         connectorId: String,
         payload: ConnectorSchemaMapperPreviewRequestDto
     ): ConnectorSchemaMapperPreviewResponseDto = unsupported()
+
+    override suspend fun simulateConnectorWebhook(
+        connectorId: String,
+        payload: ConnectorSimulationRequestDto
+    ): ConnectorSimulationResponseDto = unsupported()
 
     override suspend fun listMCPPendingRequests(
         projectId: String?,
