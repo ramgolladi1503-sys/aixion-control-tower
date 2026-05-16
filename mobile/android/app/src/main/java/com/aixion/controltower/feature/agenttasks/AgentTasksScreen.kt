@@ -107,8 +107,8 @@ fun AgentTasksScreen(
 
         item {
             TowerSectionHeader(
-                title = "Agent Work Queue",
-                subtitle = "Track connected-agent work before it becomes approval, execution, PR, or failure evidence."
+                title = "Connected-Agent Work Queue",
+                subtitle = "Tasks submitted by ChatGPT, Codex, Claude, Cursor, local bridges, or other connectors before they become approvals, execution, PRs, or failure evidence."
             )
         }
 
@@ -117,13 +117,20 @@ fun AgentTasksScreen(
                 TowerPanel(elevated = true) {
                     Text(
                         text = if (state.errorMessage == null) {
-                            "No agent tasks found yet. Create one from GPT Actions, Codex, or the backend task API."
+                            "No connected-agent work yet. Create a connector, send a task through ChatGPT/Codex, or use the backend AgentTask API."
                         } else {
                             "Agent task list unavailable. Fix backend/auth connectivity before trusting this screen."
                         },
                         color = TowerTextMuted,
                         fontSize = 15.sp,
                         lineHeight = 21.sp
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(
+                        text = "A connector is the doorway. An Agent Task is the submitted work item. An Approval is the decision gate.",
+                        color = TowerTextMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
                     )
                 }
             }
@@ -157,7 +164,7 @@ private fun AgentTasksHero(
             verticalAlignment = Alignment.Top
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = if (loading) "SYNCING" else "AGENT CONTROL", color = if (loading) RiskMedium else RiskLow)
+                StatusBadge(label = if (loading) "SYNCING" else "CONNECTED AGENTS", color = if (loading) RiskMedium else RiskLow)
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
                     text = "Agent Tasks",
@@ -171,7 +178,7 @@ private fun AgentTasksHero(
                     text = if (loading) {
                         "Loading connected-agent work..."
                     } else {
-                        "Track ChatGPT, Codex, Claude, Cursor, GitHub Actions, and manual agent work."
+                        "See work submitted by external agents. This is not the connector setup screen and not the final approval screen."
                     },
                     color = TowerTextMuted,
                     fontSize = 14.sp,
@@ -203,7 +210,13 @@ private fun AgentTaskSummaryCard(total: Int, active: Int, waiting: Int) {
         }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text(
-            text = "Connected-agent work should be visible here before it becomes approvals, PRs, failures, or final evidence.",
+            text = "Agent Tasks are submitted work items. They can become approval requests, execution runs, pull-request evidence, failures, or completed records.",
+            color = TowerTextMuted,
+            fontSize = 13.sp,
+            lineHeight = 19.sp
+        )
+        Text(
+            text = "If five or more agents are connected, this screen should scale as a queue grouped by source, status, and linked approval. That grouping is a follow-up UX scope.",
             color = TowerTextMuted,
             fontSize = 13.sp,
             lineHeight = 19.sp
