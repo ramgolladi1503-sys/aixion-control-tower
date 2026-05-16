@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -54,7 +55,7 @@ fun HomeScreen(
     }
     val heroSubtitle = when {
         state.loading -> "Syncing approvals, worker state, and execution queues."
-        state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then refresh."
+        state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then retry."
         state.actionRequiredCount > 0 -> "AI/code execution stays paused until the right human decision exists."
         state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
         else -> "No human action needed right now. Keep building, but keep the tower watching."
@@ -116,7 +117,9 @@ fun HomeScreen(
             item {
                 ErrorPanel(
                     title = "Live backend data unavailable",
-                    body = message
+                    body = message,
+                    onRetry = viewModel::refresh,
+                    retryEnabled = !state.loading
                 )
             }
         }
@@ -170,7 +173,7 @@ fun HomeScreen(
             item {
                 EmptyHomePanel(
                     title = "No fallback approvals loaded",
-                    body = "This is intentional. Authenticated product screens now wait for real backend data instead of silently showing demo data."
+                    body = "This is intentional. Authenticated product screens now wait for real backend data instead of silently showing demo data. Use Retry after the backend is reachable."
                 )
             }
         } else if (state.actionRequiredApprovals.isEmpty()) {
@@ -243,7 +246,7 @@ private fun HomeHeader(loading: Boolean, hasError: Boolean) {
 }
 
 @Composable
-private fun ErrorPanel(title: String, body: String) {
+private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEnabled: Boolean) {
     TowerPanel(elevated = true) {
         StatusBadge(label = "REAL DATA REQUIRED", color = RiskCritical)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
@@ -260,6 +263,10 @@ private fun ErrorPanel(title: String, body: String) {
             fontSize = 13.sp,
             lineHeight = 19.sp
         )
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Button(onClick = onRetry, enabled = retryEnabled) {
+            Text("Retry sync")
+        }
     }
 }
 
