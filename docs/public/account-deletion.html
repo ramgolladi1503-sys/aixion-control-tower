@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Account Deletion — Aixion Control Tower</title>
+  <meta name="description" content="How to request account deletion for Aixion Control Tower." />
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --text: #172033;
+      --muted: #5d6678;
+      --border: #d9deea;
+      --accent: #2d5bd1;
+      --warn: #8a5a00;
+      --danger: #a32424;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      line-height: 1.6;
+    }
+    main {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 32px 18px 56px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 24px;
+      box-shadow: 0 12px 32px rgba(22, 32, 51, 0.08);
+    }
+    h1, h2 { line-height: 1.25; }
+    h1 { font-size: 2rem; margin: 0 0 8px; }
+    h2 { margin-top: 30px; border-top: 1px solid var(--border); padding-top: 22px; }
+    a { color: var(--accent); }
+    .muted { color: var(--muted); }
+    .notice {
+      background: #fff7df;
+      border: 1px solid #f0d28a;
+      color: var(--warn);
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin: 18px 0;
+    }
+    .danger {
+      background: #fff0f0;
+      border: 1px solid #efb5b5;
+      color: var(--danger);
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin: 18px 0;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      overflow-wrap: anywhere;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 10px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th { background: #f0f3fa; }
+    code {
+      background: #eef2fb;
+      padding: 2px 5px;
+      border-radius: 6px;
+    }
+    ol, ul { padding-left: 22px; }
+  </style>
+</head>
+<body>
+  <main>
+    <article class="panel">
+      <h1>Account Deletion Request</h1>
+      <p class="muted"><strong>App:</strong> Aixion Control Tower</p>
+      <p class="muted"><strong>Last updated:</strong> TODO: replace before publication</p>
+
+      <div class="notice">
+        <strong>Publication checklist:</strong> Replace TODO contact values before using this page in Google Play Console.
+      </div>
+
+      <h2>1. How to request deletion</h2>
+      <p>You can request deletion of your Aixion Control Tower account in either of these ways.</p>
+      <ol>
+        <li><strong>Inside the app:</strong> sign in, open <strong>Account</strong>, find <strong>Privacy and data controls</strong>, and tap <strong>Request account removal</strong>.</li>
+        <li><strong>Outside the app:</strong> email the privacy/support contact listed below with the subject <strong>Aixion account deletion request</strong>.</li>
+      </ol>
+
+      <table>
+        <tr><th>Privacy/support email</th><td>TODO: support/privacy email address</td></tr>
+        <tr><th>Information to include</th><td>Email address used for your Aixion Control Tower account, plus any optional context you want to provide.</td></tr>
+        <tr><th>Do not include</th><td>Passwords, API keys, invite codes, private keys, access tokens, or other secrets.</td></tr>
+      </table>
+
+      <div class="danger">
+        <strong>Important:</strong> Account deletion is not the same as logging out. Logging out only removes local access from your device. A deletion request starts account removal or anonymization processing.
+      </div>
+
+      <h2>2. What happens after an in-app request</h2>
+      <p>When an authenticated in-app request is submitted, the backend currently performs these actions:</p>
+      <ul>
+        <li>Records the account deletion request.</li>
+        <li>Revokes active sessions for the requesting user.</li>
+        <li>Disables account access.</li>
+        <li>Records an audit event named <code>auth.account_deletion_requested</code>.</li>
+        <li>Returns request status <code>RECEIVED</code>.</li>
+      </ul>
+      <p>The app clears the local saved session after a successful request.</p>
+
+      <h2>3. What data may be deleted or anonymized</h2>
+      <p>Depending on the final operator retention policy and legal/security obligations, deletion or anonymization may cover:</p>
+      <ul>
+        <li>Account profile data.</li>
+        <li>Active sessions.</li>
+        <li>Device tokens if notifications are enabled.</li>
+        <li>Invite records tied only to the account, where appropriate.</li>
+        <li>Personal identifiers in operational records where deletion or anonymization is possible.</li>
+      </ul>
+
+      <h2>4. What may be retained</h2>
+      <p>Some records may be retained or anonymized rather than immediately deleted where needed for security, audit integrity, legal obligations, fraud/abuse prevention, backup recovery windows, or compliance.</p>
+      <p>Examples may include:</p>
+      <ul>
+        <li>Audit logs required to prove approval decisions and controlled execution.</li>
+        <li>Security records related to access changes or session revocation.</li>
+        <li>Records required to investigate abuse, fraud, or unauthorized access.</li>
+        <li>Backups until the backup retention window expires.</li>
+      </ul>
+      <p><strong>TODO before publication:</strong> replace this section with final retention timelines and final anonymization/deletion rules.</p>
+
+      <h2>5. Expected processing time</h2>
+      <p>TODO: define response and completion timeline before publication. Example placeholder only: requests are reviewed and processed according to the operator's published retention policy.</p>
+
+      <h2>6. Privacy policy</h2>
+      <p>Read the privacy policy here:</p>
+      <p><a href="privacy-policy.html">Privacy Policy</a></p>
+
+      <h2>7. Publication blockers</h2>
+      <ul>
+        <li>Replace support/privacy email TODO.</li>
+        <li>Define response/completion timeline.</li>
+        <li>Define exact retention and anonymization rules.</li>
+        <li>Confirm public HTTPS hosting URL.</li>
+        <li>Complete legal/privacy review.</li>
+      </ul>
+    </article>
+  </main>
+</body>
+</html>
