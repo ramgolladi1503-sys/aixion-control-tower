@@ -2,18 +2,19 @@
 
 This document defines the Android release-readiness process for the Mobile Approval Console / Aixion Control Tower MVP.
 
-It is intentionally honest: the project can validate the release build variant now, but it does **not** yet have production signing, Play Store distribution, or secret-backed release automation.
+It is intentionally honest: the project can validate the release build variant and now has a release-signing scaffold, but it does **not** yet have a real committed keystore, Play Store distribution, or Play upload automation.
 
 ## Current release status
 
 ```text
 Debug APK:                 supported
 Release variant build:     validated by local/CI commands when run
-Signed production APK:     not ready yet
+Signing config scaffold:   supported through local properties or environment variables
+Signed production APK/AAB: possible only after real keystore values are provided
 Play Store / internal app: not configured yet
 ```
 
-Do not claim signed release readiness until a real keystore and secret-backed signing flow exist.
+Do not claim signed release readiness until a real keystore-backed APK/AAB has been generated and smoke tested.
 
 Do not claim Play Store readiness until signing, store metadata, privacy/compliance, production backend configuration, and physical-device release smoke testing are complete.
 
@@ -34,18 +35,20 @@ Release validation currently proves:
 2. Release-only build configuration does not break compilation.
 3. The same configured API base URL mechanism works for release builds.
 4. CI or local commands can catch Android release compile failures before merge.
+5. The build can optionally sign the release variant when valid local signing values are present.
 
 Release validation currently does **not** prove:
 
-1. Production signing.
-2. Play Store upload readiness.
-3. App integrity / Play App Signing.
-4. Runtime smoke test on a real physical device.
-5. Production backend URL correctness.
-6. Production secrets or Firebase release setup.
-7. Privacy policy readiness.
-8. Store listing readiness.
-9. Review-compliant screenshots and feature graphics.
+1. A production keystore exists.
+2. A signed release APK/AAB has been smoke tested.
+3. Play Store upload readiness.
+4. App integrity / Play App Signing enrollment.
+5. Runtime smoke test on a real physical device.
+6. Production backend URL correctness.
+7. Production secrets or Firebase release setup.
+8. Privacy policy readiness.
+9. Store listing readiness.
+10. Review-compliant screenshots and feature graphics.
 
 ## Local debug build
 
@@ -64,9 +67,9 @@ http://10.0.2.2:8000/
 
 That is correct for Android emulator only.
 
-## Local release variant build
+## Local unsigned release variant build
 
-Use this to prove the release variant compiles:
+Use this to prove the release variant compiles without signing values:
 
 ```bash
 cd mobile/android
@@ -82,9 +85,55 @@ cd mobile/android
 
 The API base URL must end with `/` because Retrofit requires a trailing slash.
 
+## Local signed release build
+
+Copy the template:
+
+```bash
+cd mobile/android
+cp keystore.properties.example keystore.properties
+```
+
+Generate or place your local release keystore. Example only:
+
+```bash
+keytool -genkeypair \
+  -v \
+  -keystore release.keystore \
+  -alias aixion-release \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000
+```
+
+Edit `keystore.properties` locally:
+
+```text
+ANDROID_KEYSTORE_FILE=release.keystore
+ANDROID_KEYSTORE_PASSWORD=your-local-password
+ANDROID_KEY_ALIAS=aixion-release
+ANDROID_KEY_PASSWORD=your-local-key-password
+```
+
+Then build:
+
+```bash
+./gradlew assembleRelease
+./gradlew bundleRelease
+```
+
+Expected outputs:
+
+```text
+mobile/android/app/build/outputs/apk/release/
+mobile/android/app/build/outputs/bundle/release/
+```
+
+Hard rule: never commit `keystore.properties`, `release.keystore`, `*.jks`, `*.keystore`, signing passwords, or base64 keystore dumps.
+
 ## CI release validation
 
-CI should run:
+CI should run without signing secrets:
 
 ```bash
 cd mobile/android
@@ -105,7 +154,7 @@ Hard truth: this is still not the same as a signed production release.
 
 ## Unsigned release output
 
-After running:
+After running without signing values:
 
 ```bash
 ./gradlew assembleRelease
@@ -125,10 +174,16 @@ Do not distribute an unsigned release APK as a real release.
 
 A real signed release needs a keystore and signing credentials.
 
-Required secrets:
+Supported local file:
 
 ```text
-ANDROID_KEYSTORE_BASE64
+mobile/android/keystore.properties
+```
+
+Supported properties / environment variables:
+
+```text
+ANDROID_KEYSTORE_FILE
 ANDROID_KEYSTORE_PASSWORD
 ANDROID_KEY_ALIAS
 ANDROID_KEY_PASSWORD
@@ -154,42 +209,40 @@ base64 keystore dumps
 
 If any of those appear in git, treat it as a secret leak.
 
-For Play Store, prefer Android App Bundle output when the signing flow exists:
+For Play Store, prefer Android App Bundle output:
 
 ```bash
 cd mobile/android
 ./gradlew bundleRelease
 ```
 
-Expected future artifact:
+Expected artifact:
 
 ```text
 mobile/android/app/build/outputs/bundle/release/*.aab
 ```
 
-## Future signing implementation
+## Future CI signing implementation
 
-When production signing is ready, add a Gradle signing config that reads from local properties or environment variables.
+The current scaffold supports signing from local properties or environment variables. A later PR can add CI artifact publishing after repository secrets exist.
 
-The signing flow should support:
+CI signing should use GitHub Actions secrets such as:
 
-1. Local developer release signing from `keystore.properties`.
-2. CI release signing from GitHub Actions secrets.
-3. No signing secrets in source control.
-4. Clear failure when signing secrets are missing and a signed release is requested.
-5. A signed APK or AAB artifact that can be installed/tested or uploaded.
-
-Expected future commands:
-
-```bash
-./gradlew assembleRelease
+```text
+ANDROID_KEYSTORE_BASE64
+ANDROID_KEYSTORE_PASSWORD
+ANDROID_KEY_ALIAS
+ANDROID_KEY_PASSWORD
 ```
 
-or, if using Android App Bundles:
+The CI signing flow should support:
 
-```bash
-./gradlew bundleRelease
-```
+1. Decode keystore from secret into a temporary file.
+2. Pass signing values through environment variables.
+3. Run `./gradlew bundleRelease`.
+4. Upload the AAB as a workflow artifact.
+5. Never echo secrets.
+6. Never commit the keystore.
 
 ## Play Store preflight checklist
 
@@ -261,6 +314,7 @@ docs/PLAY_STORE_DATA_SAFETY_DRAFT.md
 - [ ] `./gradlew testDebugUnitTest` passes.
 - [ ] `./gradlew assembleDebug` passes.
 - [ ] `./gradlew assembleRelease` passes.
+- [ ] `./gradlew bundleRelease` passes with real signing values.
 - [ ] Signed release APK or AAB is generated.
 - [ ] Signed artifact installs or upload-validates.
 - [ ] Version code is incremented.
@@ -286,7 +340,7 @@ Required proof:
 - [ ] WorkOrder source badges are visible.
 - [ ] Retry actions recover after backend returns.
 - [ ] Owner role/invite/session controls work when logged in as OWNER.
-- [ ] MCP mobile approval smoke path passes if demoing MCP control.
+- [ ] MCP mobile approval path passes if demoing MCP control.
 - [ ] Audit proves request, decision, forwarding, and admin actions.
 
 ## Play Store blocked-until list
@@ -294,8 +348,9 @@ Required proof:
 The app is blocked from honest Play Store upload until all of these are done:
 
 ```text
-real signing configuration
-signed APK or AAB generation
+real keystore values provided
+signed APK or AAB generated
+signed artifact smoke tested
 privacy policy URL
 Data Safety answers
 store listing metadata
@@ -316,7 +371,7 @@ The serious path is:
 ```text
 release variant compiles
 -> signed APK/AAB generated from secrets
--> install on physical phone
+-> install on physical phone or upload-validate in Play Console
 -> auth-enabled smoke test
 -> MCP approval smoke test
 -> audit proof smoke test
@@ -430,14 +485,14 @@ Production mobile deployment is solved.
 | `testDebugUnitTest` fails | Android logic/test compile issue | Fix before merge. |
 | `assembleDebug` fails | Debug build broken | Fix before demo. |
 | `assembleRelease` fails | Release variant broken | Fix before claiming release readiness. |
-| `bundleRelease` fails later | App Bundle release path is not ready | Fix before Play Store upload. |
+| `bundleRelease` fails | App Bundle release path or signing path is not ready | Fix before Play Store upload. |
 | APK cannot reach backend | Wrong API URL or LAN/network issue | Prove `/health` from phone first. |
-| APK not installable | Likely unsigned/release signing issue | Use debug for demo or implement signing. |
-| Missing signing secrets | Expected until signing flow exists | Do not claim signed release. |
+| APK not installable | Likely unsigned/release signing issue | Use debug for demo or provide real signing values. |
+| Missing signing secrets | Expected until signing values exist | Do not claim signed release. |
 | Play Console rejects artifact | Signing/package/version/compliance issue | Fix the specific Play Console blocker. |
 | Review cannot log in | Missing review account/backend instructions | Provide review credentials and backend availability. |
 | Screenshots rejected | Wrong size/content or misleading listing | Regenerate compliant screenshots. |
 
 ## Brutal truth
 
-A debug APK is enough for a controlled MVP demo, but it is not release discipline. The next level is proving release compilation, then adding real signing without leaking secrets, then proving a signed artifact against a reachable backend.
+A signing scaffold is not the same as a signed release. The next level is generating a real signed artifact with real keystore material, proving it against a reachable backend, and only then using it for internal testing or Play upload.

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -5,6 +7,28 @@ plugins {
 
 val aixionApiBaseUrl = providers.gradleProperty("AIXION_API_BASE_URL")
     .orElse("http://10.0.2.2:8000/")
+
+val signingPropertiesFile = rootProject.file("keystore.properties")
+val signingProperties = Properties().apply {
+    if (signingPropertiesFile.exists()) {
+        signingPropertiesFile.inputStream().use { load(it) }
+    }
+}
+
+fun signingValue(name: String): String? {
+    return signingProperties.getProperty(name)
+        ?: providers.gradleProperty(name).orNull
+        ?: providers.environmentVariable(name).orNull
+}
+
+val releaseStoreFile = signingValue("ANDROID_KEYSTORE_FILE")?.let { rootProject.file(it) }
+val releaseStorePassword = signingValue("ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("ANDROID_KEY_ALIAS")
+val releaseKeyPassword = signingValue("ANDROID_KEY_PASSWORD")
+val hasReleaseSigningConfig = releaseStoreFile?.exists() == true &&
+    !releaseStorePassword.isNullOrBlank() &&
+    !releaseKeyAlias.isNullOrBlank() &&
+    !releaseKeyPassword.isNullOrBlank()
 
 android {
     namespace = "com.aixion.controltower"
@@ -18,6 +42,25 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "AIXION_API_BASE_URL", "\"${aixionApiBaseUrl.get()}\"")
+    }
+
+    signingConfigs {
+        if (hasReleaseSigningConfig) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            if (hasReleaseSigningConfig) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     buildFeatures {

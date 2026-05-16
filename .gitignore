@@ -17,6 +17,12 @@ build/
 local.properties
 *.apk
 *.aab
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+release.keystore
+release.jks
 
 # IDE
 .idea/
@@ -29,3 +35,8 @@ mobile/android/.gradle/
 mobile/android/build/
 mobile/android/app/build/
 mobile/android/local.properties
+mobile/android/keystore.properties
+mobile/android/*.jks
+mobile/android/*.keystore
+mobile/android/app/*.jks
+mobile/android/app/*.keystore
