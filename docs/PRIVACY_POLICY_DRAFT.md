@@ -46,7 +46,10 @@ TODO HTTPS URL, publicly accessible, non-geofenced, non-editable, and not a PDF
 Account deletion request URL:
 
 ```text
-TODO HTTPS URL or in-app deletion flow plus outside-the-app web request flow
+Backend authenticated endpoint exists: POST /auth/account-deletion-request
+Backend public info endpoint exists: GET /auth/account-deletion-info
+TODO public outside-the-app HTTPS account deletion request URL for Google Play Console
+TODO in-app user-facing deletion/request UI if account creation remains available in the app
 ```
 
 ## 3. Data we may collect
@@ -66,6 +69,7 @@ password credential material handled as salted password hash / authentication to
 email verification state
 invite acceptance metadata
 owner/maintainer/reviewer role metadata
+account deletion request status and timestamp
 ```
 
 Purpose:
@@ -77,6 +81,7 @@ role-based access control
 invite acceptance
 security and abuse prevention
 admin access management
+account deletion request processing
 ```
 
 ### Approval, work-order, and operational content
@@ -126,6 +131,7 @@ approval decision history
 role changes
 invite creation, acceptance, revocation, and expiry records
 session revocation events
+account deletion request audit events
 ```
 
 Purpose:
@@ -137,6 +143,7 @@ admin review
 incident investigation
 compliance and abuse prevention
 accountability for controlled execution
+account deletion request evidence
 ```
 
 Audit records may be retained longer than normal account/session data because they are the evidence layer of the product. The final release policy must define how audit records are deleted, retained, or anonymized when an account deletion request is processed.
@@ -161,6 +168,7 @@ Purpose:
 keeping users signed in
 verifying active sessions
 allowing owners to expire another user's access
+revoking active sessions after account deletion request
 security and access management
 ```
 
@@ -236,6 +244,7 @@ active/revoked session state
 audit events
 approval/work-order actions
 source/provenance metadata
+account deletion request audit status
 ```
 
 Purpose:
@@ -245,6 +254,7 @@ access management
 security review
 approval governance
 incident investigation
+account deletion request handling
 ```
 
 Final release notes and review/demo instructions should make clear that the app is intended for controlled team/enterprise use, not anonymous public social use.
@@ -286,6 +296,7 @@ MCP queue review and forwarding control
 audit trail generation
 owner/admin access management
 security, abuse prevention, and troubleshooting
+account deletion request handling
 release/demo operation when explicitly configured
 ```
 
@@ -300,7 +311,7 @@ unrelated marketing
 
 ## 7. Data sharing and service providers
 
-The app sends data to the backend service configured for the deployment. The backend is necessary for account/session management, approvals, work orders, audit logs, and MCP/agent control.
+The app sends data to the backend service configured for the deployment. The backend is necessary for account/session management, approvals, work orders, audit logs, account deletion request handling, and MCP/agent control.
 
 Data may be processed by service providers that host or operate the backend, database, logging, deployment, notification, security, or monitoring systems on behalf of the app operator.
 
@@ -386,11 +397,12 @@ Draft retention model:
 
 | Data type | Draft retention approach | Final value needed before release |
 | --- | --- | --- |
-| Account profile | Retained while account exists, then deleted or anonymized after deletion request unless retention is required | TODO exact timeline |
-| Authentication/session records | Retained while active and for a limited security/audit period after expiry or revocation | TODO exact timeline |
+| Account profile | Retained while account exists, then disabled after deletion request and deleted or anonymized after operator processing unless retention is required | TODO exact timeline |
+| Authentication/session records | Active sessions are revoked after deletion request; session records retained for a limited security/audit period | TODO exact timeline |
 | Invites | Retained until accepted/revoked/expired, then retained for a limited audit/security period | TODO exact timeline |
 | Approval/work-order records | Retained as operational evidence unless deleted/anonymized under retention policy | TODO exact timeline |
 | Audit logs | Retained as security/control evidence and may survive account deletion in minimized/anonymized form if needed | TODO exact timeline and anonymization rule |
+| Account deletion request events | Retained as proof of request receipt and processing status | TODO exact timeline |
 | Device tokens | Retained while notifications/device registration remain active, then removed when disabled or account/session is deleted | TODO exact timeline |
 | Server logs | Retained for troubleshooting/security for a limited period | TODO exact timeline |
 | Backups | Retained until backup expiry window completes | TODO backup window |
@@ -406,16 +418,31 @@ an in-app readily discoverable deletion path, if account creation is available i
 an outside-the-app web URL entered in Play Console
 ```
 
-Draft account deletion URL:
+Implemented backend request path:
 
 ```text
-TODO public account deletion URL
+POST /auth/account-deletion-request
+GET /auth/account-deletion-info
 ```
 
-Draft in-app deletion path:
+Current backend behavior:
 
 ```text
-TODO Account > Delete account / Request account deletion
+records authenticated account deletion request
+revokes active sessions for the requesting user
+disables the user account
+records auth.account_deletion_requested audit event
+returns request status RECEIVED
+```
+
+Still required before Play submission:
+
+```text
+public outside-the-app HTTPS account deletion URL
+in-app user-facing delete/request control if account creation remains available in app
+operator workflow for final deletion/anonymization
+published retention timelines
+published audit-retention exception
 ```
 
 Deletion should cover:
@@ -440,7 +467,7 @@ backup/recovery windows
 
 If any records are retained after deletion, the final public policy must explain what is retained, why it is retained, and for how long.
 
-Temporary account disabling, freezing, or logout is not account deletion.
+Temporary account disabling, freezing, logout, or session revocation alone is not full account deletion. The current backend endpoint is a request-and-disable foundation; it does not complete all final deletion/anonymization processing by itself.
 
 ## 12. In-app disclosures and consent
 
@@ -544,8 +571,11 @@ Do not publish this policy until these are resolved:
 - [ ] Privacy contact is final.
 - [ ] Public HTTPS privacy policy URL exists and is not a PDF.
 - [ ] Privacy policy link or text exists inside the app.
-- [ ] Account deletion request URL exists outside the app.
+- [ ] Public outside-the-app account deletion request URL exists.
 - [ ] In-app account deletion/request flow exists if account creation remains in app.
+- [x] Backend authenticated account deletion request endpoint exists.
+- [x] Backend public account deletion info endpoint exists.
+- [ ] Operator deletion/anonymization workflow is defined after request receipt.
 - [ ] Final Android permissions are reviewed.
 - [ ] Final Android dependencies and SDKs are reviewed.
 - [ ] Backend deployment architecture and hosting region are known.
