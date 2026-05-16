@@ -83,6 +83,8 @@ fun AuthScreen(
         AuthForm(state = state, viewModel = viewModel)
 
         if (state.authenticated) {
+            PrivacyControlsPanel(state = state, viewModel = viewModel)
+
             TowerSectionHeader(
                 title = "Owner Administration",
                 subtitle = "Roles, invites, and sessions are sensitive control surfaces. Every action should stay deliberate and traceable."
@@ -218,6 +220,40 @@ private fun AuthForm(state: AuthUiState, viewModel: AuthViewModel) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(onClick = viewModel::refreshSession, enabled = !state.loading, modifier = Modifier.weight(1f)) { Text("Verify saved session") }
             OutlinedButton(onClick = viewModel::logout, enabled = !state.loading, modifier = Modifier.weight(1f)) { Text("Clear session") }
+        }
+    }
+}
+
+@Composable
+private fun PrivacyControlsPanel(state: AuthUiState, viewModel: AuthViewModel) {
+    TowerPanel(elevated = true) {
+        Text("Privacy and data controls", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Privacy policy and account data controls must be available before Play Store submission. Public policy URL is still configured outside the app release.",
+            color = TowerTextMuted,
+            fontSize = 12.sp,
+            lineHeight = 18.sp
+        )
+        StatusBadge("PRIVACY POLICY: DRAFT", TowerAccent)
+        Text(
+            "Account removal requests disable app access immediately. Audit and security records may be retained or anonymized according to the published retention policy.",
+            color = TowerTextMuted,
+            fontSize = 12.sp,
+            lineHeight = 18.sp
+        )
+        OutlinedTextField(
+            value = state.privacyRemovalReason,
+            onValueChange = viewModel::updatePrivacyRemovalReason,
+            label = { Text("Optional reason") },
+            modifier = Modifier.fillMaxWidth(),
+            maxLines = 3
+        )
+        Button(
+            onClick = viewModel::requestPrivacyAccountRemoval,
+            enabled = !state.loading,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (state.loading) "Submitting..." else "Request account removal")
         }
     }
 }
