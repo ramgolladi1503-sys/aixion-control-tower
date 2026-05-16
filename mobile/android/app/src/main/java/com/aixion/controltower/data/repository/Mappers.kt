@@ -27,6 +27,17 @@ import com.aixion.controltower.core.model.RuntimeReadinessSummary
 import com.aixion.controltower.core.model.TestRunSummary
 import com.aixion.controltower.core.model.WorkOrderSummary
 
+data class WorkOrderSourceMetadata(
+    val sourceType: String = "MANUAL",
+    val sourceProvider: String = "MANUAL",
+    val sourceAgentId: String? = null,
+    val sourceAgentName: String? = null,
+    val sourceTaskId: String? = null,
+    val sourceSessionId: String? = null,
+    val createdByUserId: String? = null,
+    val verifiedSource: Boolean = false
+)
+
 fun String.toRiskLevelOrDefault(): RiskLevel = runCatching {
     RiskLevel.valueOf(uppercase())
 }.getOrDefault(RiskLevel.MEDIUM)
@@ -61,6 +72,27 @@ fun String.toAgentTaskStatusOrDefault(): AgentTaskStatus {
 fun String?.toNullableRiskLevel(): RiskLevel? {
     if (isNullOrBlank()) return null
     return runCatching { RiskLevel.valueOf(uppercase()) }.getOrNull()
+}
+
+fun Any?.asStringOrNull(): String? = this?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+
+fun Any?.asBooleanOrFalse(): Boolean = when (this) {
+    is Boolean -> this
+    is String -> equals("true", ignoreCase = true)
+    else -> false
+}
+
+fun Map<String, Any?>.toWorkOrderSourceMetadata(): WorkOrderSourceMetadata {
+    return WorkOrderSourceMetadata(
+        sourceType = this["source_type"].asStringOrNull() ?: "MANUAL",
+        sourceProvider = this["source_provider"].asStringOrNull() ?: "MANUAL",
+        sourceAgentId = this["source_agent_id"].asStringOrNull(),
+        sourceAgentName = this["source_agent_name"].asStringOrNull(),
+        sourceTaskId = this["source_task_id"].asStringOrNull(),
+        sourceSessionId = this["source_session_id"].asStringOrNull(),
+        createdByUserId = this["created_by_user_id"].asStringOrNull(),
+        verifiedSource = this["verified_source"].asBooleanOrFalse()
+    )
 }
 
 fun ProjectDto.toUiSummary(
@@ -113,14 +145,25 @@ fun ApprovalRequestDto.toUiSummary(projectName: String = "Project"): ApprovalSum
     )
 }
 
-fun WorkOrderDto.toUiSummary(projectName: String = "Project"): WorkOrderSummary {
+fun WorkOrderDto.toUiSummary(
+    projectName: String = "Project",
+    sourceMetadata: WorkOrderSourceMetadata = WorkOrderSourceMetadata()
+): WorkOrderSummary {
     return WorkOrderSummary(
         id = id,
         projectName = projectName,
         goal = goal,
         risk = (risk_level ?: "MEDIUM").toRiskLevelOrDefault(),
         tasks = tasks,
-        requiredTests = required_tests
+        requiredTests = required_tests,
+        sourceType = sourceMetadata.sourceType,
+        sourceProvider = sourceMetadata.sourceProvider,
+        sourceAgentId = sourceMetadata.sourceAgentId,
+        sourceAgentName = sourceMetadata.sourceAgentName,
+        sourceTaskId = sourceMetadata.sourceTaskId,
+        sourceSessionId = sourceMetadata.sourceSessionId,
+        createdByUserId = sourceMetadata.createdByUserId,
+        verifiedSource = sourceMetadata.verifiedSource
     )
 }
 

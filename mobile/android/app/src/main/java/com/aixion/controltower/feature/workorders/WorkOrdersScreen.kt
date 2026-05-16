@@ -26,6 +26,7 @@ import com.aixion.controltower.core.ui.components.RiskBadge
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.theme.RiskCritical
+import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSpacing
@@ -111,6 +112,21 @@ fun WorkOrdersScreen(viewModel: WorkOrdersViewModel = viewModel()) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         RiskBadge(workOrder.risk)
                         StatusBadge(workOrder.projectName, TowerAccent)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        StatusBadge(
+                            workOrder.sourceBadgeLabel,
+                            if (workOrder.verifiedSource) RiskLow else TowerAccent
+                        )
+                        StatusBadge(workOrder.sourceLabel, TowerAccent)
+                    }
+                    if (workOrder.sourceDetail.isNotBlank()) {
+                        Text(
+                            text = workOrder.sourceDetail,
+                            color = TowerTextMuted,
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp
+                        )
                     }
                     Text(workOrder.goal, color = TowerTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Text("Tasks", color = TowerTextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
