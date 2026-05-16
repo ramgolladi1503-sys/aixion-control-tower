@@ -29,6 +29,27 @@ data class ResendVerificationRequestDto(
     val email: String
 )
 
+data class AccountDeletionRequestDto(
+    val reason: String = ""
+)
+
+data class AccountDeletionResponseDto(
+    val user_id: String,
+    val email: String,
+    val status: String,
+    val requested_at: String? = null,
+    val active_sessions_revoked: Int = 0,
+    val message: String
+)
+
+data class AccountDeletionInfoDto(
+    val app: String,
+    val status: String,
+    val authenticated_request_endpoint: String,
+    val public_deletion_url_status: String,
+    val retention_note: String
+)
+
 data class AuthResponseDto(
     val access_token: String,
     val token_type: String = "bearer",
