@@ -51,11 +51,31 @@ fun WorkOrdersScreen(viewModel: WorkOrdersViewModel = viewModel()) {
                 text = when {
                     state.loading -> "Loading work orders..."
                     state.hasError -> "Backend work-order sync failed. No mock work orders are shown."
-                    else -> "Structured execution packages created from commands."
+                    else -> "Prepared work packages. They describe goal, tasks, risk, source, and tests before approval or execution."
                 },
                 color = TowerTextMuted,
-                fontSize = 14.sp
+                fontSize = 14.sp,
+                lineHeight = 20.sp
             )
+        }
+
+        item {
+            TowerPanel(elevated = true) {
+                Text("What is a Work Order?", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                Text(
+                    text = "A Work Order is not the approval itself. It is the structured package that explains what work should happen, why it exists, who created it, and what tests are expected.",
+                    color = TowerTextMuted,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp
+                )
+                Text(
+                    text = "Sensitive work still needs an Approval before GitHub execution continues.",
+                    color = TowerTextMuted,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp
+                )
+            }
         }
 
         state.errorMessage?.let { message ->
@@ -137,6 +157,12 @@ fun WorkOrdersScreen(viewModel: WorkOrdersViewModel = viewModel()) {
                     workOrder.requiredTests.ifEmpty { listOf("No tests defined yet") }.forEach { test ->
                         Text("• $test", color = TowerTextPrimary, fontSize = 13.sp)
                     }
+                    Text(
+                        text = "Lifecycle: prepared package → approval when needed → GitHub execution if approved and configured.",
+                        color = TowerTextMuted,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp
+                    )
                 }
             }
         }
