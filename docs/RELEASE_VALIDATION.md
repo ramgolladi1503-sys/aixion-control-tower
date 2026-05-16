@@ -4,6 +4,14 @@ This checklist is the release/demo gate for the current Mobile Approval Console 
 
 It does **not** prove production readiness. It proves whether the current build is demo-ready without lying about CI, Android reachability, MCP forwarding, auth, audit traceability, environment configuration, role permissions, invite onboarding, or session revocation.
 
+For the shorter Android operator path, use:
+
+```text
+docs/ANDROID_RELEASE_SMOKE_CHECKLIST.md
+```
+
+The Android smoke checklist is the fast human checklist for auth-first routing, retry behavior, WorkOrder source badges, approval provenance, owner controls, and MCP mobile approval flow. This release validation file remains the broader evidence gate.
+
 ## Release position
 
 Current honest position:
@@ -51,6 +59,7 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Android role visibility | Account screen shows current backend role after `/auth/me` | Manual Account check |
 | Android invite registration | Account screen supports invite code for non-bootstrap registration | Manual Account check |
 | Android owner session controls | Account screen lists sessions and can expire another user's access | Manual Account check |
+| Android work-order provenance | Work Orders show Manual User Source or Verified Agent Source | `docs/ANDROID_RELEASE_SMOKE_CHECKLIST.md` + `WorkOrderRepositoryTest` |
 | Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
 | Android release variant | Release variant compiles | `cd mobile/android && ./gradlew assembleRelease` |
 | Android release process | Release limits and signing gap are documented | `docs/ANDROID_RELEASE_PROCESS.md` |
@@ -121,6 +130,12 @@ release variant compiles
 ```
 
 If Android tests fail because of fake API drift or model drift, fix that before demo. Do not wave it away as “just tests”.
+
+For the focused Android smoke path, use:
+
+```text
+docs/ANDROID_RELEASE_SMOKE_CHECKLIST.md
+```
 
 ## 3. Role, invite, and session validation
 
