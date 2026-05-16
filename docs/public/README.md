@@ -32,6 +32,38 @@ Vercel
 company website/static hosting
 ```
 
+## GitHub Pages workflow
+
+This repo includes a GitHub Actions workflow:
+
+```text
+.github/workflows/public-pages.yml
+```
+
+The workflow publishes only this folder:
+
+```text
+docs/public
+```
+
+Expected GitHub Pages URLs after the workflow runs successfully:
+
+```text
+Privacy Policy URL:
+https://ramgolladi1503-sys.github.io/aixion-control-tower/privacy-policy.html
+
+Account Deletion URL:
+https://ramgolladi1503-sys.github.io/aixion-control-tower/account-deletion.html
+```
+
+Repository setting that may still be required:
+
+```text
+GitHub repo -> Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+```
+
+If GitHub Pages is disabled or set to a branch source, the workflow may not publish correctly.
+
 ## Not publishable until TODOs are replaced
 
 Do not submit these pages to Google Play until all TODOs are resolved:
@@ -48,18 +80,8 @@ backend hosting/provider details
 legal/privacy review
 ```
 
-## Suggested future URLs
-
-Replace with the real deployed URLs after hosting:
-
-```text
-Privacy Policy URL:
-https://TODO.example.com/privacy-policy.html
-
-Account Deletion URL:
-https://TODO.example.com/account-deletion.html
-```
-
 ## Hard rule
 
 A page existing in the repo is not enough. Google Play needs the actual deployed public URL.
+
+A workflow existing in the repo is also not enough. The workflow must run successfully, and the resulting URLs must load in a browser without login.
