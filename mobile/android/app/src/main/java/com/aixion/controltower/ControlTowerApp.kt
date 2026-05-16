@@ -129,6 +129,18 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             onApprovalSelected = { approval ->
                                 approvalsViewModel.selectApproval(approval)
                                 navController.navigate(Route.ApprovalDetail.value)
+                            },
+                            onOpenActionQueue = {
+                                navController.navigate(Route.Inbox.value) { launchSingleTop = true }
+                            },
+                            onOpenExecutionQueue = {
+                                navController.navigate(Route.AgentTasks.value) { launchSingleTop = true }
+                            },
+                            onOpenBlockedQueue = {
+                                navController.navigate(Route.Inbox.value) { launchSingleTop = true }
+                            },
+                            onOpenFailedTests = {
+                                navController.navigate(Route.Tests.value) { launchSingleTop = true }
                             }
                         )
                     }

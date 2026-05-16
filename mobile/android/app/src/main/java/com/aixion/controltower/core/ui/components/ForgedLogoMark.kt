@@ -7,7 +7,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -25,36 +24,26 @@ fun ForgedLogoMark(
         Canvas(modifier = Modifier.size(size)) {
             val scale = this.size.minDimension / 120f
             fun p(x: Float, y: Float) = Offset(x * scale, y * scale)
-            val strokeWidth = 7f * scale
-            val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Square, join = StrokeJoin.Miter)
+            val strokeWidth = 6f * scale
+            val stroke = Stroke(width = strokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
 
-            fun drawPolyline(points: List<Offset>) {
-                val path = Path().apply {
-                    moveTo(points.first().x, points.first().y)
-                    points.drop(1).forEach { lineTo(it.x, it.y) }
-                }
-                drawPath(path = path, color = color, style = stroke)
-            }
+            // Approved Woven / Forged Network direction:
+            // two interlocked loops, one center approval point, and a bridge line.
+            drawLine(color = color, start = p(27f, 60f), end = p(93f, 60f), strokeWidth = 4f * scale, cap = StrokeCap.Round)
 
-            drawPolyline(listOf(p(27f, 74f), p(44f, 91f), p(61f, 74f), p(77f, 91f), p(94f, 74f)))
-            drawPolyline(listOf(p(27f, 46f), p(44f, 29f), p(60f, 45f), p(77f, 29f), p(94f, 46f)))
-            drawPolyline(listOf(p(27f, 46f), p(44f, 63f), p(27f, 80f)))
-            drawPolyline(listOf(p(94f, 46f), p(77f, 63f), p(94f, 80f)))
-            drawPolyline(listOf(p(44f, 29f), p(77f, 91f)))
-            drawPolyline(listOf(p(77f, 29f), p(44f, 91f)))
+            drawLine(color = color, start = p(28f, 60f), end = p(45f, 38f), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+            drawLine(color = color, start = p(45f, 38f), end = p(60f, 60f), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+            drawLine(color = color, start = p(60f, 60f), end = p(45f, 82f), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+            drawLine(color = color, start = p(45f, 82f), end = p(28f, 60f), strokeWidth = strokeWidth, cap = StrokeCap.Round)
 
-            fun filledPath(points: List<Offset>) {
-                val path = Path().apply {
-                    moveTo(points.first().x, points.first().y)
-                    points.drop(1).forEach { lineTo(it.x, it.y) }
-                    close()
-                }
-                drawPath(path = path, color = color)
-            }
+            drawLine(color = color, start = p(60f, 60f), end = p(75f, 38f), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+            drawLine(color = color, start = p(75f, 38f), end = p(92f, 60f), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+            drawLine(color = color, start = p(92f, 60f), end = p(75f, 82f), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+            drawLine(color = color, start = p(75f, 82f), end = p(60f, 60f), strokeWidth = strokeWidth, cap = StrokeCap.Round)
 
-            filledPath(listOf(p(58f, 19f), p(58f, 38f), p(69f, 27f), p(69f, 8f)))
-            filledPath(listOf(p(28f, 80f), p(17f, 91f), p(31f, 91f), p(39f, 83f)))
-            filledPath(listOf(p(92f, 80f), p(103f, 91f), p(89f, 91f), p(81f, 83f)))
+            drawCircle(color = color, radius = 7f * scale, center = p(60f, 60f))
+            drawCircle(color = color.copy(alpha = 0.78f), radius = 4f * scale, center = p(28f, 60f))
+            drawCircle(color = color.copy(alpha = 0.78f), radius = 4f * scale, center = p(92f, 60f))
         }
     }
 }

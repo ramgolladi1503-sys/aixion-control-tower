@@ -1,5 +1,6 @@
 package com.aixion.controltower.core.ui.components
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.Text
@@ -18,9 +19,15 @@ fun StatusCard(
     value: String,
     subtitle: String,
     accent: Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null
 ) {
-    TowerPanel(modifier = modifier, elevated = true) {
+    val clickableModifier = if (onClick != null) {
+        modifier.clickable(onClick = onClick)
+    } else {
+        modifier
+    }
+    TowerPanel(modifier = clickableModifier, elevated = true) {
         Text(
             text = title.uppercase(),
             color = TowerTextMuted,
@@ -31,6 +38,6 @@ fun StatusCard(
         Spacer(modifier = Modifier.height(8.dp))
         Text(text = value, color = accent, fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(4.dp))
-        Text(text = subtitle, color = TowerTextPrimary.copy(alpha = 0.7f), fontSize = 12.sp)
+        Text(text = subtitle, color = TowerTextPrimary.copy(alpha = 0.7f), fontSize = 12.sp, lineHeight = 17.sp)
     }
 }
