@@ -73,16 +73,13 @@ fun AuthScreen(
     ) {
         AccountHero(state = state)
 
-        SessionStatePanel(state = state)
-
-        TowerSectionHeader(
-            title = "Access flow",
-            subtitle = "Use the sequence in order: register, verify email, then log in. The app stays locked until that sequence is complete."
-        )
-
-        AuthForm(state = state, viewModel = viewModel)
-
         if (state.authenticated) {
+            AccountInfoPanel(
+                state = state,
+                onRefreshSession = viewModel::refreshSession,
+                onLogout = viewModel::logout
+            )
+
             PrivacyControlsPanel(state = state, viewModel = viewModel)
 
             TowerSectionHeader(
@@ -104,6 +101,15 @@ fun AuthScreen(
                 onRefresh = sessionAdminViewModel::refresh,
                 onExpireAccess = sessionAdminViewModel::clearUserSessions
             )
+        } else {
+            SessionStatePanel(state = state)
+
+            TowerSectionHeader(
+                title = "Access flow",
+                subtitle = "Use the sequence in order: register, verify email, then log in. The app stays locked until that sequence is complete."
+            )
+
+            AuthForm(state = state, viewModel = viewModel)
         }
     }
 }
@@ -162,6 +168,40 @@ private fun SessionStatePanel(state: AuthUiState) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         state.userLabel?.let { Text(text = it, color = TowerTextPrimary, fontSize = 14.sp) }
         state.message?.let { Text(text = it, color = TowerAccent, fontSize = 13.sp) }
+    }
+}
+
+@Composable
+private fun AccountInfoPanel(
+    state: AuthUiState,
+    onRefreshSession: () -> Unit,
+    onLogout: () -> Unit
+) {
+    TowerPanel(elevated = true) {
+        StatusBadge(label = "SIGNED IN", color = RiskLow)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text("Account information", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = state.userLabel ?: "Current session is active.",
+            color = TowerTextPrimary,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
+        Text(
+            text = "Registration, login, and verification controls are hidden because this session is already active.",
+            color = TowerTextMuted,
+            fontSize = 12.sp,
+            lineHeight = 18.sp
+        )
+        state.message?.let { Text(text = it, color = TowerAccent, fontSize = 13.sp) }
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        OutlinedButton(onClick = onRefreshSession, enabled = !state.loading, modifier = Modifier.fillMaxWidth()) {
+            Text(if (state.loading) "Checking session..." else "Refresh session")
+        }
+        OutlinedButton(onClick = onLogout, enabled = !state.loading, modifier = Modifier.fillMaxWidth()) {
+            Text("Log out")
+        }
     }
 }
 
