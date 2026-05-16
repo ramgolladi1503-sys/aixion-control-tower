@@ -105,6 +105,13 @@ class AgentAction(StrEnum):
     EXECUTE_GITHUB = "EXECUTE_GITHUB"
 
 
+class WorkOrderSourceType(StrEnum):
+    MANUAL = "MANUAL"
+    AGENT_TASK = "AGENT_TASK"
+    CONNECTOR = "CONNECTOR"
+    MCP = "MCP"
+
+
 class User(BaseModel):
     id: str = Field(default_factory=lambda: new_id("user"))
     email: str
@@ -253,10 +260,28 @@ class WorkOrderCreate(BaseModel):
     rollback_plan: str = ""
 
 
+class AgentWorkOrderCreate(WorkOrderCreate):
+    source_task_id: str | None = None
+    source_session_id: str | None = None
+
+
 class WorkOrder(WorkOrderCreate):
     id: str = Field(default_factory=lambda: new_id("work"))
     risk_level: RiskLevel = RiskLevel.MEDIUM
+    source_type: WorkOrderSourceType = WorkOrderSourceType.MANUAL
+    source_provider: AgentProvider = AgentProvider.MANUAL
+    source_agent_id: str | None = None
+    source_agent_name: str | None = None
+    source_task_id: str | None = None
+    source_session_id: str | None = None
+    created_by_user_id: str | None = None
+    verified_source: bool = False
     created_at: datetime = Field(default_factory=now_utc)
+
+    @field_validator("source_provider", mode="before")
+    @classmethod
+    def default_manual_source_provider(cls, value: AgentProvider | str | None) -> AgentProvider | str:
+        return AgentProvider.MANUAL if value is None else value
 
 
 class FileChange(BaseModel):
