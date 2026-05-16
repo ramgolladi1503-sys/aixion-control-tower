@@ -32,6 +32,7 @@ from .models import (
     TestRunCreate,
     WorkOrder,
     WorkOrderCreate,
+    WorkOrderSourceType,
     now_utc,
 )
 from .notifications import create_notification, router as notifications_router
@@ -138,6 +139,7 @@ def seed_demo_data(_: AuthUser = MaintainerDependency) -> dict[str, int]:
         required_tests=["pytest tests/test_execution_gate.py"],
         rollback_plan="Revert feature branch commit and rerun execution regression tests.",
         risk_level="CRITICAL",
+        source_type=WorkOrderSourceType.MANUAL,
     )
     store.work_orders[work_order.id] = work_order
 
@@ -223,12 +225,27 @@ def create_work_order(payload: WorkOrderCreate, user: AuthUser = MaintainerDepen
         raise HTTPException(status_code=404, detail="Idea not found")
 
     risk_level = assess_work_order(payload)
-    work_order = WorkOrder(**payload.model_dump(), risk_level=risk_level)
+    work_order = WorkOrder(
+        **payload.model_dump(),
+        risk_level=risk_level,
+        source_type=WorkOrderSourceType.MANUAL,
+        created_by_user_id=user.id,
+        verified_source=False,
+    )
     store.work_orders[work_order.id] = work_order
     audit(
         "work_order.created",
         work_order.id,
-        {"project_id": work_order.project_id, "risk_level": work_order.risk_level},
+        {
+            "project_id": work_order.project_id,
+            "risk_level": work_order.risk_level,
+            "source_type": work_order.source_type,
+            "source_provider": work_order.source_provider,
+            "source_agent_id": work_order.source_agent_id,
+            "source_agent_name": work_order.source_agent_name,
+            "created_by_user_id": work_order.created_by_user_id,
+            "verified_source": work_order.verified_source,
+        },
         actor=user.email,
     )
     persist()
