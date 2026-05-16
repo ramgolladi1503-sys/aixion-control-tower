@@ -17,6 +17,15 @@ Do not claim signed release readiness until a real keystore and secret-backed si
 
 Do not claim Play Store readiness until signing, store metadata, privacy/compliance, production backend configuration, and physical-device release smoke testing are complete.
 
+Privacy/data-safety drafts now live at:
+
+```text
+docs/PRIVACY_POLICY_DRAFT.md
+docs/PLAY_STORE_DATA_SAFETY_DRAFT.md
+```
+
+These are planning drafts, not final legal/compliance approval.
+
 ## What release validation means today
 
 Release validation currently proves:
@@ -228,6 +237,13 @@ Do not upload with TODO values.
 - [ ] No demo secrets, backend tokens, invite codes, API keys, or keystores are bundled.
 - [ ] App does not expose internal debug screens to public users unless deliberately scoped.
 - [ ] If notifications are enabled later, notification usage is disclosed.
+
+Use these planning docs before submission:
+
+```text
+docs/PRIVACY_POLICY_DRAFT.md
+docs/PLAY_STORE_DATA_SAFETY_DRAFT.md
+```
 
 ### Backend readiness
 
