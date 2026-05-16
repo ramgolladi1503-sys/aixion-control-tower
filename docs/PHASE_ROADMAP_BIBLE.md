@@ -1,11 +1,10 @@
 # Aixion Control Tower — Phase Roadmap & Product Scope Bible
 
 Status: roadmap control document  
-Owner: product/operator  
 Repository: `ramgolladi1503-sys/aixion-control-tower`  
 Applies to: Phase 0 local validation, Phase 1 paid production-shaped setup, Phase 2 production hardening
 
-This document is the execution bible for the remaining Mobile Approval Console / Aixion Control Tower roadmap. It exists to stop scope drift, stop fake readiness claims, and make every future PR map to a clear phase, acceptance gate, and release objective.
+This document is the execution bible for the Mobile Approval Console / Aixion Control Tower roadmap. It exists to stop scope drift, stop fake readiness claims, and make every future PR map to a clear phase, acceptance gate, and release objective.
 
 ## 1. Product definition
 
@@ -13,74 +12,73 @@ Aixion Control Tower is a mobile approval console for AI-agent and automation wo
 
 The product allows a user to review, approve, reject, or revise high-risk agent actions from Android before those actions reach GitHub, MCP child servers, connector workflows, or other mutating execution paths.
 
-The core value is not a pretty dashboard. The core value is this control guarantee:
+Core guarantee:
 
 > No mutating agent or connector action should execute unless the right user can see the context, understand the risk, and approve the exact request.
 
-## 2. Non-negotiable product rules
-
-These rules override convenience.
+## 2. Non-negotiable rules
 
 1. No fake production claims.
    - If backend is local-only, call it local-only.
    - If public pages still contain placeholders, call them placeholders.
-   - If signed AAB workflow exists but secrets are not configured, do not claim Play readiness.
+   - If signed build automation exists but real release configuration is absent, do not claim store readiness.
 
 2. No silent mock fallback in authenticated product paths.
    - Backend failures must show explicit errors.
-   - Empty data must not be replaced with fake approvals/work orders.
+   - Empty backend data must not be replaced with fake approvals or work orders.
 
 3. One PR must do one meaningful thing.
-   - Avoid mega-PRs that mix infra, UI, DB, auth, policy, and docs.
-   - Every PR must have acceptance gates.
+   - Avoid mega-PRs that mix infrastructure, UI, database, auth, policy, and docs.
+   - Every PR must have an acceptance gate.
 
 4. Every phase must be testable.
-   - Phase 0 must be proven on laptop + real Android phone on same Wi-Fi.
-   - Phase 1 must be proven through public HTTPS/review/prod-style infrastructure.
-   - Phase 2 must be proven through evidence bundles, rollback drills, and hardening checks.
+   - Phase 0 must be proven on laptop plus real Android phone on same Wi-Fi.
+   - Phase 1 must be proven through public HTTPS/review/production-shaped infrastructure.
+   - Phase 2 must be proven through evidence bundles, recovery drills, and hardening checks.
 
 5. Approval safety beats speed.
-   - Approve/reject/revise flows must remain auditable.
-   - MCP/agent/connector mutation paths must stay gated.
-   - Broker-like, destructive, privileged, or write actions must never bypass the approval lifecycle.
+   - Approve, reject, and revise flows must remain auditable.
+   - MCP, agent, and connector mutation paths must stay gated.
+   - Privileged or write actions must never bypass the approval lifecycle.
 
-## 3. Current baseline
+## 3. Current baseline and numbering correction
 
-Latest verified merged before this bible:
+Latest verified roadmap-control baseline:
 
 ```text
-PR #144 — Add public page URL verifier
+PR #147 — Add Phase Roadmap Product Scope Bible
+Merge commit: 331ffaa44d2ee12f68d89946148d5eaf692387a5
 ```
 
-Important correction:
+Correction:
 
-The roadmap numbering changed during execution. Earlier planning mapped Phase 1 to PR #137–#144, but actual PR #137–#144 work mostly covered public pages, signing scaffolds, Play Store copy, and URL verification. That work is useful, but it did not finish the originally intended paid production infra work.
+Earlier planning mapped Phase 1 to PR #137–#144, but actual PR #137–#144 mostly covered public pages, signing scaffolds, Play Store copy, and URL verification. Useful work, but not the originally intended paid production infrastructure.
 
-Therefore, this bible treats PR #145 as the roadmap reset/control document and continues missing Phase 1 infra from PR #146 onward.
+PR #147 added this bible. PR #148 corrects the numbering mismatch. Missing Phase 1 infrastructure starts after PR #148.
 
 ## 4. Phase model
 
 ```text
 Phase 0 — Local testable product
-Goal: prove the product works on a real Android phone connected to laptop backend over same Wi-Fi LAN.
-Money: no required paid infra.
+Goal: prove the app works on a real Android phone connected to laptop backend over same Wi-Fi LAN.
+Money: no required paid infrastructure.
 
 Phase 1 — Paid production-shaped setup
-Goal: move from LAN demo to public/review/prod-style hosted setup with real domain, DB, email, push, signed AAB smoke, and Play closed-testing readiness.
+Goal: move from LAN demo to public/review/production-shaped setup with domain, hosted backend, hosted database, email, push, signed build smoke, and Play closed-testing readiness.
 Money: domain, hosting, database, Play Console, maybe email provider.
 
 Phase 2 — Production hardening and release confidence
-Goal: make the product safer, more observable, less fragile, and defensible as a real release candidate.
-Money: ongoing infra plus optional monitoring/email/storage costs.
+Goal: make the product safer, more observable, less fragile, and defensible as a release candidate.
+Money: ongoing infrastructure plus optional monitoring/email/storage costs.
 ```
 
-## 5. Phase 0 — Local testable product scope
+## 5. Phase 0 — Local testable product
 
-### 5.1 Objective
+### Objective
 
 Phase 0 proves the product locally before spending money.
 
-The expected setup:
+Expected setup:
 
 ```text
 Laptop:
@@ -90,7 +88,7 @@ Laptop:
 - agent/MCP/connector approval path available
 
 Android phone:
-- installed debug/release test APK
+- installed debug or release-test APK
 - connected to same Wi-Fi as laptop
 - API base URL points to laptop LAN IP, not emulator localhost
 
@@ -98,9 +96,7 @@ Network:
 - phone can reach backend over http://<laptop-lan-ip>:<port>
 ```
 
-### 5.2 Phase 0 user journey
-
-The minimum demonstration:
+### Phase 0 user journey
 
 1. User opens Android app.
 2. User registers/logs in.
@@ -113,9 +109,7 @@ The minimum demonstration:
 9. Downstream worker/agent/MCP path continues only if approved.
 10. Audit/event trail shows what happened.
 
-### 5.3 Phase 0 merged PR baseline
-
-These PRs form the Phase 0 local testable product baseline:
+### Phase 0 merged PR baseline
 
 | PR | Status | Scope |
 |---:|---|---|
@@ -133,7 +127,7 @@ These PRs form the Phase 0 local testable product baseline:
 | #135 | Merged | Android privacy and account removal controls |
 | #136 | Merged | Public privacy and account deletion pages |
 
-### 5.4 Phase 0 completion gate
+### Phase 0 completion gate
 
 Phase 0 is not complete merely because PRs are merged. It is complete only when this real-device gate passes:
 
@@ -154,80 +148,56 @@ Phase 0 is not complete merely because PRs are merged. It is complete only when 
 [ ] Demo can be repeated after app restart.
 ```
 
-### 5.5 Phase 0 explicit non-goals
+### Phase 0 non-goals
 
-Phase 0 does not require:
-
-- public domain
-- paid backend hosting
-- production database
-- real email provider
-- Play Store release
-- production FCM
-- legal/privacy review
-- external customer use
+Phase 0 does not require public domain, paid backend hosting, production database, real email provider, Play Store release, production push notifications, legal/privacy review, or external customer use.
 
 ## 6. Phase 1 — Paid production-shaped setup
 
-### 6.1 Objective
+### Objective
 
-Phase 1 converts the product from LAN demo into a reviewable, internet-accessible, production-shaped system.
+Phase 1 converts the product from LAN demo into an internet-accessible review/production-shaped system.
 
-This is the phase where money starts to matter.
-
-Phase 1 must not be treated as “just deployment.” It is the point where the product must stop depending on laptop-only assumptions.
-
-### 6.2 Phase 1 target architecture
+Target architecture:
 
 ```text
 Android app
   -> public HTTPS backend URL
   -> hosted backend service
-  -> hosted production/review database
+  -> hosted database
   -> email provider for verification/resend
-  -> FCM push setup for approval notifications
+  -> push setup for approval notifications
   -> public privacy/account deletion pages
-  -> signed AAB artifact
+  -> signed Android artifact
   -> Play Console closed testing track
 ```
 
-### 6.3 Expected paid or possibly paid items
-
-Exact pricing must be checked before purchase. Do not hardcode vendor prices into release claims.
+### Expected paid or possibly paid items
 
 | Item | Why needed | Paid? |
 |---|---|---|
 | Domain | Stable public identity and URLs | Usually yes |
-| DNS / hosting routing | Public backend and policy URL routing | Usually free/low-cost at start |
+| DNS / hosting routing | Public backend and policy URL routing | Free or low-cost at start |
 | Backend hosting | Public review/prod API | Usually yes |
 | Hosted database | Durable state outside laptop | Usually yes |
 | Play Console | Closed testing / app distribution | Usually one-time paid account |
 | Email provider | Production verification/resend | Free tier possible, paid later |
 | Monitoring/logging | Production diagnostics | Free tier possible, paid later |
-| FCM | Push notifications | Usually free at start |
+| Push service | Approval notifications | Usually free at start |
 
-### 6.4 Domain and URL plan
+### Domain and URL plan
 
 Preferred public identity:
 
 ```text
-Root/company domain:
-aixionlabs.com
-
-Product/review backend:
-api.controltower.aixionlabs.com
-
-Product landing/support page:
-controltower.aixionlabs.com
-
-Privacy policy URL:
-https://controltower.aixionlabs.com/privacy-policy
-
-Account deletion URL:
-https://controltower.aixionlabs.com/account-deletion
+Root/company domain: aixionlabs.com
+Product/review backend: api.controltower.aixionlabs.com
+Product landing/support page: controltower.aixionlabs.com
+Privacy policy URL: https://controltower.aixionlabs.com/privacy-policy
+Account deletion URL: https://controltower.aixionlabs.com/account-deletion
 ```
 
-Fallback if domain is not bought yet:
+Fallback:
 
 ```text
 Use provider URLs only for temporary review smoke tests.
@@ -235,74 +205,45 @@ Do not call provider URLs final public identity.
 Do not submit Play Console public URLs until they are stable and placeholder-free.
 ```
 
-### 6.5 Phase 1 continuation PR roadmap
-
-Because PR #137–#144 were consumed by public-page/signing/Play-prep work, the missing Phase 1 infra continues from PR #146 onward. PR #145 is this bible/control PR.
+### Phase 1 continuation roadmap
 
 | Planned PR | Scope | Phase | Spend gate |
 |---:|---|---|---|
-| #145 | Add Phase Roadmap & Product Scope Bible | Phase 1 control | No spend |
-| #146 | Deploy hosted backend review environment | Phase 1 | Backend hosting may start |
-| #147 | Add production database deployment path and backup/restore validation | Phase 1 | Hosted DB may start |
-| #148 | Wire domain/DNS/HTTPS routing documentation and env config | Phase 1 | Domain/DNS spend may start |
-| #149 | Replace public-page placeholders with real release values | Phase 1 | Requires real operator/support/legal inputs |
-| #150 | Integrate real email verification provider | Phase 1 | Email provider may start |
-| #151 | Configure and validate production FCM push path | Phase 1 | Usually no direct spend |
-| #152 | Android production backend config and signed AAB smoke evidence | Phase 1 | Depends on signing secrets and hosted backend |
-| #153 | Play Console closed-testing readiness package | Phase 1 | Play developer account required |
-| #154 | Phase 1 evidence gate and release decision record | Phase 1 | No new spend, validates all spend |
+| #147 | Add Phase Roadmap & Product Scope Bible | Phase 1 control | No spend |
+| #148 | Correct roadmap bible numbering after merge | Phase 1 control | No spend |
+| #149 | Deploy hosted backend review environment | Phase 1 | Backend hosting may start |
+| #150 | Add production database deployment path and backup/restore validation | Phase 1 | Hosted DB may start |
+| #151 | Wire domain/DNS/HTTPS routing documentation and env config | Phase 1 | Domain/DNS spend may start |
+| #152 | Replace public-page placeholders with real release values | Phase 1 | Requires real operator/support/legal inputs |
+| #153 | Integrate real email verification provider | Phase 1 | Email provider may start |
+| #154 | Configure and validate production push notification path | Phase 1 | Usually no direct spend |
+| #155 | Android production backend config and signed AAB smoke evidence | Phase 1 | Depends on signing config and hosted backend |
+| #156 | Play Console closed-testing readiness package | Phase 1 | Play developer account required |
+| #157 | Phase 1 evidence gate and release decision record | Phase 1 | No new spend, validates all spend |
 
-### 6.6 PR #146 — Deploy hosted backend review environment
+### PR #149 — Deploy hosted backend review environment
 
-Purpose:
-
-Move backend from laptop-only to public HTTPS review environment.
-
-Scope:
-
-- Add deployment documentation for selected provider.
-- Add production/review environment variable table.
-- Add backend health endpoint validation for deployed environment if missing.
-- Add deployment smoke checklist.
-- Confirm no secrets are committed.
-- Confirm local/dev behavior still works.
+Purpose: move backend from laptop-only to public HTTPS review environment.
 
 Acceptance gate:
 
 ```text
 [ ] Hosted backend URL exists.
 [ ] Health check returns expected response.
-[ ] Required env vars are documented.
+[ ] Required environment values are documented.
 [ ] Unsafe defaults fail in production/review mode.
 [ ] Local demo mode still works.
-[ ] No secrets or tokens are committed.
+[ ] No sensitive values are committed.
 ```
 
-Out of scope:
+### PR #150 — Production database deployment path and backup/restore validation
 
-- database migration to hosted DB if separated into PR #147
-- real email provider
-- Play Console submission
-
-### 6.7 PR #147 — Production database deployment path and backup/restore validation
-
-Purpose:
-
-Move persistent product state from local SQLite assumptions toward hosted durable DB readiness.
-
-Scope:
-
-- Document chosen database provider.
-- Add production DB connection env contract.
-- Add migration/startup notes for hosted database.
-- Add backup policy and restore drill documentation.
-- Add tests or scripts that verify DB URL/config validation.
-- Preserve local SQLite/dev path if still needed.
+Purpose: move persistent product state from local assumptions toward hosted durable DB readiness.
 
 Acceptance gate:
 
 ```text
-[ ] Hosted DB connection configuration is explicit.
+[ ] Hosted DB configuration is explicit.
 [ ] Production mode refuses unsafe/missing DB config.
 [ ] Migration path is documented.
 [ ] Backup process is documented.
@@ -310,23 +251,11 @@ Acceptance gate:
 [ ] Local dev DB path remains usable.
 ```
 
-Hard rule:
+Hard rule: do not claim production database readiness until restore is documented and tested at least once.
 
-Do not claim “production database ready” until a restore path is documented and tested at least once.
+### PR #151 — Domain, DNS, and HTTPS routing
 
-### 6.8 PR #148 — Domain, DNS, and HTTPS routing
-
-Purpose:
-
-Make public URLs stable and reviewable.
-
-Scope:
-
-- Document DNS records for backend and public pages.
-- Document HTTPS verification steps.
-- Add environment config examples for public URLs.
-- Add validation checklist for privacy/account-deletion URLs.
-- Keep provider temporary URLs separate from final product URLs.
+Purpose: make public URLs stable and reviewable.
 
 Acceptance gate:
 
@@ -339,21 +268,9 @@ Acceptance gate:
 [ ] Temporary provider URLs are clearly marked temporary.
 ```
 
-### 6.9 PR #149 — Public-page real release values
+### PR #152 — Public-page real release values
 
-Purpose:
-
-Replace placeholder policy/account-deletion values with real operator-approved values.
-
-Scope:
-
-- Fill final developer/operator name.
-- Fill support/privacy email.
-- Fill actual backend/provider details.
-- Fill retention windows.
-- Fill account deletion handling language.
-- Run local public page readiness guard.
-- Run deployed URL verifier if pages are hosted.
+Purpose: replace placeholder policy/account-deletion values with real operator-approved values.
 
 Acceptance gate:
 
@@ -367,126 +284,70 @@ Acceptance gate:
 [ ] Legal/privacy review is marked required before external launch.
 ```
 
-Hard rule:
+Hard rule: do not invent legal/operator/privacy values. If values are unknown, keep the PR blocked.
 
-Do not invent legal/operator/privacy values. If values are unknown, keep the PR blocked.
+### PR #153 — Real email provider integration
 
-### 6.10 PR #150 — Real email provider integration
-
-Purpose:
-
-Replace dev-only verification code behavior with a production-capable email verification/resend path.
-
-Scope:
-
-- Add provider abstraction if not already present.
-- Configure production email provider env vars.
-- Keep dev/test provider deterministic.
-- Add resend rate-limit protection if missing.
-- Add audit event for email verification send/resend if appropriate.
-- Add provider failure behavior.
+Purpose: replace dev-only verification behavior with production-capable email verification/resend.
 
 Acceptance gate:
 
 ```text
 [ ] Production mode sends verification email through configured provider.
-[ ] Dev/test mode does not require external email provider.
+[ ] Dev/test mode does not require external provider.
 [ ] Missing provider config fails safely in production mode.
 [ ] Resend cannot be abused without limits.
-[ ] Verification code/token is not logged in production.
+[ ] Verification credential is not exposed in production logs.
 [ ] Backend tests cover success and provider failure paths.
 ```
 
-### 6.11 PR #151 — Production FCM push validation
+### PR #154 — Production push notification validation
 
-Purpose:
-
-Validate mobile push notification path for pending approval visibility.
-
-Scope:
-
-- Document FCM project/app setup.
-- Confirm Android manifest/config expectations.
-- Confirm backend device-token registration path.
-- Add push send smoke documentation.
-- Add failure logging policy without exposing secrets/tokens.
+Purpose: validate mobile push notification path for pending approval visibility.
 
 Acceptance gate:
 
 ```text
-[ ] Device token can be registered from Android.
+[ ] Device registration path works from Android.
 [ ] Backend can trigger a test approval notification.
 [ ] Notification opens or routes user to relevant approval path where possible.
-[ ] Missing/invalid FCM config fails safely.
-[ ] Token privacy/retention is documented.
+[ ] Missing/invalid push config fails safely.
+[ ] Notification identifier privacy/retention is documented.
 ```
 
-### 6.12 PR #152 — Android production backend config and signed AAB smoke evidence
+### PR #155 — Android production backend config and signed AAB smoke evidence
 
-Purpose:
-
-Prove signed Android build can talk to the hosted backend.
-
-Scope:
-
-- Add production/review API base URL build config notes.
-- Run signed AAB workflow with real secrets when available.
-- Capture smoke evidence path.
-- Confirm release build does not point to laptop/localhost.
-- Confirm auth/session/approval flows work against hosted backend.
+Purpose: prove signed Android build can talk to the hosted backend.
 
 Acceptance gate:
 
 ```text
-[ ] Signed AAB artifact is generated.
+[ ] Signed Android artifact is generated.
 [ ] Release/review build points to hosted HTTPS backend.
 [ ] Fresh install auth flow works.
 [ ] Approval list loads from hosted backend.
 [ ] Approve/reject works from physical device.
-[ ] No debug/dev verification secrets are exposed in release build.
+[ ] Debug-only behavior is absent from release build.
 ```
 
-### 6.13 PR #153 — Play Console closed-testing readiness package
+### PR #156 — Play Console closed-testing readiness package
 
-Purpose:
-
-Prepare closed testing honestly, without pretending full public launch readiness.
-
-Scope:
-
-- Add Play closed-test checklist.
-- Add tester instructions.
-- Add known limitations.
-- Add privacy/account deletion/public URL evidence references.
-- Add signed artifact upload notes.
-- Add release notes for testers.
+Purpose: prepare closed testing honestly, without pretending full public launch readiness.
 
 Acceptance gate:
 
 ```text
 [ ] Play listing draft is complete enough for closed test.
 [ ] Public URLs are stable and placeholder-free.
-[ ] Signed AAB is available.
+[ ] Signed Android artifact is available.
 [ ] Tester instructions exist.
 [ ] Known limitations are documented.
 [ ] Data Safety draft is reviewed against actual artifact behavior.
 ```
 
-### 6.14 PR #154 — Phase 1 evidence gate and release decision record
+### PR #157 — Phase 1 evidence gate and release decision record
 
-Purpose:
-
-Create a clear go/no-go record for moving into Phase 2.
-
-Scope:
-
-- Add Phase 1 evidence checklist.
-- Link hosted backend URL evidence.
-- Link database backup/restore evidence.
-- Link public page verifier output.
-- Link signed AAB evidence.
-- Link real-device smoke evidence.
-- Record open blockers honestly.
+Purpose: create a clear go/no-go record for moving into Phase 2.
 
 Acceptance gate:
 
@@ -496,128 +357,24 @@ Acceptance gate:
 [ ] Hosted DB gate passed.
 [ ] Domain/public URL gate passed.
 [ ] Email provider gate passed.
-[ ] FCM gate passed or intentionally deferred.
-[ ] Signed AAB gate passed.
+[ ] Push gate passed or intentionally deferred.
+[ ] Signed build gate passed.
 [ ] Closed-test readiness gate passed.
 [ ] Remaining blockers are documented with owner/action.
 ```
 
 ## 7. Phase 2 — Production hardening roadmap
 
-### 7.1 Objective
-
-Phase 2 turns the Phase 1 hosted system into a safer release candidate.
-
-Phase 2 is not where the product becomes “feature bigger.” It is where the product becomes harder to break, harder to misuse, and easier to audit.
-
-### 7.2 Planned Phase 2 PRs
-
 | Planned PR | Scope | Why it matters |
 |---:|---|---|
-| #155 | Secrets/session/rate-limit hardening | Prevent obvious auth/session abuse |
-| #156 | Retention, anonymization, and account deletion executor | Convert policy docs into actual lifecycle behavior |
-| #157 | Agent/MCP/connector policy guardrail hardening | Reduce risk of dangerous mutations slipping through |
-| #158 | Database migration rollback and restore drill | Prove recoverability, not just migration forward path |
-| #159 | Observability and error telemetry without PII leakage | Debug production safely |
-| #160 | Android offline/session-expiry/retry polish | Improve real-world mobile reliability |
-| #161 | Release candidate evidence bundle | Centralize proof for reviewers/recruiters/users |
-| #162 | v1.0 release candidate tag and launch decision | Freeze a defensible release state |
-
-### 7.3 PR #155 — Secrets/session/rate-limit hardening
-
-Acceptance gate:
-
-```text
-[ ] Production secrets are documented and not committed.
-[ ] Session expiry and revocation are tested.
-[ ] Login/register/verification resend rate limits exist or are documented as blockers.
-[ ] Unsafe debug behavior is blocked in production mode.
-[ ] Security-sensitive logs avoid tokens/passwords/codes.
-```
-
-### 7.4 PR #156 — Retention, anonymization, and account deletion executor
-
-Acceptance gate:
-
-```text
-[ ] Account deletion request lifecycle is explicit.
-[ ] User-facing deletion request status is auditable.
-[ ] Retained audit/security data is justified.
-[ ] Anonymization/deletion behavior is implemented or deliberately queued.
-[ ] Retention policy matches public pages.
-```
-
-### 7.5 PR #157 — Agent/MCP/connector guardrail hardening
-
-Acceptance gate:
-
-```text
-[ ] Mutating tool calls remain approval-gated.
-[ ] Read-only calls cannot secretly mutate state.
-[ ] High-risk operations carry risk labels.
-[ ] Approval payload hash/integrity behavior remains enforced.
-[ ] Rejected/expired approvals cannot execute later.
-```
-
-### 7.6 PR #158 — Migration rollback and restore drill
-
-Acceptance gate:
-
-```text
-[ ] Migration forward path is tested.
-[ ] Unknown newer DB version fails safely.
-[ ] Backup procedure exists.
-[ ] Restore procedure is tested in a non-production environment.
-[ ] Failure playbook exists.
-```
-
-### 7.7 PR #159 — Observability without PII leakage
-
-Acceptance gate:
-
-```text
-[ ] Health/readiness endpoints are clear.
-[ ] Error logging policy exists.
-[ ] Sensitive fields are redacted.
-[ ] Operational events are useful for debugging.
-[ ] No tokens, verification codes, passwords, or secrets appear in logs.
-```
-
-### 7.8 PR #160 — Android offline/session-expiry/retry polish
-
-Acceptance gate:
-
-```text
-[ ] Offline state is understandable.
-[ ] Expired session routes user back to auth.
-[ ] Retry actions are consistent.
-[ ] Approval actions cannot appear successful if backend failed.
-[ ] App restart preserves/clears state correctly.
-```
-
-### 7.9 PR #161 — Release candidate evidence bundle
-
-Acceptance gate:
-
-```text
-[ ] Evidence bundle links validation docs.
-[ ] Evidence bundle links release smoke results.
-[ ] Evidence bundle links privacy/public URL checks.
-[ ] Evidence bundle links security/hardening decisions.
-[ ] Known limitations are explicit.
-```
-
-### 7.10 PR #162 — v1.0 release candidate tag and launch decision
-
-Acceptance gate:
-
-```text
-[ ] Release candidate tag is documented.
-[ ] Go/no-go decision is recorded.
-[ ] Open risks are accepted or blocked.
-[ ] Rollback path is documented.
-[ ] Next post-release roadmap is separated from launch blockers.
-```
+| #158 | Session/rate-limit hardening | Prevent obvious auth/session abuse |
+| #159 | Retention, anonymization, and account deletion executor | Convert policy docs into lifecycle behavior |
+| #160 | Agent/MCP/connector policy guardrail hardening | Reduce mutation risk |
+| #161 | Database migration rollback and restore drill | Prove recoverability |
+| #162 | Observability and error telemetry without PII leakage | Debug production safely |
+| #163 | Android offline/session-expiry/retry polish | Improve mobile reliability |
+| #164 | Release candidate evidence bundle | Centralize proof |
+| #165 | v1.0 release candidate tag and launch decision | Freeze a defensible release state |
 
 ## 8. Execution discipline for every future PR
 
@@ -677,12 +434,12 @@ python scripts/validate_public_pages_ready.py
 python scripts/verify_public_page_urls.py --privacy-url <url> --account-deletion-url <url>
 ```
 
-Signed AAB validation when relevant:
+Signed Android artifact validation when relevant:
 
 ```text
-Run manual signed AAB GitHub Actions workflow with real signing secrets configured.
+Run manual signed Android artifact workflow with real release configuration.
 Download artifact.
-Install/test through intended review/closed-test path.
+Install/test through intended review or closed-test path.
 ```
 
 ## 10. Release claim policy
@@ -722,7 +479,7 @@ Domain:
 Buy only when public URL plan is final.
 
 Backend hosting:
-Start only when deployment env contract is ready.
+Start only when deployment environment contract is ready.
 
 Hosted database:
 Start only when DB connection, migration, backup, and restore expectations are clear.
@@ -731,7 +488,7 @@ Email provider:
 Start only when verification provider abstraction/config path is ready.
 
 Play Console:
-Use only when signed AAB, public pages, privacy/data safety, and tester plan are close enough for closed testing.
+Use only when signed artifact, public pages, privacy/data safety, and tester plan are close enough for closed testing.
 ```
 
 ## 12. Definition of done by phase
@@ -751,13 +508,17 @@ A signed Android build can connect to a hosted HTTPS backend backed by durable D
 ### Phase 2 done
 
 ```text
-The hosted product has evidence-backed hardening for secrets, sessions, retention, audit, DB recovery, observability, mobile reliability, and release candidate decision-making.
+The hosted product has evidence-backed hardening for sessions, retention, audit, DB recovery, observability, mobile reliability, and release candidate decision-making.
 ```
 
 ## 13. Hard truth checkpoint
 
-The repo has moved fast. That is good, but speed creates a dangerous illusion: lots of merged PRs can look like production readiness even when paid infra, real hosted DB, real email, real public URLs, and real-device evidence are missing.
+The repo has moved fast. That is good, but speed creates a dangerous illusion: lots of merged PRs can look like production readiness even when paid infrastructure, real hosted DB, real email, real public URLs, and real-device evidence are missing.
 
 This bible exists to prevent that mistake.
 
-The next correct move is not random feature work. The next correct move is to follow the roadmap from PR #146 onward and close the paid-infra gap honestly.
+The next correct move after PR #148 is not random feature work. The next correct move is:
+
+```text
+PR #149 — Deploy hosted backend review environment
+```
