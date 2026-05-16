@@ -87,11 +87,11 @@ fun ConnectorsContent(
             ConnectorsHero(state = state)
             if (state.notice.isNotBlank()) {
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(state.notice, color = RiskLow, fontSize = 13.sp)
+                Text(state.notice, color = RiskLow, fontSize = 13.sp, lineHeight = 18.sp)
             }
             if (state.error.isNotBlank()) {
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(state.error, color = RiskBlocked, fontSize = 13.sp)
+                Text(state.error, color = RiskBlocked, fontSize = 13.sp, lineHeight = 18.sp)
             }
             if (state.lastSecret.isNotBlank()) {
                 OneTimeCredentialPanel(
@@ -102,9 +102,11 @@ fun ConnectorsContent(
             }
             if (state.preview.isNotBlank()) {
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(state.preview, color = TowerTextMuted, fontSize = 12.sp)
+                Text(state.preview, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
             }
         }
+
+        item { FirstTimeConnectorGuide() }
 
         item {
             TemplatePanel(
@@ -118,8 +120,27 @@ fun ConnectorsContent(
         item {
             TowerSectionHeader(
                 title = "Configured Connectors",
-                subtitle = "Webhook agents, credentials, setup blocks, and schema mappers stay controlled here."
+                subtitle = if (state.connectors.isEmpty()) {
+                    "No connector is configured yet. Pick ChatGPT, Codex, Claude/Cursor, Gemini, or Local Bridge from templates first."
+                } else {
+                    "Webhook agents, credentials, setup blocks, and schema mappers stay controlled here."
+                }
             )
+        }
+
+        if (!state.loading && state.connectors.isEmpty()) {
+            item {
+                TowerPanel(elevated = true) {
+                    Text("No connector configured yet", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(
+                        "Start with ChatGPT Actions Bridge or Codex Agent Bridge. Create the connector, issue a credential, then copy the setup block into the external agent.",
+                        color = TowerTextMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
+                    )
+                }
+            }
         }
 
         items(state.connectors) { connector ->
@@ -153,7 +174,7 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
                 Text("Connectors", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = if (state.loading) "Loading connector console..." else "Bring-your-own-agent control from phone.",
+                    text = if (state.loading) "Loading connector console..." else "Connect ChatGPT, Codex, Claude, Gemini, local bridges, and custom agents without letting them bypass mobile approval.",
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
@@ -162,10 +183,22 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
             ForgedLogoMark(size = 52.dp, color = TowerTextPrimary.copy(alpha = 0.78f))
         }
         Spacer(modifier = Modifier.height(TowerSpacing.lg))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = "CONNECTORS ${state.connectors.size}", color = TowerAccent)
             StatusBadge(label = "TEMPLATES ${state.templates.size}", color = RiskMedium)
         }
+    }
+}
+
+@Composable
+private fun FirstTimeConnectorGuide() {
+    TowerPanel(elevated = true) {
+        Text("First-time setup", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text("1. Pick a template such as ChatGPT Actions Bridge or Codex Agent Bridge.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("2. Create the connector from the selected template.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("3. Issue a credential and copy the setup block into the external agent.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("4. Keep approvals on the phone. External agents submit work; they do not approve it.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
     }
 }
 
@@ -178,11 +211,11 @@ private fun OneTimeCredentialPanel(
     TowerPanel(modifier = Modifier.padding(top = 10.dp), elevated = true) {
         Text("One-time connector credential", color = TowerTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Copy this now. Hide it after storing it in the external agent config.", color = RiskMedium, fontSize = 12.sp)
-        Text(secret, color = TowerTextMuted, fontSize = 12.sp)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = onCopy, modifier = Modifier.weight(1f)) { Text("Copy credential") }
-            OutlinedButton(onClick = onHide, modifier = Modifier.weight(1f)) { Text("Hide") }
+        Text("Copy this now. Hide it after storing it in the external agent config.", color = RiskMedium, fontSize = 12.sp, lineHeight = 17.sp)
+        Text(secret, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = onCopy, modifier = Modifier.fillMaxWidth()) { Text("Copy credential") }
+            OutlinedButton(onClick = onHide, modifier = Modifier.fillMaxWidth()) { Text("Hide") }
         }
     }
 }
@@ -202,13 +235,17 @@ private fun TemplatePanel(
         templates.forEach { template ->
             val selected = template.id == selectedTemplateId
             OutlinedButton(onClick = { onTemplateSelected(template.id) }, modifier = Modifier.fillMaxWidth()) {
-                Text(if (selected) "✓ ${template.display_name}" else template.display_name)
+                Text(if (selected) "✓ ${template.display_name}" else template.display_name, lineHeight = 18.sp)
             }
             if (selected) {
-                Text(template.description, color = TowerTextMuted, fontSize = 12.sp)
+                Text(template.description, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
                 if (template.setup_notes.isNotEmpty()) {
-                    Text("Notes: ${template.setup_notes.joinToString(" • ")}", color = TowerTextMuted, fontSize = 12.sp)
+                    Text("Notes:", color = TowerTextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    template.setup_notes.forEach { note ->
+                        Text("• $note", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+                    }
                 }
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
             }
         }
         Button(onClick = onCreate, enabled = templates.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
@@ -231,16 +268,10 @@ private fun ConnectorCard(
     onPreviewMapper: () -> Unit
 ) {
     TowerPanel(elevated = true) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(connector.name, color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("${connector.provider_label} • ${connector.connector_type} • ${connector.auth_type}", color = TowerTextMuted, fontSize = 12.sp)
-            }
+        Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
+            Text(connector.name, color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 23.sp)
+            Text("${connector.provider_label} • ${connector.connector_type} • ${connector.auth_type}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
             StatusBadge(connector.status, if (connector.status == "ENABLED") RiskLow else RiskBlocked)
-        }
-
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(connector.health_status, if (connector.health_status == "HEALTHY") RiskLow else RiskMedium)
             StatusBadge(if (connector.secret_configured) "Credential set" else "No credential", if (connector.secret_configured) RiskLow else RiskBlocked)
             StatusBadge("Failures ${connector.failed_auth_count}", if (connector.failed_auth_count == 0) RiskLow else RiskBlocked)
@@ -248,41 +279,39 @@ private fun ConnectorCard(
 
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text("Webhook", color = TowerTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text(webhookUrl, color = TowerTextMuted, fontSize = 12.sp)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = onCopyWebhook, modifier = Modifier.weight(1f)) { Text("Copy webhook") }
-            OutlinedButton(onClick = onCopySetup, modifier = Modifier.weight(1f)) { Text("Copy setup") }
+        Text(webhookUrl, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = onCopyWebhook, modifier = Modifier.fillMaxWidth()) { Text("Copy webhook") }
+            OutlinedButton(onClick = onCopySetup, modifier = Modifier.fillMaxWidth()) { Text("Copy setup block") }
         }
 
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Actions: ${connector.allowed_actions.joinToString()}", color = TowerTextMuted, fontSize = 12.sp)
-        Text("Repos: ${connector.allowed_repositories.joinToString().ifBlank { "wildcard" }}", color = TowerTextMuted, fontSize = 12.sp)
-        Text("Last used: ${connector.last_used_at ?: "never"}", color = TowerTextMuted, fontSize = 12.sp)
+        Text("Actions: ${connector.allowed_actions.joinToString()}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        Text("Repos: ${connector.allowed_repositories.joinToString().ifBlank { "wildcard" }}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        Text("Last used: ${connector.last_used_at ?: "never"}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
         if (!connector.last_error.isNullOrBlank()) {
-            Text("Last error: ${connector.last_error}", color = RiskBlocked, fontSize = 12.sp)
+            Text("Last error: ${connector.last_error}", color = RiskBlocked, fontSize = 12.sp, lineHeight = 17.sp)
         }
         if (selectedTemplate != null) {
-            Text("Selected setup preset: ${selectedTemplate.display_name}", color = TowerTextMuted, fontSize = 12.sp)
+            Text("Selected setup preset: ${selectedTemplate.display_name}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = onToggle, modifier = Modifier.weight(1f)) {
-                Text(if (connector.status == "ENABLED") "Disable" else "Enable")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
+                Text(if (connector.status == "ENABLED") "Disable connector" else "Enable connector")
             }
-            OutlinedButton(onClick = onIssueSecret, modifier = Modifier.weight(1f)) {
+            OutlinedButton(onClick = onIssueSecret, modifier = Modifier.fillMaxWidth()) {
                 Text(if (connector.secret_configured) "Rotate credential" else "Issue credential")
             }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(onClick = onRevokeSecret, enabled = connector.secret_configured, modifier = Modifier.weight(1f)) {
+            OutlinedButton(onClick = onRevokeSecret, enabled = connector.secret_configured, modifier = Modifier.fillMaxWidth()) {
                 Text("Revoke credential")
             }
-            OutlinedButton(onClick = onApplyMapper, enabled = selectedTemplate != null, modifier = Modifier.weight(1f)) {
-                Text("Apply mapper")
+            OutlinedButton(onClick = onApplyMapper, enabled = selectedTemplate != null, modifier = Modifier.fillMaxWidth()) {
+                Text("Apply selected mapper")
             }
-        }
-        OutlinedButton(onClick = onPreviewMapper, enabled = selectedTemplate != null, modifier = Modifier.fillMaxWidth()) {
-            Text("Test selected template payload")
+            OutlinedButton(onClick = onPreviewMapper, enabled = selectedTemplate != null, modifier = Modifier.fillMaxWidth()) {
+                Text("Test selected template payload")
+            }
         }
     }
 }
