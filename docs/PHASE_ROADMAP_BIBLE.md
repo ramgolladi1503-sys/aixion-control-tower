@@ -41,20 +41,26 @@ Core guarantee:
    - MCP, agent, and connector mutation paths must stay gated.
    - Privileged or write actions must never bypass the approval lifecycle.
 
-## 3. Current baseline and numbering correction
+## 3. Current baseline and Phase 0 lock
 
 Latest verified roadmap-control baseline:
 
 ```text
 PR #147 — Add Phase Roadmap Product Scope Bible
-Merge commit: 331ffaa44d2ee12f68d89946148d5eaf692387a5
+PR #148 — Correct phase roadmap bible numbering
 ```
 
 Correction:
 
 Earlier planning mapped Phase 1 to PR #137–#144, but actual PR #137–#144 mostly covered public pages, signing scaffolds, Play Store copy, and URL verification. Useful work, but not the originally intended paid production infrastructure.
 
-PR #147 added this bible. PR #148 corrects the numbering mismatch. Missing Phase 1 infrastructure starts after PR #148.
+Decision after PR #148:
+
+```text
+Do not enter paid Phase 1 until Phase 0 is fully proven with real-device LAN evidence.
+PR #149 is reserved for Phase 0 LAN completion gate and evidence template.
+Phase 1 hosted backend work starts after Phase 0 evidence is accepted.
+```
 
 ## 4. Phase model
 
@@ -96,6 +102,12 @@ Network:
 - phone can reach backend over http://<laptop-lan-ip>:<port>
 ```
 
+Detailed gate:
+
+```text
+docs/PHASE0_LAN_COMPLETION_GATE.md
+```
+
 ### Phase 0 user journey
 
 1. User opens Android app.
@@ -126,10 +138,11 @@ Network:
 | #134 | Merged | Privacy policy/data safety drafts and account deletion backend foundation |
 | #135 | Merged | Android privacy and account removal controls |
 | #136 | Merged | Public privacy and account deletion pages |
+| #149 | Planned | Phase 0 LAN completion gate and evidence template |
 
 ### Phase 0 completion gate
 
-Phase 0 is not complete merely because PRs are merged. It is complete only when this real-device gate passes:
+Phase 0 is not complete merely because PRs are merged. It is complete only when this real-device gate passes and evidence is recorded:
 
 ```text
 [ ] Backend starts on laptop and binds to LAN-reachable host/port.
@@ -207,21 +220,21 @@ Do not submit Play Console public URLs until they are stable and placeholder-fre
 
 ### Phase 1 continuation roadmap
 
+Phase 1 starts only after Phase 0 LAN completion evidence is accepted.
+
 | Planned PR | Scope | Phase | Spend gate |
 |---:|---|---|---|
-| #147 | Add Phase Roadmap & Product Scope Bible | Phase 1 control | No spend |
-| #148 | Correct roadmap bible numbering after merge | Phase 1 control | No spend |
-| #149 | Deploy hosted backend review environment | Phase 1 | Backend hosting may start |
-| #150 | Add production database deployment path and backup/restore validation | Phase 1 | Hosted DB may start |
-| #151 | Wire domain/DNS/HTTPS routing documentation and env config | Phase 1 | Domain/DNS spend may start |
-| #152 | Replace public-page placeholders with real release values | Phase 1 | Requires real operator/support/legal inputs |
-| #153 | Integrate real email verification provider | Phase 1 | Email provider may start |
-| #154 | Configure and validate production push notification path | Phase 1 | Usually no direct spend |
-| #155 | Android production backend config and signed AAB smoke evidence | Phase 1 | Depends on signing config and hosted backend |
-| #156 | Play Console closed-testing readiness package | Phase 1 | Play developer account required |
-| #157 | Phase 1 evidence gate and release decision record | Phase 1 | No new spend, validates all spend |
+| #150 | Deploy hosted backend review environment | Phase 1 | Backend hosting may start |
+| #151 | Add production database deployment path and backup/restore validation | Phase 1 | Hosted DB may start |
+| #152 | Wire domain/DNS/HTTPS routing documentation and env config | Phase 1 | Domain/DNS spend may start |
+| #153 | Replace public-page placeholders with real release values | Phase 1 | Requires real operator/support/legal inputs |
+| #154 | Integrate real email verification provider | Phase 1 | Email provider may start |
+| #155 | Configure and validate production push notification path | Phase 1 | Usually no direct spend |
+| #156 | Android production backend config and signed AAB smoke evidence | Phase 1 | Depends on signing config and hosted backend |
+| #157 | Play Console closed-testing readiness package | Phase 1 | Play developer account required |
+| #158 | Phase 1 evidence gate and release decision record | Phase 1 | No new spend, validates all spend |
 
-### PR #149 — Deploy hosted backend review environment
+### PR #150 — Deploy hosted backend review environment
 
 Purpose: move backend from laptop-only to public HTTPS review environment.
 
@@ -236,7 +249,7 @@ Acceptance gate:
 [ ] No sensitive values are committed.
 ```
 
-### PR #150 — Production database deployment path and backup/restore validation
+### PR #151 — Production database deployment path and backup/restore validation
 
 Purpose: move persistent product state from local assumptions toward hosted durable DB readiness.
 
@@ -253,7 +266,7 @@ Acceptance gate:
 
 Hard rule: do not claim production database readiness until restore is documented and tested at least once.
 
-### PR #151 — Domain, DNS, and HTTPS routing
+### PR #152 — Domain, DNS, and HTTPS routing
 
 Purpose: make public URLs stable and reviewable.
 
@@ -268,7 +281,7 @@ Acceptance gate:
 [ ] Temporary provider URLs are clearly marked temporary.
 ```
 
-### PR #152 — Public-page real release values
+### PR #153 — Public-page real release values
 
 Purpose: replace placeholder policy/account-deletion values with real operator-approved values.
 
@@ -286,7 +299,7 @@ Acceptance gate:
 
 Hard rule: do not invent legal/operator/privacy values. If values are unknown, keep the PR blocked.
 
-### PR #153 — Real email provider integration
+### PR #154 — Real email provider integration
 
 Purpose: replace dev-only verification behavior with production-capable email verification/resend.
 
@@ -301,7 +314,7 @@ Acceptance gate:
 [ ] Backend tests cover success and provider failure paths.
 ```
 
-### PR #154 — Production push notification validation
+### PR #155 — Production push notification validation
 
 Purpose: validate mobile push notification path for pending approval visibility.
 
@@ -315,7 +328,7 @@ Acceptance gate:
 [ ] Notification identifier privacy/retention is documented.
 ```
 
-### PR #155 — Android production backend config and signed AAB smoke evidence
+### PR #156 — Android production backend config and signed AAB smoke evidence
 
 Purpose: prove signed Android build can talk to the hosted backend.
 
@@ -330,7 +343,7 @@ Acceptance gate:
 [ ] Debug-only behavior is absent from release build.
 ```
 
-### PR #156 — Play Console closed-testing readiness package
+### PR #157 — Play Console closed-testing readiness package
 
 Purpose: prepare closed testing honestly, without pretending full public launch readiness.
 
@@ -345,7 +358,7 @@ Acceptance gate:
 [ ] Data Safety draft is reviewed against actual artifact behavior.
 ```
 
-### PR #157 — Phase 1 evidence gate and release decision record
+### PR #158 — Phase 1 evidence gate and release decision record
 
 Purpose: create a clear go/no-go record for moving into Phase 2.
 
@@ -367,14 +380,14 @@ Acceptance gate:
 
 | Planned PR | Scope | Why it matters |
 |---:|---|---|
-| #158 | Session/rate-limit hardening | Prevent obvious auth/session abuse |
-| #159 | Retention, anonymization, and account deletion executor | Convert policy docs into lifecycle behavior |
-| #160 | Agent/MCP/connector policy guardrail hardening | Reduce mutation risk |
-| #161 | Database migration rollback and restore drill | Prove recoverability |
-| #162 | Observability and error telemetry without PII leakage | Debug production safely |
-| #163 | Android offline/session-expiry/retry polish | Improve mobile reliability |
-| #164 | Release candidate evidence bundle | Centralize proof |
-| #165 | v1.0 release candidate tag and launch decision | Freeze a defensible release state |
+| #159 | Session/rate-limit hardening | Prevent obvious auth/session abuse |
+| #160 | Retention, anonymization, and account deletion executor | Convert policy docs into lifecycle behavior |
+| #161 | Agent/MCP/connector policy guardrail hardening | Reduce mutation risk |
+| #162 | Database migration rollback and restore drill | Prove recoverability |
+| #163 | Observability and error telemetry without PII leakage | Debug production safely |
+| #164 | Android offline/session-expiry/retry polish | Improve mobile reliability |
+| #165 | Release candidate evidence bundle | Centralize proof |
+| #166 | v1.0 release candidate tag and launch decision | Freeze a defensible release state |
 
 ## 8. Execution discipline for every future PR
 
@@ -517,8 +530,8 @@ The repo has moved fast. That is good, but speed creates a dangerous illusion: l
 
 This bible exists to prevent that mistake.
 
-The next correct move after PR #148 is not random feature work. The next correct move is:
+The next correct move after PR #149 is not paid hosting. The next correct move is to execute and record Phase 0 LAN evidence. Only after that should Phase 1 begin with:
 
 ```text
-PR #149 — Deploy hosted backend review environment
+PR #150 — Deploy hosted backend review environment
 ```
