@@ -1,6 +1,9 @@
 package com.aixion.controltower.data.repository
 
 import com.aixion.controltower.core.api.ControlTowerApi
+import com.aixion.controltower.core.api.dto.AccountDeletionInfoDto
+import com.aixion.controltower.core.api.dto.AccountDeletionRequestDto
+import com.aixion.controltower.core.api.dto.AccountDeletionResponseDto
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.AuthResponseDto
@@ -51,6 +54,14 @@ open class BaseFakeControlTowerApi : ControlTowerApi {
     override suspend fun resendVerification(payload: ResendVerificationRequestDto): RegistrationResponseDto = unsupported()
     override suspend fun login(payload: LoginRequestDto): AuthResponseDto = unsupported()
     override suspend fun me(): AuthUserDto = unsupported()
+    override suspend fun accountDeletionInfo(): AccountDeletionInfoDto = AccountDeletionInfoDto(
+        app = "Aixion Control Tower",
+        status = "available",
+        authenticated_request_endpoint = "/auth/account-deletion-request",
+        public_deletion_url_status = "TODO",
+        retention_note = "Audit/security records may be retained or anonymized."
+    )
+    override suspend fun requestAccountDeletion(payload: AccountDeletionRequestDto): AccountDeletionResponseDto = unsupported()
     override suspend fun listRoleChoices(): RoleChoicesDto = RoleChoicesDto()
     override suspend fun listUsers(): List<AuthUserDto> = emptyList()
     override suspend fun updateUserRole(userId: String, payload: RoleUpdateRequestDto): AuthUserDto = unsupported()
