@@ -54,9 +54,10 @@ fun CommandChatScreen(viewModel: CommandChatViewModel = viewModel()) {
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Turn raw ideas into controlled work orders.",
+                text = "Turn a rough instruction into a controlled work package. Command prepares work; it does not approve or execute it by itself.",
                 color = TowerTextMuted,
-                fontSize = 14.sp
+                fontSize = 14.sp,
+                lineHeight = 20.sp
             )
         }
 
@@ -77,6 +78,12 @@ fun CommandChatScreen(viewModel: CommandChatViewModel = viewModel()) {
                     }
                 }
             }
+            Text(
+                text = "Next step after creation: review the Work Orders screen, then route sensitive work through Approval before execution.",
+                color = TowerTextMuted,
+                fontSize = 12.sp,
+                lineHeight = 17.sp
+            )
         }
 
         OutlinedTextField(
@@ -84,13 +91,13 @@ fun CommandChatScreen(viewModel: CommandChatViewModel = viewModel()) {
             onValueChange = { command = it },
             modifier = Modifier.fillMaxWidth(),
             minLines = 7,
-            label = { Text("What should the agent prepare?") },
-            placeholder = { Text("Example: Improve Tradebot stale feed handling and prepare a safe work order with tests and rollback plan.") }
+            label = { Text("What work should be prepared?") },
+            placeholder = { Text("Example: Improve Tradebot stale feed handling and prepare a safe work package with tests and rollback plan.") }
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            StatusBadge("Generate Work Order", TowerAccent)
-            StatusBadge("Ask Safer Version", RiskMedium)
+            StatusBadge("Creates Work Order", TowerAccent)
+            StatusBadge("Approval comes later", RiskMedium)
         }
 
         Button(
@@ -98,7 +105,7 @@ fun CommandChatScreen(viewModel: CommandChatViewModel = viewModel()) {
             modifier = Modifier.fillMaxWidth(),
             enabled = command.isNotBlank() && !state.loading
         ) {
-            Text(if (state.loading) "Creating..." else "Create Controlled Work Order")
+            Text(if (state.loading) "Creating..." else "Create Work Order")
         }
 
         state.message?.let { message ->
@@ -117,6 +124,7 @@ fun CommandChatScreen(viewModel: CommandChatViewModel = viewModel()) {
                     RiskBadge(workOrder.risk)
                     StatusBadge(workOrder.projectName, TowerAccent)
                 }
+                Text("Work Order created", color = TowerTextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                 Text(workOrder.goal, color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Text("Tasks", color = TowerTextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                 workOrder.tasks.forEach { task ->
@@ -126,6 +134,12 @@ fun CommandChatScreen(viewModel: CommandChatViewModel = viewModel()) {
                 workOrder.requiredTests.forEach { test ->
                     Text("• $test", color = TowerTextPrimary, fontSize = 13.sp)
                 }
+                Text(
+                    text = "This is a prepared work package. Approval and GitHub execution are separate steps.",
+                    color = TowerTextMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
             }
         }
     }
