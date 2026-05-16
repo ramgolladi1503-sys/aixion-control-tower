@@ -14,8 +14,11 @@ import kotlinx.coroutines.launch
 
 data class WorkOrdersUiState(
     val loading: Boolean = true,
-    val workOrders: List<WorkOrderSummary> = emptyList()
-)
+    val workOrders: List<WorkOrderSummary> = emptyList(),
+    val errorMessage: String? = null
+) {
+    val hasError: Boolean = errorMessage != null
+}
 
 class WorkOrdersViewModel(application: Application) : AndroidViewModel(application) {
     private val api = ApiClient.create(application.applicationContext)
@@ -31,12 +34,22 @@ class WorkOrdersViewModel(application: Application) : AndroidViewModel(applicati
 
     fun refresh() {
         viewModelScope.launch {
-            val projects = projectRepository.listProjects()
-            val projectNames = projects.associate { it.id to it.name }
-            _state.value = WorkOrdersUiState(
-                loading = false,
-                workOrders = workOrderRepository.listWorkOrders(projectNames)
-            )
+            _state.value = _state.value.copy(loading = true, errorMessage = null)
+            runCatching {
+                val projects = projectRepository.listProjects()
+                val projectNames = projects.associate { it.id to it.name }
+                workOrderRepository.listWorkOrders(projectNames)
+            }.onSuccess { workOrders ->
+                _state.value = WorkOrdersUiState(
+                    loading = false,
+                    workOrders = workOrders
+                )
+            }.onFailure { error ->
+                _state.value = WorkOrdersUiState(
+                    loading = false,
+                    errorMessage = "Backend work-order sync failed. No mock work orders shown. ${error.message ?: "Retry when the backend is reachable."}"
+                )
+            }
         }
     }
 }

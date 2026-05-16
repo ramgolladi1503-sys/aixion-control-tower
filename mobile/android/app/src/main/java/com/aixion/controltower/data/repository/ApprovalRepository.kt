@@ -4,16 +4,11 @@ import com.aixion.controltower.core.api.ControlTowerApi
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.model.ApprovalSummary
-import com.aixion.controltower.data.mock.MockData
 
 class ApprovalRepository(private val api: ControlTowerApi) {
     suspend fun listApprovals(projectNamesById: Map<String, String> = emptyMap()): List<ApprovalSummary> {
-        return runCatching {
-            api.listApprovals().map { dto ->
-                dto.toUiSummary(projectNamesById[dto.project_id] ?: "Project")
-            }
-        }.getOrElse {
-            MockData.approvals
+        return api.listApprovals().map { dto ->
+            dto.toUiSummary(projectNamesById[dto.project_id] ?: "Project")
         }
     }
 
