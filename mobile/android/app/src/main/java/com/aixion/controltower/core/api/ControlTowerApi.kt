@@ -1,5 +1,8 @@
 package com.aixion.controltower.core.api
 
+import com.aixion.controltower.core.api.dto.AccountDeletionInfoDto
+import com.aixion.controltower.core.api.dto.AccountDeletionRequestDto
+import com.aixion.controltower.core.api.dto.AccountDeletionResponseDto
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.AuthResponseDto
@@ -68,6 +71,12 @@ interface ControlTowerApi {
 
     @GET("auth/me")
     suspend fun me(): AuthUserDto
+
+    @GET("auth/account-deletion-info")
+    suspend fun accountDeletionInfo(): AccountDeletionInfoDto
+
+    @POST("auth/account-deletion-request")
+    suspend fun requestAccountDeletion(@Body payload: AccountDeletionRequestDto): AccountDeletionResponseDto
 
     @GET("auth/roles")
     suspend fun listRoleChoices(): RoleChoicesDto
