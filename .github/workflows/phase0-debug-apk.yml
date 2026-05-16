@@ -1,0 +1,76 @@
+name: Phase 0 Debug APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: "Backend base URL for the APK. Use laptop LAN URL, ending with /. Example: http://192.168.1.25:8000/"
+        required: true
+        default: "http://192.168.1.25:8000/"
+      artifact_name:
+        description: "APK artifact name"
+        required: true
+        default: "aixion-phase0-debug-apk"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: mobile/android
+
+jobs:
+  build-debug-apk:
+    name: Build Phase 0 debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Validate API base URL
+        shell: bash
+        run: |
+          API_BASE_URL="${{ github.event.inputs.api_base_url }}"
+          if [[ -z "$API_BASE_URL" ]]; then
+            echo "api_base_url is required" >&2
+            exit 1
+          fi
+          if [[ "$API_BASE_URL" != http://* && "$API_BASE_URL" != https://* ]]; then
+            echo "api_base_url must start with http:// or https://" >&2
+            exit 1
+          fi
+          if [[ "$API_BASE_URL" != */ ]]; then
+            echo "api_base_url must end with / because Retrofit requires a trailing slash" >&2
+            exit 1
+          fi
+          if [[ "$API_BASE_URL" == *"localhost"* || "$API_BASE_URL" == *"127.0.0.1"* || "$API_BASE_URL" == *"10.0.2.2"* ]]; then
+            echo "For Phase 0 phone testing, use the laptop LAN IP, not localhost/127.0.0.1/10.0.2.2" >&2
+            exit 1
+          fi
+
+      - name: Run Android unit tests
+        run: ./gradlew testDebugUnitTest
+
+      - name: Build debug APK for Phase 0 LAN test
+        run: ./gradlew assembleDebug -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url }}
+
+      - name: List APK outputs
+        run: find app/build/outputs/apk/debug -type f -name "*.apk" -maxdepth 2 -print
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name }}
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
