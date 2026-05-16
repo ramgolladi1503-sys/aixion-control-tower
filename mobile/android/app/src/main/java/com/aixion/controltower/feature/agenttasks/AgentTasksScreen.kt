@@ -119,7 +119,7 @@ fun AgentTasksScreen(
                         text = if (state.errorMessage == null) {
                             "No connected-agent work yet. Create a connector, send a task through ChatGPT/Codex, or use the backend AgentTask API."
                         } else {
-                            "Agent task list unavailable. Fix backend/auth connectivity before trusting this screen."
+                            "Agent work list unavailable. Fix backend/auth connectivity before trusting this screen."
                         },
                         color = TowerTextMuted,
                         fontSize = 15.sp,
@@ -127,7 +127,7 @@ fun AgentTasksScreen(
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
-                        text = "A connector is the doorway. An Agent Task is the submitted work item. An Approval is the decision gate.",
+                        text = "A connector is the doorway. Agent Work is the submitted work item. An Approval is the decision gate.",
                         color = TowerTextMuted,
                         fontSize = 13.sp,
                         lineHeight = 19.sp
@@ -164,10 +164,10 @@ private fun AgentTasksHero(
             verticalAlignment = Alignment.Top
         ) {
             Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = if (loading) "SYNCING" else "CONNECTED AGENTS", color = if (loading) RiskMedium else RiskLow)
+                StatusBadge(label = if (loading) "SYNCING" else "CONNECTED WORK", color = if (loading) RiskMedium else RiskLow)
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
-                    text = "Agent Tasks",
+                    text = "Agent Work",
                     color = TowerTextPrimary,
                     fontSize = 28.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -210,7 +210,7 @@ private fun AgentTaskSummaryCard(total: Int, active: Int, waiting: Int) {
         }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text(
-            text = "Agent Tasks are submitted work items. They can become approval requests, execution runs, pull-request evidence, failures, or completed records.",
+            text = "Agent Work items are submitted by connected agents. They can become approval requests, execution runs, pull-request evidence, failures, or completed records.",
             color = TowerTextMuted,
             fontSize = 13.sp,
             lineHeight = 19.sp

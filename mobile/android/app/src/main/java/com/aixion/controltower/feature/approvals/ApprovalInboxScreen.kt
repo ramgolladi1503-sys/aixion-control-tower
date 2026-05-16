@@ -67,16 +67,30 @@ fun ApprovalInboxContent(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text("Approval Inbox", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Text("Approvals", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
             Text(
                 text = when {
-                    state.loading -> "Loading approvals..."
+                    state.loading -> "Loading approval decisions..."
                     state.hasError -> "Backend approval sync failed. No mock approvals are shown."
-                    else -> "Review agent requests before code moves."
+                    else -> "Allow, deny, or request revision before connected-agent work continues."
                 },
                 color = TowerTextMuted,
-                fontSize = 14.sp
+                fontSize = 14.sp,
+                lineHeight = 20.sp
             )
+        }
+
+        item {
+            TowerPanel(elevated = true) {
+                Text("Decision gate", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                Text(
+                    text = "External agents can submit work, but they do not approve it. This queue is where the operator decides whether work may continue, must stop, or needs revision.",
+                    color = TowerTextMuted,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp
+                )
+            }
         }
 
         state.errorMessage?.let { message ->
