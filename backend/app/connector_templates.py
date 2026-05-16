@@ -81,6 +81,90 @@ def _base_defaults(
 def connector_templates() -> list[ConnectorTemplate]:
     return [
         _template(
+            template_id="chatgpt-actions-bridge",
+            display_name="ChatGPT Actions Bridge",
+            description="ChatGPT Custom GPT action connector that creates approval-gated AgentTasks.",
+            provider_label=ConnectorProviderLabel.CHATGPT,
+            connector_type=ConnectorType.GPT_ACTIONS,
+            auth_type=ConnectorAuthType.BEARER,
+            connector_defaults=_base_defaults(
+                name="ChatGPT Actions Bridge",
+                connector_type=ConnectorType.GPT_ACTIONS,
+                provider_label=ConnectorProviderLabel.CHATGPT,
+                auth_type=ConnectorAuthType.BEARER,
+                profile="chatgpt-actions",
+            ),
+            mapper=ConnectorSchemaMapperConfig(
+                default_action=AgentAction.CREATE_AGENT_TASK,
+                field_paths={
+                    "title": "task.title",
+                    "goal": "task.goal",
+                    "context": "task.context",
+                    "repository": "target.repository",
+                    "branch_preference": "target.branch",
+                    "metadata": "metadata",
+                },
+                defaults={"requested_action": "GENERATE_DOCS", "requires_approval": True},
+            ),
+            sample_payload={
+                "task": {
+                    "title": "Review ChatGPT proposed change",
+                    "goal": "Create an approval-gated implementation task",
+                    "context": "Custom GPT action request",
+                },
+                "target": {"repository": "owner/repo", "branch": "feature/chatgpt-task"},
+                "metadata": {"source": "chatgpt", "channel": "custom-gpt-actions"},
+            },
+            setup_notes=[
+                "Use this with the repo's GPT Actions OpenAPI contract.",
+                "Configure bearer auth and a public HTTPS backend before real ChatGPT callbacks.",
+                "ChatGPT creates tasks only; mobile approval remains the decision authority.",
+            ],
+            tags=["chatgpt", "gpt-actions", "approval-gated"],
+        ),
+        _template(
+            template_id="codex-agent-bridge",
+            display_name="Codex Agent Bridge",
+            description="Codex-style coding agent connector for branch, patch, validation, and PR task requests.",
+            provider_label=ConnectorProviderLabel.CODEX,
+            connector_type=ConnectorType.WEBHOOK,
+            auth_type=ConnectorAuthType.BEARER,
+            connector_defaults=_base_defaults(
+                name="Codex Agent Bridge",
+                connector_type=ConnectorType.WEBHOOK,
+                provider_label=ConnectorProviderLabel.CODEX,
+                auth_type=ConnectorAuthType.BEARER,
+                profile="codex-agent",
+            ),
+            mapper=ConnectorSchemaMapperConfig(
+                default_action=AgentAction.CREATE_AGENT_TASK,
+                field_paths={
+                    "title": "job.title",
+                    "goal": "job.goal",
+                    "context": "job.context",
+                    "repository": "git.repository",
+                    "branch_preference": "git.branch",
+                    "metadata": "job.metadata",
+                },
+                defaults={"requested_action": "GENERATE_DOCS", "requires_approval": True},
+            ),
+            sample_payload={
+                "job": {
+                    "title": "Prepare safe patch",
+                    "goal": "Draft a code change and evidence plan",
+                    "context": "Codex agent request",
+                    "metadata": {"source": "codex", "risk": "medium"},
+                },
+                "git": {"repository": "owner/repo", "branch": "feature/codex-task"},
+            },
+            setup_notes=[
+                "Use this for Codex-style coding agent task callbacks.",
+                "Keep repositories scoped before enabling live callbacks.",
+                "Do not let Codex approve its own work; route decisions through mobile approval.",
+            ],
+            tags=["codex", "coding-agent", "approval-gated"],
+        ),
+        _template(
             template_id="openclaw-local-bridge",
             display_name="OpenClaw Local Bridge",
             description="Local OpenClaw-style agent bridge that creates approval-gated AgentTasks.",

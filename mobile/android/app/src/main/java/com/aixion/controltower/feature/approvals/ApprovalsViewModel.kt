@@ -88,6 +88,7 @@ class ApprovalsViewModel(application: Application) : AndroidViewModel(applicatio
     fun decide(decision: String, reason: String, onCompleted: () -> Unit = {}) {
         val approval = _state.value.selectedApproval ?: return
         viewModelScope.launch {
+            _state.value = _state.value.copy(lastActionMessage = "Sending $decision decision...")
             runCatching {
                 val updated = repository.decide(approval.id, decision, reason)
                 val resolveMessage = if (approval.isMCPToolApproval) {
@@ -102,9 +103,11 @@ class ApprovalsViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 updated to resolveMessage
             }.onSuccess { (updated, resolveMessage) ->
+                val remaining = _state.value.approvals.filterNot { it.id == updated.id }
                 _state.value = _state.value.copy(
-                    selectedApproval = updated,
-                    lastActionMessage = "Decision sent: $decision.$resolveMessage"
+                    approvals = remaining,
+                    selectedApproval = remaining.firstOrNull(),
+                    lastActionMessage = "Decision sent: $decision. Request moved out of the active queue.$resolveMessage"
                 )
                 onCompleted()
             }.onFailure { error ->
