@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "verify_public_page_urls.py"
@@ -8,6 +9,7 @@ spec = importlib.util.spec_from_file_location("verify_public_page_urls", SCRIPT_
 assert spec is not None
 verifier = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
+sys.modules[spec.name] = verifier
 spec.loader.exec_module(verifier)
 
 
