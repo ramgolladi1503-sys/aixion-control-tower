@@ -1,0 +1,53 @@
+name: Verify public page URLs
+
+on:
+  workflow_dispatch:
+    inputs:
+      privacy_url:
+        description: Public privacy policy URL to verify
+        required: true
+        default: https://ramgolladi1503-sys.github.io/aixion-control-tower/privacy-policy.html
+      account_deletion_url:
+        description: Public account deletion URL to verify
+        required: true
+        default: https://ramgolladi1503-sys.github.io/aixion-control-tower/account-deletion.html
+      allow_placeholders:
+        description: Allow TODO placeholders for deployment smoke testing before final values exist
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-page-url-smoke
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify public page URLs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify deployed public pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            --privacy-url "${{ inputs.privacy_url }}"
+            --account-deletion-url "${{ inputs.account_deletion_url }}"
+          )
+
+          if [[ "${{ inputs.allow_placeholders }}" == "true" ]]; then
+            args+=(--allow-placeholders)
+          fi
+
+          python scripts/verify_public_page_urls.py "${args[@]}"
