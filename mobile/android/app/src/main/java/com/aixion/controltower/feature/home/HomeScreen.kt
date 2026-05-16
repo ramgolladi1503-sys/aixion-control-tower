@@ -43,7 +43,11 @@ import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel = viewModel(),
-    onApprovalSelected: (ApprovalSummary) -> Unit = {}
+    onApprovalSelected: (ApprovalSummary) -> Unit = {},
+    onOpenActionQueue: () -> Unit = {},
+    onOpenExecutionQueue: () -> Unit = {},
+    onOpenBlockedQueue: () -> Unit = {},
+    onOpenFailedTests: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
     val heroTitle = when {
@@ -56,9 +60,9 @@ fun HomeScreen(
     val heroSubtitle = when {
         state.loading -> "Syncing approvals, worker state, and execution queues."
         state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then retry."
-        state.actionRequiredCount > 0 -> "AI/code execution stays paused until the right human decision exists."
+        state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, reject, or request revision."
         state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
-        else -> "No human action needed right now. Keep building, but keep the tower watching."
+        else -> "No action required right now. Keep building, but keep the tower watching."
     }
 
     LazyColumn(
@@ -127,18 +131,20 @@ fun HomeScreen(
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 StatusCard(
-                    title = "Human Action",
+                    title = "Action",
                     value = state.actionRequiredCount.toString(),
-                    subtitle = "review, unblock, PR",
+                    subtitle = "tap to review queue",
                     accent = TowerAccent,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    onClick = onOpenActionQueue
                 )
                 StatusCard(
-                    title = "Runner Queue",
+                    title = "Execution",
                     value = state.githubExecutionCount.toString(),
-                    subtitle = "approved, not PR-ready",
+                    subtitle = "tap to see PR path",
                     accent = RiskMedium,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    onClick = onOpenExecutionQueue
                 )
             }
         }
@@ -148,25 +154,20 @@ fun HomeScreen(
                 StatusCard(
                     title = "Blocked",
                     value = state.blockedCount.toString(),
-                    subtitle = "policy stopped",
+                    subtitle = "tap for stopped work",
                     accent = RiskBlocked,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    onClick = onOpenBlockedQueue
                 )
                 StatusCard(
                     title = "Failed Tests",
                     value = state.failedTestsCount.toString(),
-                    subtitle = "need review",
+                    subtitle = "tap for failures",
                     accent = RiskCritical,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    onClick = onOpenFailedTests
                 )
             }
-        }
-
-        item {
-            TowerSectionHeader(
-                title = "Action Required",
-                subtitle = "Requests that need human judgment before execution can continue."
-            )
         }
 
         if (state.hasError) {
@@ -176,16 +177,22 @@ fun HomeScreen(
                     body = "This is intentional. Authenticated product screens now wait for real backend data instead of silently showing demo data. Use Retry after the backend is reachable."
                 )
             }
-        } else if (state.actionRequiredApprovals.isEmpty()) {
+        } else if (state.actionRequiredApprovals.isNotEmpty()) {
+            item {
+                TowerSectionHeader(
+                    title = "Needs Decision",
+                    subtitle = "Top pending requests. Tap the Action card above for the full review queue."
+                )
+            }
+            items(state.actionRequiredApprovals.take(2)) { approval ->
+                ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
+            }
+        } else {
             item {
                 EmptyHomePanel(
                     title = "No approvals waiting",
-                    body = "The approval queue is clear. New AI/code actions will appear here when review is required."
+                    body = "The approval queue is clear. New AI/code actions will appear through the Action card when review is required."
                 )
-            }
-        } else {
-            items(state.actionRequiredApprovals.take(3)) { approval ->
-                ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
         }
 
@@ -193,10 +200,10 @@ fun HomeScreen(
             item {
                 TowerSectionHeader(
                     title = "Awaiting GitHub Execution",
-                    subtitle = "Approved work that still needs branch, validation, or PR completion."
+                    subtitle = "Approved work that still needs branch, validation, or PR completion. Tap Execution above for this queue."
                 )
             }
-            items(state.githubExecutionApprovals.take(3)) { approval ->
+            items(state.githubExecutionApprovals.take(2)) { approval ->
                 ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
         }
