@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -73,6 +74,10 @@ fun WorkOrdersScreen(viewModel: WorkOrdersViewModel = viewModel()) {
                         fontSize = 13.sp,
                         lineHeight = 19.sp
                     )
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Button(onClick = viewModel::refresh, enabled = !state.loading) {
+                        Text("Retry work orders")
+                    }
                 }
             }
         }
@@ -87,7 +92,7 @@ fun WorkOrdersScreen(viewModel: WorkOrdersViewModel = viewModel()) {
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Authenticated work-order screens now require real backend data instead of silently rendering demo work orders.",
+                        text = "Authenticated work-order screens now require real backend data instead of silently rendering demo work orders. Use Retry after the backend is reachable.",
                         color = TowerTextMuted,
                         fontSize = 13.sp,
                         lineHeight = 19.sp
