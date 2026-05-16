@@ -156,8 +156,30 @@ data class WorkOrderSummary(
     val goal: String,
     val risk: RiskLevel,
     val tasks: List<String>,
-    val requiredTests: List<String>
-)
+    val requiredTests: List<String>,
+    val sourceType: String = "MANUAL",
+    val sourceProvider: String = "MANUAL",
+    val sourceAgentId: String? = null,
+    val sourceAgentName: String? = null,
+    val sourceTaskId: String? = null,
+    val sourceSessionId: String? = null,
+    val createdByUserId: String? = null,
+    val verifiedSource: Boolean = false
+) {
+    val sourceLabel: String
+        get() = sourceAgentName?.takeIf { it.isNotBlank() }
+            ?: createdByUserId?.takeIf { it.isNotBlank() }?.let { "User ${it.take(8)}" }
+            ?: sourceProvider.ifBlank { sourceType }
+
+    val sourceBadgeLabel: String
+        get() = if (verifiedSource) "Verified Agent Source" else "Manual User Source"
+
+    val sourceDetail: String
+        get() = listOf(sourceType, sourceProvider)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(" • ")
+}
 
 data class TestRunSummary(
     val id: String,
