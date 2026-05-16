@@ -2,15 +2,14 @@ package com.aixion.controltower.feature.approvals
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -42,6 +41,7 @@ fun ApprovalInboxScreen(
     val state by viewModel.state.collectAsState()
     ApprovalInboxContent(
         state = state,
+        onRetry = viewModel::refresh,
         onApprovalSelected = { approval ->
             viewModel.selectApproval(approval)
             onApprovalSelected(approval)
@@ -52,6 +52,7 @@ fun ApprovalInboxScreen(
 @Composable
 fun ApprovalInboxContent(
     state: ApprovalsUiState,
+    onRetry: () -> Unit = {},
     onApprovalSelected: (ApprovalSummary) -> Unit = {}
 ) {
     val pending = state.approvals.filter { it.status == ApprovalStatus.PENDING_REVIEW || it.status == ApprovalStatus.REQUESTED }
@@ -95,6 +96,10 @@ fun ApprovalInboxContent(
                         fontSize = 13.sp,
                         lineHeight = 19.sp
                     )
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Button(onClick = onRetry, enabled = !state.loading) {
+                        Text("Retry approvals")
+                    }
                 }
             }
         }
@@ -117,7 +122,7 @@ fun ApprovalInboxContent(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Authenticated approval screens now require real backend data instead of silently rendering demo approvals.",
+                        text = "Authenticated approval screens now require real backend data instead of silently rendering demo approvals. Use Retry after the backend is reachable.",
                         color = TowerTextMuted,
                         fontSize = 13.sp,
                         lineHeight = 19.sp
