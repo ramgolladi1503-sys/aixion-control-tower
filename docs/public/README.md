@@ -64,6 +64,22 @@ GitHub repo -> Settings -> Pages -> Build and deployment -> Source: GitHub Actio
 
 If GitHub Pages is disabled or set to a branch source, the workflow may not publish correctly.
 
+## Readiness guard
+
+Run this before submitting the public URLs to Google Play:
+
+```bash
+python scripts/validate_public_pages_ready.py
+```
+
+The guard intentionally fails while unfinished placeholder values remain.
+
+The required real-world values are tracked in:
+
+```text
+docs/PUBLIC_PAGE_RELEASE_VALUES.md
+```
+
 ## Not publishable until TODOs are replaced
 
 Do not submit these pages to Google Play until all TODOs are resolved:
