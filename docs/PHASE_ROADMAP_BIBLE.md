@@ -2,7 +2,7 @@
 
 Status: roadmap control document  
 Repository: `ramgolladi1503-sys/aixion-control-tower`  
-Applies to: Phase 0 local validation, Phase 1 paid production-shaped setup, Phase 2 production hardening
+Applies to: Phase 0 local validation, Phase 1 paid production-shaped setup, Play Store readiness track, Phase 2 hardening
 
 This document is the execution bible for the Mobile Approval Console / Aixion Control Tower roadmap. It exists to stop scope drift, stop fake readiness claims, and make every future PR map to a clear phase, acceptance gate, and release objective.
 
@@ -34,6 +34,7 @@ Core guarantee:
 4. Every phase must be testable.
    - Phase 0 must be proven on laptop plus real Android phone on same Wi-Fi.
    - Phase 1 must be proven through public HTTPS/review/production-shaped infrastructure.
+   - Play Store readiness must start only after Phase 1 evidence is accepted.
    - Phase 2 must be proven through evidence bundles, recovery drills, and hardening checks.
 
 5. Approval safety beats speed.
@@ -48,18 +49,14 @@ Latest verified roadmap-control baseline:
 ```text
 PR #147 — Add Phase Roadmap Product Scope Bible
 PR #148 — Correct phase roadmap bible numbering
+PR #149 — Add Phase 0 LAN completion gate
 ```
 
-Correction:
-
-Earlier planning mapped Phase 1 to PR #137–#144, but actual PR #137–#144 mostly covered public pages, signing scaffolds, Play Store copy, and URL verification. Useful work, but not the originally intended paid production infrastructure.
-
-Decision after PR #148:
+Decision after PR #149:
 
 ```text
 Do not enter paid Phase 1 until Phase 0 is fully proven with real-device LAN evidence.
-PR #149 is reserved for Phase 0 LAN completion gate and evidence template.
-Phase 1 hosted backend work starts after Phase 0 evidence is accepted.
+Do not enter Play Store readiness until Phase 1 evidence is accepted.
 ```
 
 ## 4. Phase model
@@ -70,8 +67,12 @@ Goal: prove the app works on a real Android phone connected to laptop backend ov
 Money: no required paid infrastructure.
 
 Phase 1 — Paid production-shaped setup
-Goal: move from LAN demo to public/review/production-shaped setup with domain, hosted backend, hosted database, email, push, signed build smoke, and Play closed-testing readiness.
-Money: domain, hosting, database, Play Console, maybe email provider.
+Goal: move from LAN demo to public/review/production-shaped setup with domain, hosted backend, hosted database, email/review communication path, push path where required, signed build smoke, and public URLs.
+Money: domain, hosting, database, maybe email/provider services.
+
+Play Store readiness track — after Phase 1
+Goal: prepare Play Console, store listing, policy recheck, signed AAB upload validation, internal testing, closed testing, and final store-readiness evidence.
+Money: Play Console account and any testing/release support costs.
 
 Phase 2 — Production hardening and release confidence
 Goal: make the product safer, more observable, less fragile, and defensible as a release candidate.
@@ -121,25 +122,6 @@ docs/PHASE0_LAN_COMPLETION_GATE.md
 9. Downstream worker/agent/MCP path continues only if approved.
 10. Audit/event trail shows what happened.
 
-### Phase 0 merged PR baseline
-
-| PR | Status | Scope |
-|---:|---|---|
-| #124 | Merged | Auth-first app routing and session gate |
-| #125 | Merged | Registration email verification flow |
-| #126 | Merged | Android auth UX polish |
-| #127 | Merged | Remove authenticated mock fallbacks |
-| #128 | Merged | Android retry actions |
-| #129 | Merged | WorkOrder provenance and scoped agent creation |
-| #130 | Merged | Show WorkOrder source provenance on Android |
-| #131 | Merged | Split Android DTOs by domain |
-| #132 | Merged | Android release smoke checklist |
-| #133 | Merged | Android signed release and Play Store readiness guardrails |
-| #134 | Merged | Privacy policy/data safety drafts and account deletion backend foundation |
-| #135 | Merged | Android privacy and account removal controls |
-| #136 | Merged | Public privacy and account deletion pages |
-| #149 | Planned | Phase 0 LAN completion gate and evidence template |
-
 ### Phase 0 completion gate
 
 Phase 0 is not complete merely because PRs are merged. It is complete only when this real-device gate passes and evidence is recorded:
@@ -178,12 +160,13 @@ Android app
   -> public HTTPS backend URL
   -> hosted backend service
   -> hosted database
-  -> email provider for verification/resend
-  -> push setup for approval notifications
+  -> review/prod auth and email path where required
+  -> push setup where required
   -> public privacy/account deletion pages
-  -> signed Android artifact
-  -> Play Console closed testing track
+  -> signed Android artifact smoke-tested against hosted backend
 ```
+
+Play Console readiness is intentionally not part of Phase 1. It starts after Phase 1 evidence is accepted.
 
 ### Expected paid or possibly paid items
 
@@ -193,10 +176,9 @@ Android app
 | DNS / hosting routing | Public backend and policy URL routing | Free or low-cost at start |
 | Backend hosting | Public review/prod API | Usually yes |
 | Hosted database | Durable state outside laptop | Usually yes |
-| Play Console | Closed testing / app distribution | Usually one-time paid account |
-| Email provider | Production verification/resend | Free tier possible, paid later |
+| Email provider | Production verification/resend or support path | Free tier possible, paid later |
 | Monitoring/logging | Production diagnostics | Free tier possible, paid later |
-| Push service | Approval notifications | Usually free at start |
+| Push service | Approval notifications if enabled | Usually free at start |
 
 ### Domain and URL plan
 
@@ -228,11 +210,10 @@ Phase 1 starts only after Phase 0 LAN completion evidence is accepted.
 | #151 | Add production database deployment path and backup/restore validation | Phase 1 | Hosted DB may start |
 | #152 | Wire domain/DNS/HTTPS routing documentation and env config | Phase 1 | Domain/DNS spend may start |
 | #153 | Replace public-page placeholders with real release values | Phase 1 | Requires real operator/support/legal inputs |
-| #154 | Integrate real email verification provider | Phase 1 | Email provider may start |
-| #155 | Configure and validate production push notification path | Phase 1 | Usually no direct spend |
+| #154 | Integrate real email verification/provider path | Phase 1 | Email provider may start |
+| #155 | Configure and validate production push notification path if enabled | Phase 1 | Usually no direct spend |
 | #156 | Android production backend config and signed AAB smoke evidence | Phase 1 | Depends on signing config and hosted backend |
-| #157 | Play Console closed-testing readiness package | Phase 1 | Play developer account required |
-| #158 | Phase 1 evidence gate and release decision record | Phase 1 | No new spend, validates all spend |
+| #157 | Phase 1 evidence gate and release decision record | Phase 1 | No new spend, validates all spend |
 
 ### PR #150 — Deploy hosted backend review environment
 
@@ -293,39 +274,40 @@ Acceptance gate:
 [ ] Public account deletion URL loads without login.
 [ ] Retention windows are stated.
 [ ] Support/privacy contact is real.
-[ ] Data Safety draft matches actual app behavior.
+[ ] Data Safety draft is marked ready for post-Phase-1 Play alignment, not submitted yet.
 [ ] Legal/privacy review is marked required before external launch.
 ```
 
 Hard rule: do not invent legal/operator/privacy values. If values are unknown, keep the PR blocked.
 
-### PR #154 — Real email provider integration
+### PR #154 — Real email verification/provider path
 
-Purpose: replace dev-only verification behavior with production-capable email verification/resend.
+Purpose: replace dev-only verification behavior with production-capable email verification/resend or define a conscious review-safe alternative.
 
 Acceptance gate:
 
 ```text
-[ ] Production mode sends verification email through configured provider.
+[ ] Production mode has an email/provider path or explicit approved alternative.
 [ ] Dev/test mode does not require external provider.
 [ ] Missing provider config fails safely in production mode.
-[ ] Resend cannot be abused without limits.
+[ ] Resend cannot be abused without limits if email verification is enabled.
 [ ] Verification credential is not exposed in production logs.
 [ ] Backend tests cover success and provider failure paths.
 ```
 
 ### PR #155 — Production push notification validation
 
-Purpose: validate mobile push notification path for pending approval visibility.
+Purpose: validate mobile push notification path for pending approval visibility if notifications are enabled for the release/review build.
 
 Acceptance gate:
 
 ```text
-[ ] Device registration path works from Android.
-[ ] Backend can trigger a test approval notification.
+[ ] Device registration path works from Android if push is enabled.
+[ ] Backend can trigger a test approval notification if push is enabled.
 [ ] Notification opens or routes user to relevant approval path where possible.
 [ ] Missing/invalid push config fails safely.
 [ ] Notification identifier privacy/retention is documented.
+[ ] If push is deferred, the deferral is explicit and Play disclosure docs are updated.
 ```
 
 ### PR #156 — Android production backend config and signed AAB smoke evidence
@@ -343,53 +325,62 @@ Acceptance gate:
 [ ] Debug-only behavior is absent from release build.
 ```
 
-### PR #157 — Play Console closed-testing readiness package
+### PR #157 — Phase 1 evidence gate and release decision record
 
-Purpose: prepare closed testing honestly, without pretending full public launch readiness.
-
-Acceptance gate:
-
-```text
-[ ] Play listing draft is complete enough for closed test.
-[ ] Public URLs are stable and placeholder-free.
-[ ] Signed Android artifact is available.
-[ ] Tester instructions exist.
-[ ] Known limitations are documented.
-[ ] Data Safety draft is reviewed against actual artifact behavior.
-```
-
-### PR #158 — Phase 1 evidence gate and release decision record
-
-Purpose: create a clear go/no-go record for moving into Phase 2.
+Purpose: create a clear go/no-go record for entering the Play Store readiness track.
 
 Acceptance gate:
 
 ```text
-[ ] Phase 0 LAN gate passed or explicitly marked stale.
+[ ] Phase 0 LAN gate passed.
 [ ] Hosted backend gate passed.
 [ ] Hosted DB gate passed.
 [ ] Domain/public URL gate passed.
-[ ] Email provider gate passed.
-[ ] Push gate passed or intentionally deferred.
-[ ] Signed build gate passed.
-[ ] Closed-test readiness gate passed.
+[ ] Public page real values gate passed.
+[ ] Email/provider gate passed or consciously deferred.
+[ ] Push gate passed or consciously deferred.
+[ ] Signed build smoke gate passed.
 [ ] Remaining blockers are documented with owner/action.
+[ ] Decision recorded: ready or not ready to start Play Store readiness track.
 ```
 
-## 7. Phase 2 — Production hardening roadmap
+## 7. Play Store readiness track — after Phase 1
+
+Dedicated plan:
+
+```text
+docs/PLAY_STORE_READINESS_AFTER_PHASE1.md
+```
+
+This track starts only after PR #157 accepts Phase 1 evidence.
+
+| Planned PR | Scope | Gate |
+|---:|---|---|
+| #158 | Play Store policy recheck and readiness lock | Official requirements rechecked; repo checklist updated |
+| #159 | Final store listing metadata and review notes | App name, descriptions, support contact, review instructions finalized |
+| #160 | Final screenshots, icon, and feature graphic evidence | Required visual assets exported and reviewed |
+| #161 | Final privacy policy, account deletion, and Data Safety alignment | Public URLs and Play form answers match actual app/backend behavior |
+| #162 | Play App Signing and signed AAB upload validation | Signed AAB/upload path verified without committing signing material |
+| #163 | Internal testing track package | Internal test instructions, build notes, known limitations, tester guidance |
+| #164 | Closed testing package and tester evidence | Closed test setup, tester instructions, feedback collection plan |
+| #165 | Play Store readiness evidence gate | Go/no-go record for Play closed testing or production access request |
+
+## 8. Phase 2 — Production hardening roadmap
+
+Phase 2 starts after the Play Store readiness track is either completed or consciously deferred.
 
 | Planned PR | Scope | Why it matters |
 |---:|---|---|
-| #159 | Session/rate-limit hardening | Prevent obvious auth/session abuse |
-| #160 | Retention, anonymization, and account deletion executor | Convert policy docs into lifecycle behavior |
-| #161 | Agent/MCP/connector policy guardrail hardening | Reduce mutation risk |
-| #162 | Database migration rollback and restore drill | Prove recoverability |
-| #163 | Observability and error telemetry without PII leakage | Debug production safely |
-| #164 | Android offline/session-expiry/retry polish | Improve mobile reliability |
-| #165 | Release candidate evidence bundle | Centralize proof |
-| #166 | v1.0 release candidate tag and launch decision | Freeze a defensible release state |
+| #166 | Session/rate-limit hardening | Prevent obvious auth/session abuse |
+| #167 | Retention, anonymization, and account deletion executor | Convert policy docs into lifecycle behavior |
+| #168 | Agent/MCP/connector policy guardrail hardening | Reduce mutation risk |
+| #169 | Database migration rollback and restore drill | Prove recoverability |
+| #170 | Observability and error telemetry without PII leakage | Debug production safely |
+| #171 | Android offline/session-expiry/retry polish | Improve mobile reliability |
+| #172 | Release candidate evidence bundle | Centralize proof |
+| #173 | v1.0 release candidate tag and launch decision | Freeze a defensible release state |
 
-## 8. Execution discipline for every future PR
+## 9. Execution discipline for every future PR
 
 Every PR after this bible must include:
 
@@ -398,7 +389,7 @@ Every PR after this bible must include:
 What changed in plain English.
 
 ## Phase mapping
-Phase 0 / Phase 1 / Phase 2.
+Phase 0 / Phase 1 / Play Store readiness / Phase 2.
 
 ## Scope
 What is included.
@@ -416,7 +407,7 @@ Commands, manual checks, or evidence required.
 What could break or what remains unfinished.
 ```
 
-## 9. Required validation commands by area
+## 10. Required validation commands by area
 
 Backend typical validation:
 
@@ -455,7 +446,7 @@ Download artifact.
 Install/test through intended review or closed-test path.
 ```
 
-## 10. Release claim policy
+## 11. Release claim policy
 
 Allowed claims:
 
@@ -463,6 +454,8 @@ Allowed claims:
 Local demo-ready
 LAN-testable
 Review-environment ready
+Phase 1 evidence accepted
+Play Store prep in progress
 Closed-test candidate
 Release candidate
 ```
@@ -481,7 +474,7 @@ Fully hardened
 
 Use conservative wording until the evidence exists.
 
-## 11. Spending gate
+## 12. Spending gate
 
 Do not spend money just because the roadmap says Phase 1.
 
@@ -501,10 +494,10 @@ Email provider:
 Start only when verification provider abstraction/config path is ready.
 
 Play Console:
-Use only when signed artifact, public pages, privacy/data safety, and tester plan are close enough for closed testing.
+Use only after Phase 1 evidence is accepted and Play Store readiness track begins.
 ```
 
-## 12. Definition of done by phase
+## 13. Definition of done by phase
 
 ### Phase 0 done
 
@@ -515,7 +508,13 @@ A real Android phone on same Wi-Fi as laptop can login, load real backend data, 
 ### Phase 1 done
 
 ```text
-A signed Android build can connect to a hosted HTTPS backend backed by durable DB, use real auth/email behavior, expose public privacy/account deletion URLs, pass URL/readiness checks, and be prepared honestly for Play closed testing.
+A signed Android build can connect to a hosted HTTPS backend backed by durable DB, use real auth/email behavior or documented review-safe alternative, expose public privacy/account deletion URLs, pass URL/readiness checks, and pass hosted-backend physical-device smoke testing.
+```
+
+### Play Store readiness done
+
+```text
+The Play Store policy recheck, store listing, visual assets, privacy/account deletion/Data Safety alignment, signed AAB upload validation, internal testing package, closed testing package, and final readiness evidence gate are complete.
 ```
 
 ### Phase 2 done
@@ -524,14 +523,17 @@ A signed Android build can connect to a hosted HTTPS backend backed by durable D
 The hosted product has evidence-backed hardening for sessions, retention, audit, DB recovery, observability, mobile reliability, and release candidate decision-making.
 ```
 
-## 13. Hard truth checkpoint
+## 14. Hard truth checkpoint
 
 The repo has moved fast. That is good, but speed creates a dangerous illusion: lots of merged PRs can look like production readiness even when paid infrastructure, real hosted DB, real email, real public URLs, and real-device evidence are missing.
 
 This bible exists to prevent that mistake.
 
-The next correct move after PR #149 is not paid hosting. The next correct move is to execute and record Phase 0 LAN evidence. Only after that should Phase 1 begin with:
+The correct order is:
 
 ```text
-PR #150 — Deploy hosted backend review environment
+1. Finish Phase 0 evidence.
+2. Complete Phase 1 hosted infrastructure evidence.
+3. Start Play Store readiness track.
+4. Then continue deeper hardening/release-candidate work.
 ```
