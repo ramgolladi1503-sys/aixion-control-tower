@@ -17,6 +17,7 @@ data class AuthUiState(
     val displayName: String = "",
     val inviteCode: String = "",
     val verificationCode: String = "",
+    val privacyRemovalReason: String = "",
     val loading: Boolean = false,
     val authenticated: Boolean = false,
     val sessionChecked: Boolean = false,
@@ -58,6 +59,10 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateVerificationCode(value: String) {
         _state.value = _state.value.copy(verificationCode = value)
+    }
+
+    fun updatePrivacyRemovalReason(value: String) {
+        _state.value = _state.value.copy(privacyRemovalReason = value)
     }
 
     fun login() {
@@ -161,6 +166,26 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 _state.value = _state.value.copy(
                     loading = false,
                     message = "Resend failed: ${AuthFailure.operatorMessage(error)}"
+                )
+            }
+        }
+    }
+
+    fun requestPrivacyAccountRemoval() {
+        val current = _state.value
+        viewModelScope.launch {
+            _state.value = current.copy(loading = true, message = null)
+            runCatching {
+                repository.requestPrivacyAccountRemoval(current.privacyRemovalReason)
+            }.onSuccess { response ->
+                _state.value = AuthUiState(
+                    sessionChecked = true,
+                    message = "${response.message} Sign in again only if support reactivates access."
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    loading = false,
+                    message = "Privacy request failed: ${AuthFailure.operatorMessage(error)}"
                 )
             }
         }
