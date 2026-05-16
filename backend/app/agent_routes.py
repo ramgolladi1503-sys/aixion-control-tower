@@ -27,6 +27,7 @@ from .auth import require_owner
 from .models import (
     AgentAction,
     AgentRegistrationResponse,
+    AgentWorkOrderCreate,
     ApprovalRequest,
     ApprovalRequestCreate,
     ApprovalStatus,
@@ -34,10 +35,12 @@ from .models import (
     AuthUser,
     ExternalAgent,
     ExternalAgentPublic,
+    WorkOrder,
+    WorkOrderSourceType,
     now_utc,
 )
 from .notifications import create_notification
-from .risk_engine import assess_approval_request
+from .risk_engine import assess_approval_request, assess_work_order
 from .store import store
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -148,6 +151,48 @@ def create_agent_approval(
     )
     store.persist()
     return request
+
+
+@router.post("/work-orders", response_model=WorkOrder)
+def create_agent_work_order(
+    payload: AgentWorkOrderCreate,
+    agent: ExternalAgent = Depends(require_external_agent),
+) -> WorkOrder:
+    assert_agent_can(agent, AgentAction.CREATE_WORK_ORDER, project_id=payload.project_id)
+    if payload.project_id not in store.projects:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if payload.idea_id and payload.idea_id not in store.ideas:
+        raise HTTPException(status_code=404, detail="Idea not found")
+
+    risk_level = assess_work_order(payload)
+    work_order = WorkOrder(
+        **payload.model_dump(),
+        risk_level=risk_level,
+        source_type=WorkOrderSourceType.AGENT_TASK,
+        source_provider=agent.provider,
+        source_agent_id=agent.id,
+        source_agent_name=agent.display_name,
+        verified_source=True,
+    )
+    store.work_orders[work_order.id] = work_order
+    audit(
+        "work_order.created_by_agent",
+        work_order.id,
+        {
+            "project_id": work_order.project_id,
+            "risk_level": work_order.risk_level,
+            "source_type": work_order.source_type,
+            "source_provider": work_order.source_provider,
+            "source_agent_id": work_order.source_agent_id,
+            "source_agent_name": work_order.source_agent_name,
+            "source_task_id": work_order.source_task_id,
+            "source_session_id": work_order.source_session_id,
+            "verified_source": work_order.verified_source,
+        },
+        actor=f"agent:{agent.id}",
+    )
+    store.persist()
+    return work_order
 
 
 @router.post("/tasks", response_model=AgentTask)
