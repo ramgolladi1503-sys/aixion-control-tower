@@ -2,8 +2,12 @@ package com.aixion.controltower.feature.approvals
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -20,10 +24,13 @@ import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.StatusBadge
+import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.theme.RiskBlocked
+import com.aixion.controltower.core.ui.theme.RiskCritical
 import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.RiskMedium
 import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
@@ -61,10 +68,35 @@ fun ApprovalInboxContent(
         item {
             Text("Approval Inbox", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
             Text(
-                text = if (state.loading) "Loading approvals..." else "Review agent requests before code moves.",
+                text = when {
+                    state.loading -> "Loading approvals..."
+                    state.hasError -> "Backend approval sync failed. No mock approvals are shown."
+                    else -> "Review agent requests before code moves."
+                },
                 color = TowerTextMuted,
                 fontSize = 14.sp
             )
+        }
+
+        state.errorMessage?.let { message ->
+            item {
+                TowerPanel(elevated = true) {
+                    StatusBadge("REAL DATA REQUIRED", RiskCritical)
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(
+                        text = "Approval data unavailable",
+                        color = TowerTextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = message,
+                        color = TowerTextMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
+                    )
+                }
+            }
         }
 
         item {
@@ -75,11 +107,30 @@ fun ApprovalInboxContent(
             }
         }
 
-        items(state.approvals) { approval ->
-            ApprovalCard(
-                approval = approval,
-                onClick = { onApprovalSelected(approval) }
-            )
+        if (state.hasError) {
+            item {
+                TowerPanel(elevated = true) {
+                    Text(
+                        text = "No fallback approvals loaded",
+                        color = TowerTextPrimary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Authenticated approval screens now require real backend data instead of silently rendering demo approvals.",
+                        color = TowerTextMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
+                    )
+                }
+            }
+        } else {
+            items(state.approvals) { approval ->
+                ApprovalCard(
+                    approval = approval,
+                    onClick = { onApprovalSelected(approval) }
+                )
+            }
         }
     }
 }
