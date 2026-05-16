@@ -2,6 +2,8 @@ package com.aixion.controltower.data.repository
 
 import android.content.Context
 import com.aixion.controltower.core.api.ControlTowerApi
+import com.aixion.controltower.core.api.dto.AccountDeletionRequestDto
+import com.aixion.controltower.core.api.dto.AccountDeletionResponseDto
 import com.aixion.controltower.core.api.dto.LoginRequestDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
 import com.aixion.controltower.core.api.dto.RegistrationResponseDto
@@ -43,6 +45,12 @@ class AuthRepository(
         return listOf(user.display_name, user.email, user.role)
             .filter { it.isNotBlank() }
             .joinToString(" • ")
+    }
+
+    suspend fun requestPrivacyAccountRemoval(reason: String): AccountDeletionResponseDto {
+        val response = api.requestAccountDeletion(AccountDeletionRequestDto(reason = reason.trim()))
+        AuthSession.clear(context)
+        return response
     }
 
     fun hasSavedToken(): Boolean = AuthSession.getAccessToken(context).isNotBlank()
