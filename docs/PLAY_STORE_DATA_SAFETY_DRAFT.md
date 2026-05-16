@@ -14,6 +14,10 @@ App connects to a backend service.
 App stores/uses approval, work-order, audit, session, role, invite, and agent/source metadata.
 App may process repository names, branch names, file paths, diffs, proposed code, validation commands, and MCP tool arguments.
 App may process server/network logs through backend hosting or monitoring systems.
+Backend authenticated account deletion request endpoint exists.
+Backend public account deletion info endpoint exists.
+Public outside-the-app account deletion URL is still TODO.
+In-app user-facing deletion/request UI is still TODO if account creation remains available.
 App does not use third-party advertising SDKs.
 App does not sell user data.
 App does not intentionally collect precise location, contacts, SMS, photos/videos/audio from the Android device, calendar, health, or payment card data.
@@ -59,7 +63,7 @@ Draft answers:
 
 ```text
 Data encrypted in transit: Yes, for production/review builds only if HTTPS is enforced.
-Users can request data deletion: No/TODO today; only Yes after an account deletion request path exists and is operational.
+Users can request data deletion: Not ready for Play submission until public URL and in-app path exist. Backend request foundation exists.
 Data is not sold: Yes, if final SDK/backend review confirms no sale.
 ```
 
@@ -68,7 +72,7 @@ Hard blockers:
 ```text
 If the release/review backend uses plain HTTP, do not claim encrypted in transit for production/review release.
 Local debug LAN HTTP does not count as production security.
-If users can create accounts in the app, do not claim deletion support until both in-app and outside-the-app deletion paths are handled according to Play requirements.
+If users can create accounts in the app, do not claim full deletion support until both in-app and outside-the-app deletion paths are handled according to Play requirements.
 ```
 
 ## 5. Account deletion
@@ -76,22 +80,39 @@ If users can create accounts in the app, do not claim deletion support until bot
 Draft status:
 
 ```text
-Not ready.
+Partially implemented, not Play-submission ready.
 ```
 
-Before Play submission, provide:
+Implemented backend foundation:
 
 ```text
-public account deletion URL
+POST /auth/account-deletion-request
+GET /auth/account-deletion-info
+```
+
+Current backend behavior:
+
+```text
+records authenticated account deletion request
+revokes active sessions for requesting user
+disables the requesting user account
+records auth.account_deletion_requested audit event
+returns request status RECEIVED
+```
+
+Before Play submission, still provide:
+
+```text
+public outside-the-app account deletion URL
 in-app deletion/request path, if account creation remains available in app
-support process for deletion requests
-backend deletion/anonymization policy
+operator support process for deletion/anonymization requests
+backend deletion/anonymization policy after request receipt
 clear explanation of retained audit/security records
 ```
 
 If account creation is available in the app, Play may require a discoverable account deletion path. Do not leave this as a support-only afterthought.
 
-Temporary disablement, logout, or session revocation is not account deletion.
+Temporary disablement, logout, or session revocation is not full account deletion. The current endpoint is a request-and-disable foundation.
 
 ## 6. Data types and purposes
 
@@ -110,6 +131,7 @@ user email
 invite email
 review/demo account email
 email verification target
+account deletion request email
 ```
 
 Purpose:
@@ -119,6 +141,7 @@ account management
 authentication
 security
 app functionality
+account deletion request handling
 ```
 
 Shared:
@@ -172,6 +195,7 @@ created_by_user_id
 approved_by_user_id
 session user_id
 invite accepted_by_user_id
+account deletion request user_id
 ```
 
 Purpose:
@@ -182,6 +206,7 @@ role enforcement
 audit traceability
 security
 app functionality
+account deletion request handling
 ```
 
 ### 6.4 App activity / app interactions
@@ -201,6 +226,7 @@ MCP approval interactions
 role changes
 invite creation/acceptance/revocation
 session revocation
+account deletion request action
 audit events
 screen/API actions needed to operate the approval console
 ```
@@ -212,6 +238,7 @@ app functionality
 audit/security
 fraud or abuse prevention
 troubleshooting
+account deletion request handling
 analytics only if internal operational audit is considered analytics by final Play interpretation
 ```
 
@@ -405,13 +432,13 @@ No
 
 | Data category | Collected? | Purpose | Required? | Notes |
 | --- | --- | --- | --- | --- |
-| Email address | Yes | Account management, auth, security | Yes | Used for login, verification, invites |
+| Email address | Yes | Account management, auth, security, deletion request handling | Yes | Used for login, verification, invites, deletion request evidence |
 | Name/display name | Yes if provided | Account profile, operator identification | Usually yes for app flow | May be optional depending final UI |
-| User IDs | Yes | Auth, audit, role enforcement | Yes | Backend-generated IDs |
+| User IDs | Yes | Auth, audit, role enforcement, deletion request handling | Yes | Backend-generated IDs |
 | Approval/work-order activity | Yes | App functionality, audit/security | Yes | Core product data |
 | Operational content/diffs/MCP args | Yes/Conditional by Play category | App functionality, audit/security | Yes | Must not contain secrets; category needs final review |
-| Audit/security events | Yes | Security, compliance evidence, troubleshooting | Yes | Core control story |
-| Session data | Yes | Auth/session management/security | Yes | Includes active/revoked state |
+| Audit/security events | Yes | Security, compliance evidence, troubleshooting | Yes | Includes deletion request audit event |
+| Session data | Yes | Auth/session management/security | Yes | Sessions revoked after deletion request |
 | Server/network logs | Conditional/likely | Security, troubleshooting | Usually yes for backend operation | Includes IP/user-agent depending hosting |
 | Device token | Conditional | Push notifications | Conditional | Only if notifications enabled |
 | Crash/diagnostics | Conditional | App quality/debugging | No | Only if SDK/logging added |
@@ -432,7 +459,7 @@ TODO before submission:
 
 ```text
 define actual retention periods
-define account deletion behavior
+define final deletion/anonymization behavior after deletion request receipt
 define audit record retention exceptions
 define anonymization/minimization behavior
 define backup deletion window
@@ -444,13 +471,20 @@ define notification token deletion behavior
 
 Draft answer is not final.
 
+Implemented foundation:
+
+```text
+Authenticated backend deletion request endpoint exists.
+Public backend deletion info endpoint exists.
+```
+
 Before submission, provide:
 
 ```text
-public account deletion URL
+public outside-the-app account deletion URL
 in-app deletion/request path
 operator support email or deletion form
-backend deletion/anonymization policy
+backend final deletion/anonymization policy
 audit-retention exception wording
 backup expiry window
 ```
@@ -458,10 +492,10 @@ backup expiry window
 Potential public wording after implementation:
 
 ```text
-Users can request account deletion by contacting TODO or visiting TODO. Some audit/security records may be retained where required for security, legal, or abuse-prevention purposes.
+Users can request account deletion by using the in-app account deletion request flow or by visiting TODO_PUBLIC_DELETION_URL. Some audit/security records may be retained where required for security, legal, or abuse-prevention purposes.
 ```
 
-Do not use this wording until the process exists.
+Do not use this wording until the public URL and in-app flow exist.
 
 ## 10. Encryption in transit
 
@@ -513,7 +547,11 @@ Do not submit Data Safety answers until these are done:
 - [ ] HTTPS production/review backend confirmed.
 - [ ] Public privacy policy URL created.
 - [ ] In-app privacy policy link added.
-- [ ] Account deletion URL/process created.
+- [ ] Public outside-the-app account deletion URL created.
+- [ ] In-app account deletion/request path added if account creation remains in app.
+- [x] Backend authenticated account deletion request endpoint exists.
+- [x] Backend public account deletion info endpoint exists.
+- [ ] Final deletion/anonymization workflow defined.
 - [ ] Retention periods finalized.
 - [ ] Audit deletion/anonymization exception finalized.
 - [ ] Legal/privacy review completed.
@@ -571,7 +609,7 @@ This section is not a submission answer. It is a conservative starting point.
 ```text
 Collects data: Yes
 Data encrypted in transit: Yes only if HTTPS backend is used for review/release
-Deletion request supported: No until implemented
+Deletion request supported: Not ready until public URL + in-app path + operator workflow exist
 Data sold: No, pending final SDK/provider review
 Email address: Yes
 Name/display name: Yes if collected
