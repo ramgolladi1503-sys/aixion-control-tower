@@ -60,6 +60,16 @@ class AuthSessionGateTest {
     }
 
     @Test
+    fun mainShellIsHiddenAfterLogoutEvenIfCurrentRouteWasProtected() {
+        assertFalse(AuthSessionGate.shouldShowMainShell(false, true, Route.Home.value))
+        assertFalse(AuthSessionGate.shouldShowMainShell(false, true, Route.Account.value))
+        assertEquals(
+            Route.Auth.value,
+            AuthSessionGate.redirectRoute(Route.Home.value, authenticated = false, sessionChecked = true)
+        )
+    }
+
+    @Test
     fun accountScreenIsProtectedAfterLoginOnly() {
         assertEquals(
             Route.Auth.value,
