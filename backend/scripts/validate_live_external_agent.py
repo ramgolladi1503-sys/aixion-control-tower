@@ -15,6 +15,7 @@ SAMPLE_PAYLOADS = {
     "chatgpt": Path("docs/samples/chatgpt-actions-bridge-payload.json"),
     "codex": Path("docs/samples/codex-agent-bridge-payload.json"),
 }
+VALIDATION_MODES = ("public-external", "phase0-lan")
 
 ClientFactory = Callable[[httpx.Timeout], httpx.Client]
 
@@ -82,6 +83,17 @@ def check_external_agent_readiness(client: httpx.Client, base_url: str, owner_to
     )
 
 
+def check_phase0_lan_readiness(client: httpx.Client, base_url: str, owner_token: str | None) -> CheckResult:
+    status, body = _get_json(client, f"{base_url}/ops/readiness", headers=_owner_headers(owner_token))
+    ok = status == 200 and body.get("status") == "ready"
+    return CheckResult(
+        name="phase0_lan_readiness",
+        ok=ok,
+        detail="Phase 0 LAN runtime readiness is ready" if ok else f"Phase 0 LAN runtime readiness failed with HTTP {status}: {body.get('errors') or body.get('detail')}",
+        data=body,
+    )
+
+
 def send_connector_payload(
     client: httpx.Client,
     base_url: str,
@@ -126,6 +138,10 @@ def _default_client_factory(timeout: httpx.Timeout) -> httpx.Client:
     return httpx.Client(timeout=timeout)
 
 
+def _validation_mode(args: argparse.Namespace) -> str:
+    return getattr(args, "mode", "public-external")
+
+
 def run_validation(
     args: argparse.Namespace,
     repo_root: Path,
@@ -138,12 +154,16 @@ def run_validation(
     owner_token = args.owner_token or os.getenv("AIXION_OWNER_TOKEN")
     connector_id = args.connector_id or os.getenv("AIXION_CONNECTOR_ID")
     connector_secret = args.connector_secret or os.getenv("AIXION_CONNECTOR_SECRET")
+    mode = _validation_mode(args)
 
     results: list[CheckResult] = []
     timeout = httpx.Timeout(args.timeout_seconds)
     with client_factory(timeout) as client:
         results.append(check_health(client, base_url))
-        results.append(check_external_agent_readiness(client, base_url, owner_token))
+        if mode == "phase0-lan":
+            results.append(check_phase0_lan_readiness(client, base_url, owner_token))
+        else:
+            results.append(check_external_agent_readiness(client, base_url, owner_token))
 
         if args.skip_webhook:
             results.append(CheckResult(name="connector_webhook", ok=True, detail="Skipped by --skip-webhook."))
@@ -174,13 +194,14 @@ def print_report(results: list[CheckResult]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate a deployed Aixion backend for live external-agent smoke testing.")
-    parser.add_argument("--base-url", default=None, help="Public Aixion backend base URL. Defaults to AIXION_BASE_URL.")
+    parser = argparse.ArgumentParser(description="Validate an Aixion backend for external-agent or Phase 0 LAN smoke testing.")
+    parser.add_argument("--base-url", default=None, help="Aixion backend base URL. Defaults to AIXION_BASE_URL.")
     parser.add_argument("--owner-token", default=None, help="Owner/maintainer bearer token. Defaults to AIXION_OWNER_TOKEN.")
     parser.add_argument("--connector-id", default=None, help="Connector id. Defaults to AIXION_CONNECTOR_ID.")
     parser.add_argument("--connector-secret", default=None, help="One-time/active connector secret. Defaults to AIXION_CONNECTOR_SECRET.")
     parser.add_argument("--provider", choices=sorted(SAMPLE_PAYLOADS), default="chatgpt", help="Sample payload provider.")
-    parser.add_argument("--skip-webhook", action="store_true", help="Only check health and external-agent readiness.")
+    parser.add_argument("--mode", choices=VALIDATION_MODES, default="public-external", help="Use public-external for real internet callbacks or phase0-lan for same-Wi-Fi validation.")
+    parser.add_argument("--skip-webhook", action="store_true", help="Only check health/readiness without sending a connector payload.")
     parser.add_argument("--timeout-seconds", type=float, default=20.0)
     args = parser.parse_args()
 
