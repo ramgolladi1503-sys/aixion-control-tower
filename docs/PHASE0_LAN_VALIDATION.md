@@ -40,7 +40,7 @@ Do not claim these until a public backend exists.
 
 Both devices must be on the same Wi-Fi network.
 
-Find laptop LAN IP:
+Find laptop LAN IP on macOS:
 
 ```bash
 ipconfig getifaddr en0
@@ -52,10 +52,16 @@ Example:
 192.168.1.20
 ```
 
-Use this backend URL:
+Use this backend URL shape:
 
 ```text
 http://192.168.1.20:8000
+```
+
+The Android app normalizes this to a Retrofit-safe trailing-slash URL internally:
+
+```text
+http://192.168.1.20:8000/
 ```
 
 ## Start backend for LAN
@@ -82,17 +88,50 @@ Check from phone browser:
 http://192.168.1.20:8000/health
 ```
 
-If phone cannot open it, fix network/firewall before debugging the app.
+If phone cannot open it, fix Wi-Fi/firewall/backend binding before debugging the app. The app cannot connect if the phone browser cannot reach `/health`.
 
 ## Android app base URL
 
-Set the Android debug/local backend URL to the laptop LAN IP:
+The debug build defaults to the Android emulator backend URL:
 
 ```text
-http://192.168.1.20:8000
+http://10.0.2.2:8000/
 ```
 
-Then rebuild/install the debug APK.
+That is wrong for a physical phone. For phone-to-laptop Phase 0 validation, build the debug APK with the laptop LAN backend URL:
+
+```bash
+cd mobile/android
+./gradlew assembleDebug -PAIXION_API_BASE_URL=http://192.168.1.20:8000/
+```
+
+Then install the generated debug APK on the phone.
+
+Hard rule:
+
+```text
+emulator -> http://10.0.2.2:8000/
+physical phone -> http://YOUR_LAPTOP_LAN_IP:8000/
+```
+
+Do not use `localhost` from the phone. On the phone, `localhost` means the phone itself, not the laptop.
+
+## Android debug validation checklist
+
+```text
+1. Run `ipconfig getifaddr en0` on Mac and copy the LAN IP.
+2. Start backend with `--host 0.0.0.0 --port 8000`.
+3. Open `http://LAN_IP:8000/health` from the phone browser.
+4. Rebuild Android debug APK with `-PAIXION_API_BASE_URL=http://LAN_IP:8000/`.
+5. Install the rebuilt APK.
+6. Open the app.
+7. Register/login or use intentional demo auth mode.
+8. Confirm Home loads.
+9. Confirm Agent Work loads.
+10. Confirm Approvals loads.
+11. Confirm Account logout confirmation works.
+12. Confirm Home back button/back gesture shows the same logout confirmation.
+```
 
 ## Phase 0 validator mode
 

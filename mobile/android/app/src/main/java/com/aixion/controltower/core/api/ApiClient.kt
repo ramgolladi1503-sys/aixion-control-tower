@@ -30,7 +30,7 @@ object ApiClient {
             .build()
 
         return Retrofit.Builder()
-            .baseUrl(baseUrl)
+            .baseUrl(BackendConnectionConfig.normalizeBaseUrl(baseUrl))
             .client(client)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
