@@ -25,6 +25,13 @@ def _client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def _client_factory(handler):
+    def factory(_timeout: httpx.Timeout) -> httpx.Client:
+        return _client(handler)
+
+    return factory
+
+
 def test_check_health_passes_when_backend_reports_ok() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/health"
@@ -61,16 +68,7 @@ def test_run_validation_can_skip_webhook_after_readiness() -> None:
     args = Args()
     args.skip_webhook = True
 
-    original_client = httpx.Client
-
-    def fake_client(*_, **__) -> httpx.Client:
-        return _client(handler)
-
-    try:
-        httpx.Client = fake_client  # type: ignore[assignment]
-        results = run_validation(args, Path(__file__).resolve().parents[1])
-    finally:
-        httpx.Client = original_client  # type: ignore[assignment]
+    results = run_validation(args, Path(__file__).resolve().parents[1], client_factory=_client_factory(handler))
 
     assert [result.name for result in results] == ["health", "external_agent_readiness", "connector_webhook"]
     assert all(result.ok for result in results)
@@ -95,16 +93,8 @@ def test_run_validation_sends_webhook_and_verifies_task_visibility() -> None:
 
     args = Args()
     args.skip_webhook = False
-    original_client = httpx.Client
 
-    def fake_client(*_, **__) -> httpx.Client:
-        return _client(handler)
-
-    try:
-        httpx.Client = fake_client  # type: ignore[assignment]
-        results = run_validation(args, Path(__file__).resolve().parents[1])
-    finally:
-        httpx.Client = original_client  # type: ignore[assignment]
+    results = run_validation(args, Path(__file__).resolve().parents[1], client_factory=_client_factory(handler))
 
     assert calls == [
         "/health",
@@ -126,16 +116,8 @@ def test_run_validation_fails_without_connector_credentials_when_webhook_not_ski
     args = Args()
     args.connector_id = None
     args.connector_secret = None
-    original_client = httpx.Client
 
-    def fake_client(*_, **__) -> httpx.Client:
-        return _client(handler)
-
-    try:
-        httpx.Client = fake_client  # type: ignore[assignment]
-        results = run_validation(args, Path(__file__).resolve().parents[1])
-    finally:
-        httpx.Client = original_client  # type: ignore[assignment]
+    results = run_validation(args, Path(__file__).resolve().parents[1], client_factory=_client_factory(handler))
 
     assert results[-1].name == "connector_webhook"
     assert results[-1].ok is False
