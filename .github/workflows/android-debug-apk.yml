@@ -1,0 +1,67 @@
+name: Android Debug APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_base_url:
+        description: "Backend base URL baked into the debug APK. Use your laptop LAN URL for Phase 0, for example http://192.168.29.235:8000/"
+        required: true
+        default: "http://10.0.2.2:8000/"
+      artifact_name:
+        description: "Uploaded artifact name"
+        required: true
+        default: "aixion-debug-apk"
+  pull_request:
+    paths:
+      - "mobile/android/**"
+      - ".github/workflows/android-debug-apk.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "mobile/android/**"
+      - ".github/workflows/android-debug-apk.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-debug-apk:
+    name: Build Android debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set executable bit on Gradle wrapper
+        working-directory: mobile/android
+        run: chmod +x ./gradlew
+
+      - name: Show build inputs
+        run: |
+          echo "API base URL: ${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}"
+          echo "Artifact name: ${{ github.event.inputs.artifact_name || 'aixion-debug-apk' }}"
+
+      - name: Run Android unit tests
+        working-directory: mobile/android
+        run: ./gradlew testDebugUnitTest -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}
+
+      - name: Build debug APK
+        working-directory: mobile/android
+        run: ./gradlew assembleDebug -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name || 'aixion-debug-apk' }}
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
