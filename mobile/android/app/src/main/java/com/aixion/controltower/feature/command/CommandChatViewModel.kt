@@ -17,7 +17,8 @@ data class CommandUiState(
     val projects: List<ProjectSummary> = emptyList(),
     val selectedProject: ProjectSummary? = null,
     val generatedWorkOrder: WorkOrderSummary? = null,
-    val message: String? = null
+    val message: String? = null,
+    val errorMessage: String? = null
 )
 
 class CommandChatViewModel : ViewModel() {
@@ -30,11 +31,21 @@ class CommandChatViewModel : ViewModel() {
 
     init {
         viewModelScope.launch {
-            val projects = projectRepository.listProjects()
-            _state.value = _state.value.copy(
-                projects = projects,
-                selectedProject = projects.firstOrNull()
-            )
+            runCatching { projectRepository.listProjects() }
+                .onSuccess { projects ->
+                    _state.value = _state.value.copy(
+                        projects = projects,
+                        selectedProject = projects.firstOrNull(),
+                        errorMessage = null
+                    )
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        projects = emptyList(),
+                        selectedProject = null,
+                        errorMessage = error.message ?: "Unable to load projects. Command needs backend project data before it can create a real Work Order."
+                    )
+                }
         }
     }
 
@@ -45,17 +56,33 @@ class CommandChatViewModel : ViewModel() {
     fun createWorkOrder(rawCommand: String) {
         if (rawCommand.isBlank()) return
         viewModelScope.launch {
-            _state.value = _state.value.copy(loading = true, message = "Creating controlled work order...")
-            val workOrder = commandRepository.createControlledWorkOrder(
-                project = _state.value.selectedProject,
-                title = rawCommand.take(48),
-                rawCommand = rawCommand
-            )
             _state.value = _state.value.copy(
-                loading = false,
-                generatedWorkOrder = workOrder,
-                message = "Work order ready: ${workOrder.goal.take(48)}"
+                loading = true,
+                message = "Creating Work Order...",
+                errorMessage = null,
+                generatedWorkOrder = null
             )
+            runCatching {
+                commandRepository.createControlledWorkOrder(
+                    project = _state.value.selectedProject,
+                    title = rawCommand.take(48),
+                    rawCommand = rawCommand
+                )
+            }.onSuccess { workOrder ->
+                _state.value = _state.value.copy(
+                    loading = false,
+                    generatedWorkOrder = workOrder,
+                    message = "Work Order created. Review it in Work Orders before approval or execution.",
+                    errorMessage = null
+                )
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    loading = false,
+                    generatedWorkOrder = null,
+                    message = null,
+                    errorMessage = error.message ?: "Work Order was not created. Backend sync is required."
+                )
+            }
         }
     }
 }
