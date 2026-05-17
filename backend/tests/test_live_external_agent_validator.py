@@ -21,6 +21,10 @@ class Args:
     timeout_seconds = 5.0
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
 def _client(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler))
 
@@ -68,7 +72,7 @@ def test_run_validation_can_skip_webhook_after_readiness() -> None:
     args = Args()
     args.skip_webhook = True
 
-    results = run_validation(args, Path(__file__).resolve().parents[1], client_factory=_client_factory(handler))
+    results = run_validation(args, _repo_root(), client_factory=_client_factory(handler))
 
     assert [result.name for result in results] == ["health", "external_agent_readiness", "connector_webhook"]
     assert all(result.ok for result in results)
@@ -94,7 +98,7 @@ def test_run_validation_sends_webhook_and_verifies_task_visibility() -> None:
     args = Args()
     args.skip_webhook = False
 
-    results = run_validation(args, Path(__file__).resolve().parents[1], client_factory=_client_factory(handler))
+    results = run_validation(args, _repo_root(), client_factory=_client_factory(handler))
 
     assert calls == [
         "/health",
@@ -117,7 +121,7 @@ def test_run_validation_fails_without_connector_credentials_when_webhook_not_ski
     args.connector_id = None
     args.connector_secret = None
 
-    results = run_validation(args, Path(__file__).resolve().parents[1], client_factory=_client_factory(handler))
+    results = run_validation(args, _repo_root(), client_factory=_client_factory(handler))
 
     assert results[-1].name == "connector_webhook"
     assert results[-1].ok is False
