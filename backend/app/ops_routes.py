@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_maintainer
 from .database_migrations import known_migration_ids
+from .external_agent_readiness import ExternalAgentReadinessResponse, build_external_agent_readiness
 from .models import AuthUser, UserRole, now_utc
 from .recovery_routes import RECOVERY_FORMAT_VERSION, export_recovery_snapshot
 from .settings import get_settings
@@ -100,3 +101,8 @@ def build_runtime_readiness() -> RuntimeReadinessResponse:
 @router.get("/readiness", response_model=RuntimeReadinessResponse)
 def get_runtime_readiness(_: AuthUser = MaintainerDependency) -> RuntimeReadinessResponse:
     return build_runtime_readiness()
+
+
+@router.get("/external-agent-readiness", response_model=ExternalAgentReadinessResponse)
+def get_external_agent_readiness(_: AuthUser = MaintainerDependency) -> ExternalAgentReadinessResponse:
+    return build_external_agent_readiness()

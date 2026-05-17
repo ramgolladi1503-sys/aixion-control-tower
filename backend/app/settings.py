@@ -30,6 +30,8 @@ class Settings:
     db_path: Path
     github_token_configured: bool = False
     fcm_server_key_configured: bool = False
+    public_base_url: str | None = None
+    allow_unauthenticated_external_agent_demo: bool = False
     validation_errors: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -56,6 +58,11 @@ def _profile_from_env() -> str:
 
 def _env_present(name: str) -> bool:
     return bool(os.getenv(name, "").strip())
+
+
+def _optional_env(name: str) -> str | None:
+    value = os.getenv(name, "").strip()
+    return value or None
 
 
 def _production_validation_errors(settings: Settings) -> tuple[str, ...]:
@@ -86,6 +93,11 @@ def get_settings() -> Settings:
         db_path=Path(os.getenv("AIXION_DB_PATH", defaults["db_path"])),
         github_token_configured=_env_present(github_env),
         fcm_server_key_configured=_env_present(fcm_env),
+        public_base_url=_optional_env("AIXION_PUBLIC_BASE_URL"),
+        allow_unauthenticated_external_agent_demo=parse_bool(
+            os.getenv("AIXION_ALLOW_UNAUTHENTICATED_EXTERNAL_AGENT_DEMO", "false"),
+            field_name="AIXION_ALLOW_UNAUTHENTICATED_EXTERNAL_AGENT_DEMO",
+        ),
     )
     return Settings(
         profile=settings.profile,
@@ -93,6 +105,8 @@ def get_settings() -> Settings:
         db_path=settings.db_path,
         github_token_configured=settings.github_token_configured,
         fcm_server_key_configured=settings.fcm_server_key_configured,
+        public_base_url=settings.public_base_url,
+        allow_unauthenticated_external_agent_demo=settings.allow_unauthenticated_external_agent_demo,
         validation_errors=_production_validation_errors(settings),
     )
 
