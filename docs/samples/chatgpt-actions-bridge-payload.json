@@ -1,0 +1,15 @@
+{
+  "task": {
+    "title": "Review ChatGPT proposed change",
+    "goal": "Create an approval-gated implementation task",
+    "context": "Custom GPT action request"
+  },
+  "target": {
+    "repository": "owner/repo",
+    "branch": "feature/chatgpt-task"
+  },
+  "metadata": {
+    "source": "chatgpt",
+    "channel": "custom-gpt-actions"
+  }
+}
