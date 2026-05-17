@@ -10,6 +10,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
@@ -20,6 +23,7 @@ import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.feature.agenttasks.AgentTasksScreen
 import com.aixion.controltower.feature.approvals.ApprovalDetailScreen
+import com.aixion.controltower.feature.approvals.ApprovalInboxFilter
 import com.aixion.controltower.feature.approvals.ApprovalInboxScreen
 import com.aixion.controltower.feature.approvals.ApprovalsViewModel
 import com.aixion.controltower.feature.audit.AuditTrailScreen
@@ -48,6 +52,7 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
         val authState by authViewModel.state.collectAsState()
         val approvalsViewModel: ApprovalsViewModel = viewModel()
         val mcpQueueViewModel: MCPQueueViewModel = viewModel()
+        var approvalInboxFilter by remember { mutableStateOf(ApprovalInboxFilter.ALL) }
         val backStackEntry = navController.currentBackStackEntryAsState().value
         val currentRoute = backStackEntry?.destination?.route ?: Route.Auth.value
         val showMainShell = AuthSessionGate.shouldShowMainShell(
@@ -87,6 +92,7 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                 }
                 is NotificationDeepLink.ApprovalRequest -> {
                     approvalsViewModel.openApprovalById(notificationDeepLink.entityId)
+                    approvalInboxFilter = ApprovalInboxFilter.ALL
                     navController.navigate(Route.ApprovalDetail.value) { launchSingleTop = true }
                 }
                 is NotificationDeepLink.Unknown,
@@ -103,6 +109,9 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             NavigationBarItem(
                                 selected = currentRoute == route.value,
                                 onClick = {
+                                    if (route == Route.Inbox) {
+                                        approvalInboxFilter = ApprovalInboxFilter.ALL
+                                    }
                                     navController.navigate(route.value) {
                                         launchSingleTop = true
                                         popUpTo(Route.Home.value) { saveState = true }
@@ -131,12 +140,15 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                                 navController.navigate(Route.ApprovalDetail.value)
                             },
                             onOpenActionQueue = {
+                                approvalInboxFilter = ApprovalInboxFilter.ACTION
                                 navController.navigate(Route.Inbox.value) { launchSingleTop = true }
                             },
                             onOpenExecutionQueue = {
-                                navController.navigate(Route.AgentTasks.value) { launchSingleTop = true }
+                                approvalInboxFilter = ApprovalInboxFilter.EXECUTION
+                                navController.navigate(Route.Inbox.value) { launchSingleTop = true }
                             },
                             onOpenBlockedQueue = {
+                                approvalInboxFilter = ApprovalInboxFilter.BLOCKED
                                 navController.navigate(Route.Inbox.value) { launchSingleTop = true }
                             },
                             onOpenFailedTests = {
@@ -156,6 +168,7 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                     composable(Route.Inbox.value) {
                         ApprovalInboxScreen(
                             viewModel = approvalsViewModel,
+                            filter = approvalInboxFilter,
                             onApprovalSelected = { approval ->
                                 approvalsViewModel.selectApproval(approval)
                                 navController.navigate(Route.ApprovalDetail.value)
@@ -167,6 +180,7 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             deepLinkTaskId = (notificationDeepLink as? NotificationDeepLink.AgentTask)?.entityId,
                             onOpenApproval = { linkedApprovalId ->
                                 approvalsViewModel.openApprovalById(linkedApprovalId)
+                                approvalInboxFilter = ApprovalInboxFilter.ALL
                                 navController.navigate(Route.ApprovalDetail.value)
                             }
                         )
@@ -177,6 +191,7 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             viewModel = mcpQueueViewModel,
                             onOpenApproval = { linkedApprovalId ->
                                 approvalsViewModel.openApprovalById(linkedApprovalId)
+                                approvalInboxFilter = ApprovalInboxFilter.ALL
                                 navController.navigate(Route.ApprovalDetail.value)
                             }
                         )
