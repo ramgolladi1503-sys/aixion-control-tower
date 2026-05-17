@@ -18,6 +18,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -43,6 +46,14 @@ import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
+enum class AgentWorkFilter(val label: String, val emptyCopy: String) {
+    ALL("All", "No connected-agent work yet."),
+    WAITING_APPROVAL("Waiting approval", "No Agent Work is waiting for approval."),
+    ACTIVE("Active", "No Agent Work is currently active."),
+    FAILED("Failed", "No failed Agent Work items are currently shown."),
+    DONE("Done", "No completed Agent Work items are currently shown.")
+}
+
 @Composable
 fun AgentTasksScreen(
     viewModel: AgentTasksViewModel = viewModel(),
@@ -51,6 +62,8 @@ fun AgentTasksScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val selectedTask = state.selectedTask
+    var filter by remember { mutableStateOf(AgentWorkFilter.ALL) }
+    val visibleTasks = state.tasks.filterBy(filter)
 
     LaunchedEffect(deepLinkTaskId) {
         deepLinkTaskId?.takeIf { it.isNotBlank() }?.let { taskId ->
@@ -88,7 +101,8 @@ fun AgentTasksScreen(
             AgentTaskSummaryCard(
                 total = state.tasks.size,
                 active = state.activeCount,
-                waiting = state.waitingForApprovalCount
+                waiting = state.waitingForApprovalCount,
+                providers = state.tasks.map { it.provider }.filter { it.isNotBlank() }.distinct().sorted()
             )
         }
 
@@ -112,12 +126,20 @@ fun AgentTasksScreen(
             )
         }
 
-        if (!state.loading && state.tasks.isEmpty()) {
+        item {
+            AgentWorkFilterPanel(
+                selected = filter,
+                tasks = state.tasks,
+                onSelect = { filter = it }
+            )
+        }
+
+        if (!state.loading && visibleTasks.isEmpty()) {
             item {
                 TowerPanel(elevated = true) {
                     Text(
                         text = if (state.errorMessage == null) {
-                            "No connected-agent work yet. Create a connector, send a task through ChatGPT/Codex, or use the backend AgentTask API."
+                            filter.emptyCopy
                         } else {
                             "Agent work list unavailable. Fix backend/auth connectivity before trusting this screen."
                         },
@@ -136,7 +158,7 @@ fun AgentTasksScreen(
             }
         }
 
-        items(state.tasks) { task ->
+        items(visibleTasks) { task ->
             AgentTaskCard(
                 task = task,
                 selected = task.id == state.selectedTaskId,
@@ -201,7 +223,7 @@ private fun AgentTasksHero(
 }
 
 @Composable
-private fun AgentTaskSummaryCard(total: Int, active: Int, waiting: Int) {
+private fun AgentTaskSummaryCard(total: Int, active: Int, waiting: Int, providers: List<String>) {
     TowerPanel(elevated = true) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = "TOTAL $total", color = TowerAccent)
@@ -216,11 +238,40 @@ private fun AgentTaskSummaryCard(total: Int, active: Int, waiting: Int) {
             lineHeight = 19.sp
         )
         Text(
-            text = "If five or more agents are connected, this screen should scale as a queue grouped by source, status, and linked approval. That grouping is a follow-up UX scope.",
+            text = if (providers.isEmpty()) {
+                "No providers detected yet. Create a connector first, then submitted work will appear here."
+            } else {
+                "Providers detected: ${providers.joinToString()}"
+            },
             color = TowerTextMuted,
             fontSize = 13.sp,
             lineHeight = 19.sp
         )
+    }
+}
+
+@Composable
+private fun AgentWorkFilterPanel(
+    selected: AgentWorkFilter,
+    tasks: List<AgentTaskSummary>,
+    onSelect: (AgentWorkFilter) -> Unit
+) {
+    TowerPanel(elevated = true) {
+        Text("Filter Agent Work", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = "Use filters when multiple connected agents are submitting work. This keeps ChatGPT, Codex, Claude, local bridges, and worker tasks from becoming one noisy list.",
+            color = TowerTextMuted,
+            fontSize = 13.sp,
+            lineHeight = 19.sp
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        AgentWorkFilter.entries.forEach { filter ->
+            OutlinedButton(onClick = { onSelect(filter) }, modifier = Modifier.fillMaxWidth()) {
+                val count = tasks.filterBy(filter).size
+                Text(if (selected == filter) "✓ ${filter.label} ($count)" else "${filter.label} ($count)")
+            }
+        }
     }
 }
 
@@ -245,6 +296,13 @@ private fun AgentTaskCard(
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(task.title, color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 23.sp)
         Text(task.goal, color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("Provider: ${task.sourceLabel}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        task.sourceSessionId?.takeIf { it.isNotBlank() }?.let { session ->
+            Text("Session: $session", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        }
+        task.sourceTaskId?.takeIf { it.isNotBlank() }?.let { taskId ->
+            Text("External task: $taskId", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        }
         task.repository?.takeIf { it.isNotBlank() }?.let { repository ->
             Text("Repo: $repository", color = TowerTextMuted, fontSize = 12.sp)
         }
@@ -264,6 +322,13 @@ private fun AgentTaskCard(
             Button(onClick = onOpenApproval, modifier = Modifier.fillMaxWidth()) {
                 Text("Open linked approval")
             }
+        } else if (task.requiresApproval || task.status == AgentTaskStatus.WAITING_FOR_APPROVAL) {
+            Text(
+                text = "Waiting for an approval link from backend bridge.",
+                color = TowerTextMuted,
+                fontSize = 12.sp,
+                lineHeight = 17.sp
+            )
         }
     }
 }
@@ -282,6 +347,10 @@ private fun SelectedTaskTimelineCard(
         }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text(task.title, color = TowerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, lineHeight = 25.sp)
+        Text("Provider: ${task.sourceLabel}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        task.repository?.takeIf { it.isNotBlank() }?.let { repository ->
+            Text("Repo: $repository", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        }
         if (task.approvalRequestId != null) {
             Button(onClick = onOpenApproval, modifier = Modifier.fillMaxWidth()) {
                 Text("Open approval ${task.approvalRequestId}")
@@ -312,6 +381,29 @@ private fun AgentTaskEventRow(event: AgentTaskEventSummary) {
             color = TowerTextMuted,
             fontSize = 12.sp
         )
+    }
+}
+
+private fun List<AgentTaskSummary>.filterBy(filter: AgentWorkFilter): List<AgentTaskSummary> {
+    return when (filter) {
+        AgentWorkFilter.ALL -> this
+        AgentWorkFilter.WAITING_APPROVAL -> filter { task ->
+            task.status == AgentTaskStatus.WAITING_FOR_APPROVAL || task.requiresApproval
+        }
+        AgentWorkFilter.ACTIVE -> filter { task ->
+            task.status == AgentTaskStatus.RECEIVED ||
+                task.status == AgentTaskStatus.PLANNING ||
+                task.status == AgentTaskStatus.APPROVED ||
+                task.status == AgentTaskStatus.EXECUTING ||
+                task.status == AgentTaskStatus.TESTING ||
+                task.status == AgentTaskStatus.READY_FOR_PR
+        }
+        AgentWorkFilter.FAILED -> filter { task ->
+            task.status == AgentTaskStatus.FAILED ||
+                task.status == AgentTaskStatus.CANCELLED ||
+                task.status == AgentTaskStatus.DENIED
+        }
+        AgentWorkFilter.DONE -> filter { task -> task.status == AgentTaskStatus.DONE }
     }
 }
 
