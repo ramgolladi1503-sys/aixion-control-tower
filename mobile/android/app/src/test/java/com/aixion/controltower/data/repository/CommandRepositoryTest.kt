@@ -58,12 +58,7 @@ class CommandRepositoryTest {
 
     @Test
     fun createControlledWorkOrderPropagatesWorkOrderCreateFailureWithoutFallback() = runTest {
-        val project = ProjectSummary(
-            id = "project_1",
-            name = "Aixion",
-            description = "demo",
-            mode = "STRICT"
-        )
+        val project = projectFixture()
         val api = FailingCreateWorkOrderCommandApi()
         val repository = CommandRepository(api)
 
@@ -88,12 +83,7 @@ class CommandRepositoryTest {
 
     @Test
     fun createControlledWorkOrderUsesBackendWorkOrderIdWhenSuccessful() = runTest {
-        val project = ProjectSummary(
-            id = "project_1",
-            name = "Aixion",
-            description = "demo",
-            mode = "STRICT"
-        )
+        val project = projectFixture()
         val api = SuccessfulCommandApi()
         val repository = CommandRepository(api)
 
@@ -110,6 +100,16 @@ class CommandRepositoryTest {
         assertTrue(api.createIdeaCalled)
         assertTrue(api.createWorkOrderCalled)
     }
+
+    private fun projectFixture(): ProjectSummary = ProjectSummary(
+        id = "project_1",
+        name = "Aixion",
+        description = "demo",
+        mode = "STRICT",
+        pendingApprovals = 0,
+        blockedRequests = 0,
+        healthScore = 100
+    )
 }
 
 private open class CommandApiBase : BaseFakeControlTowerApi() {
