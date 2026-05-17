@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,8 @@ SAMPLE_PAYLOADS = {
     "chatgpt": Path("docs/samples/chatgpt-actions-bridge-payload.json"),
     "codex": Path("docs/samples/codex-agent-bridge-payload.json"),
 }
+
+ClientFactory = Callable[[httpx.Timeout], httpx.Client]
 
 
 @dataclass
@@ -119,7 +122,15 @@ def verify_task_visibility(client: httpx.Client, base_url: str, owner_token: str
     )
 
 
-def run_validation(args: argparse.Namespace, repo_root: Path) -> list[CheckResult]:
+def _default_client_factory(timeout: httpx.Timeout) -> httpx.Client:
+    return httpx.Client(timeout=timeout)
+
+
+def run_validation(
+    args: argparse.Namespace,
+    repo_root: Path,
+    client_factory: ClientFactory = _default_client_factory,
+) -> list[CheckResult]:
     base_url = _clean_base_url(args.base_url or os.getenv("AIXION_BASE_URL", ""))
     if not base_url:
         return [CheckResult(name="configuration", ok=False, detail="AIXION_BASE_URL or --base-url is required.")]
@@ -130,7 +141,7 @@ def run_validation(args: argparse.Namespace, repo_root: Path) -> list[CheckResul
 
     results: list[CheckResult] = []
     timeout = httpx.Timeout(args.timeout_seconds)
-    with httpx.Client(timeout=timeout) as client:
+    with client_factory(timeout) as client:
         results.append(check_health(client, base_url))
         results.append(check_external_agent_readiness(client, base_url, owner_token))
 
