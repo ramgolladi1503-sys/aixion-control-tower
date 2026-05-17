@@ -1,5 +1,6 @@
 package com.aixion.controltower
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.NavigationBar
@@ -29,6 +30,7 @@ import com.aixion.controltower.feature.approvals.ApprovalsViewModel
 import com.aixion.controltower.feature.audit.AuditTrailScreen
 import com.aixion.controltower.feature.auth.AuthScreen
 import com.aixion.controltower.feature.auth.AuthViewModel
+import com.aixion.controltower.feature.auth.LogoutConfirmationDialog
 import com.aixion.controltower.feature.command.CommandChatScreen
 import com.aixion.controltower.feature.connectors.ConnectorsScreen
 import com.aixion.controltower.feature.diff.DiffViewerScreen
@@ -53,12 +55,39 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
         val approvalsViewModel: ApprovalsViewModel = viewModel()
         val mcpQueueViewModel: MCPQueueViewModel = viewModel()
         var approvalInboxFilter by remember { mutableStateOf(ApprovalInboxFilter.ALL) }
+        var showLogoutConfirmation by remember { mutableStateOf(false) }
         val backStackEntry = navController.currentBackStackEntryAsState().value
         val currentRoute = backStackEntry?.destination?.route ?: Route.Auth.value
         val showMainShell = AuthSessionGate.shouldShowMainShell(
             authenticated = authState.authenticated,
             sessionChecked = authState.sessionChecked,
             currentRoute = currentRoute
+        )
+
+        fun requestLogoutConfirmation() {
+            showLogoutConfirmation = true
+        }
+
+        fun confirmLogout() {
+            showLogoutConfirmation = false
+            approvalInboxFilter = ApprovalInboxFilter.ALL
+            authViewModel.logout()
+            navController.navigate(Route.Auth.value) {
+                launchSingleTop = true
+                popUpTo(0) { inclusive = true }
+            }
+        }
+
+        BackHandler(
+            enabled = authState.authenticated && authState.sessionChecked && currentRoute == Route.Home.value
+        ) {
+            requestLogoutConfirmation()
+        }
+
+        LogoutConfirmationDialog(
+            visible = showLogoutConfirmation,
+            onConfirm = ::confirmLogout,
+            onDismiss = { showLogoutConfirmation = false }
         )
 
         LaunchedEffect(currentRoute, authState.authenticated, authState.sessionChecked) {
@@ -196,7 +225,12 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             }
                         )
                     }
-                    composable(Route.Account.value) { AuthScreen(viewModel = authViewModel) }
+                    composable(Route.Account.value) {
+                        AuthScreen(
+                            viewModel = authViewModel,
+                            onLogoutRequested = ::requestLogoutConfirmation
+                        )
+                    }
                     composable(Route.Ops.value) { RuntimeReadinessScreen() }
                     composable(Route.Tests.value) { TestRunsScreen() }
                     composable(Route.Audit.value) { AuditTrailScreen() }
