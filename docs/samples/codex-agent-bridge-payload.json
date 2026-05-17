@@ -1,0 +1,15 @@
+{
+  "job": {
+    "title": "Prepare safe patch",
+    "goal": "Draft a code change and evidence plan",
+    "context": "Codex agent request",
+    "metadata": {
+      "source": "codex",
+      "risk": "medium"
+    }
+  },
+  "git": {
+    "repository": "owner/repo",
+    "branch": "feature/codex-task"
+  }
+}
