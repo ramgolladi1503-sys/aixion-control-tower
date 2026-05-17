@@ -41,6 +41,12 @@ import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
+private data class ConnectorSetupGuidance(
+    val stage: String,
+    val nextAction: String,
+    val healthy: Boolean
+)
+
 @Composable
 fun ConnectorsScreen(viewModel: ConnectorsViewModel = viewModel()) {
     val state by viewModel.state.collectAsState()
@@ -123,7 +129,7 @@ fun ConnectorsContent(
                 subtitle = if (state.connectors.isEmpty()) {
                     "No connector is configured yet. Pick ChatGPT, Codex, Claude/Cursor, Gemini, or Local Bridge from templates first."
                 } else {
-                    "Webhook agents, credentials, setup blocks, and schema mappers stay controlled here."
+                    "Webhook agents, credentials, setup blocks, schema mappers, setup stage, and next action stay controlled here."
                 }
             )
         }
@@ -134,7 +140,7 @@ fun ConnectorsContent(
                     Text("No connector configured yet", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
-                        "Start with ChatGPT Actions Bridge or Codex Agent Bridge. Create the connector, issue a credential, then copy the setup block into the external agent.",
+                        "Start with ChatGPT Actions Bridge or Codex Agent Bridge. Create the connector, issue a credential, copy the setup block into the external agent, then test a sample payload.",
                         color = TowerTextMuted,
                         fontSize = 13.sp,
                         lineHeight = 19.sp
@@ -198,7 +204,8 @@ private fun FirstTimeConnectorGuide() {
         Text("1. Pick a template such as ChatGPT Actions Bridge or Codex Agent Bridge.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
         Text("2. Create the connector from the selected template.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
         Text("3. Issue a credential and copy the setup block into the external agent.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
-        Text("4. Keep approvals on the phone. External agents submit work; they do not approve it.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("4. Test a sample payload before trusting live work.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("5. External agents submit Agent Work; they do not approve their own work.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
     }
 }
 
@@ -267,6 +274,8 @@ private fun ConnectorCard(
     onApplyMapper: () -> Unit,
     onPreviewMapper: () -> Unit
 ) {
+    val guidance = connector.setupGuidance()
+
     TowerPanel(elevated = true) {
         Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
             Text(connector.name, color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 23.sp)
@@ -275,6 +284,14 @@ private fun ConnectorCard(
             StatusBadge(connector.health_status, if (connector.health_status == "HEALTHY") RiskLow else RiskMedium)
             StatusBadge(if (connector.secret_configured) "Credential set" else "No credential", if (connector.secret_configured) RiskLow else RiskBlocked)
             StatusBadge("Failures ${connector.failed_auth_count}", if (connector.failed_auth_count == 0) RiskLow else RiskBlocked)
+        }
+
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        TowerPanel(elevated = false) {
+            StatusBadge("STAGE ${guidance.stage.uppercase()}", if (guidance.healthy) RiskLow else RiskMedium)
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+            Text("Next action", color = TowerTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(guidance.nextAction, color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
         }
 
         Spacer(modifier = Modifier.height(TowerSpacing.md))
@@ -313,5 +330,40 @@ private fun ConnectorCard(
                 Text("Test selected template payload")
             }
         }
+    }
+}
+
+private fun ConnectorDto.setupGuidance(): ConnectorSetupGuidance {
+    return when {
+        failed_auth_count > 0 || !last_error.isNullOrBlank() -> ConnectorSetupGuidance(
+            stage = "Fix error",
+            nextAction = "Review the last error, rotate the credential if needed, then test the selected template payload again.",
+            healthy = false
+        )
+        !secret_configured -> ConnectorSetupGuidance(
+            stage = "Credential needed",
+            nextAction = "Issue a credential, copy it once, and store it inside the external agent configuration.",
+            healthy = false
+        )
+        status != "ENABLED" -> ConnectorSetupGuidance(
+            stage = "Disabled",
+            nextAction = "Enable the connector after the credential and setup block are installed in the external agent.",
+            healthy = false
+        )
+        health_status != "HEALTHY" -> ConnectorSetupGuidance(
+            stage = "Test needed",
+            nextAction = "Copy the setup block into the external agent, apply the selected mapper if required, then test a sample payload.",
+            healthy = false
+        )
+        last_used_at.isNullOrBlank() -> ConnectorSetupGuidance(
+            stage = "Ready, unused",
+            nextAction = "Send the first task from ChatGPT/Codex/Claude. Submitted work will appear in Agent Work and approvals will appear in Approvals.",
+            healthy = true
+        )
+        else -> ConnectorSetupGuidance(
+            stage = "Live",
+            nextAction = "Connector is usable. Monitor submitted Agent Work and approve, deny, or request revision from Approvals.",
+            healthy = true
+        )
     }
 }
