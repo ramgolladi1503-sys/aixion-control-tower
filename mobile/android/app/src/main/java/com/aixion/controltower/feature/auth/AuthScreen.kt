@@ -48,7 +48,8 @@ fun AuthScreen(
     viewModel: AuthViewModel = viewModel(),
     roleAdminViewModel: RoleAdminViewModel = viewModel(),
     inviteAdminViewModel: InviteAdminViewModel = viewModel(),
-    sessionAdminViewModel: SessionAdminViewModel = viewModel()
+    sessionAdminViewModel: SessionAdminViewModel = viewModel(),
+    onLogoutRequested: () -> Unit = viewModel::logout
 ) {
     val state by viewModel.state.collectAsState()
     val roleState by roleAdminViewModel.state.collectAsState()
@@ -77,7 +78,7 @@ fun AuthScreen(
             AccountInfoPanel(
                 state = state,
                 onRefreshSession = viewModel::refreshSession,
-                onLogout = viewModel::logout
+                onLogout = onLogoutRequested
             )
 
             PrivacyControlsPanel(state = state, viewModel = viewModel)
@@ -200,7 +201,7 @@ private fun AccountInfoPanel(
             Text(if (state.loading) "Checking session..." else "Refresh session")
         }
         OutlinedButton(onClick = onLogout, enabled = !state.loading, modifier = Modifier.fillMaxWidth()) {
-            Text("Log out")
+            Text("Logout")
         }
     }
 }
