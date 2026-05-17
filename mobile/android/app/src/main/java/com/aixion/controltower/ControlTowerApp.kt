@@ -146,7 +146,13 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                     }
                     composable(Route.Projects.value) { ProjectsScreen() }
                     composable(Route.WorkOrders.value) { WorkOrdersScreen() }
-                    composable(Route.Command.value) { CommandChatScreen() }
+                    composable(Route.Command.value) {
+                        CommandChatScreen(
+                            onOpenWorkOrders = {
+                                navController.navigate(Route.WorkOrders.value) { launchSingleTop = true }
+                            }
+                        )
+                    }
                     composable(Route.Inbox.value) {
                         ApprovalInboxScreen(
                             viewModel = approvalsViewModel,
