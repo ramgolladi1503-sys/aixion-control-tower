@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from typing import TypeVar
+from contextlib import contextmanager
+from typing import Iterator, TypeVar
 
 from pydantic import BaseModel
 
@@ -28,6 +29,7 @@ from .models import (
     WorkOrder,
 )
 from .settings import validate_startup_environment
+from .trust_action_authorization_models import ActionAuthorization
 from .trust_models import (
     ActionConsumption,
     CapabilityLease,
@@ -70,6 +72,7 @@ class SQLiteBackedStore:
         self.reviewer_attestations: dict[str, ReviewerAttestation] = {}
         self.proposed_actions: dict[str, ProposedAction] = {}
         self.policy_decisions: dict[str, PolicyDecision] = {}
+        self.action_authorizations: dict[str, ActionAuthorization] = {}
         self.action_consumptions: dict[str, ActionConsumption] = {}
         self.credential_grants: dict[str, CredentialGrant] = {}
         self.trust_events: dict[str, TrustEvent] = {}
@@ -84,6 +87,12 @@ class SQLiteBackedStore:
         self.audit_events: list[AuditEvent] = []
         self._init_db()
         self.load()
+
+    @contextmanager
+    def atomic(self) -> Iterator[None]:
+        """Serialize a read-modify-persist sequence inside the API process."""
+        with self._lock:
+            yield
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30.0)
@@ -152,6 +161,10 @@ class SQLiteBackedStore:
                 "policy_decision",
                 PolicyDecision,
             )
+            self.action_authorizations = self._load_entities(
+                "action_authorization",
+                ActionAuthorization,
+            )
             self.action_consumptions = self._load_entities(
                 "action_consumption",
                 ActionConsumption,
@@ -210,6 +223,7 @@ class SQLiteBackedStore:
             )
             self._write_map(conn, "proposed_action", self.proposed_actions)
             self._write_map(conn, "policy_decision", self.policy_decisions)
+            self._write_map(conn, "action_authorization", self.action_authorizations)
             self._write_map(conn, "action_consumption", self.action_consumptions)
             self._write_map(conn, "credential_grant", self.credential_grants)
             self._write_map(conn, "trust_event", self.trust_events)
@@ -267,6 +281,7 @@ class SQLiteBackedStore:
             self.reviewer_attestations.clear()
             self.proposed_actions.clear()
             self.policy_decisions.clear()
+            self.action_authorizations.clear()
             self.action_consumptions.clear()
             self.credential_grants.clear()
             self.trust_events.clear()
