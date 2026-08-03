@@ -17,6 +17,7 @@ from .agent_run_models import (
     AgentRunRetryRequest,
     AgentRunStatus,
     AgentRunStep,
+    AgentRunStepStatus,
     AgentRunSummary,
 )
 from .agent_run_supervisor import (
@@ -40,6 +41,20 @@ ReviewerDependency = Depends(require_reviewer)
 MaintainerDependency = Depends(require_maintainer)
 MAX_RUN_LEASE_SECONDS = 3600
 RUN_LEASE_OVERHEAD_SECONDS = 60
+TERMINAL_RUN_STATUSES = {
+    AgentRunStatus.BLOCKED,
+    AgentRunStatus.SUCCEEDED,
+    AgentRunStatus.FAILED,
+    AgentRunStatus.CANCELLED,
+}
+NON_RETRYABLE_STEP_STATUSES = {
+    AgentRunStepStatus.RUNNING,
+    AgentRunStepStatus.BLOCKED,
+    AgentRunStepStatus.SUCCEEDED,
+    AgentRunStepStatus.FAILED,
+    AgentRunStepStatus.CANCELLED,
+    AgentRunStepStatus.SKIPPED,
+}
 
 
 def _audit(event_type: str, entity_id: str, details: dict, actor: str) -> None:
@@ -86,10 +101,7 @@ def _detail(run: AgentRun) -> AgentRunDetail:
 
 
 def _safe_lease_seconds(payload: AgentRunExecuteRequest) -> int:
-    required = (
-        payload.timeout_seconds * MAX_VALIDATION_COMMANDS
-        + RUN_LEASE_OVERHEAD_SECONDS
-    )
+    required = payload.timeout_seconds * MAX_VALIDATION_COMMANDS + RUN_LEASE_OVERHEAD_SECONDS
     if required > MAX_RUN_LEASE_SECONDS:
         raise HTTPException(
             status_code=422,
@@ -100,6 +112,22 @@ def _safe_lease_seconds(payload: AgentRunExecuteRequest) -> int:
             ),
         )
     return max(payload.lease_seconds, required)
+
+
+def _require_step_boundary(run: AgentRun, action: str) -> None:
+    current = store.agent_run_steps.get(run.current_step_id or "")
+    if (
+        (current is not None and current.status == AgentRunStepStatus.RUNNING)
+        or run.lease_owner is not None
+        or run.lease_token is not None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Cannot {action} while a governed step is in flight. "
+                "Wait for the step boundary or recover an expired lease first."
+            ),
+        )
 
 
 @router.post("", response_model=AgentRunDetail)
@@ -264,6 +292,7 @@ def pause_run(
     user: AuthUser = MaintainerDependency,
 ) -> AgentRunDetail:
     run = _run_or_404(run_id)
+    _require_step_boundary(run, "pause the run")
     try:
         pause_agent_run(run, actor=user.email, reason=payload.reason)
     except AgentRunConflict as error:
@@ -292,6 +321,7 @@ def cancel_run(
     user: AuthUser = MaintainerDependency,
 ) -> AgentRunDetail:
     run = _run_or_404(run_id)
+    _require_step_boundary(run, "cancel the run")
     try:
         cancel_agent_run(run, actor=user.email, reason=payload.reason)
     except AgentRunConflict as error:
@@ -306,6 +336,14 @@ def retry_run(
     user: AuthUser = MaintainerDependency,
 ) -> AgentRunDetail:
     run = _run_or_404(run_id)
+    if run.status in TERMINAL_RUN_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Terminal run {run.status} cannot be retried. "
+                "Create a revised approval and a new run instead."
+            ),
+        )
     step = (
         _step_or_404(payload.step_id)
         if payload.step_id
@@ -313,6 +351,11 @@ def retry_run(
     )
     if step is None:
         raise HTTPException(status_code=409, detail="Run has no current step to retry")
+    if step.status in NON_RETRYABLE_STEP_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Step {step.status} is not eligible for bounded retry.",
+        )
     try:
         retry_agent_run_step(run, step, actor=user.email, reason=payload.reason)
     except AgentRunConflict as error:
