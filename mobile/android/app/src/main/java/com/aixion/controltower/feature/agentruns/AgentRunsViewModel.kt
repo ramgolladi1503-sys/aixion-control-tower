@@ -26,6 +26,7 @@ private data class MissionControlSnapshot(
 data class AgentRunsUiState(
     val loading: Boolean = true,
     val actionInProgress: Boolean = false,
+    val decidingActionId: String? = null,
     val runs: List<AgentRunDto> = emptyList(),
     val summary: AgentRunSummaryDto = AgentRunSummaryDto(),
     val trustExceptions: List<TrustExceptionDto> = emptyList(),
@@ -105,6 +106,42 @@ class AgentRunsViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun closeRun() {
         _state.value = _state.value.copy(selected = null, actionMessage = null)
+    }
+
+    fun decideExactAction(actionId: String, allow: Boolean) {
+        if (_state.value.decidingActionId != null) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                decidingActionId = actionId,
+                errorMessage = null,
+                actionMessage = null
+            )
+            val decision = if (allow) "ALLOW" else "BLOCK"
+            val reason = if (allow) {
+                "Approved this exact immutable action from Android Mission Control."
+            } else {
+                "Denied this exact immutable action from Android Mission Control."
+            }
+            runCatching {
+                repository.decideExactAction(actionId, decision, reason)
+            }.onSuccess {
+                _state.value = _state.value.copy(
+                    decidingActionId = null,
+                    actionMessage = if (allow) {
+                        "Exact agent action approved"
+                    } else {
+                        "Exact agent action blocked"
+                    },
+                    errorMessage = null
+                )
+                refresh()
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    decidingActionId = null,
+                    errorMessage = error.message ?: "Unable to record exact action decision."
+                )
+            }
+        }
     }
 
     fun pause() = act("Run paused") { runId ->
