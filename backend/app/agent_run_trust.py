@@ -170,6 +170,7 @@ def _step_actions(
         "repository": task.repository,
         "branch": task.branch_preference,
         "retry_number": step.attempt_count,
+        "created_at": step.created_at,
         "metadata": {
             "step_id": step.id,
             "step_type": step.step_type.value,
@@ -243,7 +244,9 @@ def authorize_run_step(
             result = evaluate_gateway_action(action, actor=actor)
             decision = result.decision
         else:
-            if existing.model_dump(mode="json") != action.model_dump(mode="json"):
+            existing_payload = existing.model_dump(mode="json", exclude={"created_at"})
+            action_payload = action.model_dump(mode="json", exclude={"created_at"})
+            if existing_payload != action_payload:
                 raise AgentRunTrustConflict(
                     "Deterministic trust action identifier resolved to a different payload."
                 )
@@ -266,7 +269,9 @@ def authorize_run_step(
         )
         if decision.decision == PolicyDecisionType.BLOCK:
             store.persist()
-            raise AgentRunTrustConflict("Trust policy blocked execution: " + " ".join(decision.reasons))
+            raise AgentRunTrustConflict(
+                "Trust policy blocked execution: " + " ".join(decision.reasons)
+            )
         if decision.decision == PolicyDecisionType.REQUIRE_APPROVAL:
             store.persist()
             raise AgentRunTrustConflict(
@@ -285,7 +290,7 @@ def consume_run_step_actions(
     if not actions or step.status != AgentRunStepStatus.SUCCEEDED:
         return
     duration_seconds = max(0, int((step.duration_ms or 0) / 1000))
-    per_action_runtime = duration_seconds // len(actions) if actions else 0
+    per_action_runtime = duration_seconds // len(actions)
     remainder = duration_seconds - per_action_runtime * len(actions)
     for index, action in enumerate(actions):
         consumption = ActionConsumption(
@@ -294,7 +299,7 @@ def consume_run_step_actions(
             pull_requests_created=(
                 1 if step.step_type == AgentRunStepType.CREATE_PULL_REQUEST else 0
             ),
-            retry_consumed=step.attempt_count > 1,
+            retry_consumed=step.attempt_count > 1 and index == 0,
             output_reference=step.output_reference,
             evidence={
                 "run_id": step.run_id,
