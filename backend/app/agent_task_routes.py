@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from .agent_run_models import AgentRunCreate
+from .agent_run_supervisor import create_agent_run
 from .agent_task_cancel import (
     AgentTaskCancelRequest,
     AgentTaskCancelSummary,
@@ -30,7 +32,15 @@ from .agent_task_retry import (
     retry_summary,
 )
 from .auth import require_maintainer, require_reviewer
-from .models import AgentProvider, ApprovalRequest, ApprovalRequestCreate, ApprovalStatus, AuditEvent, AuthUser, now_utc
+from .models import (
+    AgentProvider,
+    ApprovalRequest,
+    ApprovalRequestCreate,
+    ApprovalStatus,
+    AuditEvent,
+    AuthUser,
+    now_utc,
+)
 from .risk_engine import assess_approval_request
 from .store import store
 
@@ -82,7 +92,11 @@ def propagate_approval_decision_to_agent_task(
     previous_status: ApprovalStatus,
     actor: str,
 ) -> AgentTask | None:
-    linked_tasks = [task for task in store.agent_tasks.values() if task.approval_request_id == approval_request.id]
+    linked_tasks = [
+        task
+        for task in store.agent_tasks.values()
+        if task.approval_request_id == approval_request.id
+    ]
     if not linked_tasks:
         return None
 
@@ -102,10 +116,12 @@ def propagate_approval_decision_to_agent_task(
     else:
         event_type = AgentTaskEventType.NOTE
         task_status = task.status
-        message = f"Linked approval moved from {previous_status} to {approval_request.status}."
+        message = (
+            f"Linked approval moved from {previous_status} to {approval_request.status}."
+        )
 
     notification = notify_agent_task_approval_decision(task, approval_request)
-    append_system_task_event(
+    decision_event = append_system_task_event(
         task,
         event_type,
         message,
@@ -130,11 +146,42 @@ def propagate_approval_decision_to_agent_task(
         },
         actor=actor,
     )
+
+    if task_status == AgentTaskStatus.APPROVED:
+        run = create_agent_run(
+            AgentRunCreate(
+                task_id=task.id,
+                metadata={
+                    "scheduled_from": "approval_decision",
+                    "approval_decision_actor": actor,
+                },
+            ),
+            actor=actor,
+        )
+        decision_event.metadata = {
+            **decision_event.metadata,
+            "agent_run_id": run.id,
+            "agent_run_status": run.status,
+        }
+        audit(
+            "agent_task.run_scheduled",
+            task.id,
+            {
+                "agent_run_id": run.id,
+                "approval_request_id": approval_request.id,
+                "run_status": run.status,
+            },
+            actor=actor,
+        )
+
     return task
 
 
 @router.post("", response_model=AgentTask)
-def create_agent_task(payload: AgentTaskCreate, user: AuthUser = MaintainerDependency) -> AgentTask:
+def create_agent_task(
+    payload: AgentTaskCreate,
+    user: AuthUser = MaintainerDependency,
+) -> AgentTask:
     if payload.project_id and payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -192,14 +239,20 @@ def get_agent_task(task_id: str, _: AuthUser = ReviewerDependency) -> AgentTask:
 
 
 @router.get("/{task_id}/events", response_model=list[AgentTaskEvent])
-def list_agent_task_events(task_id: str, _: AuthUser = ReviewerDependency) -> list[AgentTaskEvent]:
+def list_agent_task_events(
+    task_id: str,
+    _: AuthUser = ReviewerDependency,
+) -> list[AgentTaskEvent]:
     if task_id not in store.agent_tasks:
         raise HTTPException(status_code=404, detail="Agent task not found")
     return sorted(_task_events(task_id), key=lambda event: event.created_at)
 
 
 @router.get("/{task_id}/cancel", response_model=AgentTaskCancelSummary)
-def get_agent_task_cancel_summary(task_id: str, _: AuthUser = ReviewerDependency) -> AgentTaskCancelSummary:
+def get_agent_task_cancel_summary(
+    task_id: str,
+    _: AuthUser = ReviewerDependency,
+) -> AgentTaskCancelSummary:
     task = store.agent_tasks.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
@@ -308,14 +361,25 @@ def create_agent_task_approval(
     if payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
     if task.project_id and payload.project_id != task.project_id:
-        raise HTTPException(status_code=409, detail="Approval project must match agent task project")
+        raise HTTPException(
+            status_code=409,
+            detail="Approval project must match agent task project",
+        )
     if payload.work_order_id and payload.work_order_id not in store.work_orders:
         raise HTTPException(status_code=404, detail="Work order not found")
 
     risk = assess_approval_request(payload)
     status = ApprovalStatus.BLOCKED if risk.blocked else ApprovalStatus.REQUESTED
     request = ApprovalRequest(
-        **payload.model_dump(exclude={"source_provider", "source_agent_id", "source_agent_name", "source_session_id", "source_task_url"}),
+        **payload.model_dump(
+            exclude={
+                "source_provider",
+                "source_agent_id",
+                "source_agent_name",
+                "source_session_id",
+                "source_task_url",
+            }
+        ),
         risk=risk,
         status=status,
         source_provider=task.provider,
@@ -324,7 +388,9 @@ def create_agent_task_approval(
         source_session_id=task.source_session_id,
         source_task_url=task.source_url,
         created_by_user_id=user.id,
-        verified_source=task.provider != AgentProvider.MANUAL or task.external_agent_id is not None,
+        verified_source=(
+            task.provider != AgentProvider.MANUAL or task.external_agent_id is not None
+        ),
     )
     store.approval_requests[request.id] = request
     task.approval_request_id = request.id
@@ -338,7 +404,11 @@ def create_agent_task_approval(
         "Approval request created for agent task.",
         status=task.status,
         actor=user.email,
-        metadata={"approval_request_id": request.id, "risk_level": request.risk.level, "notification_id": notification.id},
+        metadata={
+            "approval_request_id": request.id,
+            "risk_level": request.risk.level,
+            "notification_id": notification.id,
+        },
     )
     audit(
         "agent_task.approval_created",
