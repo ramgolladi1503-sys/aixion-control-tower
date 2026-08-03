@@ -6,6 +6,7 @@ data class AgentRunDto(
     val id: String,
     @SerializedName("task_id") val taskId: String,
     @SerializedName("approval_request_id") val approvalRequestId: String? = null,
+    @SerializedName("capability_lease_id") val capabilityLeaseId: String? = null,
     @SerializedName("project_id") val projectId: String? = null,
     val repository: String? = null,
     val objective: String = "",
@@ -110,6 +111,23 @@ data class AgentReliabilityScorecardDto(
     @SerializedName("total_cost_usd") val totalCostUsd: Double = 0.0,
     val confidence: Double = 0.0,
     @SerializedName("generated_at") val generatedAt: String? = null
+)
+
+data class ActionAuthorizationRequestDto(
+    val decision: String,
+    val reason: String
+)
+
+data class ActionAuthorizationDto(
+    val id: String,
+    @SerializedName("action_id") val actionId: String,
+    @SerializedName("policy_decision_id") val policyDecisionId: String,
+    @SerializedName("reviewer_user_id") val reviewerUserId: String,
+    @SerializedName("reviewer_role") val reviewerRole: String,
+    val decision: String,
+    val reason: String,
+    val signature: String,
+    @SerializedName("created_at") val createdAt: String? = null
 )
 
 data class AgentRunControlRequestDto(val reason: String = "")
