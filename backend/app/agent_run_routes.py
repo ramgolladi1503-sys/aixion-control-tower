@@ -30,6 +30,7 @@ from .agent_run_supervisor import (
     resume_agent_run,
     retry_agent_run_step,
 )
+from .agent_worker_validation_plan import MAX_VALIDATION_COMMANDS
 from .auth import require_maintainer, require_reviewer
 from .models import AuditEvent, AuthUser
 from .store import store
@@ -37,6 +38,8 @@ from .store import store
 router = APIRouter(prefix="/agent/runs", tags=["agent-runs"])
 ReviewerDependency = Depends(require_reviewer)
 MaintainerDependency = Depends(require_maintainer)
+MAX_RUN_LEASE_SECONDS = 3600
+RUN_LEASE_OVERHEAD_SECONDS = 60
 
 
 def _audit(event_type: str, entity_id: str, details: dict, actor: str) -> None:
@@ -80,6 +83,23 @@ def _events(run_id: str) -> list[AgentRunEvent]:
 
 def _detail(run: AgentRun) -> AgentRunDetail:
     return AgentRunDetail(run=run, steps=_steps(run.id), events=_events(run.id))
+
+
+def _safe_lease_seconds(payload: AgentRunExecuteRequest) -> int:
+    required = (
+        payload.timeout_seconds * MAX_VALIDATION_COMMANDS
+        + RUN_LEASE_OVERHEAD_SECONDS
+    )
+    if required > MAX_RUN_LEASE_SECONDS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "timeout_seconds is too large for the bounded Mission Control lease. "
+                f"Maximum safe value is "
+                f"{(MAX_RUN_LEASE_SECONDS - RUN_LEASE_OVERHEAD_SECONDS) // MAX_VALIDATION_COMMANDS}."
+            ),
+        )
+    return max(payload.lease_seconds, required)
 
 
 @router.post("", response_model=AgentRunDetail)
@@ -206,11 +226,12 @@ def execute_run_next_step(
     _: AuthUser = MaintainerDependency,
 ) -> AgentRunDetail:
     run = _run_or_404(run_id)
+    lease_seconds = _safe_lease_seconds(payload)
     try:
         execute_next_step(
             run.id,
             worker_id=payload.worker_id,
-            lease_seconds=payload.lease_seconds,
+            lease_seconds=lease_seconds,
             timeout_seconds=payload.timeout_seconds,
         )
     except AgentRunConflict as error:
