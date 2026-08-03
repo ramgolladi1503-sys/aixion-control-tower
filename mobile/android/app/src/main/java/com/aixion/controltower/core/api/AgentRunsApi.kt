@@ -1,5 +1,7 @@
 package com.aixion.controltower.core.api
 
+import com.aixion.controltower.core.api.dto.ActionAuthorizationDto
+import com.aixion.controltower.core.api.dto.ActionAuthorizationRequestDto
 import com.aixion.controltower.core.api.dto.AgentReliabilityScorecardDto
 import com.aixion.controltower.core.api.dto.AgentRunControlRequestDto
 import com.aixion.controltower.core.api.dto.AgentRunDetailDto
@@ -33,6 +35,12 @@ interface AgentRunsApi {
 
     @GET("trust/scorecards")
     suspend fun listReliabilityScorecards(): List<AgentReliabilityScorecardDto>
+
+    @POST("trust/gateway/actions/{actionId}/decision")
+    suspend fun decideExactAction(
+        @Path("actionId") actionId: String,
+        @Body request: ActionAuthorizationRequestDto
+    ): ActionAuthorizationDto
 
     @POST("agent/runs/{runId}/pause")
     suspend fun pauseRun(
