@@ -136,11 +136,14 @@ jobs:
           printf '%s' 'ci-only-placeholder' > secrets/aixion_metrics_token
 
       - name: Validate production Compose contract
-        run: docker compose -f docker-compose.production.yml config
+        run: |
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml config
 
       - name: Start production-profile API
         run: |
-          docker compose -f docker-compose.production.yml up \
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml up \
             --detach \
             --build \
             api
@@ -154,15 +157,19 @@ jobs:
             sleep 2
           done
           curl --fail http://127.0.0.1:8000/health
-          docker compose -f docker-compose.production.yml \
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml \
             ps --services --status running | grep -Fx api
 
       - name: Show production compose logs on failure
         if: failure()
-        run: docker compose -f docker-compose.production.yml logs --no-color
+        run: |
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml logs --no-color
 
       - name: Stop production trust-plane stack
         if: always()
         run: |
-          docker compose -f docker-compose.production.yml down --volumes || true
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml down --volumes || true
           rm -f .env.production secrets/aixion_metrics_token
