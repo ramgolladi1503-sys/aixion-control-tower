@@ -6,6 +6,7 @@ services:
       AIXION_PROFILE: demo
       AIXION_AUTH_ENABLED: "false"
       AIXION_DB_PATH: /app/runtime/aixion_control_tower.sqlite3
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     ports:
       - "8000:8000"
     volumes:
@@ -18,17 +19,15 @@ services:
     command:
       - python
       - scripts/run_mission_control_worker.py
+      - --base-url
+      - http://api:8000
       - --worker-id
       - mission-control-compose-worker
       - --poll-seconds
       - "2"
     environment:
-      AIXION_PROFILE: demo
-      AIXION_AUTH_ENABLED: "false"
-      AIXION_DB_PATH: /app/runtime/aixion_control_tower.sqlite3
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
-    volumes:
-      - aixion-runtime:/app/runtime
+      AIXION_API_BASE_URL: http://api:8000
+      AIXION_OWNER_TOKEN: ${AIXION_OWNER_TOKEN:-}
     depends_on:
       api:
         condition: service_healthy
