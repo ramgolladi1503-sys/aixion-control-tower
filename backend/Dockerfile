@@ -12,12 +12,12 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY pyproject.toml ./
-RUN python -m pip install --upgrade pip \
-    && python -m pip install .
-
 COPY app ./app
 COPY scripts ./scripts
-RUN mkdir -p /app/runtime && chown -R aixion:aixion /app
+RUN python -m pip install --upgrade pip \
+    && python -m pip install . \
+    && mkdir -p /app/runtime \
+    && chown -R aixion:aixion /app
 
 USER aixion
 EXPOSE 8000
