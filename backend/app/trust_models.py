@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from .models import AgentProvider, RiskLevel, new_id, now_utc
+from .models import AgentProvider, RiskLevel, UserRole, new_id, now_utc
 
 
 class CapabilityLeaseMode(StrEnum):
@@ -136,6 +136,33 @@ class CapabilityLeasePublic(BaseModel):
     receipt_signature: str
 
 
+class LeaseRevocationRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class ReviewerAttestationDecision(StrEnum):
+    APPROVE = "APPROVE"
+    DENY = "DENY"
+
+
+class ReviewerAttestationCreate(BaseModel):
+    approval_request_id: str
+    decision: ReviewerAttestationDecision
+    reason: str = Field(default="", max_length=1000)
+
+
+class ReviewerAttestation(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("attestation"))
+    approval_request_id: str
+    approval_payload_hash: str
+    reviewer_user_id: str
+    reviewer_role: UserRole
+    decision: ReviewerAttestationDecision
+    reason: str = ""
+    signature: str
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class ProposedAction(BaseModel):
     id: str = Field(default_factory=lambda: new_id("action"))
     lease_id: str | None = None
@@ -157,6 +184,15 @@ class ProposedAction(BaseModel):
     created_at: datetime = Field(default_factory=now_utc)
 
 
+class ActionConsumption(BaseModel):
+    actual_runtime_seconds: int = Field(default=0, ge=0, le=86400)
+    actual_cost_usd: float = Field(default=0.0, ge=0.0, le=100000.0)
+    pull_requests_created: int = Field(default=0, ge=0, le=20)
+    retry_consumed: bool = False
+    output_reference: str | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class PolicyDecisionType(StrEnum):
     ALLOW = "ALLOW"
     REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
@@ -175,7 +211,14 @@ class PolicyDecision(BaseModel):
     evaluated_at: datetime = Field(default_factory=now_utc)
 
 
+class AgentGatewayResult(BaseModel):
+    action: ProposedAction
+    decision: PolicyDecision
+    lease: CapabilityLeasePublic | None = None
+
+
 class TrustEventType(StrEnum):
+    ATTESTATION_RECORDED = "ATTESTATION_RECORDED"
     LEASE_ISSUED = "LEASE_ISSUED"
     LEASE_REVOKED = "LEASE_REVOKED"
     LEASE_EXPIRED = "LEASE_EXPIRED"
