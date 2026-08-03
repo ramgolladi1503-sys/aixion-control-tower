@@ -6,6 +6,14 @@ from .agent_auth import assert_agent_can, require_external_agent
 from .auth import require_maintainer, require_owner, require_reviewer
 from .models import AgentAction, AuthUser, ExternalAgent
 from .store import store
+from .trust_action_authorization import (
+    ActionAuthorizationConflict,
+    record_action_authorization,
+)
+from .trust_action_authorization_models import (
+    ActionAuthorization,
+    ActionAuthorizationCreate,
+)
 from .trust_credentials import (
     CredentialIntrospectionRequest,
     CredentialIntrospectionResult,
@@ -133,7 +141,10 @@ def list_leases(
         ]
     if agent_id:
         leases = [item for item in leases if item.agent_id == agent_id]
-    return [_public(item) for item in sorted(leases, key=lambda item: item.created_at, reverse=True)]
+    return [
+        _public(item)
+        for item in sorted(leases, key=lambda item: item.created_at, reverse=True)
+    ]
 
 
 @router.get("/leases/{lease_id}", response_model=CapabilityLeasePublic)
@@ -191,6 +202,41 @@ def evaluate_manual_action(
     user: AuthUser = MaintainerDependency,
 ) -> AgentGatewayResult:
     return evaluate_gateway_action(payload, actor=user.email)
+
+
+@router.post(
+    "/gateway/actions/{action_id}/decision",
+    response_model=ActionAuthorization,
+)
+def decide_exact_action(
+    action_id: str,
+    payload: ActionAuthorizationCreate,
+    user: AuthUser = ReviewerDependency,
+) -> ActionAuthorization:
+    try:
+        return record_action_authorization(action_id, payload, user=user)
+    except (ValueError, ActionAuthorizationConflict) as error:
+        raise _trust_error(error) from error
+
+
+@router.get(
+    "/gateway/actions/{action_id}/decision",
+    response_model=ActionAuthorization | None,
+)
+def get_exact_action_decision(
+    action_id: str,
+    _: AuthUser = ReviewerDependency,
+) -> ActionAuthorization | None:
+    if action_id not in store.proposed_actions:
+        raise HTTPException(status_code=404, detail="Proposed action not found")
+    return next(
+        (
+            item
+            for item in store.action_authorizations.values()
+            if item.action_id == action_id
+        ),
+        None,
+    )
 
 
 @router.post("/gateway/actions/{action_id}/consume", response_model=ActionConsumption)
