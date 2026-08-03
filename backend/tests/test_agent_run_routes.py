@@ -6,6 +6,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
+from app.agent_run_models import AgentRunStatus, AgentRunStepStatus
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.main import app
 from app.models import (
@@ -62,6 +63,15 @@ def _seed_approved_task() -> AgentTask:
     store.agent_tasks[task.id] = task
     store.persist()
     return task
+
+
+def _create_run() -> tuple[str, object, object]:
+    task = _seed_approved_task()
+    payload = client.post("/agent/runs", json={"task_id": task.id}).json()
+    run_id = payload["run"]["id"]
+    run = store.agent_runs[run_id]
+    step = store.agent_run_steps[run.current_step_id]
+    return run_id, run, step
 
 
 def test_create_list_detail_summary_and_metrics_routes() -> None:
@@ -151,3 +161,41 @@ def test_execute_route_rejects_timeout_that_cannot_fit_maximum_lease() -> None:
     )
     assert response.status_code == 422
     assert "Maximum safe value" in response.json()["detail"]
+
+
+def test_pause_and_cancel_are_rejected_while_step_is_in_flight() -> None:
+    run_id, run, step = _create_run()
+    run.status = AgentRunStatus.RUNNING
+    run.lease_owner = "active-worker"
+    run.lease_token = "active-lease"
+    step.status = AgentRunStepStatus.RUNNING
+    step.lease_owner = "active-worker"
+    step.lease_token = "active-lease"
+    store.persist()
+
+    pause = client.post(f"/agent/runs/{run_id}/pause", json={"reason": "pause now"})
+    cancel = client.post(f"/agent/runs/{run_id}/cancel", json={"reason": "cancel now"})
+
+    assert pause.status_code == 409
+    assert cancel.status_code == 409
+    assert "governed step is in flight" in pause.json()["detail"]
+    assert "governed step is in flight" in cancel.json()["detail"]
+    assert run.status == AgentRunStatus.RUNNING
+    assert step.status == AgentRunStepStatus.RUNNING
+
+
+def test_terminal_failed_run_requires_new_approval_instead_of_retry() -> None:
+    run_id, run, step = _create_run()
+    run.status = AgentRunStatus.FAILED
+    step.status = AgentRunStepStatus.FAILED
+    store.persist()
+
+    response = client.post(
+        f"/agent/runs/{run_id}/retry",
+        json={"step_id": step.id, "reason": "retry terminal work"},
+    )
+
+    assert response.status_code == 409
+    assert "Create a revised approval and a new run" in response.json()["detail"]
+    assert run.status == AgentRunStatus.FAILED
+    assert step.status == AgentRunStepStatus.FAILED
