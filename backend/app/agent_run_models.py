@@ -227,7 +227,7 @@ class AgentRunStepExecutionResult(BaseModel):
     decision: VerificationDecision
     reason: str
     evidence: dict[str, Any] = Field(default_factory=dict)
-    output_reference: str | None = None
+    output_reference: str | None = Field(default=None, exclude=True)
 
 
 class AgentRunDetail(BaseModel):
