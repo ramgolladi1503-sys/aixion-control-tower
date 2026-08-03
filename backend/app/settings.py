@@ -7,7 +7,7 @@ from pathlib import Path
 VALID_PROFILES = {"local", "demo", "test", "production"}
 REQUIRED_PRODUCTION_ENV_VARS = (
     "AIXION_DB_PATH",
-    "GITHUB_" + "TOKEN",
+    "AIXION_LEASE_SIGNING_KEY",
     "FCM_" + "SERVER_" + "KEY",
 )
 UNSAFE_PRODUCTION_DB_NAMES = {
@@ -29,7 +29,9 @@ class Settings:
     auth_enabled: bool
     db_path: Path
     github_token_configured: bool = False
+    github_app_configured: bool = False
     fcm_server_key_configured: bool = False
+    lease_signing_key_configured: bool = False
     public_base_url: str | None = None
     allow_unauthenticated_external_agent_demo: bool = False
     validation_errors: tuple[str, ...] = field(default_factory=tuple)
@@ -65,6 +67,15 @@ def _optional_env(name: str) -> str | None:
     return value or None
 
 
+def _github_app_configured() -> bool:
+    required = (
+        "AIXION_GITHUB_APP_ID",
+        "AIXION_GITHUB_APP_INSTALLATION_ID",
+        "AIXION_GITHUB_APP_PRIVATE_KEY",
+    )
+    return all(_env_present(name) for name in required)
+
+
 def _production_validation_errors(settings: Settings) -> tuple[str, ...]:
     if not settings.is_production:
         return ()
@@ -76,6 +87,10 @@ def _production_validation_errors(settings: Settings) -> tuple[str, ...]:
         errors.append("AIXION_AUTH_ENABLED must not be false in production")
     if settings.db_path.name in UNSAFE_PRODUCTION_DB_NAMES:
         errors.append("AIXION_DB_PATH must not point at demo or test database files in production")
+    if not settings.github_token_configured and not settings.github_app_configured:
+        errors.append(
+            "Production requires either GITHUB_TOKEN or a complete Aixion GitHub App configuration"
+        )
     return tuple(errors)
 
 
@@ -92,7 +107,9 @@ def get_settings() -> Settings:
         ),
         db_path=Path(os.getenv("AIXION_DB_PATH", defaults["db_path"])),
         github_token_configured=_env_present(github_env),
+        github_app_configured=_github_app_configured(),
         fcm_server_key_configured=_env_present(fcm_env),
+        lease_signing_key_configured=_env_present("AIXION_LEASE_SIGNING_KEY"),
         public_base_url=_optional_env("AIXION_PUBLIC_BASE_URL"),
         allow_unauthenticated_external_agent_demo=parse_bool(
             os.getenv("AIXION_ALLOW_UNAUTHENTICATED_EXTERNAL_AGENT_DEMO", "false"),
@@ -104,7 +121,9 @@ def get_settings() -> Settings:
         auth_enabled=settings.auth_enabled,
         db_path=settings.db_path,
         github_token_configured=settings.github_token_configured,
+        github_app_configured=settings.github_app_configured,
         fcm_server_key_configured=settings.fcm_server_key_configured,
+        lease_signing_key_configured=settings.lease_signing_key_configured,
         public_base_url=settings.public_base_url,
         allow_unauthenticated_external_agent_demo=settings.allow_unauthenticated_external_agent_demo,
         validation_errors=_production_validation_errors(settings),
