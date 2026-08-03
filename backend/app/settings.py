@@ -16,10 +16,26 @@ UNSAFE_PRODUCTION_DB_NAMES = {
 }
 
 PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
-    "local": {"auth_enabled": "true", "db_path": "runtime/aixion_control_tower.sqlite3"},
-    "demo": {"auth_enabled": "false", "db_path": "runtime/aixion_control_tower_demo.sqlite3"},
-    "test": {"auth_enabled": "false", "db_path": "runtime/aixion_control_tower_test.sqlite3"},
-    "production": {"auth_enabled": "true", "db_path": "runtime/aixion_control_tower.sqlite3"},
+    "local": {
+        "auth_enabled": "true",
+        "trust_enforcement": "false",
+        "db_path": "runtime/aixion_control_tower.sqlite3",
+    },
+    "demo": {
+        "auth_enabled": "false",
+        "trust_enforcement": "false",
+        "db_path": "runtime/aixion_control_tower_demo.sqlite3",
+    },
+    "test": {
+        "auth_enabled": "false",
+        "trust_enforcement": "false",
+        "db_path": "runtime/aixion_control_tower_test.sqlite3",
+    },
+    "production": {
+        "auth_enabled": "true",
+        "trust_enforcement": "true",
+        "db_path": "runtime/aixion_control_tower.sqlite3",
+    },
 }
 
 
@@ -27,6 +43,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
 class Settings:
     profile: str
     auth_enabled: bool
+    trust_enforcement: bool
     db_path: Path
     github_token_configured: bool = False
     github_app_configured: bool = False
@@ -85,6 +102,8 @@ def _production_validation_errors(settings: Settings) -> tuple[str, ...]:
         errors.append("Missing required production environment variables: " + ", ".join(missing))
     if not settings.auth_enabled:
         errors.append("AIXION_AUTH_ENABLED must not be false in production")
+    if not settings.trust_enforcement:
+        errors.append("AIXION_TRUST_ENFORCEMENT must not be false in production")
     if settings.db_path.name in UNSAFE_PRODUCTION_DB_NAMES:
         errors.append("AIXION_DB_PATH must not point at demo or test database files in production")
     if not settings.github_token_configured and not settings.github_app_configured:
@@ -105,6 +124,10 @@ def get_settings() -> Settings:
             os.getenv("AIXION_AUTH_ENABLED", defaults["auth_enabled"]),
             field_name="AIXION_AUTH_ENABLED",
         ),
+        trust_enforcement=parse_bool(
+            os.getenv("AIXION_TRUST_ENFORCEMENT", defaults["trust_enforcement"]),
+            field_name="AIXION_TRUST_ENFORCEMENT",
+        ),
         db_path=Path(os.getenv("AIXION_DB_PATH", defaults["db_path"])),
         github_token_configured=_env_present(github_env),
         github_app_configured=_github_app_configured(),
@@ -119,6 +142,7 @@ def get_settings() -> Settings:
     return Settings(
         profile=settings.profile,
         auth_enabled=settings.auth_enabled,
+        trust_enforcement=settings.trust_enforcement,
         db_path=settings.db_path,
         github_token_configured=settings.github_token_configured,
         github_app_configured=settings.github_app_configured,
