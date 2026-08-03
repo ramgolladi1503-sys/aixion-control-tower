@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from .agent_run_models import AgentRunStatus, AgentRunStepStatus, AgentRunSummary
 from .store import store
+from .trust_metrics import prometheus_trust_metrics
 
 
 def build_agent_run_summary() -> AgentRunSummary:
@@ -20,7 +21,12 @@ def build_agent_run_summary() -> AgentRunSummary:
     queue_depth = sum(
         1
         for step in store.agent_run_steps.values()
-        if step.status in {AgentRunStepStatus.PENDING, AgentRunStepStatus.READY, AgentRunStepStatus.RETRY_WAIT}
+        if step.status
+        in {
+            AgentRunStepStatus.PENDING,
+            AgentRunStepStatus.READY,
+            AgentRunStepStatus.RETRY_WAIT,
+        }
     )
     return AgentRunSummary(
         total=len(store.agent_runs),
@@ -35,10 +41,17 @@ def build_agent_run_summary() -> AgentRunSummary:
     )
 
 
-def _metric_line(name: str, value: int | float, labels: dict[str, str] | None = None) -> str:
+def _metric_line(
+    name: str,
+    value: int | float,
+    labels: dict[str, str] | None = None,
+) -> str:
     label_text = ""
     if labels:
-        rendered = ",".join(f'{key}="{str(value).replace(chr(34), chr(92) + chr(34))}"' for key, value in sorted(labels.items()))
+        rendered = ",".join(
+            f'{key}="{str(item).replace(chr(34), chr(92) + chr(34))}"'
+            for key, item in sorted(labels.items())
+        )
         label_text = "{" + rendered + "}"
     return f"{name}{label_text} {value}"
 
@@ -50,7 +63,13 @@ def prometheus_agent_run_metrics() -> str:
     ]
     run_statuses = Counter(run.status.value for run in store.agent_runs.values())
     for status in AgentRunStatus:
-        lines.append(_metric_line("aixion_agent_runs_total", run_statuses[status.value], {"status": status.value}))
+        lines.append(
+            _metric_line(
+                "aixion_agent_runs_total",
+                run_statuses[status.value],
+                {"status": status.value},
+            )
+        )
 
     lines.extend(
         [
@@ -58,7 +77,10 @@ def prometheus_agent_run_metrics() -> str:
             "# TYPE aixion_agent_run_steps_total gauge",
         ]
     )
-    step_statuses = Counter((step.step_type.value, step.status.value) for step in store.agent_run_steps.values())
+    step_statuses = Counter(
+        (step.step_type.value, step.status.value)
+        for step in store.agent_run_steps.values()
+    )
     for (step_type, status), count in sorted(step_statuses.items()):
         lines.append(
             _metric_line(
@@ -78,25 +100,39 @@ def prometheus_agent_run_metrics() -> str:
             "# TYPE aixion_agent_run_retry_attempts_total counter",
             _metric_line(
                 "aixion_agent_run_retry_attempts_total",
-                sum(max(0, step.attempt_count - 1) for step in store.agent_run_steps.values()),
+                sum(
+                    max(0, step.attempt_count - 1)
+                    for step in store.agent_run_steps.values()
+                ),
             ),
             "# HELP aixion_agent_run_duplicate_deliveries_total Duplicate callbacks ignored.",
             "# TYPE aixion_agent_run_duplicate_deliveries_total counter",
             _metric_line(
                 "aixion_agent_run_duplicate_deliveries_total",
-                sum(1 for event in store.agent_run_events.values() if event.event_type.value == "DUPLICATE_DELIVERY_IGNORED"),
+                sum(
+                    1
+                    for event in store.agent_run_events.values()
+                    if event.event_type.value == "DUPLICATE_DELIVERY_IGNORED"
+                ),
             ),
             "# HELP aixion_agent_run_stale_lease_recoveries_total Expired leases recovered.",
             "# TYPE aixion_agent_run_stale_lease_recoveries_total counter",
             _metric_line(
                 "aixion_agent_run_stale_lease_recoveries_total",
-                sum(1 for event in store.agent_run_events.values() if event.event_type.value == "STALE_LEASE_RECOVERED"),
+                sum(
+                    1
+                    for event in store.agent_run_events.values()
+                    if event.event_type.value == "STALE_LEASE_RECOVERED"
+                ),
             ),
             "# HELP aixion_agent_run_step_duration_seconds Completed step duration.",
             "# TYPE aixion_agent_run_step_duration_seconds summary",
         ]
     )
-    for step in sorted(store.agent_run_steps.values(), key=lambda item: (item.run_id, item.sequence)):
+    for step in sorted(
+        store.agent_run_steps.values(),
+        key=lambda item: (item.run_id, item.sequence),
+    ):
         if step.duration_ms is not None:
             lines.append(
                 _metric_line(
@@ -119,4 +155,5 @@ def prometheus_agent_run_metrics() -> str:
             _metric_line("aixion_agent_run_expired_leases", expired_leases),
         ]
     )
-    return "\n".join(lines) + "\n"
+    run_metrics = "\n".join(lines) + "\n"
+    return run_metrics + prometheus_trust_metrics()
