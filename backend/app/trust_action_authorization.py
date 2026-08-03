@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from .agent_run_models import (
+    AgentRunEvent,
+    AgentRunEventType,
+    AgentRunStatus,
+    AgentRunStepStatus,
+)
+from .agent_run_state_machine import transition_run, transition_step
 from .models import AuthUser
 from .store import store
 from .trust_action_authorization_models import (
@@ -15,6 +22,63 @@ from .trust_models import PolicyDecision, PolicyDecisionType, TrustEventType
 
 class ActionAuthorizationConflict(RuntimeError):
     pass
+
+
+def _apply_durable_run_decision(
+    action_id: str,
+    decision: ActionAuthorizationDecision,
+    *,
+    actor: str,
+    reason: str,
+) -> None:
+    action = store.proposed_actions.get(action_id)
+    if action is None or not action.run_id:
+        return
+    run = store.agent_runs.get(action.run_id)
+    if run is None:
+        return
+    step_id = str(action.metadata.get("step_id") or "")
+    step = store.agent_run_steps.get(step_id)
+    if step is None or step.run_id != run.id:
+        return
+
+    if decision == ActionAuthorizationDecision.ALLOW:
+        if step.status == AgentRunStepStatus.NEEDS_HUMAN:
+            transition_step(
+                step,
+                AgentRunStepStatus.READY,
+                reason="Exact trust action approval recorded.",
+            )
+        if run.status == AgentRunStatus.NEEDS_HUMAN:
+            transition_run(
+                run,
+                AgentRunStatus.SCHEDULED,
+                reason="Exact trust action approval recorded.",
+            )
+        message = "Exact human action approval returned the run to the scheduler."
+    else:
+        if step.status == AgentRunStepStatus.NEEDS_HUMAN:
+            transition_step(step, AgentRunStepStatus.BLOCKED, reason=reason)
+        if run.status == AgentRunStatus.NEEDS_HUMAN:
+            transition_run(run, AgentRunStatus.BLOCKED, reason=reason)
+        message = "Exact human action denial permanently blocked the run."
+
+    event = AgentRunEvent(
+        run_id=run.id,
+        task_id=run.task_id,
+        step_id=step.id,
+        correlation_id=run.correlation_id,
+        event_type=AgentRunEventType.OPERATOR_ACTION,
+        message=message,
+        reason=reason,
+        actor=actor,
+        attempt_number=step.attempt_count,
+        metadata={
+            "action_id": action.id,
+            "authorization_decision": decision,
+        },
+    )
+    store.agent_run_events[event.id] = event
 
 
 def record_action_authorization(
@@ -43,6 +107,13 @@ def record_action_authorization(
             None,
         )
         if existing:
+            _apply_durable_run_decision(
+                action_id,
+                existing.decision,
+                actor=user.email,
+                reason=existing.reason,
+            )
+            store.persist()
             return existing
         raise ActionAuthorizationConflict("Action is already allowed by policy.")
 
@@ -59,6 +130,13 @@ def record_action_authorization(
             raise ActionAuthorizationConflict(
                 "Action authorization is immutable once recorded."
             )
+        _apply_durable_run_decision(
+            action_id,
+            existing.decision,
+            actor=user.email,
+            reason=existing.reason,
+        )
+        store.persist()
         return existing
 
     material = {
@@ -121,6 +199,12 @@ def record_action_authorization(
             "reason": payload.reason,
         },
         persist=False,
+    )
+    _apply_durable_run_decision(
+        action_id,
+        payload.decision,
+        actor=user.email,
+        reason=payload.reason,
     )
     store.persist()
     return authorization
