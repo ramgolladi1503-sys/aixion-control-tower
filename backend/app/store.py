@@ -28,20 +28,25 @@ from .models import (
     WorkOrder,
 )
 from .settings import validate_startup_environment
+from .trust_models import (
+    ActionConsumption,
+    CapabilityLease,
+    CredentialGrant,
+    PolicyDecision,
+    ProposedAction,
+    ReviewerAttestation,
+    TrustEvent,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
 
 class SQLiteBackedStore:
-    """Small persistent MVP store backed by SQLite.
+    """Persistent single-writer MVP store backed by SQLite.
 
-    The generic KV table keeps the MVP simple while making state survive restarts.
-    Mission Control run entities deliberately use the same persistence boundary so a
-    worker restart cannot erase run, step, lease, event, or evidence truth.
-
-    The API process is the single writer. A re-entrant lock serializes persistence
-    across FastAPI worker threads, and the external Mission Control scheduler calls
-    the API rather than opening the database directly.
+    The API process remains the single owner of mutation. A re-entrant lock serializes
+    writes across FastAPI worker threads. External schedulers and agents interact only
+    through authenticated APIs and never mount the database directly.
     """
 
     def __init__(self) -> None:
@@ -61,6 +66,13 @@ class SQLiteBackedStore:
         self.agent_run_steps: dict[str, AgentRunStep] = {}
         self.agent_run_events: dict[str, AgentRunEvent] = {}
         self.agent_run_faults: dict[str, AgentRunFaultConfig] = {}
+        self.capability_leases: dict[str, CapabilityLease] = {}
+        self.reviewer_attestations: dict[str, ReviewerAttestation] = {}
+        self.proposed_actions: dict[str, ProposedAction] = {}
+        self.policy_decisions: dict[str, PolicyDecision] = {}
+        self.action_consumptions: dict[str, ActionConsumption] = {}
+        self.credential_grants: dict[str, CredentialGrant] = {}
+        self.trust_events: dict[str, TrustEvent] = {}
         self.projects: dict[str, Project] = {}
         self.mcp_child_servers: dict[str, MCPChildServer] = {}
         self.ideas: dict[str, Idea] = {}
@@ -124,6 +136,31 @@ class SQLiteBackedStore:
                 "agent_run_fault",
                 AgentRunFaultConfig,
             )
+            self.capability_leases = self._load_entities(
+                "capability_lease",
+                CapabilityLease,
+            )
+            self.reviewer_attestations = self._load_entities(
+                "reviewer_attestation",
+                ReviewerAttestation,
+            )
+            self.proposed_actions = self._load_entities(
+                "proposed_action",
+                ProposedAction,
+            )
+            self.policy_decisions = self._load_entities(
+                "policy_decision",
+                PolicyDecision,
+            )
+            self.action_consumptions = self._load_entities(
+                "action_consumption",
+                ActionConsumption,
+            )
+            self.credential_grants = self._load_entities(
+                "credential_grant",
+                CredentialGrant,
+            )
+            self.trust_events = self._load_entities("trust_event", TrustEvent)
             self.projects = self._load_entities("project", Project)
             self.mcp_child_servers = self._load_entities(
                 "mcp_child_server",
@@ -165,6 +202,17 @@ class SQLiteBackedStore:
             self._write_map(conn, "agent_run_step", self.agent_run_steps)
             self._write_map(conn, "agent_run_event", self.agent_run_events)
             self._write_map(conn, "agent_run_fault", self.agent_run_faults)
+            self._write_map(conn, "capability_lease", self.capability_leases)
+            self._write_map(
+                conn,
+                "reviewer_attestation",
+                self.reviewer_attestations,
+            )
+            self._write_map(conn, "proposed_action", self.proposed_actions)
+            self._write_map(conn, "policy_decision", self.policy_decisions)
+            self._write_map(conn, "action_consumption", self.action_consumptions)
+            self._write_map(conn, "credential_grant", self.credential_grants)
+            self._write_map(conn, "trust_event", self.trust_events)
             self._write_map(conn, "project", self.projects)
             self._write_map(conn, "mcp_child_server", self.mcp_child_servers)
             self._write_map(conn, "idea", self.ideas)
@@ -215,6 +263,13 @@ class SQLiteBackedStore:
             self.agent_run_steps.clear()
             self.agent_run_events.clear()
             self.agent_run_faults.clear()
+            self.capability_leases.clear()
+            self.reviewer_attestations.clear()
+            self.proposed_actions.clear()
+            self.policy_decisions.clear()
+            self.action_consumptions.clear()
+            self.credential_grants.clear()
+            self.trust_events.clear()
             self.projects.clear()
             self.mcp_child_servers.clear()
             self.ideas.clear()
