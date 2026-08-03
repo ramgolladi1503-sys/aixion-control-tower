@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from .models import AgentProvider, ApprovalStatus, AuthUser, RiskLevel, now_utc
+from .models import ApprovalStatus, AuthUser, RiskLevel, now_utc
 from .store import store
 from .trust_crypto import issue_bearer_token, new_nonce, sha256_hex, sign_payload
 from .trust_flight_recorder import append_trust_event
@@ -10,7 +10,6 @@ from .trust_models import (
     ActionConsumption,
     AgentGatewayResult,
     AgentReliabilityScorecard,
-    CapabilityActionType,
     CapabilityLease,
     CapabilityLeaseCreate,
     CapabilityLeasePublic,
@@ -151,7 +150,10 @@ def _validate_scope_against_approval(payload: CapabilityLeaseCreate) -> None:
         raise TrustControlConflict("Lease branch must match the approved target branch.")
 
     approved_paths = {item.path.strip().replace("\\", "/") for item in approval.files}
-    requested_paths = {item.strip().replace("\\", "/").rstrip("/") for item in payload.scope.allowed_path_prefixes}
+    requested_paths = {
+        item.strip().replace("\\", "/").rstrip("/")
+        for item in payload.scope.allowed_path_prefixes
+    }
     outside_paths = sorted(path for path in requested_paths if path not in approved_paths)
     if outside_paths:
         raise TrustControlConflict(
@@ -434,7 +436,8 @@ def issue_credential_grant(
         raise NotImplementedError(
             "External GitHub App and OIDC brokers require deployment-specific issuer integration."
         )
-    if payload.expires_in_seconds > int((lease.expires_at - _utcnow()).total_seconds()):
+    remaining_seconds = int((lease.expires_at - _utcnow()).total_seconds())
+    if payload.expires_in_seconds > remaining_seconds:
         raise TrustControlConflict("Credential grant cannot outlive its capability lease.")
 
     raw_token, token_hash = issue_bearer_token()
@@ -501,6 +504,7 @@ def build_reliability_scorecards() -> list[AgentReliabilityScorecard]:
         ]
         task_ids = {task.id for task in tasks}
         runs = [run for run in store.agent_runs.values() if run.task_id in task_ids]
+        run_ids = {run.id for run in runs}
         first_attempt = 0
         for run in runs:
             steps = [step for step in store.agent_run_steps.values() if step.run_id == run.id]
@@ -510,6 +514,7 @@ def build_reliability_scorecards() -> list[AgentReliabilityScorecard]:
             event.run_id
             for event in store.agent_run_events.values()
             if event.event_type.value == "STALE_LEASE_RECOVERED"
+            and event.run_id in run_ids
         }
         recovered_successes = sum(
             run.id in recovered_runs and run.status.value == "SUCCEEDED" for run in runs
@@ -546,7 +551,9 @@ def build_reliability_scorecards() -> list[AgentReliabilityScorecard]:
                 evidence_completion_rate=(
                     completed_with_evidence / len(runs) if runs else 0.0
                 ),
-                average_runtime_seconds=(sum(durations) / len(durations) if durations else 0.0),
+                average_runtime_seconds=(
+                    sum(durations) / len(durations) if durations else 0.0
+                ),
                 total_cost_usd=total_cost,
                 confidence=min(1.0, (evaluated + len(runs)) / 30.0),
             )
