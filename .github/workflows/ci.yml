@@ -80,17 +80,15 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Build backend image
-        run: docker build --tag aixion-mission-control-ci ./backend
+      - name: Validate Compose contract
+        run: docker compose -f docker-compose.mission-control.yml config
 
-      - name: Start backend container
+      - name: Start API and stateless scheduler
         run: |
-          docker run --detach --name aixion-mission-control-ci \
-            --publish 8000:8000 \
-            --env AIXION_PROFILE=demo \
-            --env AIXION_AUTH_ENABLED=false \
-            --env AIXION_DB_PATH=/app/runtime/ci.sqlite3 \
-            aixion-mission-control-ci
+          docker compose -f docker-compose.mission-control.yml up \
+            --detach \
+            --build \
+            api worker
 
       - name: Wait for health and verify Mission Control API
         run: |
@@ -103,11 +101,15 @@ jobs:
           curl --fail http://127.0.0.1:8000/health
           curl --fail http://127.0.0.1:8000/agent/runs/summary
           curl --fail http://127.0.0.1:8000/agent/runs/metrics
+          docker compose -f docker-compose.mission-control.yml \
+            ps --services --status running | grep -Fx api
+          docker compose -f docker-compose.mission-control.yml \
+            ps --services --status running | grep -Fx worker
 
-      - name: Show backend logs on failure
+      - name: Show compose logs on failure
         if: failure()
-        run: docker logs aixion-mission-control-ci
+        run: docker compose -f docker-compose.mission-control.yml logs --no-color
 
-      - name: Stop backend container
+      - name: Stop Mission Control stack
         if: always()
-        run: docker rm --force aixion-mission-control-ci || true
+        run: docker compose -f docker-compose.mission-control.yml down --volumes
