@@ -72,3 +72,42 @@ jobs:
 
       - name: Build Android release variant
         run: ./gradlew assembleRelease
+
+  mission-control-container:
+    name: Mission Control container validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build --tag aixion-mission-control-ci ./backend
+
+      - name: Start backend container
+        run: |
+          docker run --detach --name aixion-mission-control-ci \
+            --publish 8000:8000 \
+            --env AIXION_PROFILE=demo \
+            --env AIXION_AUTH_ENABLED=false \
+            --env AIXION_DB_PATH=/app/runtime/ci.sqlite3 \
+            aixion-mission-control-ci
+
+      - name: Wait for health and verify Mission Control API
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail http://127.0.0.1:8000/health
+          curl --fail http://127.0.0.1:8000/agent/runs/summary
+          curl --fail http://127.0.0.1:8000/agent/runs/metrics
+
+      - name: Show backend logs on failure
+        if: failure()
+        run: docker logs aixion-mission-control-ci
+
+      - name: Stop backend container
+        if: always()
+        run: docker rm --force aixion-mission-control-ci || true
