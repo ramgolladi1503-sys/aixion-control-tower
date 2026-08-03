@@ -6,7 +6,12 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
-from app.agent_run_models import AgentRunStatus, AgentRunStepStatus
+from app.agent_run_models import (
+    AgentRun,
+    AgentRunStatus,
+    AgentRunStep,
+    AgentRunStepStatus,
+)
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.main import app
 from app.models import (
@@ -65,7 +70,7 @@ def _seed_approved_task() -> AgentTask:
     return task
 
 
-def _create_run() -> tuple[str, object, object]:
+def _create_run() -> tuple[str, AgentRun, AgentRunStep]:
     task = _seed_approved_task()
     payload = client.post("/agent/runs", json={"task_id": task.id}).json()
     run_id = payload["run"]["id"]
@@ -163,7 +168,7 @@ def test_execute_route_rejects_timeout_that_cannot_fit_maximum_lease() -> None:
     assert "Maximum safe value" in response.json()["detail"]
 
 
-def test_pause_and_cancel_are_rejected_while_step_is_in_flight() -> None:
+def test_mutating_controls_are_rejected_while_step_is_in_flight() -> None:
     run_id, run, step = _create_run()
     run.status = AgentRunStatus.RUNNING
     run.lease_owner = "active-worker"
@@ -173,11 +178,21 @@ def test_pause_and_cancel_are_rejected_while_step_is_in_flight() -> None:
     step.lease_token = "active-lease"
     store.persist()
 
+    execute = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={
+            "worker_id": "duplicate-worker",
+            "lease_seconds": 300,
+            "timeout_seconds": 120,
+        },
+    )
     pause = client.post(f"/agent/runs/{run_id}/pause", json={"reason": "pause now"})
     cancel = client.post(f"/agent/runs/{run_id}/cancel", json={"reason": "cancel now"})
 
+    assert execute.status_code == 409
     assert pause.status_code == 409
     assert cancel.status_code == 409
+    assert "governed step is in flight" in execute.json()["detail"]
     assert "governed step is in flight" in pause.json()["detail"]
     assert "governed step is in flight" in cancel.json()["detail"]
     assert run.status == AgentRunStatus.RUNNING
