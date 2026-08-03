@@ -40,7 +40,14 @@ MaintainerDependency = Depends(require_maintainer)
 
 
 def _audit(event_type: str, entity_id: str, details: dict, actor: str) -> None:
-    store.audit_events.append(AuditEvent(event_type=event_type, entity_id=entity_id, details=details, actor=actor))
+    store.audit_events.append(
+        AuditEvent(
+            event_type=event_type,
+            entity_id=entity_id,
+            details=details,
+            actor=actor,
+        )
+    )
 
 
 def _run_or_404(run_id: str) -> AgentRun:
@@ -108,7 +115,10 @@ def get_run_summary(_: AuthUser = ReviewerDependency) -> AgentRunSummary:
 
 @router.get("/metrics")
 def get_run_metrics(_: AuthUser = MaintainerDependency) -> Response:
-    return Response(content=prometheus_agent_run_metrics(), media_type="text/plain; version=0.0.4")
+    return Response(
+        content=prometheus_agent_run_metrics(),
+        media_type="text/plain; version=0.0.4",
+    )
 
 
 @router.post("/watchdog/recover-stale")
@@ -118,15 +128,22 @@ def recover_stale_run_leases(user: AuthUser = MaintainerDependency) -> dict[str,
 
 @router.get("/faults", response_model=list[AgentRunFaultConfig])
 def list_faults(_: AuthUser = MaintainerDependency) -> list[AgentRunFaultConfig]:
-    return sorted(store.agent_run_faults.values(), key=lambda fault: fault.created_at, reverse=True)
+    return sorted(
+        store.agent_run_faults.values(),
+        key=lambda fault: fault.created_at,
+        reverse=True,
+    )
 
 
 @router.post("/faults", response_model=AgentRunFaultConfig)
-def create_fault(payload: AgentRunFaultCreate, user: AuthUser = MaintainerDependency) -> AgentRunFaultConfig:
+def create_fault(
+    payload: AgentRunFaultCreate,
+    user: AuthUser = MaintainerDependency,
+) -> AgentRunFaultConfig:
     if payload.run_id and payload.run_id not in store.agent_runs:
         raise HTTPException(status_code=404, detail="Agent run not found")
     fault = AgentRunFaultConfig(
-        **payload.model_dump(),
+        **payload.model_dump(exclude={"message"}),
         message=payload.message or default_fault_reason(payload.fault_kind),
         created_by=user.email,
     )
@@ -147,12 +164,20 @@ def create_fault(payload: AgentRunFaultCreate, user: AuthUser = MaintainerDepend
 
 
 @router.delete("/faults/{fault_id}", response_model=AgentRunFaultConfig)
-def disable_fault(fault_id: str, user: AuthUser = MaintainerDependency) -> AgentRunFaultConfig:
+def disable_fault(
+    fault_id: str,
+    user: AuthUser = MaintainerDependency,
+) -> AgentRunFaultConfig:
     fault = store.agent_run_faults.get(fault_id)
     if fault is None:
         raise HTTPException(status_code=404, detail="Fault configuration not found")
     fault.enabled = False
-    _audit("agent_run.fault_disabled", fault.id, {"fault_kind": fault.fault_kind}, actor=user.email)
+    _audit(
+        "agent_run.fault_disabled",
+        fault.id,
+        {"fault_kind": fault.fault_kind},
+        actor=user.email,
+    )
     store.persist()
     return fault
 
@@ -260,7 +285,11 @@ def retry_run(
     user: AuthUser = MaintainerDependency,
 ) -> AgentRunDetail:
     run = _run_or_404(run_id)
-    step = _step_or_404(payload.step_id) if payload.step_id else store.agent_run_steps.get(run.current_step_id or "")
+    step = (
+        _step_or_404(payload.step_id)
+        if payload.step_id
+        else store.agent_run_steps.get(run.current_step_id or "")
+    )
     if step is None:
         raise HTTPException(status_code=409, detail="Run has no current step to retry")
     try:
