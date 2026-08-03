@@ -22,6 +22,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.feature.agentruns.AgentRunsScreen
 import com.aixion.controltower.feature.agenttasks.AgentTasksScreen
 import com.aixion.controltower.feature.approvals.ApprovalDetailScreen
 import com.aixion.controltower.feature.approvals.ApprovalInboxFilter
@@ -214,6 +215,7 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             }
                         )
                     }
+                    composable(Route.AgentRuns.value) { AgentRunsScreen() }
                     composable(Route.Connectors.value) { ConnectorsScreen() }
                     composable(Route.MCPQueue.value) {
                         MCPQueueScreen(
