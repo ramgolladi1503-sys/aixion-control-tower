@@ -6,6 +6,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from .agent_credential_models import AgentCredentialRecord
+from .agent_run_models import AgentRun, AgentRunEvent, AgentRunFaultConfig, AgentRunStep
 from .agent_task_models import AgentTask, AgentTaskEvent
 from .connector_models import AgentConnector
 
@@ -34,9 +35,9 @@ T = TypeVar("T", bound=BaseModel)
 class SQLiteBackedStore:
     """Small persistent MVP store backed by SQLite.
 
-    This is intentionally lightweight. It keeps the current service code simple while
-    making data survive backend restarts. A normalized relational schema can replace
-    this once the API shape stabilizes.
+    The generic KV table keeps the MVP simple while making state survive restarts.
+    Mission Control run entities deliberately use the same persistence boundary so a
+    worker restart cannot erase run, step, lease, event, or evidence truth.
     """
 
     def __init__(self) -> None:
@@ -51,6 +52,10 @@ class SQLiteBackedStore:
         self.device_registrations: dict[str, DeviceRegistration] = {}
         self.agent_tasks: dict[str, AgentTask] = {}
         self.agent_task_events: dict[str, AgentTaskEvent] = {}
+        self.agent_runs: dict[str, AgentRun] = {}
+        self.agent_run_steps: dict[str, AgentRunStep] = {}
+        self.agent_run_events: dict[str, AgentRunEvent] = {}
+        self.agent_run_faults: dict[str, AgentRunFaultConfig] = {}
         self.projects: dict[str, Project] = {}
         self.mcp_child_servers: dict[str, MCPChildServer] = {}
         self.ideas: dict[str, Idea] = {}
@@ -95,6 +100,10 @@ class SQLiteBackedStore:
         self.device_registrations = self._load_entities("device_registration", DeviceRegistration)
         self.agent_tasks = self._load_entities("agent_task", AgentTask)
         self.agent_task_events = self._load_entities("agent_task_event", AgentTaskEvent)
+        self.agent_runs = self._load_entities("agent_run", AgentRun)
+        self.agent_run_steps = self._load_entities("agent_run_step", AgentRunStep)
+        self.agent_run_events = self._load_entities("agent_run_event", AgentRunEvent)
+        self.agent_run_faults = self._load_entities("agent_run_fault", AgentRunFaultConfig)
         self.projects = self._load_entities("project", Project)
         self.mcp_child_servers = self._load_entities("mcp_child_server", MCPChildServer)
         self.ideas = self._load_entities("idea", Idea)
@@ -117,6 +126,10 @@ class SQLiteBackedStore:
             self._write_map(conn, "device_registration", self.device_registrations)
             self._write_map(conn, "agent_task", self.agent_tasks)
             self._write_map(conn, "agent_task_event", self.agent_task_events)
+            self._write_map(conn, "agent_run", self.agent_runs)
+            self._write_map(conn, "agent_run_step", self.agent_run_steps)
+            self._write_map(conn, "agent_run_event", self.agent_run_events)
+            self._write_map(conn, "agent_run_fault", self.agent_run_faults)
             self._write_map(conn, "project", self.projects)
             self._write_map(conn, "mcp_child_server", self.mcp_child_servers)
             self._write_map(conn, "idea", self.ideas)
@@ -158,6 +171,10 @@ class SQLiteBackedStore:
         self.device_registrations.clear()
         self.agent_tasks.clear()
         self.agent_task_events.clear()
+        self.agent_runs.clear()
+        self.agent_run_steps.clear()
+        self.agent_run_events.clear()
+        self.agent_run_faults.clear()
         self.projects.clear()
         self.mcp_child_servers.clear()
         self.ideas.clear()
