@@ -14,6 +14,7 @@ from .trust_action_authorization_models import (
     ActionAuthorization,
     ActionAuthorizationCreate,
 )
+from .trust_consumption import consume_effective_action
 from .trust_credentials import (
     CredentialIntrospectionRequest,
     CredentialIntrospectionResult,
@@ -32,6 +33,7 @@ from .trust_models import (
     CapabilityLeaseStatus,
     CredentialGrant,
     CredentialGrantCreate,
+    CredentialGrantPublic,
     CredentialGrantResponse,
     ExceptionQueueItem,
     FlightRecorderVerification,
@@ -45,7 +47,6 @@ from .trust_service import (
     TrustControlConflict,
     build_exception_queue,
     build_reliability_scorecards,
-    consume_gateway_action,
     evaluate_gateway_action,
     issue_capability_lease,
     issue_credential_grant,
@@ -76,6 +77,10 @@ def _credential_or_404(grant_id: str) -> CredentialGrant:
 
 def _public(lease: CapabilityLease) -> CapabilityLeasePublic:
     return CapabilityLeasePublic.model_validate(lease.model_dump())
+
+
+def _credential_public(grant: CredentialGrant) -> CredentialGrantPublic:
+    return CredentialGrantPublic.model_validate(grant.model_dump())
 
 
 def _trust_error(error: Exception) -> HTTPException:
@@ -257,7 +262,11 @@ def consume_external_agent_action(
         repository_full_name=action.repository,
     )
     try:
-        return consume_gateway_action(action_id, payload, actor=f"agent:{agent.id}")
+        return consume_effective_action(
+            action_id,
+            payload,
+            actor=f"agent:{agent.id}",
+        )
     except (ValueError, TrustControlConflict) as error:
         raise _trust_error(error) from error
 
@@ -269,7 +278,7 @@ def consume_manual_action(
     user: AuthUser = MaintainerDependency,
 ) -> ActionConsumption:
     try:
-        return consume_gateway_action(action_id, payload, actor=user.email)
+        return consume_effective_action(action_id, payload, actor=user.email)
     except (ValueError, TrustControlConflict) as error:
         raise _trust_error(error) from error
 
@@ -295,17 +304,21 @@ def introspect_capability_credential(
     return introspect_credential(payload)
 
 
-@router.post("/credentials/{grant_id}/revoke", response_model=CredentialGrant)
+@router.post(
+    "/credentials/{grant_id}/revoke",
+    response_model=CredentialGrantPublic,
+)
 def revoke_capability_credential(
     grant_id: str,
     payload: CredentialRevocationRequest,
     user: AuthUser = OwnerDependency,
-) -> CredentialGrant:
-    return revoke_credential_grant(
+) -> CredentialGrantPublic:
+    grant = revoke_credential_grant(
         _credential_or_404(grant_id),
         user=user,
         reason=payload.reason,
     )
+    return _credential_public(grant)
 
 
 @router.get("/scorecards", response_model=list[AgentReliabilityScorecard])
