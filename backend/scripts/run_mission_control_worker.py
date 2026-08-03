@@ -8,8 +8,6 @@ from typing import Any
 
 import httpx
 
-TERMINAL_RUN_STATUSES = {"BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"}
-
 
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
@@ -43,7 +41,10 @@ def _eligible_runs(client: httpx.Client) -> list[dict[str, Any]]:
         response.raise_for_status()
         candidates.extend(response.json())
     ready = [run for run in candidates if _retry_is_ready(client, run)]
-    return sorted(ready, key=lambda run: (run.get("created_at") or "", run.get("id") or ""))
+    return sorted(
+        ready,
+        key=lambda run: (run.get("created_at") or "", run.get("id") or ""),
+    )
 
 
 def run_once(
@@ -57,9 +58,8 @@ def run_once(
     watchdog.raise_for_status()
 
     for run in _eligible_runs(client):
-        run_id = run["id"]
         response = client.post(
-            f"/agent/runs/{run_id}/execute-next",
+            f"/agent/runs/{run['id']}/execute-next",
             json={
                 "worker_id": worker_id,
                 "lease_seconds": lease_seconds,
@@ -69,10 +69,6 @@ def run_once(
         if response.status_code == 409:
             continue
         response.raise_for_status()
-        detail = response.json()
-        status = detail.get("run", {}).get("status")
-        if status not in TERMINAL_RUN_STATUSES or status == "SUCCEEDED":
-            return 1
         return 1
     return 0
 
