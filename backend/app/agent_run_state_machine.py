@@ -33,11 +33,13 @@ RUN_TRANSITIONS: dict[AgentRunStatus, set[AgentRunStatus]] = {
     AgentRunStatus.SCHEDULED: {
         AgentRunStatus.RUNNING,
         AgentRunStatus.PAUSED,
+        AgentRunStatus.NEEDS_HUMAN,
         AgentRunStatus.CANCELLED,
         AgentRunStatus.BLOCKED,
         AgentRunStatus.FAILED,
     },
     AgentRunStatus.RUNNING: {
+        AgentRunStatus.SCHEDULED,
         AgentRunStatus.EVALUATING,
         AgentRunStatus.RETRY_WAIT,
         AgentRunStatus.PAUSED,
@@ -61,6 +63,7 @@ RUN_TRANSITIONS: dict[AgentRunStatus, set[AgentRunStatus]] = {
         AgentRunStatus.RUNNING,
         AgentRunStatus.PAUSED,
         AgentRunStatus.NEEDS_HUMAN,
+        AgentRunStatus.BLOCKED,
         AgentRunStatus.FAILED,
         AgentRunStatus.CANCELLED,
     },
@@ -86,12 +89,16 @@ STEP_TRANSITIONS: dict[AgentRunStepStatus, set[AgentRunStepStatus]] = {
     AgentRunStepStatus.PENDING: {
         AgentRunStepStatus.READY,
         AgentRunStepStatus.PAUSED,
+        AgentRunStepStatus.NEEDS_HUMAN,
+        AgentRunStepStatus.BLOCKED,
         AgentRunStepStatus.CANCELLED,
         AgentRunStepStatus.SKIPPED,
     },
     AgentRunStepStatus.READY: {
         AgentRunStepStatus.RUNNING,
         AgentRunStepStatus.PAUSED,
+        AgentRunStepStatus.NEEDS_HUMAN,
+        AgentRunStepStatus.BLOCKED,
         AgentRunStepStatus.CANCELLED,
         AgentRunStepStatus.SKIPPED,
     },
@@ -106,6 +113,7 @@ STEP_TRANSITIONS: dict[AgentRunStepStatus, set[AgentRunStepStatus]] = {
     AgentRunStepStatus.RETRY_WAIT: {
         AgentRunStepStatus.READY,
         AgentRunStepStatus.NEEDS_HUMAN,
+        AgentRunStepStatus.BLOCKED,
         AgentRunStepStatus.FAILED,
         AgentRunStepStatus.CANCELLED,
     },
@@ -139,12 +147,19 @@ def can_transition_step(current: AgentRunStepStatus, target: AgentRunStepStatus)
     return target == current or target in STEP_TRANSITIONS[current]
 
 
-def transition_run(run: AgentRun, target: AgentRunStatus, *, reason: str = "") -> tuple[AgentRunStatus, AgentRunStatus]:
+def transition_run(
+    run: AgentRun,
+    target: AgentRunStatus,
+    *,
+    reason: str = "",
+) -> tuple[AgentRunStatus, AgentRunStatus]:
     previous = run.status
     if target == previous:
         return previous, target
     if not can_transition_run(previous, target):
-        raise InvalidAgentRunTransition(f"Illegal AgentRun transition: {previous} -> {target}")
+        raise InvalidAgentRunTransition(
+            f"Illegal AgentRun transition: {previous} -> {target}"
+        )
     now = _now()
     run.status = target
     run.updated_at = now
@@ -156,7 +171,11 @@ def transition_run(run: AgentRun, target: AgentRunStatus, *, reason: str = "") -
         run.lease_token = None
         run.lease_expires_at = None
     if reason:
-        run.last_error = reason if target in {AgentRunStatus.FAILED, AgentRunStatus.BLOCKED} else run.last_error
+        run.last_error = (
+            reason
+            if target in {AgentRunStatus.FAILED, AgentRunStatus.BLOCKED}
+            else run.last_error
+        )
     return previous, target
 
 
@@ -170,7 +189,9 @@ def transition_step(
     if target == previous:
         return previous, target
     if not can_transition_step(previous, target):
-        raise InvalidAgentRunTransition(f"Illegal AgentRunStep transition: {previous} -> {target}")
+        raise InvalidAgentRunTransition(
+            f"Illegal AgentRunStep transition: {previous} -> {target}"
+        )
     now = _now()
     step.status = target
     step.updated_at = now
@@ -181,7 +202,10 @@ def transition_step(
     if target in TERMINAL_STEP_STATUSES:
         step.completed_at = now
         if step.started_at is not None:
-            step.duration_ms = max(0, int((now - step.started_at).total_seconds() * 1000))
+            step.duration_ms = max(
+                0,
+                int((now - step.started_at).total_seconds() * 1000),
+            )
         step.lease_owner = None
         step.lease_token = None
         step.lease_expires_at = None
@@ -192,7 +216,12 @@ def transition_step(
     return previous, target
 
 
-def derive_run_status(steps: list[AgentRunStep], *, pause_requested: bool = False, cancel_requested: bool = False) -> AgentRunStatus:
+def derive_run_status(
+    steps: list[AgentRunStep],
+    *,
+    pause_requested: bool = False,
+    cancel_requested: bool = False,
+) -> AgentRunStatus:
     if cancel_requested:
         return AgentRunStatus.CANCELLED
     if any(step.status == AgentRunStepStatus.BLOCKED for step in steps):
@@ -201,9 +230,14 @@ def derive_run_status(steps: list[AgentRunStep], *, pause_requested: bool = Fals
         return AgentRunStatus.NEEDS_HUMAN
     if any(step.status == AgentRunStepStatus.FAILED for step in steps):
         return AgentRunStatus.FAILED
-    if pause_requested or any(step.status == AgentRunStepStatus.PAUSED for step in steps):
+    if pause_requested or any(
+        step.status == AgentRunStepStatus.PAUSED for step in steps
+    ):
         return AgentRunStatus.PAUSED
-    if steps and all(step.status in {AgentRunStepStatus.SUCCEEDED, AgentRunStepStatus.SKIPPED} for step in steps):
+    if steps and all(
+        step.status in {AgentRunStepStatus.SUCCEEDED, AgentRunStepStatus.SKIPPED}
+        for step in steps
+    ):
         return AgentRunStatus.SUCCEEDED
     if any(step.status == AgentRunStepStatus.RETRY_WAIT for step in steps):
         return AgentRunStatus.RETRY_WAIT
