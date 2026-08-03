@@ -9,6 +9,7 @@ from .agent_run_models import (
     AgentRunStepStatus,
     AgentRunStepType,
 )
+from .agent_run_state_machine import transition_run, transition_step
 from .models import now_utc
 from .settings import get_settings
 from .store import store
@@ -35,6 +36,13 @@ SIDE_EFFECT_STEPS = {
     AgentRunStepType.APPLY_CHANGES,
     AgentRunStepType.RUN_VALIDATION,
     AgentRunStepType.CREATE_PULL_REQUEST,
+}
+
+TERMINAL_RUN_STATUSES = {
+    AgentRunStatus.BLOCKED,
+    AgentRunStatus.SUCCEEDED,
+    AgentRunStatus.FAILED,
+    AgentRunStatus.CANCELLED,
 }
 
 
@@ -77,15 +85,28 @@ def _validate_lease_for_run(run: AgentRun, lease: CapabilityLease) -> None:
         reasons.append("Capability lease approval does not match the run approval.")
     if lease.scope.repository != run.repository:
         reasons.append("Capability lease repository does not match the run repository.")
+    if run.max_attempts_per_step > lease.scope.max_retries + 1:
+        reasons.append(
+            "Run attempt budget exceeds the capability lease retry budget."
+        )
     if task is not None:
         if lease.provider != task.provider:
-            reasons.append("Capability lease provider does not match the AgentTask provider.")
+            reasons.append(
+                "Capability lease provider does not match the AgentTask provider."
+            )
         if lease.agent_id and lease.agent_id != task.external_agent_id:
-            reasons.append("Capability lease agent identity does not match the AgentTask agent.")
+            reasons.append(
+                "Capability lease agent identity does not match the AgentTask agent."
+            )
         if lease.scope.branch != task.branch_preference:
             reasons.append("Capability lease branch does not match the AgentTask branch.")
-    if approval is not None and lease.approved_payload_hash != approval.approved_payload_hash:
-        reasons.append("Capability lease is not bound to the current approved payload hash.")
+    if (
+        approval is not None
+        and lease.approved_payload_hash != approval.approved_payload_hash
+    ):
+        reasons.append(
+            "Capability lease is not bound to the current approved payload hash."
+        )
     if reasons:
         raise AgentRunTrustConflict(" ".join(reasons))
 
@@ -96,30 +117,38 @@ def attach_capability_lease(
     *,
     actor: str,
 ) -> AgentRun:
-    if run.status in {
-        AgentRunStatus.RUNNING,
-        AgentRunStatus.EVALUATING,
-        AgentRunStatus.BLOCKED,
-        AgentRunStatus.SUCCEEDED,
-        AgentRunStatus.FAILED,
-        AgentRunStatus.CANCELLED,
-    }:
-        raise AgentRunTrustConflict(
-            f"Capability lease cannot be attached while run is {run.status}."
-        )
-    current_step = store.agent_run_steps.get(run.current_step_id or "")
-    if current_step and current_step.status == AgentRunStepStatus.RUNNING:
-        raise AgentRunTrustConflict("Capability lease cannot change while a step is running.")
-    lease = store.capability_leases.get(lease_id)
-    if lease is None:
-        raise ValueError("Capability lease not found.")
-    _validate_lease_for_run(run, lease)
     if run.capability_lease_id:
-        if run.capability_lease_id == lease.id:
+        if run.capability_lease_id == lease_id:
             return run
         raise AgentRunTrustConflict(
             "A durable run cannot be rebound to a different capability lease."
         )
+    if run.status in TERMINAL_RUN_STATUSES or run.status == AgentRunStatus.EVALUATING:
+        raise AgentRunTrustConflict(
+            f"Capability lease cannot be attached while run is {run.status}."
+        )
+    if run.lease_owner or run.lease_token:
+        raise AgentRunTrustConflict(
+            "Capability lease cannot change while a worker lease is active."
+        )
+    current_step = store.agent_run_steps.get(run.current_step_id or "")
+    if current_step and current_step.status == AgentRunStepStatus.RUNNING:
+        raise AgentRunTrustConflict("Capability lease cannot change while a step is running.")
+    side_effect_attempted = any(
+        step.run_id == run.id
+        and step.step_type in SIDE_EFFECT_STEPS
+        and step.attempt_count > 0
+        for step in store.agent_run_steps.values()
+    )
+    if side_effect_attempted:
+        raise AgentRunTrustConflict(
+            "Capability lease must be attached before the first side-effect attempt."
+        )
+
+    lease = store.capability_leases.get(lease_id)
+    if lease is None:
+        raise ValueError("Capability lease not found.")
+    _validate_lease_for_run(run, lease)
     run.capability_lease_id = lease.id
     run.updated_at = now_utc()
     _append_run_event(
@@ -159,7 +188,9 @@ def _step_actions(
     task = store.agent_tasks.get(run.task_id)
     approval = store.approval_requests.get(run.approval_request_id or "")
     if task is None or approval is None:
-        raise AgentRunTrustConflict("Run trust evaluation requires task and approval truth.")
+        raise AgentRunTrustConflict(
+            "Run trust evaluation requires task and approval truth."
+        )
     common = {
         "lease_id": run.capability_lease_id,
         "provider": task.provider,
@@ -182,7 +213,7 @@ def _step_actions(
             ProposedAction(
                 id=_action_id(run, step, "branch"),
                 action_type=CapabilityActionType.CREATE_BRANCH,
-                estimated_runtime_seconds=min(timeout_seconds, 60),
+                estimated_runtime_seconds=timeout_seconds,
                 **common,
             )
         ]
@@ -192,7 +223,7 @@ def _step_actions(
                 id=_action_id(run, step, "files"),
                 action_type=CapabilityActionType.MODIFY_FILES,
                 paths=[item.path for item in approval.files],
-                estimated_runtime_seconds=min(timeout_seconds, 300),
+                estimated_runtime_seconds=timeout_seconds,
                 **common,
             )
         ]
@@ -212,11 +243,83 @@ def _step_actions(
             ProposedAction(
                 id=_action_id(run, step, "pull-request"),
                 action_type=CapabilityActionType.CREATE_PULL_REQUEST,
-                estimated_runtime_seconds=min(timeout_seconds, 60),
+                estimated_runtime_seconds=timeout_seconds,
                 **common,
             )
         ]
     return []
+
+
+def _preflight_aggregate_budget(
+    lease: CapabilityLease,
+    actions: list[ProposedAction],
+) -> None:
+    projected_runtime = lease.consumed_runtime_seconds + sum(
+        action.estimated_runtime_seconds for action in actions
+    )
+    projected_cost = lease.consumed_cost_usd + sum(
+        action.estimated_cost_usd for action in actions
+    )
+    projected_prs = lease.consumed_pull_requests + sum(
+        action.action_type == CapabilityActionType.CREATE_PULL_REQUEST
+        for action in actions
+    )
+    if projected_runtime > lease.scope.max_runtime_seconds:
+        raise AgentRunTrustConflict(
+            "Trust preflight blocked execution because aggregate runtime exceeds the lease."
+        )
+    if projected_cost > lease.scope.max_cost_usd:
+        raise AgentRunTrustConflict(
+            "Trust preflight blocked execution because aggregate cost exceeds the lease."
+        )
+    if projected_prs > lease.scope.max_pull_requests:
+        raise AgentRunTrustConflict(
+            "Trust preflight blocked execution because the PR budget is exhausted."
+        )
+
+
+def _mark_needs_human(
+    run: AgentRun,
+    step: AgentRunStep,
+    *,
+    actor: str,
+    reason: str,
+    action_id: str,
+) -> None:
+    if step.status != AgentRunStepStatus.NEEDS_HUMAN:
+        transition_step(step, AgentRunStepStatus.NEEDS_HUMAN, reason=reason)
+    if run.status != AgentRunStatus.NEEDS_HUMAN:
+        transition_run(run, AgentRunStatus.NEEDS_HUMAN, reason=reason)
+    _append_run_event(
+        run,
+        step,
+        event_type=AgentRunEventType.STEP_NEEDS_HUMAN,
+        actor=actor,
+        message="Trust policy requires a human decision for the exact action.",
+        metadata={"action_id": action_id, "reason": reason},
+    )
+
+
+def _mark_blocked(
+    run: AgentRun,
+    step: AgentRunStep,
+    *,
+    actor: str,
+    reason: str,
+    action_id: str | None,
+) -> None:
+    if step.status != AgentRunStepStatus.BLOCKED:
+        transition_step(step, AgentRunStepStatus.BLOCKED, reason=reason)
+    if run.status != AgentRunStatus.BLOCKED:
+        transition_run(run, AgentRunStatus.BLOCKED, reason=reason)
+    _append_run_event(
+        run,
+        step,
+        event_type=AgentRunEventType.STEP_BLOCKED,
+        actor=actor,
+        message="Trust policy permanently blocked the governed step.",
+        metadata={"action_id": action_id, "reason": reason},
+    )
 
 
 def authorize_run_step(
@@ -235,24 +338,74 @@ def authorize_run_step(
     lease = store.capability_leases.get(run.capability_lease_id)
     if lease is None:
         raise AgentRunTrustConflict("Run capability lease cannot be found.")
-    _validate_lease_for_run(run, lease)
+    try:
+        _validate_lease_for_run(run, lease)
+    except AgentRunTrustConflict as error:
+        _mark_blocked(
+            run,
+            step,
+            actor=actor,
+            reason=str(error),
+            action_id=None,
+        )
+        store.persist()
+        raise
 
     actions = _step_actions(run, step, timeout_seconds=timeout_seconds)
+    try:
+        _preflight_aggregate_budget(lease, actions)
+    except AgentRunTrustConflict as error:
+        _mark_blocked(
+            run,
+            step,
+            actor=actor,
+            reason=str(error),
+            action_id=None,
+        )
+        store.persist()
+        raise
+
     for action in actions:
         existing = store.proposed_actions.get(action.id)
         if existing is None:
             result = evaluate_gateway_action(action, actor=actor)
             decision = result.decision
         else:
-            existing_payload = existing.model_dump(mode="json", exclude={"created_at"})
-            action_payload = action.model_dump(mode="json", exclude={"created_at"})
+            existing_payload = existing.model_dump(
+                mode="json",
+                exclude={"created_at"},
+            )
+            action_payload = action.model_dump(
+                mode="json",
+                exclude={"created_at"},
+            )
             if existing_payload != action_payload:
-                raise AgentRunTrustConflict(
+                error = AgentRunTrustConflict(
                     "Deterministic trust action identifier resolved to a different payload."
                 )
+                _mark_blocked(
+                    run,
+                    step,
+                    actor=actor,
+                    reason=str(error),
+                    action_id=action.id,
+                )
+                store.persist()
+                raise error
             decision = latest_policy_decision(action.id)
             if decision is None:
-                raise AgentRunTrustConflict("Existing trust action has no policy decision.")
+                error = AgentRunTrustConflict(
+                    "Existing trust action has no policy decision."
+                )
+                _mark_blocked(
+                    run,
+                    step,
+                    actor=actor,
+                    reason=str(error),
+                    action_id=action.id,
+                )
+                store.persist()
+                raise error
         _append_run_event(
             run,
             step,
@@ -268,15 +421,42 @@ def authorize_run_step(
             },
         )
         if decision.decision == PolicyDecisionType.BLOCK:
-            store.persist()
-            raise AgentRunTrustConflict(
-                "Trust policy blocked execution: " + " ".join(decision.reasons)
+            reason = "Trust policy blocked execution: " + " ".join(
+                decision.reasons
             )
+            _mark_blocked(
+                run,
+                step,
+                actor=actor,
+                reason=reason,
+                action_id=action.id,
+            )
+            store.persist()
+            raise AgentRunTrustConflict(reason)
         if decision.decision == PolicyDecisionType.REQUIRE_APPROVAL:
-            store.persist()
-            raise AgentRunTrustConflict(
-                "Exact action approval is required before execution: " + action.id
+            reason = "Exact action approval is required before execution: " + action.id
+            _mark_needs_human(
+                run,
+                step,
+                actor=actor,
+                reason=reason,
+                action_id=action.id,
             )
+            store.persist()
+            raise AgentRunTrustConflict(reason)
+
+    if step.status == AgentRunStepStatus.NEEDS_HUMAN:
+        transition_step(
+            step,
+            AgentRunStepStatus.READY,
+            reason="Exact trust action approval recorded.",
+        )
+    if run.status == AgentRunStatus.NEEDS_HUMAN:
+        transition_run(
+            run,
+            AgentRunStatus.SCHEDULED,
+            reason="Exact trust action approval recorded.",
+        )
     store.persist()
     return actions
 
@@ -297,7 +477,9 @@ def consume_run_step_actions(
             actual_runtime_seconds=per_action_runtime + (1 if index < remainder else 0),
             actual_cost_usd=0.0,
             pull_requests_created=(
-                1 if step.step_type == AgentRunStepType.CREATE_PULL_REQUEST else 0
+                1
+                if step.step_type == AgentRunStepType.CREATE_PULL_REQUEST
+                else 0
             ),
             retry_consumed=step.attempt_count > 1 and index == 0,
             output_reference=step.output_reference,
