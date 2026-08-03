@@ -35,17 +35,27 @@ class CapabilityActionType(StrEnum):
     CUSTOM = "CUSTOM"
 
 
+V1_ALLOWED_CAPABILITY_ACTIONS = {
+    CapabilityActionType.READ_REPOSITORY,
+    CapabilityActionType.CREATE_BRANCH,
+    CapabilityActionType.MODIFY_FILES,
+    CapabilityActionType.RUN_COMMAND,
+    CapabilityActionType.ACCESS_NETWORK,
+    CapabilityActionType.CREATE_PULL_REQUEST,
+}
+
+
 class CapabilityScope(BaseModel):
     repository: str
     branch: str
-    allowed_actions: list[CapabilityActionType] = Field(default_factory=list)
-    allowed_path_prefixes: list[str] = Field(default_factory=list)
-    allowed_commands: list[str] = Field(default_factory=list)
-    allowed_network_domains: list[str] = Field(default_factory=list)
-    max_runtime_seconds: int = Field(default=900, ge=1, le=86400)
-    max_cost_usd: float = Field(default=5.0, ge=0.0, le=100000.0)
-    max_retries: int = Field(default=3, ge=0, le=20)
-    max_pull_requests: int = Field(default=1, ge=0, le=20)
+    allowed_actions: list[CapabilityActionType] = Field(min_length=1, max_length=10)
+    allowed_path_prefixes: list[str] = Field(default_factory=list, max_length=100)
+    allowed_commands: list[str] = Field(default_factory=list, max_length=50)
+    allowed_network_domains: list[str] = Field(default_factory=list, max_length=20)
+    max_runtime_seconds: int = Field(default=900, ge=1, le=3600)
+    max_cost_usd: float = Field(default=5.0, ge=0.0, le=10.0)
+    max_retries: int = Field(default=3, ge=0, le=3)
+    max_pull_requests: int = Field(default=1, ge=0, le=1)
     allow_auto_merge: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -67,6 +77,25 @@ class CapabilityScope(BaseModel):
             raise ValueError("protected branches cannot be leased for mutation")
         return cleaned
 
+    @field_validator("allowed_actions")
+    @classmethod
+    def validate_v1_actions(
+        cls,
+        values: list[CapabilityActionType],
+    ) -> list[CapabilityActionType]:
+        normalized = list(dict.fromkeys(values))
+        unsupported = sorted(
+            value.value
+            for value in normalized
+            if value not in V1_ALLOWED_CAPABILITY_ACTIONS
+        )
+        if unsupported:
+            raise ValueError(
+                "V1 capability leases cannot grant high-risk or custom actions: "
+                + ", ".join(unsupported)
+            )
+        return normalized
+
     @field_validator("allowed_path_prefixes", "allowed_commands", "allowed_network_domains")
     @classmethod
     def normalize_strings(cls, values: list[str]) -> list[str]:
@@ -84,7 +113,7 @@ class CapabilityLeaseCreate(BaseModel):
     provider: AgentProvider = AgentProvider.OTHER
     mode: CapabilityLeaseMode = CapabilityLeaseMode.STRICT
     scope: CapabilityScope
-    expires_in_seconds: int = Field(default=900, ge=30, le=86400)
+    expires_in_seconds: int = Field(default=900, ge=30, le=3600)
     required_reviewer_count: int = Field(default=1, ge=1, le=10)
     prevent_self_approval: bool = True
 
@@ -174,22 +203,22 @@ class ProposedAction(BaseModel):
     action_type: CapabilityActionType
     repository: str | None = None
     branch: str | None = None
-    paths: list[str] = Field(default_factory=list)
-    command: str | None = None
-    network_domains: list[str] = Field(default_factory=list)
-    estimated_runtime_seconds: int = Field(default=0, ge=0, le=86400)
-    estimated_cost_usd: float = Field(default=0.0, ge=0.0, le=100000.0)
-    retry_number: int = Field(default=0, ge=0, le=100)
+    paths: list[str] = Field(default_factory=list, max_length=100)
+    command: str | None = Field(default=None, max_length=4000)
+    network_domains: list[str] = Field(default_factory=list, max_length=20)
+    estimated_runtime_seconds: int = Field(default=0, ge=0, le=3600)
+    estimated_cost_usd: float = Field(default=0.0, ge=0.0, le=10.0)
+    retry_number: int = Field(default=0, ge=0, le=3)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=now_utc)
 
 
 class ActionConsumption(BaseModel):
-    actual_runtime_seconds: int = Field(default=0, ge=0, le=86400)
-    actual_cost_usd: float = Field(default=0.0, ge=0.0, le=100000.0)
-    pull_requests_created: int = Field(default=0, ge=0, le=20)
+    actual_runtime_seconds: int = Field(default=0, ge=0, le=3600)
+    actual_cost_usd: float = Field(default=0.0, ge=0.0, le=10.0)
+    pull_requests_created: int = Field(default=0, ge=0, le=1)
     retry_consumed: bool = False
-    output_reference: str | None = None
+    output_reference: str | None = Field(default=None, max_length=4000)
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -265,7 +294,7 @@ class CredentialGrant(BaseModel):
     grant_type: CredentialGrantType
     audience: str
     subject: str
-    scope: list[str] = Field(default_factory=list)
+    scope: list[str] = Field(default_factory=list, max_length=50)
     issued_at: datetime = Field(default_factory=now_utc)
     expires_at: datetime
     revoked: bool = False
@@ -274,17 +303,31 @@ class CredentialGrant(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class CredentialGrantPublic(BaseModel):
+    id: str
+    lease_id: str
+    grant_type: CredentialGrantType
+    audience: str
+    subject: str
+    scope: list[str]
+    issued_at: datetime
+    expires_at: datetime
+    revoked: bool
+    revoked_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class CredentialGrantCreate(BaseModel):
     lease_id: str
     grant_type: CredentialGrantType = CredentialGrantType.INTERNAL_CAPABILITY_TOKEN
-    audience: str
-    subject: str
-    scope: list[str] = Field(default_factory=list)
+    audience: str = Field(min_length=1, max_length=500)
+    subject: str = Field(min_length=1, max_length=500)
+    scope: list[str] = Field(default_factory=list, max_length=50)
     expires_in_seconds: int = Field(default=300, ge=30, le=3600)
 
 
 class CredentialGrantResponse(BaseModel):
-    grant: CredentialGrant
+    grant: CredentialGrantPublic
     bearer_token: str
 
 
