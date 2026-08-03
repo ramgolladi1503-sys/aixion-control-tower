@@ -36,8 +36,11 @@ def _retry_is_ready(client: httpx.Client, run: dict[str, Any]) -> bool:
 
 def _eligible_runs(client: httpx.Client) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    for status in ("SCHEDULED", "RETRY_WAIT"):
-        response = client.get("/agent/runs", params={"status": status, "limit": 500})
+    for status in ("SCHEDULED", "RUNNING", "RETRY_WAIT"):
+        response = client.get(
+            "/agent/runs",
+            params={"status": status, "limit": 500},
+        )
         response.raise_for_status()
         candidates.extend(response.json())
     ready = [run for run in candidates if _retry_is_ready(client, run)]
