@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
+os.environ.setdefault("AIXION_PROFILE", "test")
 
 from app.agent_run_faults import consume_fault
 from app.agent_run_metrics import build_agent_run_summary, prometheus_agent_run_metrics
@@ -40,7 +41,7 @@ def test_fault_is_scoped_consumed_and_disabled() -> None:
     assert consume_fault("run_1", AgentRunStepType.CREATE_BRANCH) is None
 
 
-def test_prometheus_metrics_expose_run_and_step_truth() -> None:
+def test_prometheus_metrics_expose_run_step_and_trust_truth() -> None:
     run = AgentRun(task_id="task_1", status=AgentRunStatus.RETRY_WAIT)
     step = AgentRunStep(
         run_id=run.id,
@@ -63,3 +64,7 @@ def test_prometheus_metrics_expose_run_and_step_truth() -> None:
     assert 'aixion_agent_runs_total{status="RETRY_WAIT"} 1' in output
     assert "aixion_agent_run_queue_depth 1" in output
     assert "aixion_agent_run_retry_attempts_total 1" in output
+    assert "aixion_capability_leases_total" in output
+    assert "aixion_policy_decisions_total" in output
+    assert "aixion_trust_flight_recorder_valid 1" in output
+    assert "aixion_trust_flight_recorder_events_total 0" in output
