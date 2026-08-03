@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from threading import Lock
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from .agent_run_faults import default_fault_reason
@@ -55,6 +57,8 @@ NON_RETRYABLE_STEP_STATUSES = {
     AgentRunStepStatus.CANCELLED,
     AgentRunStepStatus.SKIPPED,
 }
+_EXECUTION_LOCK_GUARD = Lock()
+_EXECUTION_LOCKS: dict[str, Lock] = {}
 
 
 def _audit(event_type: str, entity_id: str, details: dict, actor: str) -> None:
@@ -128,6 +132,24 @@ def _require_step_boundary(run: AgentRun, action: str) -> None:
                 "Wait for the step boundary or recover an expired lease first."
             ),
         )
+
+
+def _acquire_execution_lock(run_id: str) -> Lock:
+    with _EXECUTION_LOCK_GUARD:
+        lock = _EXECUTION_LOCKS.setdefault(run_id, Lock())
+    if not lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="Another execution request is already active for this AgentRun.",
+        )
+    return lock
+
+
+def _release_execution_lock(run_id: str, lock: Lock) -> None:
+    lock.release()
+    with _EXECUTION_LOCK_GUARD:
+        if not lock.locked():
+            _EXECUTION_LOCKS.pop(run_id, None)
 
 
 @router.post("", response_model=AgentRunDetail)
@@ -254,17 +276,22 @@ def execute_run_next_step(
     _: AuthUser = MaintainerDependency,
 ) -> AgentRunDetail:
     run = _run_or_404(run_id)
-    lease_seconds = _safe_lease_seconds(payload)
+    execution_lock = _acquire_execution_lock(run.id)
     try:
-        execute_next_step(
-            run.id,
-            worker_id=payload.worker_id,
-            lease_seconds=lease_seconds,
-            timeout_seconds=payload.timeout_seconds,
-        )
-    except AgentRunConflict as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    return _detail(run)
+        _require_step_boundary(run, "start another execution")
+        lease_seconds = _safe_lease_seconds(payload)
+        try:
+            execute_next_step(
+                run.id,
+                worker_id=payload.worker_id,
+                lease_seconds=lease_seconds,
+                timeout_seconds=payload.timeout_seconds,
+            )
+        except AgentRunConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return _detail(run)
+    finally:
+        _release_execution_lock(run.id, execution_lock)
 
 
 @router.post("/{run_id}/heartbeat", response_model=AgentRun)
