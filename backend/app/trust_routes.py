@@ -6,6 +6,13 @@ from .agent_auth import assert_agent_can, require_external_agent
 from .auth import require_maintainer, require_owner, require_reviewer
 from .models import AgentAction, AuthUser, ExternalAgent
 from .store import store
+from .trust_credentials import (
+    CredentialIntrospectionRequest,
+    CredentialIntrospectionResult,
+    CredentialRevocationRequest,
+    introspect_credential,
+    revoke_credential_grant,
+)
 from .trust_flight_recorder import verify_flight_recorder
 from .trust_models import (
     ActionConsumption,
@@ -15,8 +22,9 @@ from .trust_models import (
     CapabilityLeaseCreate,
     CapabilityLeasePublic,
     CapabilityLeaseStatus,
-    CredentialGrantResponse,
+    CredentialGrant,
     CredentialGrantCreate,
+    CredentialGrantResponse,
     ExceptionQueueItem,
     FlightRecorderVerification,
     LeaseRevocationRequest,
@@ -49,6 +57,13 @@ def _lease_or_404(lease_id: str) -> CapabilityLease:
     if lease is None:
         raise HTTPException(status_code=404, detail="Capability lease not found")
     return refresh_lease_status(lease)
+
+
+def _credential_or_404(grant_id: str) -> CredentialGrant:
+    grant = store.credential_grants.get(grant_id)
+    if grant is None:
+        raise HTTPException(status_code=404, detail="Credential grant not found")
+    return grant
 
 
 def _public(lease: CapabilityLease) -> CapabilityLeasePublic:
@@ -152,12 +167,11 @@ def evaluate_external_agent_action(
     payload: ProposedAction,
     agent: ExternalAgent = Depends(require_external_agent),
 ) -> AgentGatewayResult:
-    repository = payload.repository
     assert_agent_can(
         agent,
         AgentAction.EXECUTE_GITHUB,
         project_id=payload.project_id,
-        repository_full_name=repository,
+        repository_full_name=payload.repository,
     )
     normalized = payload.model_copy(
         update={
@@ -223,6 +237,29 @@ def create_credential_grant(
         return issue_credential_grant(payload, user=user)
     except (ValueError, TrustControlConflict, NotImplementedError) as error:
         raise _trust_error(error) from error
+
+
+@router.post(
+    "/credentials/introspect",
+    response_model=CredentialIntrospectionResult,
+)
+def introspect_capability_credential(
+    payload: CredentialIntrospectionRequest,
+) -> CredentialIntrospectionResult:
+    return introspect_credential(payload)
+
+
+@router.post("/credentials/{grant_id}/revoke", response_model=CredentialGrant)
+def revoke_capability_credential(
+    grant_id: str,
+    payload: CredentialRevocationRequest,
+    user: AuthUser = OwnerDependency,
+) -> CredentialGrant:
+    return revoke_credential_grant(
+        _credential_or_404(grant_id),
+        user=user,
+        reason=payload.reason,
+    )
 
 
 @router.get("/scorecards", response_model=list[AgentReliabilityScorecard])
