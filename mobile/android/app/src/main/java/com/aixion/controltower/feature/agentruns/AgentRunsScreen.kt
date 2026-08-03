@@ -2,7 +2,6 @@ package com.aixion.controltower.feature.agentruns
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -142,12 +141,23 @@ fun AgentRunsScreen(viewModel: AgentRunsViewModel = viewModel()) {
 @Composable
 private fun RunSummaryPanel(summary: AgentRunSummaryDto) {
     TowerPanel(elevated = true) {
-        Text("Execution truth", color = TowerTextPrimary, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Execution truth",
+            color = TowerTextPrimary,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
             StatusBadge(label = "ACTIVE ${summary.active}", color = TowerAccent)
-            StatusBadge(label = "ACTION ${summary.needsHuman}", color = if (summary.needsHuman > 0) RiskHigh else RiskLow)
-            StatusBadge(label = "FAILED ${summary.failed}", color = if (summary.failed > 0) RiskCritical else RiskLow)
+            StatusBadge(
+                label = "ACTION ${summary.needsHuman}",
+                color = if (summary.needsHuman > 0) RiskHigh else RiskLow
+            )
+            StatusBadge(
+                label = "FAILED ${summary.failed}",
+                color = if (summary.failed > 0) RiskCritical else RiskLow
+            )
         }
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
@@ -174,10 +184,16 @@ private fun RunCard(run: AgentRunDto, onOpen: () -> Unit) {
             fontWeight = FontWeight.SemiBold,
             lineHeight = 23.sp
         )
-        run.repository?.let { Text("Repo: $it", color = TowerTextMuted, fontSize = 12.sp) }
+        run.repository?.let {
+            Text("Repo: $it", color = TowerTextMuted, fontSize = 12.sp)
+        }
         Text("Correlation: ${run.correlationId}", color = TowerTextMuted, fontSize = 12.sp)
-        run.leaseOwner?.let { Text("Worker: $it", color = TowerTextMuted, fontSize = 12.sp) }
-        run.lastError?.let { Text("Blocker: $it", color = RiskCritical, fontSize = 12.sp, lineHeight = 17.sp) }
+        run.leaseOwner?.let {
+            Text("Worker: $it", color = TowerTextMuted, fontSize = 12.sp)
+        }
+        run.lastError?.let {
+            Text("Blocker: $it", color = RiskCritical, fontSize = 12.sp, lineHeight = 17.sp)
+        }
         OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth()) {
             Text("Open run timeline")
         }
@@ -196,51 +212,106 @@ private fun RunDetailPanel(
     onClose: () -> Unit
 ) {
     val run = detail.run
+    val stepInFlight = run.leaseOwner != null || detail.steps.any { it.status == "RUNNING" }
+
     TowerHeroPanel {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = run.status, color = runStatusColor(run.status))
-            StatusBadge(label = "${detail.steps.count { it.status == "SUCCEEDED" }}/${detail.steps.size} STEPS", color = TowerAccent)
+            StatusBadge(
+                label = "${detail.steps.count { it.status == "SUCCEEDED" }}/${detail.steps.size} STEPS",
+                color = TowerAccent
+            )
         }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
-        Text(run.objective, color = TowerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            run.objective,
+            color = TowerTextPrimary,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.SemiBold
+        )
         Text("Run ${run.id}", color = TowerTextMuted, fontSize = 12.sp)
         Text("Task ${run.taskId}", color = TowerTextMuted, fontSize = 12.sp)
         Text("Correlation ${run.correlationId}", color = TowerTextMuted, fontSize = 12.sp)
-        run.finalEvidenceHash?.let { Text("Evidence ${it.take(16)}…", color = RiskLow, fontSize = 12.sp) }
+        run.finalEvidenceHash?.let {
+            Text("Evidence ${it.take(16)}…", color = RiskLow, fontSize = 12.sp)
+        }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
 
         detail.steps.forEach { step -> StepRow(step) }
 
         Spacer(modifier = Modifier.height(TowerSpacing.md))
-        Text("Latest flight-recorder events", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Latest flight-recorder events",
+            color = TowerTextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
+        )
         detail.events.takeLast(6).reversed().forEach { event ->
             TowerPanel(elevated = false) {
                 StatusBadge(label = event.eventType, color = TowerAccent)
-                Text(event.message.ifBlank { event.reason.ifBlank { "Event recorded" } }, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
-                Text("${event.actor} • ${event.createdAt ?: "recent"}", color = TowerTextMuted, fontSize = 11.sp)
+                Text(
+                    event.message.ifBlank { event.reason.ifBlank { "Event recorded" } },
+                    color = TowerTextMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                Text(
+                    "${event.actor} • ${event.createdAt ?: "recent"}",
+                    color = TowerTextMuted,
+                    fontSize = 11.sp
+                )
             }
         }
 
-        if (!actionInProgress) {
-            if (run.status in setOf("SCHEDULED", "RUNNING", "RETRY_WAIT")) {
-                Button(onClick = onExecuteNext, modifier = Modifier.fillMaxWidth()) { Text("Execute next governed step") }
+        when {
+            actionInProgress -> {
+                Text("Recording operator action…", color = TowerTextMuted, fontSize = 13.sp)
             }
-            if (run.status in setOf("SCHEDULED", "RUNNING", "RETRY_WAIT")) {
-                OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) { Text("Pause") }
+            stepInFlight -> {
+                TowerPanel(elevated = false) {
+                    StatusBadge(label = "STEP IN FLIGHT", color = TowerAccent)
+                    Text(
+                        text = "Pause, cancel and retry become available only after the governed step reaches a durable boundary. Refresh to see the latest result.",
+                        color = TowerTextMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp
+                    )
+                }
             }
-            if (run.status in setOf("PAUSED", "NEEDS_HUMAN", "RETRY_WAIT")) {
-                Button(onClick = onResume, modifier = Modifier.fillMaxWidth()) { Text("Resume") }
+            else -> {
+                if (run.status in setOf("SCHEDULED", "RUNNING", "RETRY_WAIT")) {
+                    Button(
+                        onClick = onExecuteNext,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Execute next governed step")
+                    }
+                }
+                if (run.status in setOf("SCHEDULED", "RUNNING", "RETRY_WAIT")) {
+                    OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
+                        Text("Pause")
+                    }
+                }
+                if (run.status in setOf("PAUSED", "NEEDS_HUMAN", "RETRY_WAIT")) {
+                    Button(onClick = onResume, modifier = Modifier.fillMaxWidth()) {
+                        Text("Resume")
+                    }
+                }
+                if (run.status in setOf("NEEDS_HUMAN", "RETRY_WAIT")) {
+                    Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
+                        Text("Approve bounded retry")
+                    }
+                }
+                if (run.status !in setOf("SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED")) {
+                    OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
+                        Text("Cancel run")
+                    }
+                }
             }
-            if (run.status in setOf("NEEDS_HUMAN", "RETRY_WAIT")) {
-                Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("Approve bounded retry") }
-            }
-            if (run.status !in setOf("SUCCEEDED", "FAILED", "BLOCKED", "CANCELLED")) {
-                OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("Cancel run") }
-            }
-        } else {
-            Text("Recording operator action…", color = TowerTextMuted, fontSize = 13.sp)
         }
-        OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Close run detail") }
+        OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+            Text("Close run detail")
+        }
     }
 }
 
@@ -250,14 +321,32 @@ private fun StepRow(step: AgentRunStepDto) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = "${step.sequence + 1}", color = TowerAccent)
             StatusBadge(label = step.status, color = runStatusColor(step.status))
-            step.decision?.let { StatusBadge(label = it, color = runStatusColor(step.status)) }
+            step.decision?.let {
+                StatusBadge(label = it, color = runStatusColor(step.status))
+            }
         }
-        Text(step.stepType.replace('_', ' '), color = TowerTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text("Attempts ${step.attemptCount}/${step.maxAttempts}", color = TowerTextMuted, fontSize = 12.sp)
+        Text(
+            step.stepType.replace('_', ' '),
+            color = TowerTextPrimary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            "Attempts ${step.attemptCount}/${step.maxAttempts}",
+            color = TowerTextMuted,
+            fontSize = 12.sp
+        )
         if (step.reason.isNotBlank()) {
-            Text(step.reason, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+            Text(
+                step.reason,
+                color = TowerTextMuted,
+                fontSize = 12.sp,
+                lineHeight = 17.sp
+            )
         }
-        step.outputReference?.let { Text("Output: $it", color = RiskLow, fontSize = 12.sp, lineHeight = 17.sp) }
+        step.outputReference?.let {
+            Text("Output: $it", color = RiskLow, fontSize = 12.sp, lineHeight = 17.sp)
+        }
     }
 }
 
