@@ -35,7 +35,14 @@ def _seed_approved_task() -> AgentTask:
         summary="safe",
         agent_name="codex",
         target_branch="feature/mission-control-api",
-        files=[FileChange(path="docs/run.md", change_type="create", diff="+run", new_content="run\n")],
+        files=[
+            FileChange(
+                path="docs/run.md",
+                change_type="create",
+                diff="+run",
+                new_content="run\n",
+            )
+        ],
         test_plan=["python -m pytest"],
         rollback_plan="Close PR.",
         risk=RiskAssessment(level=RiskLevel.LOW),
@@ -106,3 +113,41 @@ def test_run_creation_rejects_unapproved_task() -> None:
     response = client.post("/agent/runs", json={"task_id": task.id})
     assert response.status_code == 409
     assert "must be APPROVED" in str(response.json()["detail"])
+
+
+def test_execute_route_expands_lease_to_cover_bounded_validation_budget() -> None:
+    task = _seed_approved_task()
+    run_id = client.post("/agent/runs", json={"task_id": task.id}).json()["run"]["id"]
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={
+            "worker_id": "lease-budget-test",
+            "lease_seconds": 10,
+            "timeout_seconds": 120,
+        },
+    )
+    assert response.status_code == 200
+    lease_events = [
+        event
+        for event in response.json()["events"]
+        if event["event_type"] == "RUN_LEASE_ACQUIRED"
+    ]
+    assert lease_events
+    assert lease_events[-1]["metadata"]["lease_seconds"] == 1500
+
+
+def test_execute_route_rejects_timeout_that_cannot_fit_maximum_lease() -> None:
+    task = _seed_approved_task()
+    run_id = client.post("/agent/runs", json={"task_id": task.id}).json()["run"]["id"]
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={
+            "worker_id": "unsafe-timeout-test",
+            "lease_seconds": 300,
+            "timeout_seconds": 300,
+        },
+    )
+    assert response.status_code == 422
+    assert "Maximum safe value" in response.json()["detail"]
