@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import secrets
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -293,7 +292,11 @@ def _next_pending_step(run: AgentRun, completed: AgentRunStep) -> AgentRunStep |
 
 def _classify_injected_fault(error: InjectedAgentRunFault) -> AgentRunStepExecutionResult:
     reason = error.fault.message or default_fault_reason(error.fault.fault_kind)
-    return classify_execution_result(success=False, reason=reason, evidence={"fault_kind": error.fault.fault_kind.value})
+    return classify_execution_result(
+        success=False,
+        reason=reason,
+        evidence={"fault_kind": error.fault.fault_kind.value},
+    )
 
 
 def _apply_execution_result(
@@ -321,7 +324,10 @@ def _apply_execution_result(
             message=result.reason,
             actor=actor,
             output_evidence_hash=step.evidence_hash,
-            metadata={"decision": result.decision.value, "output_reference": result.output_reference},
+            metadata={
+                "decision": result.decision.value,
+                "output_reference": result.output_reference,
+            },
         )
         if _next_pending_step(run, step) is None:
             previous_run, new_run = transition_run(run, AgentRunStatus.SUCCEEDED)
@@ -362,8 +368,16 @@ def _apply_execution_result(
                 },
             )
         else:
-            previous, new = transition_step(step, AgentRunStepStatus.NEEDS_HUMAN, reason="Retry budget exhausted. " + result.reason)
-            previous_run, new_run = transition_run(run, AgentRunStatus.NEEDS_HUMAN, reason=result.reason)
+            previous, new = transition_step(
+                step,
+                AgentRunStepStatus.NEEDS_HUMAN,
+                reason="Retry budget exhausted. " + result.reason,
+            )
+            previous_run, new_run = transition_run(
+                run,
+                AgentRunStatus.NEEDS_HUMAN,
+                reason=result.reason,
+            )
             _append_event(
                 run,
                 AgentRunEventType.STEP_NEEDS_HUMAN,
@@ -373,13 +387,27 @@ def _apply_execution_result(
                 message="Retry budget exhausted; operator action is required.",
                 reason=result.reason,
                 actor=actor,
-                metadata={"run_previous_status": previous_run.value, "run_new_status": new_run.value},
+                metadata={
+                    "run_previous_status": previous_run.value,
+                    "run_new_status": new_run.value,
+                },
             )
         return
 
-    if result.decision in {VerificationDecision.NEEDS_REVISION, VerificationDecision.NEEDS_HUMAN}:
-        previous, new = transition_step(step, AgentRunStepStatus.NEEDS_HUMAN, reason=result.reason)
-        previous_run, new_run = transition_run(run, AgentRunStatus.NEEDS_HUMAN, reason=result.reason)
+    if result.decision in {
+        VerificationDecision.NEEDS_REVISION,
+        VerificationDecision.NEEDS_HUMAN,
+    }:
+        previous, new = transition_step(
+            step,
+            AgentRunStepStatus.NEEDS_HUMAN,
+            reason=result.reason,
+        )
+        previous_run, new_run = transition_run(
+            run,
+            AgentRunStatus.NEEDS_HUMAN,
+            reason=result.reason,
+        )
         _append_event(
             run,
             AgentRunEventType.STEP_NEEDS_HUMAN,
@@ -398,8 +426,16 @@ def _apply_execution_result(
         return
 
     if result.decision == VerificationDecision.BLOCK_POLICY:
-        previous, new = transition_step(step, AgentRunStepStatus.BLOCKED, reason=result.reason)
-        previous_run, new_run = transition_run(run, AgentRunStatus.BLOCKED, reason=result.reason)
+        previous, new = transition_step(
+            step,
+            AgentRunStepStatus.BLOCKED,
+            reason=result.reason,
+        )
+        previous_run, new_run = transition_run(
+            run,
+            AgentRunStatus.BLOCKED,
+            reason=result.reason,
+        )
         _append_event(
             run,
             AgentRunEventType.STEP_BLOCKED,
@@ -409,12 +445,19 @@ def _apply_execution_result(
             message="Policy violation blocked the run permanently.",
             reason=result.reason,
             actor=actor,
-            metadata={"run_previous_status": previous_run.value, "run_new_status": new_run.value},
+            metadata={
+                "run_previous_status": previous_run.value,
+                "run_new_status": new_run.value,
+            },
         )
         return
 
     previous, new = transition_step(step, AgentRunStepStatus.FAILED, reason=result.reason)
-    previous_run, new_run = transition_run(run, AgentRunStatus.FAILED, reason=result.reason)
+    previous_run, new_run = transition_run(
+        run,
+        AgentRunStatus.FAILED,
+        reason=result.reason,
+    )
     _append_event(
         run,
         AgentRunEventType.STEP_FAILED,
@@ -424,7 +467,10 @@ def _apply_execution_result(
         message="Execution failed permanently.",
         reason=result.reason,
         actor=actor,
-        metadata={"run_previous_status": previous_run.value, "run_new_status": new_run.value},
+        metadata={
+            "run_previous_status": previous_run.value,
+            "run_new_status": new_run.value,
+        },
     )
 
 
@@ -439,7 +485,12 @@ def execute_next_step(
     run = store.agent_runs.get(run_id)
     if run is None:
         raise ValueError("Agent run not found.")
-    if run.status in {AgentRunStatus.BLOCKED, AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
+    if run.status in {
+        AgentRunStatus.BLOCKED,
+        AgentRunStatus.SUCCEEDED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.CANCELLED,
+    }:
         raise AgentRunConflict(f"Terminal run cannot execute: {run.status}.")
     if run.pause_requested or run.status == AgentRunStatus.PAUSED:
         raise AgentRunConflict("Paused run cannot execute until resumed.")
@@ -502,7 +553,12 @@ def execute_next_step(
         message=f"Executing {step.step_type.value}.",
         actor=worker_id,
         input_evidence_hash=canonical_evidence_hash(
-            {"run_id": run.id, "task_id": run.task_id, "step_type": step.step_type.value, "attempt": step.attempt_count}
+            {
+                "run_id": run.id,
+                "task_id": run.task_id,
+                "step_type": step.step_type.value,
+                "attempt": step.attempt_count,
+            }
         ),
         metadata={"idempotency_key": step.idempotency_key},
     )
@@ -576,10 +632,18 @@ class DefaultAgentRunStepExecutor:
         self.container_runtime = container_runtime
         self.workspace_parent = workspace_parent
 
-    def __call__(self, run: AgentRun, step: AgentRunStep, timeout_seconds: int) -> AgentRunStepExecutionResult:
+    def __call__(
+        self,
+        run: AgentRun,
+        step: AgentRunStep,
+        timeout_seconds: int,
+    ) -> AgentRunStepExecutionResult:
         task = store.agent_tasks.get(run.task_id)
         if task is None:
-            return classify_execution_result(success=False, reason="Agent task not found during execution.")
+            return classify_execution_result(
+                success=False,
+                reason="Agent task not found during execution.",
+            )
         approval = store.approval_requests.get(run.approval_request_id or "")
 
         if step.step_type == AgentRunStepType.VALIDATE_SCOPE:
@@ -666,29 +730,47 @@ class DefaultAgentRunStepExecutor:
                 worker_id=f"mission-control:{run.id}:pr",
                 client=self.pr_client,
             )
+            classified = classify_execution_result(
+                success=result.success,
+                reason=result.reason,
+                evidence=result.to_dict(),
+                duplicate_safe=False,
+            )
             return AgentRunStepExecutionResult(
-                **classify_execution_result(
-                    success=result.success,
-                    reason=result.reason,
-                    evidence=result.to_dict(),
-                    duplicate_safe=False,
-                ).model_dump(),
+                **classified.model_dump(),
                 output_reference=result.pull_request_url,
             )
 
         if step.step_type == AgentRunStepType.VERIFY_RESULT:
-            task_events = [event for event in store.agent_task_events.values() if event.task_id == task.id]
-            pr_events = [event for event in task_events if event.event_type.value == "PR_CREATED"]
-            validation_passed = any(event.event_type.value == "TESTS_PASSED" for event in task_events)
+            task_events = [
+                event
+                for event in store.agent_task_events.values()
+                if event.task_id == task.id
+            ]
+            pr_events = [
+                event
+                for event in task_events
+                if event.event_type.value == "PR_CREATED"
+            ]
+            validation_passed = any(
+                event.event_type.value == "TESTS_PASSED"
+                for event in task_events
+            )
             pr_url = next(
                 (
                     event.metadata.get("pull_request_url")
-                    for event in reversed(sorted(pr_events, key=lambda event: event.created_at))
+                    for event in reversed(
+                        sorted(pr_events, key=lambda event: event.created_at)
+                    )
                     if event.metadata.get("pull_request_url")
                 ),
                 None,
             )
-            success = validation_passed and bool(pr_events) and task.status in {AgentTaskStatus.READY_FOR_PR, AgentTaskStatus.DONE}
+            success = (
+                validation_passed
+                and bool(pr_events)
+                and task.status in {AgentTaskStatus.READY_FOR_PR, AgentTaskStatus.DONE}
+            )
             reason = (
                 "Validation evidence and exactly one pull-request transition are present."
                 if success
@@ -708,7 +790,10 @@ class DefaultAgentRunStepExecutor:
         if step.step_type == AgentRunStepType.SEAL_EVIDENCE:
             steps = _run_steps(run.id)
             prior_steps = [item for item in steps if item.sequence < step.sequence]
-            all_prior_passed = all(item.status == AgentRunStepStatus.SUCCEEDED for item in prior_steps)
+            all_prior_passed = all(
+                item.status == AgentRunStepStatus.SUCCEEDED
+                for item in prior_steps
+            )
             evidence_payload = {
                 "run_id": run.id,
                 "task_id": run.task_id,
@@ -736,10 +821,16 @@ class DefaultAgentRunStepExecutor:
                     if all_prior_passed
                     else "Evidence chain cannot be sealed because a prior step did not pass."
                 ),
-                evidence={**evidence_payload, "final_evidence_hash": final_hash},
+                evidence={
+                    **evidence_payload,
+                    "final_evidence_hash": final_hash,
+                },
             )
 
-        return classify_execution_result(success=False, reason=f"Unsupported step type: {step.step_type}")
+        return classify_execution_result(
+            success=False,
+            reason=f"Unsupported step type: {step.step_type}",
+        )
 
 
 def recover_stale_leases(*, actor: str = "mission-control-watchdog") -> int:
@@ -759,14 +850,33 @@ def recover_stale_leases(*, actor: str = "mission-control-watchdog") -> int:
             current.lease_token = None
             current.lease_expires_at = None
             if current.attempt_count < current.max_attempts:
-                previous, new = transition_step(current, AgentRunStepStatus.RETRY_WAIT, reason="Worker lease expired.")
+                previous, new = transition_step(
+                    current,
+                    AgentRunStepStatus.RETRY_WAIT,
+                    reason="Worker lease expired.",
+                )
                 current.next_retry_at = now
                 if run.status == AgentRunStatus.RUNNING:
-                    transition_run(run, AgentRunStatus.RETRY_WAIT, reason="Worker lease expired.")
+                    transition_run(
+                        run,
+                        AgentRunStatus.RETRY_WAIT,
+                        reason="Worker lease expired.",
+                    )
             else:
-                previous, new = transition_step(current, AgentRunStepStatus.NEEDS_HUMAN, reason="Worker lease expired and retry budget is exhausted.")
-                if run.status in {AgentRunStatus.RUNNING, AgentRunStatus.RETRY_WAIT}:
-                    transition_run(run, AgentRunStatus.NEEDS_HUMAN, reason=current.reason)
+                previous, new = transition_step(
+                    current,
+                    AgentRunStepStatus.NEEDS_HUMAN,
+                    reason="Worker lease expired and retry budget is exhausted.",
+                )
+                if run.status in {
+                    AgentRunStatus.RUNNING,
+                    AgentRunStatus.RETRY_WAIT,
+                }:
+                    transition_run(
+                        run,
+                        AgentRunStatus.NEEDS_HUMAN,
+                        reason=current.reason,
+                    )
             _append_event(
                 run,
                 AgentRunEventType.STALE_LEASE_RECOVERED,
@@ -779,13 +889,23 @@ def recover_stale_leases(*, actor: str = "mission-control-watchdog") -> int:
             )
         recovered += 1
     if recovered:
-        _audit("agent_run.stale_leases_recovered", "agent_runs", {"count": recovered}, actor=actor)
+        _audit(
+            "agent_run.stale_leases_recovered",
+            "agent_runs",
+            {"count": recovered},
+            actor=actor,
+        )
         store.persist()
     return recovered
 
 
 def pause_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun:
-    if run.status in {AgentRunStatus.BLOCKED, AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED, AgentRunStatus.CANCELLED}:
+    if run.status in {
+        AgentRunStatus.BLOCKED,
+        AgentRunStatus.SUCCEEDED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.CANCELLED,
+    }:
         raise AgentRunConflict("Terminal run cannot be paused.")
     run.pause_requested = True
     if run.status != AgentRunStatus.PAUSED:
@@ -804,12 +924,24 @@ def pause_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun:
 
 
 def resume_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun:
-    if run.status not in {AgentRunStatus.PAUSED, AgentRunStatus.NEEDS_HUMAN, AgentRunStatus.RETRY_WAIT}:
+    if run.status not in {
+        AgentRunStatus.PAUSED,
+        AgentRunStatus.NEEDS_HUMAN,
+        AgentRunStatus.RETRY_WAIT,
+    }:
         raise AgentRunConflict(f"Run cannot resume from {run.status}.")
     run.pause_requested = False
     step = store.agent_run_steps.get(run.current_step_id or "")
-    if step and step.status in {AgentRunStepStatus.PAUSED, AgentRunStepStatus.NEEDS_HUMAN, AgentRunStepStatus.RETRY_WAIT}:
-        previous_step, new_step = transition_step(step, AgentRunStepStatus.READY, reason=reason or "Operator resumed step.")
+    if step and step.status in {
+        AgentRunStepStatus.PAUSED,
+        AgentRunStepStatus.NEEDS_HUMAN,
+        AgentRunStepStatus.RETRY_WAIT,
+    }:
+        previous_step, new_step = transition_step(
+            step,
+            AgentRunStepStatus.READY,
+            reason=reason or "Operator resumed step.",
+        )
         step.next_retry_at = None
         _append_event(
             run,
@@ -838,7 +970,11 @@ def resume_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun
 def cancel_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun:
     if run.status == AgentRunStatus.CANCELLED:
         return run
-    if run.status in {AgentRunStatus.BLOCKED, AgentRunStatus.SUCCEEDED, AgentRunStatus.FAILED}:
+    if run.status in {
+        AgentRunStatus.BLOCKED,
+        AgentRunStatus.SUCCEEDED,
+        AgentRunStatus.FAILED,
+    }:
         raise AgentRunConflict("Completed terminal run cannot be cancelled.")
     run.cancel_requested = True
     for step in _run_steps(run.id):
@@ -849,7 +985,11 @@ def cancel_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun
             AgentRunStepStatus.CANCELLED,
             AgentRunStepStatus.SKIPPED,
         }:
-            previous, new = transition_step(step, AgentRunStepStatus.CANCELLED, reason=reason or "Run cancelled.")
+            previous, new = transition_step(
+                step,
+                AgentRunStepStatus.CANCELLED,
+                reason=reason or "Run cancelled.",
+            )
             _append_event(
                 run,
                 AgentRunEventType.STEP_CANCELLED,
@@ -874,7 +1014,13 @@ def cancel_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun
     return run
 
 
-def retry_agent_run_step(run: AgentRun, step: AgentRunStep, *, actor: str, reason: str = "") -> AgentRunStep:
+def retry_agent_run_step(
+    run: AgentRun,
+    step: AgentRunStep,
+    *,
+    actor: str,
+    reason: str = "",
+) -> AgentRunStep:
     if step.run_id != run.id:
         raise AgentRunConflict("Step does not belong to run.")
     if step.status not in {
@@ -887,7 +1033,11 @@ def retry_agent_run_step(run: AgentRun, step: AgentRunStep, *, actor: str, reaso
         raise AgentRunConflict("Step retry budget is exhausted.")
     if step.status == AgentRunStepStatus.FAILED:
         step.status = AgentRunStepStatus.NEEDS_HUMAN
-    previous, new = transition_step(step, AgentRunStepStatus.READY, reason=reason or "Operator approved retry.")
+    previous, new = transition_step(
+        step,
+        AgentRunStepStatus.READY,
+        reason=reason or "Operator approved retry.",
+    )
     step.next_retry_at = None
     run.current_step_id = step.id
     run.current_step_index = step.sequence
