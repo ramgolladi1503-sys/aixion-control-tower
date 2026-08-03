@@ -1,0 +1,93 @@
+package com.aixion.controltower.core.api.dto
+
+import com.google.gson.annotations.SerializedName
+
+data class AgentRunDto(
+    val id: String,
+    @SerializedName("task_id") val taskId: String,
+    @SerializedName("approval_request_id") val approvalRequestId: String? = null,
+    @SerializedName("project_id") val projectId: String? = null,
+    val repository: String? = null,
+    val objective: String = "",
+    @SerializedName("correlation_id") val correlationId: String,
+    val status: String,
+    @SerializedName("current_step_id") val currentStepId: String? = null,
+    @SerializedName("current_step_index") val currentStepIndex: Int = 0,
+    @SerializedName("pause_requested") val pauseRequested: Boolean = false,
+    @SerializedName("cancel_requested") val cancelRequested: Boolean = false,
+    @SerializedName("lease_owner") val leaseOwner: String? = null,
+    @SerializedName("heartbeat_at") val heartbeatAt: String? = null,
+    @SerializedName("started_at") val startedAt: String? = null,
+    @SerializedName("completed_at") val completedAt: String? = null,
+    @SerializedName("final_evidence_hash") val finalEvidenceHash: String? = null,
+    @SerializedName("last_error") val lastError: String? = null,
+    @SerializedName("created_at") val createdAt: String? = null,
+    @SerializedName("updated_at") val updatedAt: String? = null
+)
+
+data class AgentRunStepDto(
+    val id: String,
+    @SerializedName("run_id") val runId: String,
+    @SerializedName("task_id") val taskId: String,
+    val sequence: Int,
+    @SerializedName("step_type") val stepType: String,
+    val status: String,
+    @SerializedName("attempt_count") val attemptCount: Int = 0,
+    @SerializedName("max_attempts") val maxAttempts: Int = 3,
+    @SerializedName("next_retry_at") val nextRetryAt: String? = null,
+    val decision: String? = null,
+    val reason: String = "",
+    @SerializedName("last_error") val lastError: String? = null,
+    @SerializedName("evidence_hash") val evidenceHash: String? = null,
+    @SerializedName("output_reference") val outputReference: String? = null,
+    @SerializedName("started_at") val startedAt: String? = null,
+    @SerializedName("completed_at") val completedAt: String? = null,
+    @SerializedName("duration_ms") val durationMs: Long? = null
+)
+
+data class AgentRunEventDto(
+    val id: String,
+    @SerializedName("run_id") val runId: String,
+    @SerializedName("task_id") val taskId: String,
+    @SerializedName("step_id") val stepId: String? = null,
+    @SerializedName("correlation_id") val correlationId: String,
+    @SerializedName("event_type") val eventType: String,
+    @SerializedName("previous_status") val previousStatus: String? = null,
+    @SerializedName("new_status") val newStatus: String? = null,
+    val message: String = "",
+    val reason: String = "",
+    val actor: String = "system",
+    @SerializedName("attempt_number") val attemptNumber: Int? = null,
+    @SerializedName("created_at") val createdAt: String? = null
+)
+
+data class AgentRunDetailDto(
+    val run: AgentRunDto,
+    val steps: List<AgentRunStepDto> = emptyList(),
+    val events: List<AgentRunEventDto> = emptyList()
+)
+
+data class AgentRunSummaryDto(
+    val total: Int = 0,
+    val active: Int = 0,
+    @SerializedName("retry_wait") val retryWait: Int = 0,
+    @SerializedName("needs_human") val needsHuman: Int = 0,
+    val blocked: Int = 0,
+    val failed: Int = 0,
+    val succeeded: Int = 0,
+    val cancelled: Int = 0,
+    @SerializedName("queue_depth") val queueDepth: Int = 0
+)
+
+data class AgentRunControlRequestDto(val reason: String = "")
+
+data class AgentRunRetryRequestDto(
+    val reason: String = "",
+    @SerializedName("step_id") val stepId: String? = null
+)
+
+data class AgentRunExecuteRequestDto(
+    @SerializedName("worker_id") val workerId: String = "android-mission-control",
+    @SerializedName("lease_seconds") val leaseSeconds: Int = 300,
+    @SerializedName("timeout_seconds") val timeoutSeconds: Int = 120
+)
