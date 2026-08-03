@@ -42,11 +42,15 @@ from .risk_engine import assess_approval_request, assess_work_order
 from .role_routes import router as role_router
 from .session_routes import router as session_router
 from .store import store
+from .trust_routes import router as trust_router
 
 app = FastAPI(
     title="Aixion Control Tower API",
-    version="0.2.0",
-    description="AI project execution control, approvals, resilient agent runs, risk scoring, and audit evidence.",
+    version="0.3.0",
+    description=(
+        "Independent governance, resilient execution, signed capability leases, "
+        "policy enforcement, and tamper-evident evidence for AI agents."
+    ),
 )
 app.include_router(auth_router)
 app.include_router(role_router)
@@ -55,6 +59,7 @@ app.include_router(session_router)
 app.include_router(agent_router)
 app.include_router(agent_task_router)
 app.include_router(agent_run_router)
+app.include_router(trust_router)
 app.include_router(connector_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
@@ -87,6 +92,10 @@ def counts() -> dict[str, int]:
         "devices": len(store.device_registrations),
         "agent_tasks": len(store.agent_tasks),
         "agent_runs": len(store.agent_runs),
+        "capability_leases": len(store.capability_leases),
+        "proposed_actions": len(store.proposed_actions),
+        "policy_decisions": len(store.policy_decisions),
+        "trust_events": len(store.trust_events),
         "projects": len(store.projects),
         "ideas": len(store.ideas),
         "work_orders": len(store.work_orders),
