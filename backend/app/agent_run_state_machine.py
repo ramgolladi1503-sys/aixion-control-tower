@@ -57,6 +57,7 @@ RUN_TRANSITIONS: dict[AgentRunStatus, set[AgentRunStatus]] = {
         AgentRunStatus.CANCELLED,
     },
     AgentRunStatus.RETRY_WAIT: {
+        AgentRunStatus.SCHEDULED,
         AgentRunStatus.RUNNING,
         AgentRunStatus.PAUSED,
         AgentRunStatus.NEEDS_HUMAN,
