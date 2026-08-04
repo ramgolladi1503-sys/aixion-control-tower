@@ -8,7 +8,7 @@ from .models import AuthUser, now_utc
 from .store import store
 from .trust_crypto import verify_bearer_token
 from .trust_flight_recorder import append_trust_event
-from .trust_models import CredentialGrant, TrustEventType
+from .trust_models import CredentialGrant, CredentialGrantPublic, TrustEventType
 
 
 class CredentialIntrospectionRequest(BaseModel):
@@ -67,27 +67,30 @@ def introspect_credential(
 
 
 def revoke_credential_grant(
-    grant: CredentialGrant,
+    grant: CredentialGrant | CredentialGrantPublic,
     *,
     user: AuthUser,
     reason: str,
 ) -> CredentialGrant:
-    if grant.revoked:
-        return grant
-    grant.revoked = True
-    grant.revoked_at = now_utc()
-    grant.metadata = {
-        **grant.metadata,
+    canonical = store.credential_grants.get(grant.id)
+    if canonical is None:
+        raise ValueError("Credential grant not found.")
+    if canonical.revoked:
+        return canonical
+    canonical.revoked = True
+    canonical.revoked_at = now_utc()
+    canonical.metadata = {
+        **canonical.metadata,
         "revoked_by_user_id": user.id,
         "revocation_reason": reason,
     }
     append_trust_event(
         TrustEventType.CREDENTIAL_GRANT_REVOKED,
         entity_type="credential_grant",
-        entity_id=grant.id,
+        entity_id=canonical.id,
         actor=user.email,
-        payload={"lease_id": grant.lease_id, "reason": reason},
+        payload={"lease_id": canonical.lease_id, "reason": reason},
         persist=False,
     )
     store.persist()
-    return grant
+    return canonical
