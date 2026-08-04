@@ -2,8 +2,6 @@ name: CI
 
 on:
   pull_request:
-    branches:
-      - main
   push:
     branches:
       - main
@@ -80,7 +78,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Validate Compose contract
+      - name: Validate demo Compose contract
         run: docker compose -f docker-compose.mission-control.yml config
 
       - name: Start API and stateless scheduler
@@ -101,15 +99,75 @@ jobs:
           curl --fail http://127.0.0.1:8000/health
           curl --fail http://127.0.0.1:8000/agent/runs/summary
           curl --fail http://127.0.0.1:8000/agent/runs/metrics
+          curl --fail http://127.0.0.1:8000/trust/flight-recorder/verify
           docker compose -f docker-compose.mission-control.yml \
             ps --services --status running | grep -Fx api
           docker compose -f docker-compose.mission-control.yml \
             ps --services --status running | grep -Fx worker
 
-      - name: Show compose logs on failure
+      - name: Show demo compose logs on failure
         if: failure()
         run: docker compose -f docker-compose.mission-control.yml logs --no-color
 
-      - name: Stop Mission Control stack
+      - name: Stop demo Mission Control stack
         if: always()
         run: docker compose -f docker-compose.mission-control.yml down --volumes
+
+  production-compose:
+    name: Production trust-plane container validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Prepare non-secret CI production environment
+        run: |
+          cp .env.production.example .env.production
+          cat >> .env.production <<'EOF'
+          AIXION_LEASE_SIGNING_KEY=ci-only-signing-key-not-for-production
+          GITHUB_TOKEN=ci-only-placeholder
+          FCM_SERVER_KEY=ci-only-placeholder
+          AIXION_OWNER_TOKEN=ci-only-placeholder
+          GRAFANA_ADMIN_PASSWORD=ci-only-placeholder
+          EOF
+          mkdir -p secrets
+          printf '%s' 'ci-only-placeholder' > secrets/aixion_metrics_token
+
+      - name: Validate production Compose contract
+        run: |
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml config
+
+      - name: Start production-profile API
+        run: |
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml up \
+            --detach \
+            --build \
+            api
+
+      - name: Verify production-profile startup
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health; then
+              break
+            fi
+            sleep 2
+          done
+          curl --fail http://127.0.0.1:8000/health
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml \
+            ps --services --status running | grep -Fx api
+
+      - name: Show production compose logs on failure
+        if: failure()
+        run: |
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml logs --no-color
+
+      - name: Stop production trust-plane stack
+        if: always()
+        run: |
+          docker compose --env-file .env.production \
+            -f docker-compose.production.yml down --volumes || true
+          rm -f .env.production secrets/aixion_metrics_token

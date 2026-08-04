@@ -1,0 +1,108 @@
+services:
+  api:
+    build:
+      context: ./backend
+    env_file:
+      - .env.production
+    environment:
+      AIXION_PROFILE: production
+      AIXION_AUTH_ENABLED: "true"
+      AIXION_TRUST_ENFORCEMENT: "true"
+      AIXION_DB_PATH: /app/runtime/aixion_control_tower.sqlite3
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - aixion-runtime:/app/runtime
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  scheduler:
+    build:
+      context: ./backend
+    command:
+      - python
+      - scripts/run_mission_control_worker.py
+      - --base-url
+      - http://api:8000
+      - --worker-id
+      - mission-control-production-scheduler
+      - --poll-seconds
+      - "2"
+    env_file:
+      - .env.production
+    environment:
+      AIXION_API_BASE_URL: http://api:8000
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus.production.yml:/etc/prometheus/prometheus.yml:ro
+      - ./secrets/aixion_metrics_token:/run/secrets/aixion_metrics_token:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    env_file:
+      - .env.production
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: https://grafana.aixion.example.com
+      GF_SECURITY_COOKIE_SECURE: "true"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  aixion-runtime:
+  prometheus-data:
+  grafana-data:

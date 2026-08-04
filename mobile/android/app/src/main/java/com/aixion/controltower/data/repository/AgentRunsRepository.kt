@@ -1,11 +1,15 @@
 package com.aixion.controltower.data.repository
 
 import com.aixion.controltower.core.api.AgentRunsApi
+import com.aixion.controltower.core.api.dto.ActionAuthorizationDto
+import com.aixion.controltower.core.api.dto.ActionAuthorizationRequestDto
+import com.aixion.controltower.core.api.dto.AgentReliabilityScorecardDto
 import com.aixion.controltower.core.api.dto.AgentRunControlRequestDto
 import com.aixion.controltower.core.api.dto.AgentRunDetailDto
 import com.aixion.controltower.core.api.dto.AgentRunExecuteRequestDto
 import com.aixion.controltower.core.api.dto.AgentRunRetryRequestDto
 import com.aixion.controltower.core.api.dto.AgentRunSummaryDto
+import com.aixion.controltower.core.api.dto.TrustExceptionDto
 
 class AgentRunsRepository(private val api: AgentRunsApi) {
     suspend fun listRuns() = api.listRuns()
@@ -13,6 +17,20 @@ class AgentRunsRepository(private val api: AgentRunsApi) {
     suspend fun getSummary(): AgentRunSummaryDto = api.getSummary()
 
     suspend fun getRun(runId: String): AgentRunDetailDto = api.getRun(runId)
+
+    suspend fun listTrustExceptions(): List<TrustExceptionDto> = api.listTrustExceptions()
+
+    suspend fun listReliabilityScorecards(): List<AgentReliabilityScorecardDto> =
+        api.listReliabilityScorecards()
+
+    suspend fun decideExactAction(
+        actionId: String,
+        decision: String,
+        reason: String
+    ): ActionAuthorizationDto = api.decideExactAction(
+        actionId,
+        ActionAuthorizationRequestDto(decision = decision, reason = reason)
+    )
 
     suspend fun pause(runId: String, reason: String): AgentRunDetailDto =
         api.pauseRun(runId, AgentRunControlRequestDto(reason))

@@ -61,6 +61,8 @@ class AgentRunEventType(StrEnum):
     RUN_LEASE_ACQUIRED = "RUN_LEASE_ACQUIRED"
     RUN_HEARTBEAT = "RUN_HEARTBEAT"
     RUN_LEASE_RELEASED = "RUN_LEASE_RELEASED"
+    CAPABILITY_LEASE_ATTACHED = "CAPABILITY_LEASE_ATTACHED"
+    TRUST_POLICY_EVALUATED = "TRUST_POLICY_EVALUATED"
     STEP_READY = "STEP_READY"
     STEP_STARTED = "STEP_STARTED"
     STEP_HEARTBEAT = "STEP_HEARTBEAT"
@@ -90,15 +92,21 @@ DEFAULT_AGENT_RUN_STEPS: tuple[AgentRunStepType, ...] = (
 
 class AgentRunCreate(BaseModel):
     task_id: str
+    capability_lease_id: str | None = None
     max_attempts_per_step: int = Field(default=3, ge=1, le=10)
     correlation_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentRunCapabilityLeaseRequest(BaseModel):
+    capability_lease_id: str
 
 
 class AgentRun(BaseModel):
     id: str = Field(default_factory=lambda: new_id("agent_run"))
     task_id: str
     approval_request_id: str | None = None
+    capability_lease_id: str | None = None
     project_id: str | None = None
     repository: str | None = None
     objective: str = ""

@@ -8,6 +8,7 @@ from .agent_run_faults import default_fault_reason
 from .agent_run_metrics import build_agent_run_summary, prometheus_agent_run_metrics
 from .agent_run_models import (
     AgentRun,
+    AgentRunCapabilityLeaseRequest,
     AgentRunControlRequest,
     AgentRunCreate,
     AgentRunDetail,
@@ -33,10 +34,17 @@ from .agent_run_supervisor import (
     resume_agent_run,
     retry_agent_run_step,
 )
+from .agent_run_trust import (
+    AgentRunTrustConflict,
+    attach_capability_lease,
+    authorize_run_step,
+    consume_run_step_actions,
+)
 from .agent_worker_validation_plan import MAX_VALIDATION_COMMANDS
 from .auth import require_maintainer, require_reviewer
 from .models import AuditEvent, AuthUser
 from .store import store
+from .trust_run_capability import RunCapabilityConflict, ensure_run_capability
 
 router = APIRouter(prefix="/agent/runs", tags=["agent-runs"])
 ReviewerDependency = Depends(require_reviewer)
@@ -153,12 +161,21 @@ def _release_execution_lock(run_id: str, lock: Lock) -> None:
 
 
 @router.post("", response_model=AgentRunDetail)
-def create_run(payload: AgentRunCreate, user: AuthUser = MaintainerDependency) -> AgentRunDetail:
+def create_run(
+    payload: AgentRunCreate,
+    user: AuthUser = MaintainerDependency,
+) -> AgentRunDetail:
     try:
         run = create_agent_run(payload, actor=user.email)
+        if payload.capability_lease_id:
+            attach_capability_lease(
+                run,
+                payload.capability_lease_id,
+                actor=user.email,
+            )
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    except AgentRunConflict as error:
+    except (AgentRunConflict, AgentRunTrustConflict) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     return _detail(run)
 
@@ -269,25 +286,65 @@ def list_run_events(run_id: str, _: AuthUser = ReviewerDependency) -> list[Agent
     return _events(run_id)
 
 
+@router.post("/{run_id}/capability-lease", response_model=AgentRunDetail)
+def bind_run_capability_lease(
+    run_id: str,
+    payload: AgentRunCapabilityLeaseRequest,
+    user: AuthUser = MaintainerDependency,
+) -> AgentRunDetail:
+    run = _run_or_404(run_id)
+    _require_step_boundary(run, "bind a capability lease")
+    try:
+        attach_capability_lease(
+            run,
+            payload.capability_lease_id,
+            actor=user.email,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except AgentRunTrustConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return _detail(run)
+
+
 @router.post("/{run_id}/execute-next", response_model=AgentRunDetail)
 def execute_run_next_step(
     run_id: str,
     payload: AgentRunExecuteRequest,
-    _: AuthUser = MaintainerDependency,
+    user: AuthUser = MaintainerDependency,
 ) -> AgentRunDetail:
     run = _run_or_404(run_id)
     execution_lock = _acquire_execution_lock(run.id)
     try:
         _require_step_boundary(run, "start another execution")
         lease_seconds = _safe_lease_seconds(payload)
+        current_step = store.agent_run_steps.get(run.current_step_id or "")
+        if current_step is None:
+            raise HTTPException(status_code=409, detail="Run has no current step")
         try:
+            ensure_run_capability(run, user=user)
+            trust_actions = authorize_run_step(
+                run,
+                current_step,
+                actor=user.email,
+                timeout_seconds=payload.timeout_seconds,
+            )
             execute_next_step(
                 run.id,
                 worker_id=payload.worker_id,
                 lease_seconds=lease_seconds,
                 timeout_seconds=payload.timeout_seconds,
             )
-        except AgentRunConflict as error:
+            consume_run_step_actions(
+                trust_actions,
+                current_step,
+                actor=user.email,
+            )
+        except (
+            AgentRunConflict,
+            AgentRunTrustConflict,
+            RunCapabilityConflict,
+        ) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _detail(run)
     finally:

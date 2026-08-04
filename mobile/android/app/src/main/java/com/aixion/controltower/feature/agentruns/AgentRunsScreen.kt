@@ -22,10 +22,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aixion.controltower.core.api.dto.AgentReliabilityScorecardDto
 import com.aixion.controltower.core.api.dto.AgentRunDetailDto
 import com.aixion.controltower.core.api.dto.AgentRunDto
 import com.aixion.controltower.core.api.dto.AgentRunStepDto
 import com.aixion.controltower.core.api.dto.AgentRunSummaryDto
+import com.aixion.controltower.core.api.dto.TrustExceptionDto
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
@@ -39,6 +41,7 @@ import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import kotlin.math.roundToInt
 
 @Composable
 fun AgentRunsScreen(viewModel: AgentRunsViewModel = viewModel()) {
@@ -59,25 +62,33 @@ fun AgentRunsScreen(viewModel: AgentRunsViewModel = viewModel()) {
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
-                    text = "Agent Runs",
+                    text = "Agent Trust Console",
                     color = TowerTextPrimary,
                     fontSize = 28.sp,
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Supervise approved agent execution, recovery, evidence, blockers and pull-request delivery from your phone.",
+                    text = "Review exceptions, supervise durable runs, and compare evidence-backed agent reliability without turning the phone into a terminal.",
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Button(onClick = viewModel::refresh, modifier = Modifier.fillMaxWidth()) {
-                    Text("Refresh run truth")
+                    Text("Refresh trust truth")
                 }
             }
         }
 
         item { RunSummaryPanel(state.summary) }
+
+        if (state.trustExceptions.isNotEmpty()) {
+            item { TrustExceptionQueuePanel(state.trustExceptions) }
+        }
+
+        if (state.reliabilityScorecards.isNotEmpty()) {
+            item { AgentReliabilityPanel(state.reliabilityScorecards) }
+        }
 
         state.errorMessage?.let { error ->
             item {
@@ -123,7 +134,7 @@ fun AgentRunsScreen(viewModel: AgentRunsViewModel = viewModel()) {
             item {
                 TowerPanel(elevated = true) {
                     Text(
-                        text = "No durable Agent Runs exist yet. Approve an eligible Agent Work item, then create a Mission Control run.",
+                        text = "No durable Agent Runs exist yet. Approve eligible Agent Work to create a governed run.",
                         color = TowerTextMuted,
                         fontSize = 14.sp,
                         lineHeight = 20.sp
@@ -166,6 +177,110 @@ private fun RunSummaryPanel(summary: AgentRunSummaryDto) {
             fontSize = 13.sp,
             lineHeight = 19.sp
         )
+    }
+}
+
+@Composable
+private fun TrustExceptionQueuePanel(exceptions: List<TrustExceptionDto>) {
+    TowerHeroPanel {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusBadge(label = "NEEDS ATTENTION ${exceptions.size}", color = RiskHigh)
+            val critical = exceptions.count { it.severity in setOf("CRITICAL", "BLOCKED") }
+            StatusBadge(
+                label = "CRITICAL $critical",
+                color = if (critical > 0) RiskCritical else RiskLow
+            )
+        }
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Text(
+            text = "Exception queue",
+            color = TowerTextPrimary,
+            fontSize = 19.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = "Only agent actions and runs requiring judgment are surfaced here.",
+            color = TowerTextMuted,
+            fontSize = 13.sp,
+            lineHeight = 18.sp
+        )
+        exceptions.take(5).forEach { item ->
+            TowerPanel(elevated = item.severity in setOf("CRITICAL", "BLOCKED")) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusBadge(label = item.category, color = exceptionColor(item.severity))
+                    StatusBadge(label = item.severity, color = exceptionColor(item.severity))
+                }
+                Text(
+                    text = item.title,
+                    color = TowerTextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = item.summary,
+                    color = TowerTextMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                item.runId?.let {
+                    Text("Run $it", color = TowerTextMuted, fontSize = 11.sp)
+                }
+                item.leaseId?.let {
+                    Text("Lease $it", color = TowerTextMuted, fontSize = 11.sp)
+                }
+            }
+        }
+        if (exceptions.size > 5) {
+            Text(
+                text = "+${exceptions.size - 5} more exceptions. Refresh after resolving the highest-risk items.",
+                color = TowerTextMuted,
+                fontSize = 12.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun AgentReliabilityPanel(scorecards: List<AgentReliabilityScorecardDto>) {
+    TowerPanel(elevated = true) {
+        Text(
+            text = "Evidence-backed agent reliability",
+            color = TowerTextPrimary,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = "Scores are computed from policy decisions, run attempts, recovery, evidence and intervention—not an LLM opinion.",
+            color = TowerTextMuted,
+            fontSize = 12.sp,
+            lineHeight = 17.sp
+        )
+        scorecards.take(4).forEach { card ->
+            TowerPanel(elevated = false) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusBadge(label = card.provider, color = TowerAccent)
+                    StatusBadge(
+                        label = "SCOPE ${(card.scopeAdherenceRate * 100).roundToInt()}%",
+                        color = rateColor(card.scopeAdherenceRate)
+                    )
+                    StatusBadge(
+                        label = "EVIDENCE ${(card.evidenceCompletionRate * 100).roundToInt()}%",
+                        color = rateColor(card.evidenceCompletionRate)
+                    )
+                }
+                Text(
+                    text = "Allowed ${card.allowedActions} • Blocked ${card.blockedActions} • Escalated ${card.approvalEscalations}",
+                    color = TowerTextMuted,
+                    fontSize = 12.sp
+                )
+                Text(
+                    text = "First attempt ${(card.firstAttemptSuccessRate * 100).roundToInt()}% • Recovery ${(card.recoverySuccessRate * 100).roundToInt()}% • Confidence ${(card.confidence * 100).roundToInt()}%",
+                    color = TowerTextMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+            }
+        }
     }
 }
 
@@ -348,6 +463,19 @@ private fun StepRow(step: AgentRunStepDto) {
             Text("Output: $it", color = RiskLow, fontSize = 12.sp, lineHeight = 17.sp)
         }
     }
+}
+
+private fun exceptionColor(severity: String): Color = when (severity) {
+    "CRITICAL", "BLOCKED" -> RiskCritical
+    "HIGH" -> RiskHigh
+    "MEDIUM" -> RiskMedium
+    else -> RiskLow
+}
+
+private fun rateColor(rate: Double): Color = when {
+    rate >= 0.8 -> RiskLow
+    rate >= 0.5 -> RiskMedium
+    else -> RiskHigh
 }
 
 private fun runStatusColor(status: String): Color = when (status) {

@@ -1,11 +1,15 @@
 package com.aixion.controltower.core.api
 
+import com.aixion.controltower.core.api.dto.ActionAuthorizationDto
+import com.aixion.controltower.core.api.dto.ActionAuthorizationRequestDto
+import com.aixion.controltower.core.api.dto.AgentReliabilityScorecardDto
 import com.aixion.controltower.core.api.dto.AgentRunControlRequestDto
 import com.aixion.controltower.core.api.dto.AgentRunDetailDto
 import com.aixion.controltower.core.api.dto.AgentRunDto
 import com.aixion.controltower.core.api.dto.AgentRunExecuteRequestDto
 import com.aixion.controltower.core.api.dto.AgentRunRetryRequestDto
 import com.aixion.controltower.core.api.dto.AgentRunSummaryDto
+import com.aixion.controltower.core.api.dto.TrustExceptionDto
 import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.POST
@@ -25,6 +29,18 @@ interface AgentRunsApi {
 
     @GET("agent/runs/{runId}")
     suspend fun getRun(@Path("runId") runId: String): AgentRunDetailDto
+
+    @GET("trust/exceptions")
+    suspend fun listTrustExceptions(): List<TrustExceptionDto>
+
+    @GET("trust/scorecards")
+    suspend fun listReliabilityScorecards(): List<AgentReliabilityScorecardDto>
+
+    @POST("trust/gateway/actions/{actionId}/decision")
+    suspend fun decideExactAction(
+        @Path("actionId") actionId: String,
+        @Body request: ActionAuthorizationRequestDto
+    ): ActionAuthorizationDto
 
     @POST("agent/runs/{runId}/pause")
     suspend fun pauseRun(
