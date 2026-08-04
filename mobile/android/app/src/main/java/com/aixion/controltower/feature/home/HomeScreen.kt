@@ -18,10 +18,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aixion.controltower.core.api.dto.TrustExceptionDto
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
@@ -58,9 +60,9 @@ fun HomeScreen(
         else -> "All clear"
     }
     val heroSubtitle = when {
-        state.loading -> "Syncing approvals, worker state, and execution queues."
+        state.loading -> "Syncing native-agent approvals, worker state, and execution queues."
         state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then retry."
-        state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, reject, or request revision."
+        state.actionRequiredCount > 0 -> "The original native-agent conversation is paused until you approve or reject the exact action."
         state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
         else -> "No action required right now. Keep building, but keep the tower watching."
     }
@@ -174,24 +176,30 @@ fun HomeScreen(
             item {
                 EmptyHomePanel(
                     title = "No fallback approvals loaded",
-                    body = "This is intentional. Authenticated product screens now wait for real backend data instead of silently showing demo data. Use Retry after the backend is reachable."
+                    body = "This is intentional. Authenticated product screens wait for real backend data instead of silently showing demo data. Use Retry after the backend is reachable."
                 )
             }
-        } else if (state.actionRequiredApprovals.isNotEmpty()) {
+        } else if (
+            state.nativeActionApprovals.isNotEmpty() ||
+            state.actionRequiredApprovals.isNotEmpty()
+        ) {
             item {
                 TowerSectionHeader(
                     title = "Needs Decision",
-                    subtitle = "Top pending requests. Tap the Action card above for the full review queue."
+                    subtitle = "Native-agent actions are bound to the exact command, workspace, conversation and immutable payload hash."
                 )
             }
-            items(state.actionRequiredApprovals.take(2)) { approval ->
+            items(state.nativeActionApprovals.take(2), key = { it.id }) { action ->
+                NativeActionPreviewCard(action = action, onReview = onOpenActionQueue)
+            }
+            items(state.actionRequiredApprovals.take(2), key = { it.id }) { approval ->
                 ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
         } else {
             item {
                 EmptyHomePanel(
                     title = "No approvals waiting",
-                    body = "The approval queue is clear. New AI/code actions will appear through the Action card when review is required."
+                    body = "The approval queue is clear. New native-agent and AI/code actions will appear through the Action card when review is required."
                 )
             }
         }
@@ -203,13 +211,55 @@ fun HomeScreen(
                     subtitle = "Approved work that still needs branch, validation, or PR completion. Tap Execution above for this queue."
                 )
             }
-            items(state.githubExecutionApprovals.take(2)) { approval ->
+            items(state.githubExecutionApprovals.take(2), key = { it.id }) { approval ->
                 ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
         }
 
         item {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        }
+    }
+}
+
+@Composable
+private fun NativeActionPreviewCard(
+    action: TrustExceptionDto,
+    onReview: () -> Unit
+) {
+    val exactTarget = when {
+        !action.command.isNullOrBlank() -> action.command
+        action.paths.isNotEmpty() -> action.paths.joinToString()
+        action.networkDomains.isNotEmpty() -> action.networkDomains.joinToString()
+        else -> action.actionType ?: "Native-agent side effect"
+    }
+    TowerPanel(elevated = true) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusBadge(action.provider ?: "NATIVE AGENT", TowerAccent)
+            StatusBadge(action.actionType ?: "ACTION", RiskMedium)
+        }
+        Text(
+            text = exactTarget.take(600),
+            color = TowerTextPrimary,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontFamily = FontFamily.Monospace
+        )
+        action.cwd?.let {
+            Text("cwd $it", color = TowerTextMuted, fontSize = 11.sp)
+        }
+        action.nativeConversationId?.let {
+            Text(
+                "conversation ${it.take(20)}… • step ${action.nativeStepIndex ?: "?"}",
+                color = TowerTextMuted,
+                fontSize = 11.sp
+            )
+        }
+        action.providerPayloadSha256?.let {
+            Text("provider hash ${it.take(20)}…", color = TowerTextMuted, fontSize = 10.sp)
+        }
+        Button(onClick = onReview, modifier = Modifier.fillMaxWidth()) {
+            Text("Review exact native action")
         }
     }
 }

@@ -90,9 +90,26 @@ data class TrustExceptionDto(
     @SerializedName("task_id") val taskId: String? = null,
     @SerializedName("action_id") val actionId: String? = null,
     @SerializedName("lease_id") val leaseId: String? = null,
+    val provider: String? = null,
+    @SerializedName("action_type") val actionType: String? = null,
+    val command: String? = null,
+    val paths: List<String> = emptyList(),
+    @SerializedName("network_domains") val networkDomains: List<String> = emptyList(),
+    val repository: String? = null,
+    val branch: String? = null,
+    val cwd: String? = null,
+    @SerializedName("relay_session_id") val relaySessionId: String? = null,
+    @SerializedName("adapter_id") val adapterId: String? = null,
+    @SerializedName("native_conversation_id") val nativeConversationId: String? = null,
+    @SerializedName("native_step_index") val nativeStepIndex: Int? = null,
+    @SerializedName("provider_payload_sha256") val providerPayloadSha256: String? = null,
+    @SerializedName("action_payload_sha256") val actionPayloadSha256: String? = null,
     @SerializedName("created_at") val createdAt: String? = null,
     @SerializedName("requires_human") val requiresHuman: Boolean = true
-)
+) {
+    val isPendingExactAction: Boolean
+        get() = category == "REQUIRE_APPROVAL" && actionId != null
+}
 
 data class AgentReliabilityScorecardDto(
     val provider: String,

@@ -3,47 +3,80 @@ package com.aixion.controltower.feature.approvals
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.aixion.controltower.core.api.AgentRunsApiClient
 import com.aixion.controltower.core.api.ApiClient
+import com.aixion.controltower.core.api.dto.TrustExceptionDto
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.data.repository.AgentRunsRepository
 import com.aixion.controltower.data.repository.ApprovalRepository
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class ApprovalsUiState(
     val loading: Boolean = true,
     val approvals: List<ApprovalSummary> = emptyList(),
+    val nativeActions: List<TrustExceptionDto> = emptyList(),
     val selectedApproval: ApprovalSummary? = null,
+    val decidingNativeActionId: String? = null,
     val lastActionMessage: String? = null,
     val errorMessage: String? = null
 ) {
+    val pendingNativeActions: List<TrustExceptionDto> =
+        nativeActions.filter { it.isPendingExactAction }
+    val blockedNativeActions: List<TrustExceptionDto> =
+        nativeActions.filter { it.category == "BLOCK" && it.actionId != null }
     val hasError: Boolean = errorMessage != null
 }
 
 class ApprovalsViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ApprovalRepository(ApiClient.create(application.applicationContext))
+    private val agentRunsRepository = AgentRunsRepository(
+        AgentRunsApiClient.create(application.applicationContext)
+    )
+    private val refreshMutex = Mutex()
 
     private val _state = MutableStateFlow(ApprovalsUiState())
     val state: StateFlow<ApprovalsUiState> = _state.asStateFlow()
 
     init {
-        refresh()
+        viewModelScope.launch {
+            load(showLoading = true)
+            while (isActive) {
+                delay(3_000)
+                load(showLoading = false)
+            }
+        }
     }
 
     fun refresh() {
-        viewModelScope.launch {
-            _state.value = _state.value.copy(loading = true, errorMessage = null)
+        viewModelScope.launch { load(showLoading = true) }
+    }
+
+    private suspend fun load(showLoading: Boolean) {
+        refreshMutex.withLock {
+            if (showLoading) {
+                _state.value = _state.value.copy(loading = true, errorMessage = null)
+            }
+            val selectedId = _state.value.selectedApproval?.id
             runCatching {
-                repository.listApprovals()
-            }.onSuccess { approvals ->
-                _state.value = ApprovalsUiState(
+                repository.listApprovals() to agentRunsRepository.listTrustExceptions()
+            }.onSuccess { (approvals, nativeActions) ->
+                _state.value = _state.value.copy(
                     loading = false,
                     approvals = approvals,
-                    selectedApproval = approvals.firstOrNull()
+                    nativeActions = nativeActions,
+                    selectedApproval = approvals.firstOrNull { it.id == selectedId }
+                        ?: approvals.firstOrNull(),
+                    errorMessage = null
                 )
             }.onFailure { error ->
-                _state.value = ApprovalsUiState(
+                _state.value = _state.value.copy(
                     loading = false,
                     errorMessage = "Backend approval sync failed. No mock approvals shown. ${error.message ?: "Retry when the backend is reachable."}"
                 )
@@ -62,7 +95,7 @@ class ApprovalsViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.value = _state.value.copy(
                     loading = false,
                     selectedApproval = cachedApproval,
-                    lastActionMessage = "Opened linked approval from MCP Queue"
+                    lastActionMessage = "Opened linked approval"
                 )
                 return@launch
             }
@@ -73,13 +106,53 @@ class ApprovalsViewModel(application: Application) : AndroidViewModel(applicatio
                 _state.value = _state.value.copy(
                     loading = false,
                     selectedApproval = selected,
-                    lastActionMessage = "Opened linked approval from MCP Queue"
+                    lastActionMessage = "Opened linked approval"
                 )
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     loading = false,
                     selectedApproval = null,
                     lastActionMessage = "Failed to open linked approval $approvalId: ${error.message ?: "backend request failed"}"
+                )
+            }
+        }
+    }
+
+    fun decideNativeAction(actionId: String, allow: Boolean) {
+        if (_state.value.decidingNativeActionId != null) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                decidingNativeActionId = actionId,
+                errorMessage = null,
+                lastActionMessage = null
+            )
+            val reason = if (allow) {
+                "Approved this exact immutable native-agent action from Aixion Android."
+            } else {
+                "Denied this exact immutable native-agent action from Aixion Android."
+            }
+            runCatching {
+                agentRunsRepository.decideExactAction(
+                    actionId = actionId,
+                    decision = if (allow) "ALLOW" else "BLOCK",
+                    reason = reason
+                )
+            }.onSuccess {
+                _state.value = _state.value.copy(
+                    decidingNativeActionId = null,
+                    lastActionMessage = if (allow) {
+                        "Exact native-agent action approved"
+                    } else {
+                        "Exact native-agent action denied"
+                    },
+                    errorMessage = null
+                )
+                load(showLoading = false)
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    decidingNativeActionId = null,
+                    errorMessage = error.message
+                        ?: "Unable to record the exact native-agent decision."
                 )
             }
         }

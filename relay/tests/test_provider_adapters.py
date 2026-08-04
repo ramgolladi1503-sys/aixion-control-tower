@@ -30,7 +30,7 @@ def test_codex_thread_identity_and_notification_mapping() -> None:
         "turn/completed",
         {},
     )
-    assert event_type == EventType.AGENT_MESSAGE
+    assert event_type == EventType.SESSION_COMPLETED
 
 
 @pytest.mark.asyncio
