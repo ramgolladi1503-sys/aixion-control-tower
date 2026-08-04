@@ -273,7 +273,10 @@ def test_revoking_lease_revokes_all_child_credentials() -> None:
         user=_user("owner"),
         reason="Operator revoked the run capability.",
     )
-    assert response.grant.revoked is True
+    canonical = store.credential_grants[response.grant.id]
+    assert canonical.revoked is True
+    assert canonical.revoked_at is not None
+    assert response.grant.revoked is False
 
 
 def test_scorecard_and_exception_queue_are_evidence_driven() -> None:
