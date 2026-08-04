@@ -14,7 +14,6 @@ from app.relay_models import (
     RelayAdapterKind,
     RelayAdapterManifest,
     RelayCommandClaimRequest,
-    RelayCommandStatus,
     RelayEventCreate,
     RelayEventType,
     RelayPlatform,
@@ -80,7 +79,11 @@ def _relay_and_token():
     return store.relay_hosts[response.relay.id], response.relay_token
 
 
-def _session(relay_id: str, provider=RelayProvider.CODEX, adapter="codex-app-server"):
+def _session(
+    relay_id: str,
+    provider: RelayProvider = RelayProvider.CODEX,
+    adapter: str = "codex-app-server",
+):
     return create_relay_session(
         RelaySessionCreate(
             relay_id=relay_id,
@@ -166,7 +169,12 @@ def test_acknowledged_command_expiry_is_recovered_without_duplicate_command() ->
     assert recovered is command
     assert recovered.attempt_count == 2
     assert recovered.lease_owner == "worker-2"
-    assert len([item for item in store.relay_commands.values() if item.session_id == session.id]) == 1
+    session_commands = [
+        item
+        for item in store.relay_commands.values()
+        if item.session_id == session.id
+    ]
+    assert len(session_commands) == 1
 
 
 def test_event_chain_is_ordered_idempotent_and_tamper_evident() -> None:
