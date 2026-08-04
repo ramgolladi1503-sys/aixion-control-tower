@@ -50,8 +50,12 @@ def _lease(mode: CapabilityLeaseMode = CapabilityLeaseMode.BOUNDED) -> Capabilit
         receipt_nonce=new_nonce(),
         receipt_signature="pending",
     )
-    lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
+    _resign(lease)
     return lease
+
+
+def _resign(lease: CapabilityLease) -> None:
+    lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
 
 
 def _action(**updates) -> ProposedAction:
@@ -121,6 +125,67 @@ def test_path_traversal_secret_command_injection_and_domain_escape_are_blocked()
     assert "paths outside" in joined
     assert "command" in joined
     assert "network domains" in joined
+
+
+def test_approved_command_cannot_be_extended_with_extra_arguments() -> None:
+    lease = _lease()
+    action = _action(
+        lease_id=lease.id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        paths=[],
+        command=(
+            "python -m pytest backend/tests/test_safe.py "
+            "--override-ini=addopts=-punsafe_plugin"
+        ),
+    )
+    decision = evaluate_proposed_action(action, lease)
+    assert decision.decision == PolicyDecisionType.BLOCK
+    assert any("exact approved command" in reason.lower() for reason in decision.reasons)
+
+
+def test_repository_actions_require_exact_repository_branch_and_payload() -> None:
+    lease = _lease()
+    action = _action(
+        lease_id=lease.id,
+        repository=None,
+        branch=None,
+        paths=[],
+    )
+    decision = evaluate_proposed_action(action, lease)
+    assert decision.decision == PolicyDecisionType.BLOCK
+    joined = " ".join(decision.reasons).lower()
+    assert "repository" in joined
+    assert "branch" in joined
+    assert "explicit approved path" in joined
+
+
+def test_sensitive_files_are_blocked_even_when_named_in_scope() -> None:
+    lease = _lease()
+    lease.scope.allowed_path_prefixes = [".env.production", "config/credentials.json"]
+    _resign(lease)
+    action = _action(
+        lease_id=lease.id,
+        paths=[".env.production", "config/credentials.json"],
+    )
+    decision = evaluate_proposed_action(action, lease)
+    assert decision.decision == PolicyDecisionType.BLOCK
+    assert any("paths outside approved scope" in reason.lower() for reason in decision.reasons)
+
+
+def test_run_and_task_bound_lease_cannot_be_replayed() -> None:
+    lease = _lease()
+    lease.scope.metadata = {"run_id": "run_expected", "task_id": "task_expected"}
+    _resign(lease)
+    action = _action(
+        lease_id=lease.id,
+        run_id="run_other",
+        task_id="task_other",
+    )
+    decision = evaluate_proposed_action(action, lease)
+    assert decision.decision == PolicyDecisionType.BLOCK
+    joined = " ".join(decision.reasons).lower()
+    assert "run identity" in joined
+    assert "task identity" in joined
 
 
 def test_runtime_cost_retry_and_pull_request_budgets_are_fail_closed() -> None:
