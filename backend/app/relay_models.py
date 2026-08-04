@@ -6,8 +6,25 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .models import AgentProvider, new_id, now_utc
+from .models import new_id, now_utc
 from .trust_models import PolicyDecision, ProposedAction
+
+
+class RelayProvider(StrEnum):
+    CODEX = "CODEX"
+    CHATGPT = "CHATGPT"
+    CLAUDE = "CLAUDE"
+    ANTIGRAVITY = "ANTIGRAVITY"
+    OPENCLAW = "OPENCLAW"
+    GEMINI = "GEMINI"
+    CURSOR = "CURSOR"
+    COPILOT = "COPILOT"
+    AIDER = "AIDER"
+    CLINE = "CLINE"
+    CONTINUE = "CONTINUE"
+    WINDSURF = "WINDSURF"
+    GITHUB_ACTIONS = "GITHUB_ACTIONS"
+    CUSTOM = "CUSTOM"
 
 
 class RelayPlatform(StrEnum):
@@ -110,7 +127,7 @@ class RelayEventType(StrEnum):
 
 class RelayAdapterManifest(BaseModel):
     adapter_id: str = Field(min_length=1, max_length=120)
-    provider: AgentProvider
+    provider: RelayProvider
     adapter_kind: RelayAdapterKind
     display_name: str = Field(min_length=1, max_length=120)
     version: str = Field(default="unknown", max_length=120)
@@ -227,7 +244,7 @@ class RelayHeartbeatRequest(BaseModel):
 
 class RelaySessionCreate(BaseModel):
     relay_id: str
-    provider: AgentProvider
+    provider: RelayProvider
     adapter_id: str = Field(min_length=1, max_length=120)
     objective: str = Field(min_length=1, max_length=20000)
     workspace_path: str = Field(min_length=1, max_length=2000)
@@ -264,7 +281,7 @@ class RelaySessionCreate(BaseModel):
 class RelaySession(BaseModel):
     id: str = Field(default_factory=lambda: new_id("relay_session"))
     relay_id: str
-    provider: AgentProvider
+    provider: RelayProvider
     adapter_id: str
     objective: str
     workspace_path: str
@@ -369,7 +386,7 @@ class RelayEvent(BaseModel):
     id: str = Field(default_factory=lambda: new_id("relay_event"))
     relay_id: str
     session_id: str
-    provider: AgentProvider
+    provider: RelayProvider
     adapter_id: str
     event_id: str
     sequence: int
