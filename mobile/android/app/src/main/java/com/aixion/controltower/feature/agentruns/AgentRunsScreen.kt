@@ -12,10 +12,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -27,6 +31,10 @@ import com.aixion.controltower.core.api.dto.AgentRunDetailDto
 import com.aixion.controltower.core.api.dto.AgentRunDto
 import com.aixion.controltower.core.api.dto.AgentRunStepDto
 import com.aixion.controltower.core.api.dto.AgentRunSummaryDto
+import com.aixion.controltower.core.api.dto.RelayHostDto
+import com.aixion.controltower.core.api.dto.RelaySessionDetailDto
+import com.aixion.controltower.core.api.dto.RelaySessionDto
+import com.aixion.controltower.core.api.dto.RelaySummaryDto
 import com.aixion.controltower.core.api.dto.TrustExceptionDto
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
@@ -62,28 +70,111 @@ fun AgentRunsScreen(viewModel: AgentRunsViewModel = viewModel()) {
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
-                    text = "Agent Trust Console",
+                    text = "Universal Agent Control",
                     color = TowerTextPrimary,
                     fontSize = 28.sp,
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Review exceptions, supervise durable runs, and compare evidence-backed agent reliability without turning the phone into a terminal.",
+                    text = "Start, steer and stop Codex, Claude, Antigravity, OpenClaw and future adapters while every side effect remains inside Aixion trust policy.",
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Button(onClick = viewModel::refresh, modifier = Modifier.fillMaxWidth()) {
-                    Text("Refresh trust truth")
+                    Text("Refresh control-plane truth")
                 }
             }
         }
 
         item { RunSummaryPanel(state.summary) }
+        item { RelaySummaryPanel(state.relaySummary) }
 
         if (state.trustExceptions.isNotEmpty()) {
-            item { TrustExceptionQueuePanel(state.trustExceptions) }
+            item {
+                TrustExceptionQueuePanel(
+                    exceptions = state.trustExceptions,
+                    decidingActionId = state.decidingActionId,
+                    onApprove = { viewModel.decideExactAction(it, allow = true) },
+                    onBlock = { viewModel.decideExactAction(it, allow = false) }
+                )
+            }
+        }
+
+        if (state.relayHosts.isNotEmpty()) {
+            item {
+                RelayLaunchPanel(
+                    hosts = state.relayHosts,
+                    busy = state.relayActionInProgress,
+                    onStart = viewModel::createRelaySession
+                )
+            }
+        }
+
+        state.selectedRelaySession?.let { detail ->
+            item {
+                RelaySessionDetailPanel(
+                    detail = detail,
+                    busy = state.relayActionInProgress,
+                    onSend = viewModel::sendRelayMessage,
+                    onPause = viewModel::pauseRelaySession,
+                    onResume = viewModel::resumeRelaySession,
+                    onCancel = viewModel::cancelRelaySession,
+                    onClose = viewModel::closeRelaySession
+                )
+            }
+        }
+
+        item {
+            TowerSectionHeader(
+                title = "Connected agent hosts",
+                subtitle = "The relay connects outbound from your Mac or worker. No SSH, shell port or provider credential is exposed to the phone."
+            )
+        }
+
+        if (!state.loading && state.relayHosts.isEmpty()) {
+            item {
+                TowerPanel(elevated = true) {
+                    StatusBadge(label = "NO RELAY", color = RiskHigh)
+                    Text(
+                        text = "Register and run aixion-relay on a Mac, Linux worker or Windows host before starting provider sessions.",
+                        color = TowerTextMuted,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+        }
+
+        items(state.relayHosts, key = { it.id }) { relay ->
+            RelayHostCard(relay)
+        }
+
+        item {
+            TowerSectionHeader(
+                title = "Agent sessions",
+                subtitle = "One provider-neutral timeline for messages, tool calls, tests, approvals, usage, failures and final evidence."
+            )
+        }
+
+        if (!state.loading && state.relaySessions.isEmpty()) {
+            item {
+                TowerPanel(elevated = false) {
+                    Text(
+                        text = "No agent sessions yet. Choose an available adapter above and start a scoped session.",
+                        color = TowerTextMuted,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        }
+
+        items(state.relaySessions, key = { it.id }) { session ->
+            RelaySessionCard(
+                session = session,
+                onOpen = { viewModel.openRelaySession(session.id) }
+            )
         }
 
         if (state.reliabilityScorecards.isNotEmpty()) {
@@ -93,7 +184,7 @@ fun AgentRunsScreen(viewModel: AgentRunsViewModel = viewModel()) {
         state.errorMessage?.let { error ->
             item {
                 TowerPanel(elevated = true) {
-                    StatusBadge(label = "BACKEND ERROR", color = RiskCritical)
+                    StatusBadge(label = "CONTROL ERROR", color = RiskCritical)
                     Text(error, color = RiskCritical, fontSize = 13.sp, lineHeight = 19.sp)
                 }
             }
@@ -125,25 +216,12 @@ fun AgentRunsScreen(viewModel: AgentRunsViewModel = viewModel()) {
 
         item {
             TowerSectionHeader(
-                title = "Durable Run Queue",
-                subtitle = "A run exists only after approval. Every step carries attempts, evidence, state transitions and a correlation ID."
+                title = "Durable run queue",
+                subtitle = "Repository-changing work remains governed by signed capability leases, ordered steps, retries and evidence sealing."
             )
         }
 
-        if (!state.loading && state.runs.isEmpty()) {
-            item {
-                TowerPanel(elevated = true) {
-                    Text(
-                        text = "No durable Agent Runs exist yet. Approve eligible Agent Work to create a governed run.",
-                        color = TowerTextMuted,
-                        fontSize = 14.sp,
-                        lineHeight = 20.sp
-                    )
-                }
-            }
-        }
-
-        items(state.runs) { run ->
+        items(state.runs, key = { it.id }) { run ->
             RunCard(run = run, onOpen = { viewModel.openRun(run.id) })
         }
     }
@@ -153,7 +231,7 @@ fun AgentRunsScreen(viewModel: AgentRunsViewModel = viewModel()) {
 private fun RunSummaryPanel(summary: AgentRunSummaryDto) {
     TowerPanel(elevated = true) {
         Text(
-            "Execution truth",
+            text = "Execution truth",
             color = TowerTextPrimary,
             fontSize = 17.sp,
             fontWeight = FontWeight.SemiBold
@@ -170,9 +248,8 @@ private fun RunSummaryPanel(summary: AgentRunSummaryDto) {
                 color = if (summary.failed > 0) RiskCritical else RiskLow
             )
         }
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            text = "Queue ${summary.queueDepth} • Retry wait ${summary.retryWait} • Blocked ${summary.blocked} • Completed ${summary.succeeded}",
+            text = "Queue ${summary.queueDepth} • Retry ${summary.retryWait} • Blocked ${summary.blocked} • Completed ${summary.succeeded}",
             color = TowerTextMuted,
             fontSize = 13.sp,
             lineHeight = 19.sp
@@ -181,7 +258,289 @@ private fun RunSummaryPanel(summary: AgentRunSummaryDto) {
 }
 
 @Composable
-private fun TrustExceptionQueuePanel(exceptions: List<TrustExceptionDto>) {
+private fun RelaySummaryPanel(summary: RelaySummaryDto) {
+    TowerPanel(elevated = summary.offlineRelays > 0 || summary.failedSessions > 0) {
+        Text(
+            text = "Agent connectivity",
+            color = TowerTextPrimary,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            StatusBadge(label = "ONLINE ${summary.onlineRelays}", color = RiskLow)
+            StatusBadge(
+                label = "OFFLINE ${summary.offlineRelays}",
+                color = if (summary.offlineRelays > 0) RiskHigh else RiskLow
+            )
+            StatusBadge(
+                label = "APPROVAL ${summary.waitingForApproval}",
+                color = if (summary.waitingForApproval > 0) RiskHigh else RiskLow
+            )
+        }
+        Text(
+            text = "Sessions ${summary.totalSessions} • Active ${summary.activeSessions} • Pending commands ${summary.pendingCommands} • Failed ${summary.failedSessions}",
+            color = TowerTextMuted,
+            fontSize = 13.sp,
+            lineHeight = 19.sp
+        )
+    }
+}
+
+@Composable
+private fun RelayLaunchPanel(
+    hosts: List<RelayHostDto>,
+    busy: Boolean,
+    onStart: (String, String, String, String, String, String, String) -> Unit
+) {
+    var selectedRelayId by rememberSaveable { mutableStateOf("") }
+    var selectedProvider by rememberSaveable { mutableStateOf("") }
+    var selectedAdapterId by rememberSaveable { mutableStateOf("") }
+    var objective by rememberSaveable { mutableStateOf("") }
+    var workspace by rememberSaveable { mutableStateOf("") }
+    var repository by rememberSaveable { mutableStateOf("") }
+
+    val selectedRelay = hosts.firstOrNull { it.id == selectedRelayId }
+    TowerHeroPanel {
+        StatusBadge(label = "START AGENT", color = TowerAccent)
+        Text(
+            text = "Choose a connected adapter",
+            color = TowerTextPrimary,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        hosts.filter { it.status == "ONLINE" }.forEach { relay ->
+            relay.adapters.filter { it.available }.forEach { adapter ->
+                val selected = relay.id == selectedRelayId && adapter.adapterId == selectedAdapterId
+                OutlinedButton(
+                    onClick = {
+                        selectedRelayId = relay.id
+                        selectedProvider = adapter.provider
+                        selectedAdapterId = adapter.adapterId
+                        if (workspace.isBlank()) {
+                            workspace = relay.workspaceRoots.firstOrNull().orEmpty()
+                        }
+                        if (repository.isBlank()) {
+                            repository = relay.allowedRepositories.firstOrNull().orEmpty()
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (selected) {
+                            "Selected: ${adapter.displayName} on ${relay.name}"
+                        } else {
+                            "${adapter.displayName} • ${relay.name}"
+                        }
+                    )
+                }
+            }
+        }
+        if (selectedRelay != null) {
+            Text(
+                text = "Scope: ${selectedRelay.allowedRepositories.joinToString().ifBlank { "operator-approved repositories" }}",
+                color = TowerTextMuted,
+                fontSize = 12.sp
+            )
+        }
+        OutlinedTextField(
+            value = objective,
+            onValueChange = { objective = it },
+            label = { Text("Objective") },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3
+        )
+        OutlinedTextField(
+            value = workspace,
+            onValueChange = { workspace = it },
+            label = { Text("Absolute workspace path") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        OutlinedTextField(
+            value = repository,
+            onValueChange = { repository = it },
+            label = { Text("Repository owner/name") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Button(
+            onClick = {
+                onStart(
+                    selectedRelayId,
+                    selectedProvider,
+                    selectedAdapterId,
+                    objective,
+                    workspace,
+                    repository,
+                    "STRICT"
+                )
+            },
+            enabled = !busy && selectedAdapterId.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (busy) "Queuing session…" else "Start strict governed session")
+        }
+    }
+}
+
+@Composable
+private fun RelayHostCard(relay: RelayHostDto) {
+    TowerPanel(elevated = relay.status != "ONLINE") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusBadge(label = relay.status, color = relayStatusColor(relay.status))
+            StatusBadge(label = relay.platform, color = TowerAccent)
+            StatusBadge(label = "${relay.adapters.count { it.available }} ADAPTERS", color = RiskLow)
+        }
+        Text(
+            text = relay.name,
+            color = TowerTextPrimary,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text("${relay.hostname} • relay ${relay.relayVersion}", color = TowerTextMuted, fontSize = 12.sp)
+        Text(
+            text = relay.adapters.joinToString { adapter ->
+                "${adapter.provider}:${adapter.displayName}${if (adapter.available) "" else " (unavailable)"}"
+            },
+            color = TowerTextMuted,
+            fontSize = 12.sp,
+            lineHeight = 17.sp
+        )
+        relay.lastHeartbeatAt?.let {
+            Text("Heartbeat $it", color = TowerTextMuted, fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun RelaySessionCard(session: RelaySessionDto, onOpen: () -> Unit) {
+    TowerPanel(
+        elevated = session.status in setOf("WAITING_FOR_APPROVAL", "FAILED")
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusBadge(label = session.provider, color = TowerAccent)
+            StatusBadge(label = session.status, color = relayStatusColor(session.status))
+            StatusBadge(label = session.approvalMode, color = RiskMedium)
+        }
+        Text(
+            text = session.objective,
+            color = TowerTextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 21.sp
+        )
+        Text("Adapter ${session.adapterId}", color = TowerTextMuted, fontSize = 12.sp)
+        session.repository?.let {
+            Text("Repository $it", color = TowerTextMuted, fontSize = 12.sp)
+        }
+        session.lastError?.let {
+            Text("Blocker: $it", color = RiskCritical, fontSize = 12.sp, lineHeight = 17.sp)
+        }
+        OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth()) {
+            Text("Open agent timeline")
+        }
+    }
+}
+
+@Composable
+private fun RelaySessionDetailPanel(
+    detail: RelaySessionDetailDto,
+    busy: Boolean,
+    onSend: (String) -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onCancel: () -> Unit,
+    onClose: () -> Unit
+) {
+    var instruction by rememberSaveable(detail.session.id) { mutableStateOf("") }
+    val session = detail.session
+    val terminal = session.status in setOf("COMPLETED", "FAILED", "CANCELLED")
+
+    TowerHeroPanel {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatusBadge(label = session.provider, color = TowerAccent)
+            StatusBadge(label = session.status, color = relayStatusColor(session.status))
+            StatusBadge(label = "EVENTS ${session.latestEventSequence}", color = RiskLow)
+        }
+        Text(
+            text = session.objective,
+            color = TowerTextPrimary,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text("Host ${detail.relay.name} • ${session.adapterId}", color = TowerTextMuted, fontSize = 12.sp)
+        Text("Workspace ${session.workspacePath}", color = TowerTextMuted, fontSize = 12.sp)
+        session.remoteSessionId?.let {
+            Text("Provider session $it", color = TowerTextMuted, fontSize = 12.sp)
+        }
+        session.finalEvidenceHash?.let {
+            Text("Evidence ${it.take(20)}…", color = RiskLow, fontSize = 12.sp)
+        }
+
+        Text(
+            text = "Latest normalized events",
+            color = TowerTextPrimary,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        detail.events.takeLast(10).reversed().forEach { event ->
+            TowerPanel(elevated = event.eventType in setOf("APPROVAL_REQUIRED", "SESSION_FAILED")) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatusBadge(label = event.eventType, color = relayEventColor(event.eventType))
+                    StatusBadge(label = "#${event.sequence}", color = TowerAccent)
+                }
+                Text(
+                    text = event.message.ifBlank { "Provider event recorded" },
+                    color = TowerTextMuted,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                Text("Hash ${event.eventHash.take(12)}…", color = TowerTextMuted, fontSize = 10.sp)
+            }
+        }
+
+        if (!terminal) {
+            OutlinedTextField(
+                value = instruction,
+                onValueChange = { instruction = it },
+                label = { Text("Follow-up instruction") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 2
+            )
+            Button(
+                onClick = {
+                    onSend(instruction)
+                    instruction = ""
+                },
+                enabled = !busy && instruction.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Send instruction")
+            }
+            if (session.status == "PAUSED") {
+                Button(onClick = onResume, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text("Resume agent")
+                }
+            } else {
+                OutlinedButton(onClick = onPause, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text("Pause agent")
+                }
+            }
+            OutlinedButton(onClick = onCancel, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                Text("Cancel agent session")
+            }
+        }
+        OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+            Text("Close agent timeline")
+        }
+    }
+}
+
+@Composable
+private fun TrustExceptionQueuePanel(
+    exceptions: List<TrustExceptionDto>,
+    decidingActionId: String?,
+    onApprove: (String) -> Unit,
+    onBlock: (String) -> Unit
+) {
     TowerHeroPanel {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = "NEEDS ATTENTION ${exceptions.size}", color = RiskHigh)
@@ -191,51 +550,47 @@ private fun TrustExceptionQueuePanel(exceptions: List<TrustExceptionDto>) {
                 color = if (critical > 0) RiskCritical else RiskLow
             )
         }
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text(
-            text = "Exception queue",
+            text = "Exact action queue",
             color = TowerTextPrimary,
             fontSize = 19.sp,
             fontWeight = FontWeight.SemiBold
         )
         Text(
-            text = "Only agent actions and runs requiring judgment are surfaced here.",
+            text = "Approval is bound to the immutable command, paths, repository, branch, network scope and capability lease.",
             color = TowerTextMuted,
             fontSize = 13.sp,
             lineHeight = 18.sp
         )
-        exceptions.take(5).forEach { item ->
+        exceptions.take(8).forEach { item ->
+            val canDecide = item.category == "REQUIRE_APPROVAL" && item.actionId != null
             TowerPanel(elevated = item.severity in setOf("CRITICAL", "BLOCKED")) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     StatusBadge(label = item.category, color = exceptionColor(item.severity))
                     StatusBadge(label = item.severity, color = exceptionColor(item.severity))
                 }
-                Text(
-                    text = item.title,
-                    color = TowerTextPrimary,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = item.summary,
-                    color = TowerTextMuted,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp
-                )
-                item.runId?.let {
-                    Text("Run $it", color = TowerTextMuted, fontSize = 11.sp)
+                Text(item.title, color = TowerTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(item.summary, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+                item.actionId?.let {
+                    Text("Exact action $it", color = TowerTextMuted, fontSize = 11.sp)
                 }
-                item.leaseId?.let {
-                    Text("Lease $it", color = TowerTextMuted, fontSize = 11.sp)
+                if (canDecide) {
+                    Button(
+                        onClick = { onApprove(item.actionId!!) },
+                        enabled = decidingActionId == null,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (decidingActionId == item.actionId) "Recording…" else "Approve exact action")
+                    }
+                    OutlinedButton(
+                        onClick = { onBlock(item.actionId!!) },
+                        enabled = decidingActionId == null,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Block exact action")
+                    }
                 }
             }
-        }
-        if (exceptions.size > 5) {
-            Text(
-                text = "+${exceptions.size - 5} more exceptions. Refresh after resolving the highest-risk items.",
-                color = TowerTextMuted,
-                fontSize = 12.sp
-            )
         }
     }
 }
@@ -250,12 +605,12 @@ private fun AgentReliabilityPanel(scorecards: List<AgentReliabilityScorecardDto>
             fontWeight = FontWeight.SemiBold
         )
         Text(
-            text = "Scores are computed from policy decisions, run attempts, recovery, evidence and intervention—not an LLM opinion.",
+            text = "Scores come from policy decisions, attempts, recovery and sealed evidence—not provider claims.",
             color = TowerTextMuted,
             fontSize = 12.sp,
             lineHeight = 17.sp
         )
-        scorecards.take(4).forEach { card ->
+        scorecards.take(6).forEach { card ->
             TowerPanel(elevated = false) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     StatusBadge(label = card.provider, color = TowerAccent)
@@ -273,12 +628,6 @@ private fun AgentReliabilityPanel(scorecards: List<AgentReliabilityScorecardDto>
                     color = TowerTextMuted,
                     fontSize = 12.sp
                 )
-                Text(
-                    text = "First attempt ${(card.firstAttemptSuccessRate * 100).roundToInt()}% • Recovery ${(card.recoverySuccessRate * 100).roundToInt()}% • Confidence ${(card.confidence * 100).roundToInt()}%",
-                    color = TowerTextMuted,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp
-                )
             }
         }
     }
@@ -291,7 +640,6 @@ private fun RunCard(run: AgentRunDto, onOpen: () -> Unit) {
             StatusBadge(label = run.status, color = runStatusColor(run.status))
             StatusBadge(label = "STEP ${run.currentStepIndex + 1}", color = TowerAccent)
         }
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = run.objective.ifBlank { "Agent execution run" },
             color = TowerTextPrimary,
@@ -301,10 +649,6 @@ private fun RunCard(run: AgentRunDto, onOpen: () -> Unit) {
         )
         run.repository?.let {
             Text("Repo: $it", color = TowerTextMuted, fontSize = 12.sp)
-        }
-        Text("Correlation: ${run.correlationId}", color = TowerTextMuted, fontSize = 12.sp)
-        run.leaseOwner?.let {
-            Text("Worker: $it", color = TowerTextMuted, fontSize = 12.sp)
         }
         run.lastError?.let {
             Text("Blocker: $it", color = RiskCritical, fontSize = 12.sp, lineHeight = 17.sp)
@@ -337,72 +681,28 @@ private fun RunDetailPanel(
                 color = TowerAccent
             )
         }
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
-        Text(
-            run.objective,
-            color = TowerTextPrimary,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.SemiBold
-        )
+        Text(run.objective, color = TowerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
         Text("Run ${run.id}", color = TowerTextMuted, fontSize = 12.sp)
-        Text("Task ${run.taskId}", color = TowerTextMuted, fontSize = 12.sp)
-        Text("Correlation ${run.correlationId}", color = TowerTextMuted, fontSize = 12.sp)
+        run.capabilityLeaseId?.let {
+            Text("Capability $it", color = RiskLow, fontSize = 12.sp)
+        }
         run.finalEvidenceHash?.let {
             Text("Evidence ${it.take(16)}…", color = RiskLow, fontSize = 12.sp)
         }
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
-
         detail.steps.forEach { step -> StepRow(step) }
 
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
-        Text(
-            "Latest flight-recorder events",
-            color = TowerTextPrimary,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        detail.events.takeLast(6).reversed().forEach { event ->
-            TowerPanel(elevated = false) {
-                StatusBadge(label = event.eventType, color = TowerAccent)
-                Text(
-                    event.message.ifBlank { event.reason.ifBlank { "Event recorded" } },
-                    color = TowerTextMuted,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp
-                )
-                Text(
-                    "${event.actor} • ${event.createdAt ?: "recent"}",
-                    color = TowerTextMuted,
-                    fontSize = 11.sp
-                )
-            }
-        }
-
         when {
-            actionInProgress -> {
-                Text("Recording operator action…", color = TowerTextMuted, fontSize = 13.sp)
-            }
-            stepInFlight -> {
-                TowerPanel(elevated = false) {
-                    StatusBadge(label = "STEP IN FLIGHT", color = TowerAccent)
-                    Text(
-                        text = "Pause, cancel and retry become available only after the governed step reaches a durable boundary. Refresh to see the latest result.",
-                        color = TowerTextMuted,
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp
-                    )
-                }
-            }
+            actionInProgress -> Text("Recording operator action…", color = TowerTextMuted, fontSize = 13.sp)
+            stepInFlight -> Text(
+                "Controls unlock at the next durable step boundary.",
+                color = TowerTextMuted,
+                fontSize = 13.sp
+            )
             else -> {
                 if (run.status in setOf("SCHEDULED", "RUNNING", "RETRY_WAIT")) {
-                    Button(
-                        onClick = onExecuteNext,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
+                    Button(onClick = onExecuteNext, modifier = Modifier.fillMaxWidth()) {
                         Text("Execute next governed step")
                     }
-                }
-                if (run.status in setOf("SCHEDULED", "RUNNING", "RETRY_WAIT")) {
                     OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
                         Text("Pause")
                     }
@@ -436,31 +736,17 @@ private fun StepRow(step: AgentRunStepDto) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = "${step.sequence + 1}", color = TowerAccent)
             StatusBadge(label = step.status, color = runStatusColor(step.status))
-            step.decision?.let {
-                StatusBadge(label = it, color = runStatusColor(step.status))
-            }
+            step.decision?.let { StatusBadge(label = it, color = runStatusColor(step.status)) }
         }
         Text(
-            step.stepType.replace('_', ' '),
+            text = step.stepType.replace('_', ' '),
             color = TowerTextPrimary,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold
         )
-        Text(
-            "Attempts ${step.attemptCount}/${step.maxAttempts}",
-            color = TowerTextMuted,
-            fontSize = 12.sp
-        )
+        Text("Attempts ${step.attemptCount}/${step.maxAttempts}", color = TowerTextMuted, fontSize = 12.sp)
         if (step.reason.isNotBlank()) {
-            Text(
-                step.reason,
-                color = TowerTextMuted,
-                fontSize = 12.sp,
-                lineHeight = 17.sp
-            )
-        }
-        step.outputReference?.let {
-            Text("Output: $it", color = RiskLow, fontSize = 12.sp, lineHeight = 17.sp)
+            Text(step.reason, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
         }
     }
 }
@@ -470,6 +756,21 @@ private fun exceptionColor(severity: String): Color = when (severity) {
     "HIGH" -> RiskHigh
     "MEDIUM" -> RiskMedium
     else -> RiskLow
+}
+
+private fun relayStatusColor(status: String): Color = when (status) {
+    "ONLINE", "RUNNING", "COMPLETED", "SESSION_COMPLETED" -> RiskLow
+    "QUEUED", "STARTING" -> TowerAccent
+    "WAITING_FOR_APPROVAL", "PAUSED", "OFFLINE", "DEGRADED" -> RiskHigh
+    "FAILED", "CANCELLED", "DISABLED" -> RiskCritical
+    else -> RiskMedium
+}
+
+private fun relayEventColor(eventType: String): Color = when (eventType) {
+    "SESSION_COMPLETED", "APPROVAL_RESOLVED", "TEST_RESULT" -> RiskLow
+    "APPROVAL_REQUIRED" -> RiskHigh
+    "SESSION_FAILED", "SESSION_CANCELLED" -> RiskCritical
+    else -> TowerAccent
 }
 
 private fun rateColor(rate: Double): Color = when {
