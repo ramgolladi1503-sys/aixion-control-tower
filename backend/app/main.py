@@ -36,6 +36,7 @@ from .models import (
     WorkOrderSourceType,
     now_utc,
 )
+from .native_connector_routes import router as native_connector_router
 from .notifications import create_notification, router as notifications_router
 from .ops_routes import router as ops_router
 from .risk_engine import assess_approval_request, assess_work_order
@@ -61,6 +62,7 @@ app.include_router(agent_task_router)
 app.include_router(agent_run_router)
 app.include_router(trust_router)
 app.include_router(connector_router)
+app.include_router(native_connector_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
 app.include_router(mcp_gateway_router)
