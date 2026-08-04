@@ -43,8 +43,8 @@ PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
 class Settings:
     profile: str
     auth_enabled: bool
-    trust_enforcement: bool
     db_path: Path
+    trust_enforcement: bool = False
     github_token_configured: bool = False
     github_app_configured: bool = False
     fcm_server_key_configured: bool = False
