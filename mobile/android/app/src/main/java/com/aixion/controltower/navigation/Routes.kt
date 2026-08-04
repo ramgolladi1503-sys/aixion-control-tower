@@ -8,6 +8,7 @@ sealed class Route(val value: String, val label: String) {
     data object WorkOrders : Route("work_orders", "Work")
     data object Inbox : Route("inbox", "Approvals")
     data object AgentTasks : Route("agent_tasks", "Agent Work")
+    data object AgentRuns : Route("agent_runs", "Runs")
     data object Connectors : Route("connectors", "Connectors")
     data object MCPQueue : Route("mcp_queue", "MCP")
     data object Tests : Route("tests", "Tests")
@@ -24,6 +25,7 @@ val bottomRoutes = listOf(
     Route.Command,
     Route.Inbox,
     Route.AgentTasks,
+    Route.AgentRuns,
     Route.Connectors,
     Route.MCPQueue,
     Route.Ops,

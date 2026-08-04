@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException
 
 from .agent_routes import router as agent_router
+from .agent_run_routes import router as agent_run_router
 from .agent_task_routes import propagate_approval_decision_to_agent_task, router as agent_task_router
 from .approval_integrity import compute_approval_payload_hash
 from .approval_lifecycle import grouped_approvals
@@ -44,8 +45,8 @@ from .store import store
 
 app = FastAPI(
     title="Aixion Control Tower API",
-    version="0.1.0",
-    description="MVP backend for AI project execution control, approvals, risk scoring, and audit logs.",
+    version="0.2.0",
+    description="AI project execution control, approvals, resilient agent runs, risk scoring, and audit evidence.",
 )
 app.include_router(auth_router)
 app.include_router(role_router)
@@ -53,6 +54,7 @@ app.include_router(invite_router)
 app.include_router(session_router)
 app.include_router(agent_router)
 app.include_router(agent_task_router)
+app.include_router(agent_run_router)
 app.include_router(connector_router)
 app.include_router(notifications_router)
 app.include_router(github_runner_router)
@@ -83,6 +85,8 @@ def counts() -> dict[str, int]:
         "agents": len(store.external_agents),
         "connectors": len(store.agent_connectors),
         "devices": len(store.device_registrations),
+        "agent_tasks": len(store.agent_tasks),
+        "agent_runs": len(store.agent_runs),
         "projects": len(store.projects),
         "ideas": len(store.ideas),
         "work_orders": len(store.work_orders),

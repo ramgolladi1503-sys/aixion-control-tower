@@ -1,0 +1,70 @@
+services:
+  api:
+    build:
+      context: ./backend
+    environment:
+      AIXION_PROFILE: demo
+      AIXION_AUTH_ENABLED: "false"
+      AIXION_DB_PATH: /app/runtime/aixion_control_tower.sqlite3
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - aixion-runtime:/app/runtime
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+    command:
+      - python
+      - scripts/run_mission_control_worker.py
+      - --base-url
+      - http://api:8000
+      - --worker-id
+      - mission-control-compose-worker
+      - --poll-seconds
+      - "2"
+    environment:
+      AIXION_API_BASE_URL: http://api:8000
+      AIXION_OWNER_TOKEN: ${AIXION_OWNER_TOKEN:-}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-aixion-demo}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  aixion-runtime:
+  prometheus-data:
+  grafana-data:

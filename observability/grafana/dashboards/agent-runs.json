@@ -1,0 +1,74 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active Runs",
+      "id": 1,
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(aixion_agent_runs_total{status=~\"SCHEDULED|RUNNING|EVALUATING|RETRY_WAIT|PAUSED|NEEDS_HUMAN\"})", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto"}
+    },
+    {
+      "type": "stat",
+      "title": "Needs Human",
+      "id": 2,
+      "gridPos": {"h": 6, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "aixion_agent_runs_total{status=\"NEEDS_HUMAN\"}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto"}
+    },
+    {
+      "type": "stat",
+      "title": "Queue Depth",
+      "id": 3,
+      "gridPos": {"h": 6, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "aixion_agent_run_queue_depth", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto"}
+    },
+    {
+      "type": "stat",
+      "title": "Recovered Leases",
+      "id": 4,
+      "gridPos": {"h": 6, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "aixion_agent_run_stale_lease_recoveries_total", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "orientation": "auto", "textMode": "auto"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Run State Distribution",
+      "id": 5,
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 6},
+      "targets": [{"expr": "aixion_agent_runs_total", "legendFormat": "{{status}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Step Duration",
+      "id": 6,
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 6},
+      "targets": [{"expr": "aixion_agent_run_step_duration_seconds", "legendFormat": "{{step_type}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["aixion", "mission-control", "agent-runs"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Aixion Mission Control",
+  "uid": "aixion-mission-control",
+  "version": 1
+}
