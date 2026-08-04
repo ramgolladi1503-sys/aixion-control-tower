@@ -196,6 +196,22 @@ def relay_heartbeat(
     return relay_public(heartbeat_relay(relay, payload))
 
 
+@router.get(
+    "/relay-hosts/{relay_id}/sessions/{session_id}",
+    response_model=RelaySessionDetail,
+)
+def get_relay_owned_session(
+    relay_id: str,
+    session_id: str,
+    x_aixion_relay_token: str | None = Header(default=None),
+) -> RelaySessionDetail:
+    relay = _authenticated_relay(relay_id, x_aixion_relay_token)
+    session = _session_or_404(session_id)
+    if session.relay_id != relay.id:
+        raise HTTPException(status_code=403, detail="Relay session belongs to another relay")
+    return _session_detail(session)
+
+
 @router.post(
     "/relay-hosts/{relay_id}/commands/claim",
     response_model=RelayCommandClaimResponse,
