@@ -1,0 +1,12 @@
+{
+  "id": "aixion-approval",
+  "name": "Aixion Exact Action Approval",
+  "version": "0.1.0",
+  "description": "Routes OpenClaw before_tool_call events through Aixion capability policy and mobile exact-action approval.",
+  "entry": "./aixion-approval-plugin.ts",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

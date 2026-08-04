@@ -1,0 +1,27 @@
+[Unit]
+Description=Aixion outbound-only universal agent relay
+Documentation=https://github.com/ramgolladi1503-sys/aixion-control-tower
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__AIXION_RELAY_EXECUTABLE__ --config __AIXION_RELAY_CONFIG__ run
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__AIXION_RELAY_STATE_DIR__
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

@@ -35,10 +35,12 @@ from .connector_simulator import ConnectorSimulationRequest, ConnectorSimulation
 from .connector_templates import ConnectorTemplate, ConnectorTemplateList, connector_templates, get_connector_template
 from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
 from .models import AuditEvent, AuthUser, now_utc
+from .relay_routes import router as relay_router
 from .store import store
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 OwnerDependency = Depends(require_owner)
+router.include_router(relay_router)
 
 
 def _audit(event_type: str, entity_id: str, details: dict, actor: str = "system") -> AuditEvent:

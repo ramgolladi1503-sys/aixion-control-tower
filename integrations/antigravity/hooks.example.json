@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "name": "aixion-exact-action-approval",
+            "type": "command",
+            "command": "python3 /absolute/path/to/aixion-control-tower/integrations/antigravity/aixion_pre_tool_hook.py",
+            "timeout": 3600
+          }
+        ]
+      }
+    ]
+  }
+}
