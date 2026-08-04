@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .models import AuthUser, now_utc
+from .models import AgentProvider, AuthUser, now_utc
 from .notifications import create_notification
 from .relay_auth import issue_relay_token
 from .relay_models import (
@@ -21,7 +21,7 @@ from .relay_models import (
     RelayHeartbeatRequest,
     RelayHost,
     RelayHostPublic,
-    RelayPlatform,
+    RelayProvider,
     RelayRegistrationCreate,
     RelayRegistrationResponse,
     RelaySession,
@@ -33,12 +33,31 @@ from .relay_models import (
 from .store import store
 from .trust_crypto import sha256_hex
 from .trust_decisions import latest_policy_decision
-from .trust_models import PolicyDecisionType, ProposedAction
+from .trust_models import ProposedAction
 from .trust_service import evaluate_gateway_action
 
 
 class RelayConflict(RuntimeError):
     pass
+
+
+PROVIDER_TO_TRUST_PROVIDER = {
+    RelayProvider.CODEX: AgentProvider.CODEX,
+    RelayProvider.CHATGPT: AgentProvider.CHATGPT,
+    RelayProvider.CLAUDE: AgentProvider.CLAUDE,
+    RelayProvider.CURSOR: AgentProvider.CURSOR,
+    RelayProvider.GITHUB_ACTIONS: AgentProvider.GITHUB_ACTIONS,
+}
+
+TERMINAL_SESSION_STATUSES = {
+    RelaySessionStatus.COMPLETED,
+    RelaySessionStatus.FAILED,
+    RelaySessionStatus.CANCELLED,
+}
+
+
+def relay_provider_to_trust_provider(provider: RelayProvider) -> AgentProvider:
+    return PROVIDER_TO_TRUST_PROVIDER.get(provider, AgentProvider.OTHER)
 
 
 def _utcnow() -> datetime:
@@ -71,15 +90,14 @@ def _path_within_root(path: str, root: str) -> bool:
 def _matching_adapter(
     relay: RelayHost,
     *,
-    provider: str,
+    provider: RelayProvider,
     adapter_id: str,
 ) -> RelayAdapterManifest:
     adapter = next(
         (
             item
             for item in relay.adapters
-            if item.adapter_id == adapter_id
-            and item.provider.value == provider
+            if item.adapter_id == adapter_id and item.provider == provider
         ),
         None,
     )
@@ -162,13 +180,12 @@ def disable_relay(relay: RelayHost, *, user: AuthUser, reason: str) -> RelayHost
             command.status = RelayCommandStatus.CANCELLED
             command.error = "Relay disabled by operator."
             command.completed_at = now_utc()
+            command.lease_owner = None
+            command.lease_token = None
+            command.lease_expires_at = None
             command.updated_at = now_utc()
     for session in store.relay_sessions.values():
-        if session.relay_id == relay.id and session.status not in {
-            RelaySessionStatus.COMPLETED,
-            RelaySessionStatus.FAILED,
-            RelaySessionStatus.CANCELLED,
-        }:
+        if session.relay_id == relay.id and session.status not in TERMINAL_SESSION_STATUSES:
             session.status = RelaySessionStatus.CANCELLED
             session.last_error = reason or "Relay disabled by operator."
             session.completed_at = now_utc()
@@ -245,7 +262,11 @@ def _find_existing_command(idempotency_key: str) -> RelayCommand | None:
             for command in store.relay_commands.values()
             if command.idempotency_key == idempotency_key
             and command.status
-            not in {RelayCommandStatus.FAILED, RelayCommandStatus.CANCELLED}
+            not in {
+                RelayCommandStatus.FAILED,
+                RelayCommandStatus.CANCELLED,
+                RelayCommandStatus.EXPIRED,
+            }
         ),
         None,
     )
@@ -288,7 +309,7 @@ def create_relay_session(
         raise RelayConflict("Disabled relay cannot receive sessions.")
     _matching_adapter(
         relay,
-        provider=payload.provider.value,
+        provider=payload.provider,
         adapter_id=payload.adapter_id,
     )
     if relay.allowed_project_ids and payload.project_id not in relay.allowed_project_ids:
@@ -314,12 +335,7 @@ def create_relay_session(
             session
             for session in store.relay_sessions.values()
             if session.metadata.get("session_request_hash") == session_key
-            and session.status
-            not in {
-                RelaySessionStatus.COMPLETED,
-                RelaySessionStatus.FAILED,
-                RelaySessionStatus.CANCELLED,
-            }
+            and session.status not in TERMINAL_SESSION_STATUSES
         ),
         None,
     )
@@ -360,11 +376,7 @@ def enqueue_session_message(
     message: str,
     metadata: dict[str, Any] | None = None,
 ) -> RelayCommand:
-    if session.status in {
-        RelaySessionStatus.COMPLETED,
-        RelaySessionStatus.FAILED,
-        RelaySessionStatus.CANCELLED,
-    }:
+    if session.status in TERMINAL_SESSION_STATUSES:
         raise RelayConflict("Terminal relay session cannot receive a message.")
     return enqueue_command(
         relay_id=session.relay_id,
@@ -387,11 +399,7 @@ def enqueue_session_control(
         RelayCommandType.SYNC_SESSION,
     }:
         raise RelayConflict("Unsupported session control command.")
-    if session.status in {
-        RelaySessionStatus.COMPLETED,
-        RelaySessionStatus.FAILED,
-        RelaySessionStatus.CANCELLED,
-    }:
+    if session.status in TERMINAL_SESSION_STATUSES:
         raise RelayConflict("Terminal relay session cannot receive control commands.")
     return enqueue_command(
         relay_id=session.relay_id,
@@ -407,7 +415,10 @@ def _recover_expired_commands(relay_id: str) -> int:
     for command in store.relay_commands.values():
         if command.relay_id != relay_id:
             continue
-        if command.status != RelayCommandStatus.LEASED:
+        if command.status not in {
+            RelayCommandStatus.LEASED,
+            RelayCommandStatus.ACKNOWLEDGED,
+        }:
             continue
         if command.lease_expires_at is None or command.lease_expires_at > now:
             continue
@@ -430,10 +441,22 @@ def _recover_expired_commands(relay_id: str) -> int:
                 session.updated_at = now_utc()
         else:
             command.status = RelayCommandStatus.PENDING
+            command.acknowledged_at = None
         recovered += 1
     if recovered:
         store.persist()
     return recovered
+
+
+def _cancel_stale_pending_command(command: RelayCommand) -> bool:
+    session = store.relay_sessions.get(command.session_id or "")
+    if session is None or session.status not in TERMINAL_SESSION_STATUSES:
+        return False
+    command.status = RelayCommandStatus.CANCELLED
+    command.error = f"Relay session is terminal: {session.status}."
+    command.completed_at = now_utc()
+    command.updated_at = now_utc()
+    return True
 
 
 def claim_relay_command(
@@ -441,19 +464,22 @@ def claim_relay_command(
     payload: RelayCommandClaimRequest,
 ) -> RelayCommand | None:
     _recover_expired_commands(relay.id)
-    command = next(
-        (
-            item
-            for item in sorted(
-                store.relay_commands.values(),
-                key=lambda value: (value.created_at, value.id),
-            )
-            if item.relay_id == relay.id
-            and item.status == RelayCommandStatus.PENDING
-        ),
-        None,
-    )
+    command: RelayCommand | None = None
+    changed = False
+    for item in sorted(
+        store.relay_commands.values(),
+        key=lambda value: (value.created_at, value.id),
+    ):
+        if item.relay_id != relay.id or item.status != RelayCommandStatus.PENDING:
+            continue
+        if _cancel_stale_pending_command(item):
+            changed = True
+            continue
+        command = item
+        break
     if command is None:
+        if changed:
+            store.persist()
         return None
     command.status = RelayCommandStatus.LEASED
     command.attempt_count += 1
@@ -696,6 +722,12 @@ def append_relay_event(
     event.event_hash = sha256_hex(_relay_event_material(event))
     store.relay_events[event.id] = event
     _update_session_from_event(session, event)
+    if event.event_type in {
+        RelayEventType.SESSION_COMPLETED,
+        RelayEventType.SESSION_FAILED,
+        RelayEventType.SESSION_CANCELLED,
+    }:
+        session.final_evidence_hash = event.event_hash
 
     if event.event_type == RelayEventType.APPROVAL_REQUIRED:
         create_notification(
@@ -740,6 +772,8 @@ def verify_session_event_chain(session: RelaySession) -> tuple[bool, str]:
         if sha256_hex(_relay_event_material(event)) != event.event_hash:
             return False, f"Hash mismatch at sequence {event.sequence}."
         previous_hash = event.event_hash
+    if session.final_evidence_hash and session.final_evidence_hash != previous_hash:
+        return False, "Final session evidence hash does not match the event chain."
     return True, ""
 
 
@@ -756,13 +790,14 @@ def evaluate_relay_action(
         raise RelayConflict("Proposed action task does not match the relay session.")
     normalized = action.model_copy(
         update={
-            "provider": session.provider,
+            "provider": relay_provider_to_trust_provider(session.provider),
             "run_id": session.run_id or action.run_id,
             "task_id": session.task_id or action.task_id,
             "project_id": session.project_id or action.project_id,
             "repository": session.repository or action.repository,
             "metadata": {
                 **action.metadata,
+                "relay_provider": session.provider.value,
                 "relay_id": relay.id,
                 "relay_session_id": session.id,
                 "adapter_id": session.adapter_id,
