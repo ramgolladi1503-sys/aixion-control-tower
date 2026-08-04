@@ -40,7 +40,6 @@ from .relay_service import (
     disable_relay,
     enqueue_session_control,
     enqueue_session_message,
-    evaluate_relay_action,
     get_relay_action_status,
     heartbeat_command_lease,
     heartbeat_relay,
@@ -51,6 +50,7 @@ from .relay_service import (
     rotate_relay_token,
     verify_session_event_chain,
 )
+from .relay_trust_binding import evaluate_bound_relay_action
 from .store import store
 
 router = APIRouter(tags=["agent-relay"])
@@ -452,7 +452,7 @@ def propose_session_action(
 ) -> RelayActionStatus:
     relay = _authenticated_relay(relay_id, x_aixion_relay_token)
     try:
-        return evaluate_relay_action(
+        return evaluate_bound_relay_action(
             relay,
             _session_or_404(session_id),
             payload.action,
