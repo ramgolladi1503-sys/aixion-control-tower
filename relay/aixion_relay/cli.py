@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .adapters import discover_default_adapters
+from .adapters import AdapterRegistry, discover_default_adapters
 from .adapters.antigravity import antigravity_tool_action
 from .adapters.openclaw import openclaw_tool_action
 from .client import AixionRelayClient, register_relay_host
@@ -99,7 +99,9 @@ async def _init(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_runtime(args: argparse.Namespace):
+def _build_runtime(
+    args: argparse.Namespace,
+) -> tuple[RelayConfig, AdapterRegistry, UniversalRelayRuntime]:
     config = load_config(args.config)
     relay_token = SecretStore().get(config.relay_token_secret_name)
     registry = discover_default_adapters()
@@ -127,7 +129,7 @@ async def _run(args: argparse.Namespace, *, once: bool) -> int:
                 active_session_count=0,
             )
             await runtime.run_once()
-            await asyncio.sleep(0)
+            await runtime.drain_commands()
         finally:
             await runtime.shutdown()
         return 0
@@ -138,7 +140,7 @@ async def _run(args: argparse.Namespace, *, once: bool) -> int:
 async def _doctor(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     registry = discover_default_adapters()
-    results = {
+    results: dict[str, Any] = {
         "config": "ok",
         "relay_id": config.relay_id,
         "api_base_url": config.api_base_url,
@@ -149,7 +151,11 @@ async def _doctor(args: argparse.Namespace) -> int:
     for root in config.workspace_roots:
         path = Path(root)
         results["workspace_roots"].append(
-            {"path": str(path), "exists": path.is_dir(), "writable": os.access(path, os.W_OK)}
+            {
+                "path": str(path),
+                "exists": path.is_dir(),
+                "writable": os.access(path, os.W_OK),
+            }
         )
     results["adapters"] = [
         manifest.model_dump(mode="json")
@@ -187,7 +193,11 @@ def _hook_action(provider: str, payload: dict[str, Any]) -> ActionProposal:
     return ActionProposal.model_validate(raw_action)
 
 
-def _hook_output(provider: str, decision: PolicyDecision, reasons: list[str]) -> dict[str, Any]:
+def _hook_output(
+    provider: str,
+    decision: PolicyDecision,
+    reasons: list[str],
+) -> dict[str, Any]:
     allowed = decision == PolicyDecision.ALLOW
     reason = "; ".join(reasons)
     if provider == "antigravity":
@@ -218,6 +228,10 @@ async def _hook(args: argparse.Namespace) -> int:
     proposal = _hook_action(args.provider, payload)
     config = load_config(args.config)
     token = SecretStore().get(config.relay_token_secret_name)
+    timeout_seconds = float(
+        os.getenv("AIXION_HOOK_APPROVAL_TIMEOUT_SECONDS", "3600")
+    )
+    deadline = asyncio.get_running_loop().time() + max(1.0, timeout_seconds)
     async with AixionRelayClient(
         base_url=config.api_base_url,
         relay_id=config.relay_id,
@@ -226,6 +240,14 @@ async def _hook(args: argparse.Namespace) -> int:
     ) as client:
         decision = await client.propose_action(args.session_id, proposal)
         while decision.decision == PolicyDecision.REQUIRE_APPROVAL:
+            if asyncio.get_running_loop().time() >= deadline:
+                decision = decision.model_copy(
+                    update={
+                        "decision": PolicyDecision.BLOCK,
+                        "reasons": ["Aixion provider-hook approval timed out."],
+                    }
+                )
+                break
             await asyncio.sleep(1)
             decision = await client.get_action_status(
                 args.session_id,
