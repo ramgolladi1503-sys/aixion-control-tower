@@ -44,6 +44,7 @@ from .agent_worker_validation_plan import MAX_VALIDATION_COMMANDS
 from .auth import require_maintainer, require_reviewer
 from .models import AuditEvent, AuthUser
 from .store import store
+from .trust_run_capability import RunCapabilityConflict, ensure_run_capability
 
 router = APIRouter(prefix="/agent/runs", tags=["agent-runs"])
 ReviewerDependency = Depends(require_reviewer)
@@ -321,6 +322,7 @@ def execute_run_next_step(
         if current_step is None:
             raise HTTPException(status_code=409, detail="Run has no current step")
         try:
+            ensure_run_capability(run, user=user)
             trust_actions = authorize_run_step(
                 run,
                 current_step,
@@ -338,7 +340,11 @@ def execute_run_next_step(
                 current_step,
                 actor=user.email,
             )
-        except (AgentRunConflict, AgentRunTrustConflict) as error:
+        except (
+            AgentRunConflict,
+            AgentRunTrustConflict,
+            RunCapabilityConflict,
+        ) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         return _detail(run)
     finally:
