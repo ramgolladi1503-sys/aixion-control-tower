@@ -48,8 +48,10 @@ Aixion returns only `allow` or `deny` for exact mobile decisions.
 The customer continues to type prompts and inspect work in native Antigravity.
 Aixion owns only the approval relay and audit boundary.
 
-The local hook is a background integration component comparable to a browser extension
-or credential helper. It has no task launcher and no agent UI.
+The local hook and relay are background integration components comparable to a browser
+extension or credential helper. They have no task launcher, prompt box, or agent UI.
+The relay may run as a macOS LaunchAgent, but it never starts a second Antigravity
+application or conversation.
 
 ## Current proof scope
 
@@ -68,7 +70,35 @@ are proven.
 3. `aixion-relay` is installed and registered once on the Mac.
 4. An ANTIGRAVITY relay session exists for the disposable certification workspace.
 5. The relay token remains in the operating-system secret store. It is never copied
-   into Antigravity configuration.
+   into Antigravity configuration or a LaunchAgent plist.
+
+## Invisible macOS connector service
+
+After one-time relay registration, install the headless connector:
+
+```bash
+aixion-relay service install
+```
+
+Verify it without opening another agent window:
+
+```bash
+aixion-relay service status
+```
+
+The service definition:
+
+- runs `aixion-relay run` as a background-only LaunchAgent;
+- starts automatically at login;
+- restarts after failure or network recovery;
+- points only to the non-secret relay config path;
+- retrieves the relay token from the operating-system secret store at runtime;
+- writes operational logs under `~/Library/Logs/Aixion/`;
+- does not launch or control Antigravity.
+
+The final customer installer should perform these steps behind a one-time Connect
+Antigravity flow. Terminal commands are certification scaffolding, not the intended
+customer experience.
 
 ## One-time native hook configuration
 
