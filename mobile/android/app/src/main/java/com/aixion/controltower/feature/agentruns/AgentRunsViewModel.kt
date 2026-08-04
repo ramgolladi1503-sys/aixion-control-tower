@@ -8,6 +8,11 @@ import com.aixion.controltower.core.api.dto.AgentReliabilityScorecardDto
 import com.aixion.controltower.core.api.dto.AgentRunDetailDto
 import com.aixion.controltower.core.api.dto.AgentRunDto
 import com.aixion.controltower.core.api.dto.AgentRunSummaryDto
+import com.aixion.controltower.core.api.dto.RelayHostDto
+import com.aixion.controltower.core.api.dto.RelaySessionCreateDto
+import com.aixion.controltower.core.api.dto.RelaySessionDetailDto
+import com.aixion.controltower.core.api.dto.RelaySessionDto
+import com.aixion.controltower.core.api.dto.RelaySummaryDto
 import com.aixion.controltower.core.api.dto.TrustExceptionDto
 import com.aixion.controltower.data.repository.AgentRunsRepository
 import kotlinx.coroutines.async
@@ -20,18 +25,26 @@ private data class MissionControlSnapshot(
     val runs: List<AgentRunDto>,
     val summary: AgentRunSummaryDto,
     val exceptions: List<TrustExceptionDto>,
-    val scorecards: List<AgentReliabilityScorecardDto>
+    val scorecards: List<AgentReliabilityScorecardDto>,
+    val relayHosts: List<RelayHostDto>,
+    val relaySummary: RelaySummaryDto,
+    val relaySessions: List<RelaySessionDto>
 )
 
 data class AgentRunsUiState(
     val loading: Boolean = true,
     val actionInProgress: Boolean = false,
     val decidingActionId: String? = null,
+    val relayActionInProgress: Boolean = false,
     val runs: List<AgentRunDto> = emptyList(),
     val summary: AgentRunSummaryDto = AgentRunSummaryDto(),
     val trustExceptions: List<TrustExceptionDto> = emptyList(),
     val reliabilityScorecards: List<AgentReliabilityScorecardDto> = emptyList(),
+    val relayHosts: List<RelayHostDto> = emptyList(),
+    val relaySummary: RelaySummaryDto = RelaySummaryDto(),
+    val relaySessions: List<RelaySessionDto> = emptyList(),
     val selected: AgentRunDetailDto? = null,
+    val selectedRelaySession: RelaySessionDetailDto? = null,
     val errorMessage: String? = null,
     val actionMessage: String? = null
 )
@@ -55,32 +68,48 @@ class AgentRunsViewModel(application: Application) : AndroidViewModel(applicatio
                 val summary = async { repository.getSummary() }
                 val exceptions = async { repository.listTrustExceptions() }
                 val scorecards = async { repository.listReliabilityScorecards() }
+                val relayHosts = async { repository.listRelayHosts() }
+                val relaySummary = async { repository.getRelaySummary() }
+                val relaySessions = async { repository.listRelaySessions() }
                 MissionControlSnapshot(
                     runs = runs.await(),
                     summary = summary.await(),
                     exceptions = exceptions.await(),
-                    scorecards = scorecards.await()
+                    scorecards = scorecards.await(),
+                    relayHosts = relayHosts.await(),
+                    relaySummary = relaySummary.await(),
+                    relaySessions = relaySessions.await()
                 )
             }.onSuccess { snapshot ->
                 val selectedId = _state.value.selected?.run?.id
+                val selectedRelayId = _state.value.selectedRelaySession?.session?.id
                 _state.value = _state.value.copy(
                     loading = false,
                     runs = snapshot.runs,
                     summary = snapshot.summary,
                     trustExceptions = snapshot.exceptions,
                     reliabilityScorecards = snapshot.scorecards,
+                    relayHosts = snapshot.relayHosts,
+                    relaySummary = snapshot.relaySummary,
+                    relaySessions = snapshot.relaySessions,
                     errorMessage = null,
                     selected = _state.value.selected?.takeIf { detail ->
                         snapshot.runs.any { it.id == detail.run.id }
+                    },
+                    selectedRelaySession = _state.value.selectedRelaySession?.takeIf { detail ->
+                        snapshot.relaySessions.any { it.id == detail.session.id }
                     }
                 )
                 selectedId?.let(::openRun)
+                selectedRelayId?.let(::openRelaySession)
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     loading = false,
                     runs = emptyList(),
                     trustExceptions = emptyList(),
                     reliabilityScorecards = emptyList(),
+                    relayHosts = emptyList(),
+                    relaySessions = emptyList(),
                     errorMessage = error.message ?: "Unable to load Mission Control truth."
                 )
             }
@@ -106,6 +135,113 @@ class AgentRunsViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun closeRun() {
         _state.value = _state.value.copy(selected = null, actionMessage = null)
+    }
+
+    fun openRelaySession(sessionId: String) {
+        viewModelScope.launch {
+            runCatching { repository.getRelaySession(sessionId) }
+                .onSuccess { detail ->
+                    _state.value = _state.value.copy(
+                        selectedRelaySession = detail,
+                        errorMessage = null
+                    )
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        errorMessage = error.message ?: "Unable to load agent session."
+                    )
+                }
+        }
+    }
+
+    fun closeRelaySession() {
+        _state.value = _state.value.copy(
+            selectedRelaySession = null,
+            actionMessage = null
+        )
+    }
+
+    fun createRelaySession(
+        relayId: String,
+        provider: String,
+        adapterId: String,
+        objective: String,
+        workspacePath: String,
+        repositoryName: String,
+        approvalMode: String = "STRICT"
+    ) {
+        if (_state.value.relayActionInProgress) return
+        if (relayId.isBlank() || provider.isBlank() || adapterId.isBlank()) {
+            _state.value = _state.value.copy(
+                errorMessage = "Choose an online relay and available agent adapter."
+            )
+            return
+        }
+        if (objective.isBlank() || workspacePath.isBlank()) {
+            _state.value = _state.value.copy(
+                errorMessage = "Objective and absolute workspace path are required."
+            )
+            return
+        }
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                relayActionInProgress = true,
+                errorMessage = null,
+                actionMessage = null
+            )
+            runCatching {
+                repository.createRelaySession(
+                    RelaySessionCreateDto(
+                        relayId = relayId,
+                        provider = provider,
+                        adapterId = adapterId,
+                        objective = objective.trim(),
+                        workspacePath = workspacePath.trim(),
+                        repository = repositoryName.trim().ifBlank { null },
+                        approvalMode = approvalMode
+                    )
+                )
+            }.onSuccess { detail ->
+                _state.value = _state.value.copy(
+                    relayActionInProgress = false,
+                    selectedRelaySession = detail,
+                    actionMessage = "${detail.session.provider} session queued",
+                    errorMessage = null
+                )
+                refresh()
+            }.onFailure { error ->
+                _state.value = _state.value.copy(
+                    relayActionInProgress = false,
+                    errorMessage = error.message ?: "Unable to start agent session."
+                )
+            }
+        }
+    }
+
+    fun sendRelayMessage(message: String) = relayAct("Instruction queued") { sessionId ->
+        if (message.isBlank()) error("Instruction cannot be empty.")
+        repository.sendRelayMessage(sessionId, message.trim())
+    }
+
+    fun pauseRelaySession() = relayAct("Agent session pause queued") { sessionId ->
+        repository.pauseRelaySession(
+            sessionId,
+            "Paused from Android Aixion Control Tower."
+        )
+    }
+
+    fun resumeRelaySession() = relayAct("Agent session resume queued") { sessionId ->
+        repository.resumeRelaySession(
+            sessionId,
+            "Resumed from Android Aixion Control Tower."
+        )
+    }
+
+    fun cancelRelaySession() = relayAct("Agent session cancellation queued") { sessionId ->
+        repository.cancelRelaySession(
+            sessionId,
+            "Cancelled from Android Aixion Control Tower."
+        )
     }
 
     fun decideExactAction(actionId: String, allow: Boolean) {
@@ -167,6 +303,36 @@ class AgentRunsViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun executeNext() = act("Next step executed") { runId ->
         repository.executeNext(runId)
+    }
+
+    private fun relayAct(
+        successMessage: String,
+        block: suspend (String) -> Any
+    ) {
+        val sessionId = _state.value.selectedRelaySession?.session?.id ?: return
+        if (_state.value.relayActionInProgress) return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                relayActionInProgress = true,
+                errorMessage = null,
+                actionMessage = null
+            )
+            runCatching { block(sessionId) }
+                .onSuccess {
+                    _state.value = _state.value.copy(
+                        relayActionInProgress = false,
+                        actionMessage = successMessage,
+                        errorMessage = null
+                    )
+                    refresh()
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        relayActionInProgress = false,
+                        errorMessage = error.message ?: "Agent session action failed."
+                    )
+                }
+        }
     }
 
     private fun act(
