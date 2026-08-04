@@ -163,4 +163,4 @@ def test_human_denial_remains_as_blocked_exception() -> None:
     queue = build_exception_queue()
     item = next(entry for entry in queue if entry.action_id == action.id)
     assert item.category == "BLOCK"
-    assert item.severity == RiskLevel.MEDIUM
+    assert item.severity == RiskLevel.HIGH
