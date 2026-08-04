@@ -5,20 +5,67 @@ import json
 import pytest
 
 from aixion_relay.adapters.antigravity import antigravity_tool_action
+from aixion_relay.adapters.base import AdapterContext
 from aixion_relay.adapters.configured_process import (
     ConfiguredProcessError,
     argv_from_environment,
 )
 from aixion_relay.adapters.openclaw import openclaw_tool_action
 from aixion_relay.adapters.registry import discover_default_adapters
-from aixion_relay.contracts import CapabilityActionType, RelayProvider
+from aixion_relay.contracts import (
+    CapabilityActionType,
+    EventType,
+    RelayProvider,
+    SessionStartRequest,
+)
 
 
-def test_default_registry_always_describes_codex_and_claude() -> None:
+def test_default_registry_describes_native_antigravity_connector() -> None:
     registry = discover_default_adapters()
     manifests = {item.adapter_id: item for item in registry.manifests()}
     assert manifests["codex-app-server"].provider == RelayProvider.CODEX
     assert manifests["claude-agent-sdk"].provider == RelayProvider.CLAUDE
+
+    native = manifests["antigravity-native-hook"]
+    assert native.provider == RelayProvider.ANTIGRAVITY
+    assert native.available is True
+    assert native.metadata["native_attach_only"] is True
+    assert native.metadata["launches_replacement_agent"] is False
+
+
+@pytest.mark.asyncio
+async def test_native_antigravity_adapter_starts_passive_connector_only() -> None:
+    registry = discover_default_adapters()
+    adapter = registry.get("antigravity-native-hook")
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    async def authorize(_proposal):
+        raise AssertionError("Passive native attachment must not authorize by itself.")
+
+    session = await adapter.start(
+        AdapterContext(
+            request=SessionStartRequest(
+                session_id="relay_session_native_antigravity",
+                objective="Observe native Antigravity approvals only.",
+                workspace_path="/tmp/native-antigravity-workspace",
+            ),
+            emit=emit,
+            authorize=authorize,
+        )
+    )
+
+    assert session.remote_session_id is None
+    assert await session.sync() == {
+        "native_attach_only": True,
+        "launches_replacement_agent": False,
+        "provider_hook": "PreToolUse",
+    }
+    assert [event.event_type for event in events] == [EventType.SESSION_STARTED]
+    assert events[0].payload["launches_replacement_agent"] is False
+    await session.cancel("test cleanup")
 
 
 def test_antigravity_hook_maps_documented_run_command_payload() -> None:
