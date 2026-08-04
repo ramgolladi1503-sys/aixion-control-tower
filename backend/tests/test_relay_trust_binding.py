@@ -11,7 +11,16 @@ import pytest
 
 from app.agent_run_models import AgentRun
 from app.agent_task_models import AgentTask, AgentTaskStatus
-from app.models import AgentProvider, ApprovalRequest, ApprovalStatus, Project, now_utc
+from app.models import (
+    AgentProvider,
+    ApprovalRequest,
+    ApprovalStatus,
+    FileChange,
+    Project,
+    RiskAssessment,
+    RiskLevel,
+    now_utc,
+)
 from app.relay_models import (
     RelayHost,
     RelayPlatform,
@@ -21,6 +30,7 @@ from app.relay_models import (
 from app.relay_service import RelayConflict
 from app.relay_trust_binding import evaluate_bound_relay_action
 from app.store import store
+from app.trust_crypto import sign_payload
 from app.trust_models import (
     CapabilityActionType,
     CapabilityLease,
@@ -29,6 +39,7 @@ from app.trust_models import (
     PolicyDecisionType,
     ProposedAction,
 )
+from app.trust_policy import lease_receipt_payload
 
 
 def setup_function() -> None:
@@ -44,9 +55,21 @@ def _seed_bound_session() -> tuple[RelayHost, RelaySession, AgentTask, AgentRun]
         summary="Run one exact command.",
         agent_name="codex",
         target_branch="feature/relay-binding",
+        files=[
+            FileChange(
+                path="backend/tests/test_safe.py",
+                change_type="update",
+                diff="No file mutation; approved command-only fixture.",
+            )
+        ],
         test_plan=["python -m pytest backend/tests/test_safe.py"],
         rollback_plan="Close the feature pull request.",
         status=ApprovalStatus.APPROVED,
+        risk=RiskAssessment(
+            level=RiskLevel.LOW,
+            reasons=["Bound test-only command."],
+            blocked=False,
+        ),
         approved_payload_hash="sealed-relay-binding-payload",
     )
     store.approval_requests[approval.id] = approval
@@ -79,8 +102,9 @@ def _seed_bound_session() -> tuple[RelayHost, RelaySession, AgentTask, AgentRun]
         issued_by_user_id="owner",
         expires_at=now_utc() + timedelta(minutes=10),
         receipt_nonce="relay-binding-nonce",
-        receipt_signature="relay-binding-signature",
+        receipt_signature="pending",
     )
+    lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
     store.capability_leases[lease.id] = lease
     run = AgentRun(
         task_id=task.id,

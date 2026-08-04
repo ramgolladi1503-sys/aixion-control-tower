@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "generated_for": "feature/native-agent-session-control-plane-v1",
+  "connectors": [
+    {
+      "provider": "CODEX",
+      "adapter_id": "codex-native-desktop",
+      "display_name": "Codex native desktop session",
+      "mode": "NATIVE_EXISTING_SESSION",
+      "support": "PARTNER_REQUIRED",
+      "public_contract": false,
+      "native_control_eligible": false,
+      "capabilities": [],
+      "missing_required_capabilities": [
+        "ATTACH_EXISTING_SESSION",
+        "STREAM_SESSION_STATE",
+        "OBSERVE_APPROVAL_REQUESTS",
+        "RESOLVE_APPROVAL_REQUESTS",
+        "PRESERVE_PROVIDER_DECISIONS",
+        "CONTINUE_SAME_EXECUTION_CONTEXT",
+        "REVOKE_CONNECTION"
+      ],
+      "evidence_references": [
+        "https://openai.com/index/work-with-codex-from-anywhere/",
+        "https://help.openai.com/en/articles/20001275-chatgpt-work-and-codex",
+        "https://help.openai.com/en/articles/20001256-plugins-in-codex/"
+      ],
+      "customer_message": "OpenAI documents first-party Codex mobile remote control, but a public third-party native approval connector is not documented. Provider access is required."
+    },
+    {
+      "provider": "CODEX",
+      "adapter_id": "codex-aixion-managed-app-server",
+      "display_name": "Codex Aixion-managed app-server session",
+      "mode": "AIXION_MANAGED_SESSION",
+      "support": "MANAGED_ONLY",
+      "public_contract": true,
+      "native_control_eligible": false,
+      "capabilities": [
+        "START_MANAGED_RUNTIME",
+        "STRUCTURED_PROVIDER_EVENTS",
+        "OBSERVE_APPROVAL_REQUESTS",
+        "RESOLVE_APPROVAL_REQUESTS",
+        "PRESERVE_PROVIDER_DECISIONS"
+      ],
+      "missing_required_capabilities": [
+        "ATTACH_EXISTING_SESSION",
+        "STREAM_SESSION_STATE",
+        "CONTINUE_SAME_EXECUTION_CONTEXT",
+        "REVOKE_CONNECTION"
+      ],
+      "evidence_references": [
+        "docs/research/local_codex_session_supervision_v1_results.md"
+      ],
+      "customer_message": "Aixion can own a separate Codex runtime. This is an explicit managed-session fallback, not control of an existing Codex Desktop thread."
+    }
+  ]
+}
