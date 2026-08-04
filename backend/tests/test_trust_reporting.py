@@ -19,7 +19,10 @@ from app.models import (
     UserRole,
 )
 from app.store import store
-from app.trust_action_authorization import record_action_authorization
+from app.trust_action_authorization import (
+    action_payload_hash,
+    record_action_authorization,
+)
 from app.trust_action_authorization_models import (
     ActionAuthorizationCreate,
     ActionAuthorizationDecision,
@@ -117,10 +120,40 @@ def _strict_action() -> ProposedAction:
         repository="owner/repo",
         branch="feature/reporting",
         paths=["backend/app/reporting.py"],
+        metadata={
+            "cwd": "/workspace/repo",
+            "relay_session_id": "relay_session_reporting",
+            "adapter_id": "antigravity-native-hook",
+            "conversation_id": "conversation-reporting",
+            "step_index": 12,
+            "provider_payload_sha256": "a" * 64,
+        },
     )
     result = evaluate_gateway_action(action, actor="agent:codex")
     assert result.decision.decision.value == "REQUIRE_APPROVAL"
     return action
+
+
+def test_pending_exact_action_exposes_mobile_verification_fields() -> None:
+    action = _strict_action()
+    item = next(
+        entry
+        for entry in build_exception_queue()
+        if entry.action_id == action.id
+    )
+
+    assert item.provider == AgentProvider.CODEX
+    assert item.action_type == CapabilityActionType.MODIFY_FILES
+    assert item.paths == ["backend/app/reporting.py"]
+    assert item.repository == "owner/repo"
+    assert item.branch == "feature/reporting"
+    assert item.cwd == "/workspace/repo"
+    assert item.relay_session_id == "relay_session_reporting"
+    assert item.adapter_id == "antigravity-native-hook"
+    assert item.native_conversation_id == "conversation-reporting"
+    assert item.native_step_index == 12
+    assert item.provider_payload_sha256 == "a" * 64
+    assert item.action_payload_sha256 == action_payload_hash(action)
 
 
 def test_resolved_exact_action_disappears_from_exception_queue() -> None:
