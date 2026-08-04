@@ -20,6 +20,7 @@ from .config import (
     save_config,
 )
 from .contracts import ActionProposal, PolicyDecision
+from .macos_service import install_service, service_status, uninstall_service
 from .runtime import UniversalRelayRuntime
 from .secrets import SecretStore
 
@@ -52,6 +53,14 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser("run", help="Run the relay until stopped.")
     subparsers.add_parser("once", help="Process at most one queued command.")
     subparsers.add_parser("doctor", help="Validate configuration and provider adapters.")
+
+    service = subparsers.add_parser(
+        "service",
+        help="Manage the invisible macOS background relay service.",
+    )
+    service.add_argument("action", choices=["install", "uninstall", "status"])
+    service.add_argument("--executable", type=Path, default=None)
+    service.add_argument("--launch-agent-path", type=Path, default=None)
 
     hook = subparsers.add_parser(
         "hook",
@@ -184,6 +193,21 @@ async def _doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _service(args: argparse.Namespace) -> int:
+    if args.action == "install":
+        result = install_service(
+            executable=args.executable,
+            config_path=args.config,
+            launch_agent_path=args.launch_agent_path,
+        )
+    elif args.action == "uninstall":
+        result = uninstall_service(launch_agent_path=args.launch_agent_path)
+    else:
+        result = service_status()
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if result.get("status") != "not_loaded" else 1
+
+
 def _hook_action(provider: str, payload: dict[str, Any]) -> ActionProposal:
     if provider == "antigravity":
         return antigravity_tool_action(payload)
@@ -266,6 +290,8 @@ async def _async_main(args: argparse.Namespace) -> int:
         return await _run(args, once=True)
     if args.command == "doctor":
         return await _doctor(args)
+    if args.command == "service":
+        return _service(args)
     if args.command == "hook":
         return await _hook(args)
     raise RuntimeError(f"Unsupported command: {args.command}")
