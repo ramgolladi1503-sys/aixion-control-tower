@@ -87,7 +87,10 @@ class AixionRelayClient:
     async def get_session_detail(self, session_id: str) -> dict[str, Any]:
         return await self._request(
             "GET",
-            f"connectors/relay-sessions/{session_id}",
+            (
+                f"connectors/relay-hosts/{self.relay_id}/sessions/"
+                f"{session_id}"
+            ),
         )
 
     async def claim_command(
