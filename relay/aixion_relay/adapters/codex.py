@@ -34,6 +34,19 @@ def _nested(payload: dict[str, Any], *keys: str) -> Any:
     return current
 
 
+def _thread_id(
+    payload: dict[str, Any],
+    fallback: str | None = None,
+) -> str | None:
+    value = (
+        _nested(payload, "thread", "id")
+        or payload.get("threadId")
+        or payload.get("id")
+        or fallback
+    )
+    return str(value) if value else None
+
+
 class CodexAppServerSession(AgentSessionHandle):
     APPROVAL_METHODS = {
         "item/commandExecution/requestApproval",
@@ -86,12 +99,8 @@ class CodexAppServerSession(AgentSessionHandle):
                 "model": self.context.request.model,
             },
         )
-        self.thread_id = str(
-            _nested(result or {}, "thread", "id")
-            or (result or {}).get("threadId")
-            or (result or {}).get("id")
-        )
-        if not self.thread_id or self.thread_id == "None":
+        self.thread_id = _thread_id(result or {})
+        if not self.thread_id:
             raise RuntimeError(f"Codex thread/start returned no thread id: {result!r}")
         await self.context.emit(
             NormalizedEvent(
@@ -152,7 +161,12 @@ class CodexAppServerSession(AgentSessionHandle):
                 },
             )
         else:
-            paths = item.get("paths") or item.get("files") or []
+            paths = (
+                item.get("paths")
+                or item.get("files")
+                or item.get("grantRoot")
+                or []
+            )
             if isinstance(paths, str):
                 paths = [paths]
             proposal = ActionProposal(
@@ -252,7 +266,9 @@ class CodexAppServerSession(AgentSessionHandle):
             return EventType.COMMAND_OUTPUT, str(text)
         if "command" in method_lower and "start" in method_lower:
             return EventType.COMMAND_STARTED, str(text)
-        if "file" in method_lower and ("change" in method_lower or "patch" in method_lower):
+        if "file" in method_lower and (
+            "change" in method_lower or "patch" in method_lower
+        ):
             return EventType.FILE_CHANGED, str(text)
         if "test" in method_lower:
             return EventType.TEST_RESULT, str(text)
