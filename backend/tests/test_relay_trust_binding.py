@@ -11,7 +11,15 @@ import pytest
 
 from app.agent_run_models import AgentRun
 from app.agent_task_models import AgentTask, AgentTaskStatus
-from app.models import AgentProvider, ApprovalRequest, ApprovalStatus, Project, now_utc
+from app.models import (
+    AgentProvider,
+    ApprovalRequest,
+    ApprovalStatus,
+    Project,
+    RiskAssessment,
+    RiskLevel,
+    now_utc,
+)
 from app.relay_models import (
     RelayHost,
     RelayPlatform,
@@ -44,8 +52,10 @@ def _seed_bound_session() -> tuple[RelayHost, RelaySession, AgentTask, AgentRun]
         summary="Run one exact command.",
         agent_name="codex",
         target_branch="feature/relay-binding",
+        files=[],
         test_plan=["python -m pytest backend/tests/test_safe.py"],
         rollback_plan="Close the feature pull request.",
+        risk=RiskAssessment(level=RiskLevel.LOW),
         status=ApprovalStatus.APPROVED,
         approved_payload_hash="sealed-relay-binding-payload",
     )
