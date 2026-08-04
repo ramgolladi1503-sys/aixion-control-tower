@@ -21,7 +21,86 @@ def test_default_registry_always_describes_codex_and_claude() -> None:
     assert manifests["claude-agent-sdk"].provider == RelayProvider.CLAUDE
 
 
-def test_antigravity_hook_maps_command_without_shell_execution() -> None:
+def test_antigravity_hook_maps_documented_run_command_payload() -> None:
+    action = antigravity_tool_action(
+        {
+            "toolCall": {
+                "name": "run_command",
+                "args": {
+                    "CommandLine": "pytest tests/test_feed.py",
+                    "Cwd": "/workspace/project",
+                    "WaitMsBeforeAsync": 5000,
+                },
+            },
+            "stepIdx": 19,
+            "conversationId": "ec33ebf9-0cba-4100-8142-c61503f6c587",
+            "workspacePaths": ["/workspace/project"],
+            "transcriptPath": "/private/transcript.jsonl",
+            "artifactDirectoryPath": "/private/artifacts",
+        }
+    )
+    assert action.action_type == CapabilityActionType.RUN_COMMAND
+    assert action.command == "pytest tests/test_feed.py"
+    assert action.metadata["cwd"] == "/workspace/project"
+    assert action.metadata["conversation_id"] == (
+        "ec33ebf9-0cba-4100-8142-c61503f6c587"
+    )
+    assert action.metadata["step_index"] == 19
+    assert len(action.metadata["provider_payload_sha256"]) == 64
+
+
+def test_antigravity_hook_maps_documented_file_write_without_copying_code() -> None:
+    action = antigravity_tool_action(
+        {
+            "toolCall": {
+                "name": "write_to_file",
+                "args": {
+                    "TargetFile": "/workspace/project/example.py",
+                    "Overwrite": True,
+                    "CodeContent": "SECRET_SOURCE_MUST_NOT_ENTER_GENERIC_METADATA",
+                    "Description": "Create example",
+                },
+            },
+            "conversationId": "conversation-1",
+            "workspacePaths": ["/workspace/project"],
+            "stepIdx": 3,
+        }
+    )
+    assert action.action_type == CapabilityActionType.MODIFY_FILES
+    assert action.paths == ["/workspace/project/example.py"]
+    assert action.metadata["overwrite"] is True
+    serialized_metadata = json.dumps(action.metadata)
+    assert "SECRET_SOURCE_MUST_NOT_ENTER_GENERIC_METADATA" not in serialized_metadata
+    assert action.metadata["tool_argument_names"] == [
+        "CodeContent",
+        "Description",
+        "Overwrite",
+        "TargetFile",
+    ]
+
+
+def test_antigravity_payload_hash_is_canonical() -> None:
+    first = {
+        "conversationId": "conversation-1",
+        "toolCall": {
+            "name": "run_command",
+            "args": {"Cwd": "/workspace", "CommandLine": "pwd"},
+        },
+    }
+    second = {
+        "toolCall": {
+            "args": {"CommandLine": "pwd", "Cwd": "/workspace"},
+            "name": "run_command",
+        },
+        "conversationId": "conversation-1",
+    }
+    assert (
+        antigravity_tool_action(first).metadata["provider_payload_sha256"]
+        == antigravity_tool_action(second).metadata["provider_payload_sha256"]
+    )
+
+
+def test_antigravity_legacy_payload_remains_fail_safe_compatible() -> None:
     action = antigravity_tool_action(
         {
             "tool_name": "terminal_command",
