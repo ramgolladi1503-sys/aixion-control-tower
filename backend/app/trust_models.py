@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .models import AgentProvider, RiskLevel, UserRole, new_id, now_utc
 
@@ -304,6 +304,8 @@ class CredentialGrant(BaseModel):
 
 
 class CredentialGrantPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     lease_id: str
     grant_type: CredentialGrantType
