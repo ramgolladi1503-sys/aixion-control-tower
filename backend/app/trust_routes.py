@@ -43,10 +43,12 @@ from .trust_models import (
     ReviewerAttestationCreate,
     TrustEvent,
 )
-from .trust_service import (
-    TrustControlConflict,
+from .trust_reporting import (
     build_exception_queue,
     build_reliability_scorecards,
+)
+from .trust_service import (
+    TrustControlConflict,
     evaluate_gateway_action,
     issue_capability_lease,
     issue_credential_grant,
@@ -80,7 +82,7 @@ def _public(lease: CapabilityLease) -> CapabilityLeasePublic:
 
 
 def _credential_public(grant: CredentialGrant) -> CredentialGrantPublic:
-    return CredentialGrantPublic.model_validate(grant.model_dump())
+    return CredentialGrantPublic.model_validate(grant)
 
 
 def _trust_error(error: Exception) -> HTTPException:
