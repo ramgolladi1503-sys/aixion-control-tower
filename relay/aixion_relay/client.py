@@ -93,6 +93,47 @@ class AixionRelayClient:
             ),
         )
 
+    async def register_local_session(
+        self,
+        *,
+        provider: str,
+        adapter_id: str,
+        workspace_path: str,
+        idempotency_key: str,
+        repository: str | None = None,
+        project_id: str | None = None,
+        task_id: str | None = None,
+        run_id: str | None = None,
+        approval_mode: str = "STRICT",
+        model: str | None = None,
+        max_runtime_seconds: int = 3600,
+        host_process_id: int | None = None,
+        provider_process_id: int | None = None,
+        provider_thread_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"connectors/relay-hosts/{self.relay_id}/local-sessions",
+            json={
+                "provider": provider,
+                "adapter_id": adapter_id,
+                "workspace_path": workspace_path,
+                "repository": repository,
+                "project_id": project_id,
+                "task_id": task_id,
+                "run_id": run_id,
+                "approval_mode": approval_mode,
+                "model": model,
+                "max_runtime_seconds": max_runtime_seconds,
+                "host_process_id": host_process_id,
+                "provider_process_id": provider_process_id,
+                "provider_thread_id": provider_thread_id,
+                "idempotency_key": idempotency_key,
+                "metadata": metadata or {},
+            },
+        )
+
     async def claim_command(
         self,
         *,

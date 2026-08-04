@@ -77,6 +77,18 @@ class RelaySessionStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+class RelaySessionOrigin(StrEnum):
+    HOST_STARTED = "HOST_STARTED"
+    MOBILE_STARTED = "MOBILE_STARTED"
+
+
+class RelayApprovalSource(StrEnum):
+    MAC = "MAC"
+    ANDROID = "ANDROID"
+    POLICY = "POLICY"
+    SYSTEM = "SYSTEM"
+
+
 class RelayCommandType(StrEnum):
     START_SESSION = "START_SESSION"
     SEND_MESSAGE = "SEND_MESSAGE"
@@ -278,12 +290,41 @@ class RelaySessionCreate(BaseModel):
         return cleaned
 
 
+class RelayLocalSessionCreate(BaseModel):
+    provider: RelayProvider
+    adapter_id: str = Field(min_length=1, max_length=120)
+    workspace_path: str = Field(min_length=1, max_length=2000)
+    repository: str | None = Field(default=None, max_length=500)
+    project_id: str | None = None
+    task_id: str | None = None
+    run_id: str | None = None
+    approval_mode: str = Field(default="STRICT", max_length=40)
+    model: str | None = Field(default=None, max_length=200)
+    max_runtime_seconds: int = Field(default=3600, ge=30, le=86400)
+    host_process_id: int | None = Field(default=None, ge=1)
+    provider_process_id: int | None = Field(default=None, ge=1)
+    provider_thread_id: str | None = Field(default=None, max_length=500)
+    idempotency_key: str = Field(min_length=8, max_length=300)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("workspace_path")
+    @classmethod
+    def validate_workspace_path(cls, value: str) -> str:
+        return RelaySessionCreate.validate_workspace_path(value)
+
+    @field_validator("repository")
+    @classmethod
+    def validate_repository(cls, value: str | None) -> str | None:
+        return RelaySessionCreate.validate_repository(value)
+
+
 class RelaySession(BaseModel):
     id: str = Field(default_factory=lambda: new_id("relay_session"))
     relay_id: str
     provider: RelayProvider
     adapter_id: str
     objective: str
+    origin: RelaySessionOrigin = RelaySessionOrigin.MOBILE_STARTED
     workspace_path: str
     repository: str | None = None
     project_id: str | None = None

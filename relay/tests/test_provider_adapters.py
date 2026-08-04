@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import pytest
+from typing import Any
 
+import pytest
 from aixion_relay.adapters.base import AdapterContext
 from aixion_relay.adapters.claude import _tool_action
 from aixion_relay.adapters.codex import CodexAppServerSession, _thread_id
@@ -12,6 +13,32 @@ from aixion_relay.contracts import (
     PolicyDecision,
     SessionStartRequest,
 )
+
+
+class FakeRpc:
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.notifications: list[tuple[str, dict[str, Any] | None]] = []
+        self.closed = False
+
+    async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self.requests.append((method, params))
+        if method == "thread/start":
+            return {"thread": {"id": "thread-fake"}}
+        if method == "turn/start":
+            return {"turn": {"id": f"turn-{len(self.requests)}"}}
+        return {}
+
+    async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        self.notifications.append((method, params))
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeProcess:
+    pid = 4321
+    returncode = None
 
 
 def test_codex_thread_identity_and_notification_mapping() -> None:
@@ -30,7 +57,60 @@ def test_codex_thread_identity_and_notification_mapping() -> None:
         "turn/completed",
         {},
     )
-    assert event_type == EventType.AGENT_MESSAGE
+    assert event_type == EventType.SESSION_COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_codex_lifecycle_separates_thread_from_first_turn() -> None:
+    events = []
+
+    async def emit(event):
+        events.append(event)
+
+    async def authorize(_proposal):
+        raise AssertionError("No approval expected")
+
+    session = object.__new__(CodexAppServerSession)
+    session.context = AdapterContext(
+        request=SessionStartRequest(
+            session_id="session-1",
+            objective="",
+            workspace_path="/tmp/repo",
+        ),
+        emit=emit,
+        authorize=authorize,
+    )
+    session.process = FakeProcess()
+    session.rpc = FakeRpc()
+    session.thread_id = None
+    session.turn_id = None
+    session._initialized = False
+    session._thread_started = False
+    session._finished = __import__("asyncio").get_running_loop().create_future()
+    session._cancelled = False
+
+    await session.initialize()
+    assert [method for method, _ in session.rpc.requests] == [
+        "initialize",
+        "thread/start",
+    ]
+    assert session.thread_id == "thread-fake"
+    assert session.turn_id is None
+
+    await session.start_turn("first prompt")
+    await session.start_turn("second prompt")
+
+    assert [method for method, _ in session.rpc.requests] == [
+        "initialize",
+        "thread/start",
+        "turn/start",
+        "turn/start",
+    ]
+    assert all(
+        params.get("threadId") == "thread-fake"
+        for method, params in session.rpc.requests
+        if method == "turn/start"
+    )
 
 
 @pytest.mark.asyncio
@@ -80,6 +160,94 @@ async def test_codex_command_approval_uses_exact_command() -> None:
         EventType.APPROVAL_REQUIRED,
         EventType.APPROVAL_RESOLVED,
     ]
+    assert proposals[0].metadata["available_decisions"] == ["accept", "decline"]
+    assert proposals[0].metadata["thread_id"] == "thread-1"
+    assert proposals[0].metadata["turn_id"] == "turn-1"
+
+
+@pytest.mark.asyncio
+async def test_codex_preserves_provider_session_decision() -> None:
+    proposals = []
+
+    async def emit(_event):
+        return None
+
+    async def authorize(proposal):
+        proposals.append(proposal)
+        return ActionDecision(
+            action_id="action-command",
+            decision=PolicyDecision.ALLOW,
+            obligations=["provider_decision:acceptForSession"],
+        )
+
+    session = object.__new__(CodexAppServerSession)
+    session.context = AdapterContext(
+        request=SessionStartRequest(
+            session_id="session-1",
+            objective="Test Codex approval.",
+            workspace_path="/tmp/repo",
+        ),
+        emit=emit,
+        authorize=authorize,
+    )
+    session.thread_id = "thread-1"
+    session.turn_id = "turn-1"
+
+    response = await session._on_request(
+        "item/commandExecution/requestApproval",
+        {
+            "item": {
+                "id": "item-1",
+                "command": "pytest",
+                "availableDecisions": ["accept", "acceptForSession", "decline"],
+            }
+        },
+    )
+
+    assert response == {"decision": "acceptForSession"}
+    assert proposals[0].metadata["available_decisions"] == [
+        "accept",
+        "acceptForSession",
+        "decline",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_codex_rejects_unavailable_provider_decision() -> None:
+    async def emit(_event):
+        return None
+
+    async def authorize(_proposal):
+        return ActionDecision(
+            action_id="action-command",
+            decision=PolicyDecision.ALLOW,
+            obligations=["provider_decision:acceptForSession"],
+        )
+
+    session = object.__new__(CodexAppServerSession)
+    session.context = AdapterContext(
+        request=SessionStartRequest(
+            session_id="session-1",
+            objective="Test Codex approval.",
+            workspace_path="/tmp/repo",
+        ),
+        emit=emit,
+        authorize=authorize,
+    )
+    session.thread_id = "thread-1"
+    session.turn_id = "turn-1"
+
+    with pytest.raises(RuntimeError, match="not available"):
+        await session._on_request(
+            "item/commandExecution/requestApproval",
+            {
+                "item": {
+                    "id": "item-1",
+                    "command": "pytest",
+                    "availableDecisions": ["accept", "decline"],
+                }
+            },
+        )
 
 
 @pytest.mark.asyncio

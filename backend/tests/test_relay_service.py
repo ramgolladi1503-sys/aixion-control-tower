@@ -16,17 +16,20 @@ from app.relay_models import (
     RelayCommandClaimRequest,
     RelayEventCreate,
     RelayEventType,
+    RelayLocalSessionCreate,
     RelayPlatform,
     RelayProvider,
     RelayRegistrationCreate,
     RelaySessionCreate,
     RelaySessionStatus,
+    RelayStatus,
 )
 from app.relay_service import (
     RelayConflict,
     acknowledge_command,
     append_relay_event,
     claim_relay_command,
+    create_host_started_relay_session,
     create_relay_session,
     register_relay,
     relay_summary,
@@ -79,6 +82,13 @@ def _relay_and_token():
     return store.relay_hosts[response.relay.id], response.relay_token
 
 
+def _online_relay():
+    relay, token = _relay_and_token()
+    relay.status = RelayStatus.ONLINE
+    store.persist()
+    return relay, token
+
+
 def _session(
     relay_id: str,
     provider: RelayProvider = RelayProvider.CODEX,
@@ -128,6 +138,71 @@ def test_session_enforces_provider_adapter_workspace_and_repository_scope() -> N
                 repository="owner/repo",
             ),
             user=_owner(),
+        )
+
+
+def test_host_started_session_registers_without_start_command_and_is_idempotent() -> None:
+    relay, _ = _online_relay()
+    payload = {
+        "provider": RelayProvider.CODEX,
+        "adapter_id": "codex-app-server",
+        "workspace_path": "/Users/test/work/repo",
+        "repository": "owner/repo",
+        "approval_mode": "STRICT",
+        "provider_process_id": 1234,
+        "provider_thread_id": "thread-1",
+        "idempotency_key": "local-session-1",
+    }
+
+    session = create_host_started_relay_session(relay, RelayLocalSessionCreate(**payload))
+    duplicate = create_host_started_relay_session(relay, RelayLocalSessionCreate(**payload))
+
+    assert duplicate.id == session.id
+    assert session.origin == "HOST_STARTED"
+    assert session.status == RelaySessionStatus.RUNNING
+    assert session.remote_session_id == "thread-1"
+    assert session.metadata["provider_process_id"] == 1234
+    assert [
+        command.command_type for command in store.relay_commands.values()
+    ] == []
+
+
+def test_host_started_session_rejects_scope_adapter_status_and_limits() -> None:
+    relay, _ = _online_relay()
+    base = {
+        "provider": RelayProvider.CODEX,
+        "adapter_id": "codex-app-server",
+        "workspace_path": "/Users/test/work/repo",
+        "repository": "owner/repo",
+        "idempotency_key": "local-session-1",
+    }
+
+    relay.status = RelayStatus.DISABLED
+    with pytest.raises(RelayConflict, match="ONLINE"):
+        create_host_started_relay_session(relay, RelayLocalSessionCreate(**base))
+
+    relay.status = RelayStatus.ONLINE
+    with pytest.raises(RelayConflict, match="workspace roots"):
+        create_host_started_relay_session(
+            relay,
+            RelayLocalSessionCreate(**{**base, "workspace_path": "/tmp/outside"}),
+        )
+    with pytest.raises(RelayConflict, match="relay allowlist"):
+        create_host_started_relay_session(
+            relay,
+            RelayLocalSessionCreate(**{**base, "repository": "other/repo"}),
+        )
+    with pytest.raises(RelayConflict, match="unavailable"):
+        relay.adapters[0].available = False
+        create_host_started_relay_session(relay, RelayLocalSessionCreate(**base))
+    relay.adapters[0].available = True
+    relay.metadata["max_active_sessions"] = 1
+    first = create_host_started_relay_session(relay, RelayLocalSessionCreate(**base))
+    assert first.id
+    with pytest.raises(RelayConflict, match="active session limit"):
+        create_host_started_relay_session(
+            relay,
+            RelayLocalSessionCreate(**{**base, "idempotency_key": "local-session-2"}),
         )
 
     with pytest.raises(RelayConflict, match="relay allowlist"):
