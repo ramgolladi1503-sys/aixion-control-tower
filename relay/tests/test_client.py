@@ -74,3 +74,49 @@ async def test_client_surfaces_fail_closed_api_error() -> None:
             await client.get_session_detail("session-1")
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_registers_local_session_with_idempotency_key() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["X-Aixion-Relay-Token"] == "relay-secret"
+        assert request.url.path == "/connectors/relay-hosts/relay-1/local-sessions"
+        body = json.loads(request.content)
+        assert body["idempotency_key"] == "idem-1"
+        assert body["workspace_path"] == "/Users/test/work/repo"
+        return httpx.Response(
+            200,
+            json={
+                "session": {
+                    "id": "relay_session_1",
+                    "origin": "HOST_STARTED",
+                },
+                "relay": {"id": "relay-1"},
+                "commands": [],
+                "events": [],
+            },
+        )
+
+    client = AixionRelayClient(
+        base_url="https://aixion.test",
+        relay_id="relay-1",
+        relay_token="relay-secret",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        payload = await client.register_local_session(
+            provider="CODEX",
+            adapter_id="codex-app-server",
+            workspace_path="/Users/test/work/repo",
+            repository="owner/repo",
+            idempotency_key="idem-1",
+            provider_thread_id="thread-1",
+        )
+    finally:
+        await client.close()
+
+    assert payload["session"]["origin"] == "HOST_STARTED"
+    assert len(requests) == 1

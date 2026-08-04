@@ -21,11 +21,13 @@ from .relay_models import (
     RelayHeartbeatRequest,
     RelayHost,
     RelayHostPublic,
+    RelayLocalSessionCreate,
     RelayProvider,
     RelayRegistrationCreate,
     RelayRegistrationResponse,
     RelaySession,
     RelaySessionCreate,
+    RelaySessionOrigin,
     RelaySessionStatus,
     RelayStatus,
     RelaySummary,
@@ -54,6 +56,8 @@ TERMINAL_SESSION_STATUSES = {
     RelaySessionStatus.FAILED,
     RelaySessionStatus.CANCELLED,
 }
+
+DEFAULT_MAX_ACTIVE_RELAY_SESSIONS = 8
 
 
 def relay_provider_to_trust_provider(provider: RelayProvider) -> AgentProvider:
@@ -241,6 +245,40 @@ def _session_idempotency_key(payload: RelaySessionCreate) -> str:
     )
 
 
+def _local_session_idempotency_key(
+    relay: RelayHost,
+    payload: RelayLocalSessionCreate,
+) -> str:
+    return sha256_hex(
+        {
+            "relay_id": relay.id,
+            "idempotency_key": payload.idempotency_key,
+            "origin": RelaySessionOrigin.HOST_STARTED,
+        }
+    )
+
+
+def _active_sessions_for_relay(relay_id: str) -> int:
+    return sum(
+        1
+        for session in store.relay_sessions.values()
+        if session.relay_id == relay_id and session.status not in TERMINAL_SESSION_STATUSES
+    )
+
+
+def _max_active_sessions(relay: RelayHost) -> int:
+    raw_value = relay.metadata.get("max_active_sessions")
+    if raw_value is None:
+        return DEFAULT_MAX_ACTIVE_RELAY_SESSIONS
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as error:
+        raise RelayConflict("Relay max_active_sessions metadata is invalid.") from error
+    if value < 1:
+        raise RelayConflict("Relay max_active_sessions must be at least 1.")
+    return value
+
+
 def _command_idempotency_key(
     session: RelaySession | None,
     command_type: RelayCommandType,
@@ -367,6 +405,82 @@ def create_relay_session(
             "metadata": session.metadata,
         },
     )
+    return session
+
+
+def create_host_started_relay_session(
+    relay: RelayHost,
+    payload: RelayLocalSessionCreate,
+) -> RelaySession:
+    if relay.status != RelayStatus.ONLINE:
+        raise RelayConflict("Relay must be ONLINE to register a host-started session.")
+    _matching_adapter(
+        relay,
+        provider=payload.provider,
+        adapter_id=payload.adapter_id,
+    )
+    if relay.allowed_project_ids and payload.project_id not in relay.allowed_project_ids:
+        raise RelayConflict("Project is outside the relay allowlist.")
+    if relay.allowed_repositories:
+        if not payload.repository or payload.repository not in relay.allowed_repositories:
+            raise RelayConflict("Repository is outside the relay allowlist.")
+    if not any(
+        _path_within_root(payload.workspace_path, root)
+        for root in relay.workspace_roots
+    ):
+        raise RelayConflict("Workspace path is outside the relay workspace roots.")
+    if payload.project_id and payload.project_id not in store.projects:
+        raise ValueError("Project not found.")
+    if payload.task_id and payload.task_id not in store.agent_tasks:
+        raise ValueError("AgentTask not found.")
+    if payload.run_id and payload.run_id not in store.agent_runs:
+        raise ValueError("AgentRun not found.")
+
+    request_hash = _local_session_idempotency_key(relay, payload)
+    existing = next(
+        (
+            session
+            for session in store.relay_sessions.values()
+            if session.relay_id == relay.id
+            and session.metadata.get("local_session_idempotency_hash") == request_hash
+            and session.status not in TERMINAL_SESSION_STATUSES
+        ),
+        None,
+    )
+    if existing:
+        return existing
+
+    if _active_sessions_for_relay(relay.id) >= _max_active_sessions(relay):
+        raise RelayConflict("Relay active session limit has been reached.")
+
+    session = RelaySession(
+        relay_id=relay.id,
+        provider=payload.provider,
+        adapter_id=payload.adapter_id,
+        objective="",
+        origin=RelaySessionOrigin.HOST_STARTED,
+        workspace_path=payload.workspace_path,
+        repository=payload.repository,
+        project_id=payload.project_id,
+        task_id=payload.task_id,
+        run_id=payload.run_id,
+        approval_mode=payload.approval_mode,
+        model=payload.model,
+        max_runtime_seconds=payload.max_runtime_seconds,
+        status=RelaySessionStatus.RUNNING,
+        remote_session_id=payload.provider_thread_id,
+        started_at=now_utc(),
+        metadata={
+            **payload.metadata,
+            "local_session_idempotency_hash": request_hash,
+            "host_process_id": payload.host_process_id,
+            "provider_process_id": payload.provider_process_id,
+            "provider_thread_id": payload.provider_thread_id,
+            "created_by_relay_id": relay.id,
+        },
+    )
+    store.relay_sessions[session.id] = session
+    store.persist()
     return session
 
 

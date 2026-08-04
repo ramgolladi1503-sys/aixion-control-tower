@@ -20,6 +20,7 @@ from .relay_models import (
     RelayHeartbeatRequest,
     RelayHost,
     RelayHostPublic,
+    RelayLocalSessionCreate,
     RelayRegistrationCreate,
     RelayRegistrationResponse,
     RelaySession,
@@ -36,6 +37,7 @@ from .relay_service import (
     append_relay_event,
     claim_relay_command,
     complete_command,
+    create_host_started_relay_session,
     create_relay_session,
     disable_relay,
     enqueue_session_control,
@@ -210,6 +212,22 @@ def get_relay_owned_session(
     if session.relay_id != relay.id:
         raise HTTPException(status_code=403, detail="Relay session belongs to another relay")
     return _session_detail(session)
+
+
+@router.post(
+    "/relay-hosts/{relay_id}/local-sessions",
+    response_model=RelaySessionDetail,
+)
+def create_relay_host_local_session(
+    relay_id: str,
+    payload: RelayLocalSessionCreate,
+    x_aixion_relay_token: str | None = Header(default=None),
+) -> RelaySessionDetail:
+    relay = _authenticated_relay(relay_id, x_aixion_relay_token)
+    try:
+        return _session_detail(create_host_started_relay_session(relay, payload))
+    except (ValueError, RelayConflict) as error:
+        raise _relay_error(error) from error
 
 
 @router.post(
