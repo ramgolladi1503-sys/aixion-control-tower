@@ -4,9 +4,56 @@ import hashlib
 import json
 from typing import Any
 
-from ..contracts import ActionProposal, CapabilityActionType, RelayProvider
+from ..contracts import (
+    ActionProposal,
+    AdapterFeature,
+    AdapterKind,
+    AdapterManifest,
+    CapabilityActionType,
+    RelayProvider,
+)
+from .base import AdapterContext, AgentAdapter, AgentSessionHandle
 from .configured_process import configured_process_adapter
 from .generic_process import GenericProcessAdapter
+
+
+class NativeAntigravityHookAdapter(AgentAdapter):
+    """Manifest-only adapter for an already-running native Antigravity app.
+
+    Native sessions attach through the documented PreToolUse hook. They are not
+    started by the universal relay runtime. Keeping this adapter in discovery lets
+    the relay advertise support during one-time registration and heartbeats without
+    creating a replacement Antigravity process.
+    """
+
+    def __init__(self) -> None:
+        self._manifest = AdapterManifest(
+            adapter_id="antigravity-native-hook",
+            provider=RelayProvider.ANTIGRAVITY,
+            adapter_kind=AdapterKind.ANTIGRAVITY_HOOKS,
+            display_name="Native Antigravity approval hook",
+            available=True,
+            features=[
+                AdapterFeature.STRUCTURED_EVENTS,
+                AdapterFeature.NATIVE_APPROVALS,
+            ],
+            metadata={
+                "native_attach_only": True,
+                "launches_replacement_agent": False,
+                "provider_hook": "PreToolUse",
+            },
+        )
+
+    @property
+    def manifest(self) -> AdapterManifest:
+        return self._manifest
+
+    async def start(self, context: AdapterContext) -> AgentSessionHandle:
+        del context
+        raise RuntimeError(
+            "antigravity-native-hook attaches through PreToolUse and cannot be "
+            "started as a managed relay session."
+        )
 
 
 def _canonical_sha256(payload: dict[str, Any]) -> str:
@@ -177,7 +224,7 @@ def build_antigravity_adapter() -> GenericProcessAdapter | None:
         environment_name="AIXION_ANTIGRAVITY_ARGV",
         adapter_id="antigravity-hooks",
         provider=RelayProvider.ANTIGRAVITY,
-        display_name="Google Antigravity with Aixion hooks",
+        display_name="Managed Antigravity process with Aixion hooks",
         environment={
             "AIXION_ANTIGRAVITY_PRE_TOOL_HOOK": "aixion-relay hook antigravity",
         },
