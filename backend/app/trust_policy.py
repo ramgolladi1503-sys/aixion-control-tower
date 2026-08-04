@@ -17,8 +17,8 @@ from .trust_models import (
 )
 
 POLICY_VERSION = "trust-policy-v1"
-PROTECTED_BRANCHES = {"main", "master"}
-SENSITIVE_PATH_PARTS = {
+PROTECTED_BRANCHES = {"main", "master", "refs/heads/main", "refs/heads/master"}
+SENSITIVE_PATH_STEMS = {
     ".env",
     ".git",
     ".ssh",
@@ -33,6 +33,14 @@ HIGH_RISK_ACTIONS = {
     CapabilityActionType.READ_SECRET,
     CapabilityActionType.WRITE_DATABASE,
 }
+REPOSITORY_ACTIONS = {
+    CapabilityActionType.READ_REPOSITORY,
+    CapabilityActionType.CREATE_BRANCH,
+    CapabilityActionType.MODIFY_FILES,
+    CapabilityActionType.RUN_COMMAND,
+    CapabilityActionType.ACCESS_NETWORK,
+    CapabilityActionType.CREATE_PULL_REQUEST,
+}
 
 
 def lease_receipt_payload(lease: CapabilityLease) -> dict:
@@ -45,6 +53,8 @@ def lease_receipt_payload(lease: CapabilityLease) -> dict:
         "mode": lease.mode,
         "scope": lease.scope.model_dump(mode="json"),
         "issued_by_user_id": lease.issued_by_user_id,
+        "required_reviewer_count": lease.required_reviewer_count,
+        "prevent_self_approval": lease.prevent_self_approval,
         "issued_at": lease.issued_at,
         "expires_at": lease.expires_at,
         "receipt_nonce": lease.receipt_nonce,
@@ -79,12 +89,21 @@ def _clean_path(value: str) -> str | None:
     return str(path)
 
 
+def _is_sensitive_path_part(part: str) -> bool:
+    lowered = part.lower()
+    if lowered.startswith(".env"):
+        return True
+    if lowered in {".git", ".ssh"}:
+        return True
+    stem = PurePosixPath(lowered).stem
+    return stem in SENSITIVE_PATH_STEMS
+
+
 def _path_allowed(path: str, prefixes: list[str]) -> bool:
     clean = _clean_path(path)
     if clean is None:
         return False
-    lowered_parts = {part.lower() for part in PurePosixPath(clean).parts}
-    if lowered_parts & SENSITIVE_PATH_PARTS:
+    if any(_is_sensitive_path_part(part) for part in PurePosixPath(clean).parts):
         return False
     for prefix in prefixes:
         clean_prefix = _clean_path(prefix.rstrip("/"))
@@ -104,12 +123,8 @@ def _command_allowed(command: str, allowed: list[str]) -> bool:
     if not tokens:
         return False
     if any(marker in cleaned for marker in SHELL_META):
-        return cleaned in allowed
-    for approved in allowed:
-        approved_clean = approved.strip()
-        if cleaned == approved_clean or cleaned.startswith(approved_clean + " "):
-            return True
-    return False
+        return cleaned in {item.strip() for item in allowed}
+    return cleaned in {item.strip() for item in allowed}
 
 
 def _domain_allowed(domain: str, allowed: list[str]) -> bool:
@@ -158,19 +173,32 @@ def evaluate_proposed_action(
         reasons.append("Capability lease receipt signature is invalid.")
     if lease.agent_id and action.agent_id != lease.agent_id:
         reasons.append("Agent identity does not match the lease subject.")
+    if lease.agent_id is None and action.agent_id is not None:
+        reasons.append("An unbound lease cannot be adopted by an agent identity.")
     if action.provider != lease.provider:
         reasons.append("Agent provider does not match the lease provider.")
     if action.action_type not in lease.scope.allowed_actions:
         reasons.append(f"Action type {action.action_type} is outside the approved lease.")
-    if action.repository and action.repository != lease.scope.repository:
-        reasons.append("Repository does not match the approved capability scope.")
-    if action.branch and action.branch != lease.scope.branch:
-        reasons.append("Branch does not match the approved capability scope.")
-    if action.branch in PROTECTED_BRANCHES:
+
+    if action.action_type in REPOSITORY_ACTIONS:
+        if action.repository != lease.scope.repository:
+            reasons.append("Repository does not match the approved capability scope.")
+        if action.branch != lease.scope.branch:
+            reasons.append("Branch does not match the approved capability scope.")
+    if (action.branch or "").lower() in PROTECTED_BRANCHES:
         reasons.append("Protected branches cannot receive agent mutations.")
     if bool(action.metadata.get("auto_merge")) or lease.scope.allow_auto_merge:
         reasons.append("Auto-merge is prohibited by the Aixion trust policy.")
 
+    expected_run_id = str(lease.scope.metadata.get("run_id") or "")
+    expected_task_id = str(lease.scope.metadata.get("task_id") or "")
+    if expected_run_id and action.run_id != expected_run_id:
+        reasons.append("Run identity does not match the capability lease.")
+    if expected_task_id and action.task_id != expected_task_id:
+        reasons.append("Task identity does not match the capability lease.")
+
+    if action.action_type == CapabilityActionType.MODIFY_FILES and not action.paths:
+        reasons.append("File mutation requires at least one explicit approved path.")
     invalid_paths = [
         path
         for path in action.paths
@@ -179,9 +207,13 @@ def evaluate_proposed_action(
     if invalid_paths:
         reasons.append("Paths outside approved scope: " + ", ".join(sorted(invalid_paths)))
 
+    if action.action_type == CapabilityActionType.RUN_COMMAND and not action.command:
+        reasons.append("Command execution requires one explicit approved command.")
     if action.command and not _command_allowed(action.command, lease.scope.allowed_commands):
-        reasons.append("Command is not covered by the approved command allowlist.")
+        reasons.append("Command is not covered by the exact approved command allowlist.")
 
+    if action.action_type == CapabilityActionType.ACCESS_NETWORK and not action.network_domains:
+        reasons.append("Network access requires at least one explicit approved domain.")
     invalid_domains = [
         domain
         for domain in action.network_domains
