@@ -28,6 +28,7 @@ from .models import (
     User,
     WorkOrder,
 )
+from .relay_models import RelayCommand, RelayEvent, RelayHost, RelaySession
 from .settings import validate_startup_environment
 from .trust_action_authorization_models import ActionAuthorization
 from .trust_models import (
@@ -47,8 +48,8 @@ class SQLiteBackedStore:
     """Persistent single-writer MVP store backed by SQLite.
 
     The API process remains the single owner of mutation. A re-entrant lock serializes
-    writes across FastAPI worker threads. External schedulers and agents interact only
-    through authenticated APIs and never mount the database directly.
+    writes across FastAPI worker threads. External schedulers, relays, and agents interact
+    only through authenticated APIs and never mount the database directly.
     """
 
     def __init__(self) -> None:
@@ -76,6 +77,10 @@ class SQLiteBackedStore:
         self.action_consumptions: dict[str, ActionConsumption] = {}
         self.credential_grants: dict[str, CredentialGrant] = {}
         self.trust_events: dict[str, TrustEvent] = {}
+        self.relay_hosts: dict[str, RelayHost] = {}
+        self.relay_sessions: dict[str, RelaySession] = {}
+        self.relay_commands: dict[str, RelayCommand] = {}
+        self.relay_events: dict[str, RelayEvent] = {}
         self.projects: dict[str, Project] = {}
         self.mcp_child_servers: dict[str, MCPChildServer] = {}
         self.ideas: dict[str, Idea] = {}
@@ -174,6 +179,10 @@ class SQLiteBackedStore:
                 CredentialGrant,
             )
             self.trust_events = self._load_entities("trust_event", TrustEvent)
+            self.relay_hosts = self._load_entities("relay_host", RelayHost)
+            self.relay_sessions = self._load_entities("relay_session", RelaySession)
+            self.relay_commands = self._load_entities("relay_command", RelayCommand)
+            self.relay_events = self._load_entities("relay_event", RelayEvent)
             self.projects = self._load_entities("project", Project)
             self.mcp_child_servers = self._load_entities(
                 "mcp_child_server",
@@ -227,6 +236,10 @@ class SQLiteBackedStore:
             self._write_map(conn, "action_consumption", self.action_consumptions)
             self._write_map(conn, "credential_grant", self.credential_grants)
             self._write_map(conn, "trust_event", self.trust_events)
+            self._write_map(conn, "relay_host", self.relay_hosts)
+            self._write_map(conn, "relay_session", self.relay_sessions)
+            self._write_map(conn, "relay_command", self.relay_commands)
+            self._write_map(conn, "relay_event", self.relay_events)
             self._write_map(conn, "project", self.projects)
             self._write_map(conn, "mcp_child_server", self.mcp_child_servers)
             self._write_map(conn, "idea", self.ideas)
@@ -285,6 +298,10 @@ class SQLiteBackedStore:
             self.action_consumptions.clear()
             self.credential_grants.clear()
             self.trust_events.clear()
+            self.relay_hosts.clear()
+            self.relay_sessions.clear()
+            self.relay_commands.clear()
+            self.relay_events.clear()
             self.projects.clear()
             self.mcp_child_servers.clear()
             self.ideas.clear()
