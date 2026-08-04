@@ -15,7 +15,7 @@ from .native_connector_registry import (
 )
 
 router = APIRouter(
-    prefix="/connectors/native-capabilities",
+    prefix="/native-connectors",
     tags=["native-connectors"],
 )
 OwnerDependency = Depends(require_owner)
