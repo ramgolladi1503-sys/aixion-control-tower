@@ -101,8 +101,8 @@ fun ApprovalInboxContent(
     }
     val blocked = state.approvals.filter { it.status == ApprovalStatus.BLOCKED }
     val approved = state.approvals.filter { it.status == ApprovalStatus.APPROVED }
-    val visibleApprovals = state.approvals.filterBy(filter)
-    val visibleNativeActions = state.nativeActions.filterBy(filter)
+    val visibleApprovals = state.approvals.filterApprovalsBy(filter)
+    val visibleNativeActions = state.nativeActions.filterNativeActionsBy(filter)
 
     LazyColumn(
         modifier = Modifier
@@ -185,12 +185,12 @@ fun ApprovalInboxContent(
             }
         }
 
-        if (state.lastActionMessage != null) {
+        state.lastActionMessage?.let { message ->
             item {
                 TowerPanel(elevated = false) {
                     StatusBadge("DECISION RECORDED", RiskLow)
                     Text(
-                        state.lastActionMessage,
+                        message,
                         color = TowerTextPrimary,
                         fontSize = 13.sp
                     )
@@ -345,7 +345,9 @@ private fun NativeExactActionCard(
     }
 }
 
-private fun List<ApprovalSummary>.filterBy(filter: ApprovalInboxFilter): List<ApprovalSummary> {
+private fun List<ApprovalSummary>.filterApprovalsBy(
+    filter: ApprovalInboxFilter
+): List<ApprovalSummary> {
     return when (filter) {
         ApprovalInboxFilter.ALL -> this
         ApprovalInboxFilter.ACTION -> filter { approval ->
@@ -362,7 +364,7 @@ private fun List<ApprovalSummary>.filterBy(filter: ApprovalInboxFilter): List<Ap
     }
 }
 
-private fun List<TrustExceptionDto>.filterBy(
+private fun List<TrustExceptionDto>.filterNativeActionsBy(
     filter: ApprovalInboxFilter
 ): List<TrustExceptionDto> {
     return when (filter) {
