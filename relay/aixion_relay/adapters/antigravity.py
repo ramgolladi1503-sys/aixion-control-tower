@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from typing import Any
@@ -10,20 +11,103 @@ from ..contracts import (
     AdapterKind,
     AdapterManifest,
     CapabilityActionType,
+    EventType,
+    NormalizedEvent,
     RelayProvider,
+    SessionResult,
 )
 from .base import AdapterContext, AgentAdapter, AgentSessionHandle
 from .configured_process import configured_process_adapter
 from .generic_process import GenericProcessAdapter
 
 
-class NativeAntigravityHookAdapter(AgentAdapter):
-    """Manifest-only adapter for an already-running native Antigravity app.
+class NativeAntigravityHookSession(AgentSessionHandle):
+    """Passive relay record for an already-running native Antigravity app."""
 
-    Native sessions attach through the documented PreToolUse hook. They are not
-    started by the universal relay runtime. Keeping this adapter in discovery lets
-    the relay advertise support during one-time registration and heartbeats without
-    creating a replacement Antigravity process.
+    def __init__(self, context: AdapterContext) -> None:
+        self.context = context
+        self._finished: asyncio.Future[SessionResult] = (
+            asyncio.get_running_loop().create_future()
+        )
+
+    @property
+    def remote_session_id(self) -> str | None:
+        return None
+
+    async def announce(self) -> None:
+        await self.context.emit(
+            NormalizedEvent(
+                event_type=EventType.SESSION_STARTED,
+                message=(
+                    "Native Antigravity workspace attached through PreToolUse; "
+                    "no replacement agent process was launched."
+                ),
+                payload={
+                    "native_attach_only": True,
+                    "launches_replacement_agent": False,
+                    "provider_hook": "PreToolUse",
+                },
+            )
+        )
+
+    async def send_message(self, message: str, metadata: dict[str, Any]) -> None:
+        del message, metadata
+        raise RuntimeError(
+            "Native Antigravity remains owned by its app; Aixion cannot inject prompts."
+        )
+
+    async def pause(self, reason: str) -> None:
+        await self.context.emit(
+            NormalizedEvent(
+                event_type=EventType.SESSION_PAUSED,
+                message=reason or "Native approval connector paused.",
+            )
+        )
+
+    async def resume(self, reason: str) -> None:
+        await self.context.emit(
+            NormalizedEvent(
+                event_type=EventType.SESSION_RESUMED,
+                message=reason or "Native approval connector resumed.",
+            )
+        )
+
+    async def cancel(self, reason: str) -> None:
+        if not self._finished.done():
+            self._finished.set_result(
+                SessionResult(
+                    success=False,
+                    error=reason or "Native Antigravity connector cancelled.",
+                    result={
+                        "native_attach_only": True,
+                        "launches_replacement_agent": False,
+                    },
+                )
+            )
+        await self.context.emit(
+            NormalizedEvent(
+                event_type=EventType.SESSION_CANCELLED,
+                message=reason or "Native Antigravity connector cancelled.",
+            )
+        )
+
+    async def sync(self) -> dict[str, Any]:
+        return {
+            "native_attach_only": True,
+            "launches_replacement_agent": False,
+            "provider_hook": "PreToolUse",
+        }
+
+    async def wait(self) -> SessionResult:
+        return await self._finished
+
+
+class NativeAntigravityHookAdapter(AgentAdapter):
+    """Adapter for an already-running native Antigravity application.
+
+    The universal relay creates only a passive session record. Every actionable
+    decision enters through Google's documented PreToolUse hook and returns to the
+    same blocked native conversation.
     """
 
     def __init__(self) -> None:
@@ -49,11 +133,9 @@ class NativeAntigravityHookAdapter(AgentAdapter):
         return self._manifest
 
     async def start(self, context: AdapterContext) -> AgentSessionHandle:
-        del context
-        raise RuntimeError(
-            "antigravity-native-hook attaches through PreToolUse and cannot be "
-            "started as a managed relay session."
-        )
+        session = NativeAntigravityHookSession(context)
+        await session.announce()
+        return session
 
 
 def _canonical_sha256(payload: dict[str, Any]) -> str:
@@ -212,13 +294,7 @@ def antigravity_tool_action(payload: dict[str, Any]) -> ActionProposal:
 
 
 def build_antigravity_adapter() -> GenericProcessAdapter | None:
-    """Build an optional managed Antigravity process adapter.
-
-    Native Antigravity integration does not use this process adapter. It uses the
-    documented PreToolUse hook and ``aixion-relay hook antigravity`` so the
-    already-running Antigravity conversation remains the owner of execution.
-    The process adapter is retained only for explicitly managed fallback runs.
-    """
+    """Build an optional explicitly managed Antigravity process adapter."""
 
     return configured_process_adapter(
         environment_name="AIXION_ANTIGRAVITY_ARGV",
