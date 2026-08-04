@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import platform
 from contextlib import suppress
-from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -42,6 +41,7 @@ class UniversalRelayRuntime:
         self.registry = registry
         self._handles: dict[str, AgentSessionHandle] = {}
         self._session_tasks: dict[str, asyncio.Task[SessionResult]] = {}
+        self._command_tasks: set[asyncio.Task[None]] = set()
         self._event_sequences: dict[str, int] = {}
         self._event_locks: dict[str, asyncio.Lock] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -75,8 +75,14 @@ class UniversalRelayRuntime:
         )
         if command is None:
             return False
-        asyncio.create_task(self._execute_command(command))
+        task = asyncio.create_task(self._execute_command(command))
+        self._command_tasks.add(task)
+        task.add_done_callback(self._command_tasks.discard)
         return True
+
+    async def drain_commands(self) -> None:
+        while self._command_tasks:
+            await asyncio.gather(*list(self._command_tasks), return_exceptions=False)
 
     async def _heartbeat_loop(self) -> None:
         while not self._stopping.is_set():
@@ -239,10 +245,15 @@ class UniversalRelayRuntime:
             raise RelayRuntimeError(
                 f"Adapter {adapter.manifest.adapter_id} cannot restore a session after relay restart."
             )
+        remote_session_id = session.get("remote_session_id")
+        if not remote_session_id:
+            raise RelayRuntimeError(
+                f"Adapter {adapter.manifest.adapter_id} cannot restore a session without a provider session id."
+            )
         await self._load_sequence(session_id, detail=detail)
         request = SessionStartRequest(
             session_id=session_id,
-            objective=str(session.get("objective") or "Resume the existing agent session."),
+            objective="Resume the existing provider session without starting new work.",
             workspace_path=str(session["workspace_path"]),
             repository=session.get("repository"),
             approval_mode=str(session.get("approval_mode") or "STRICT"),
@@ -250,7 +261,7 @@ class UniversalRelayRuntime:
             max_runtime_seconds=int(session.get("max_runtime_seconds") or 3600),
             metadata={
                 **(session.get("metadata") or {}),
-                "remote_session_id": session.get("remote_session_id"),
+                "remote_session_id": remote_session_id,
                 "resume_only": True,
             },
         )
@@ -362,14 +373,13 @@ class UniversalRelayRuntime:
             with suppress(Exception):
                 await handle.cancel("Aixion relay is shutting down.")
             self._handles.pop(session_id, None)
-        tasks = list(self._session_tasks.values())
-        for task in tasks:
+        session_tasks = list(self._session_tasks.values())
+        for task in session_tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if session_tasks:
+            await asyncio.gather(*session_tasks, return_exceptions=True)
+        command_tasks = list(self._command_tasks)
+        if command_tasks:
+            await asyncio.gather(*command_tasks, return_exceptions=True)
         await self.registry.close()
         await self.client.close()
-
-
-def runtime_timestamp() -> str:
-    return datetime.now(timezone.utc).isoformat()
