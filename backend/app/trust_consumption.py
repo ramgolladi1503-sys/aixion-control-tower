@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from .models import now_utc
 from .store import store
+from .trust_action_authorization import verify_action_authorization
+from .trust_action_authorization_models import ActionAuthorizationDecision
 from .trust_crypto import sha256_hex
 from .trust_decisions import latest_policy_decision
 from .trust_flight_recorder import append_trust_event
@@ -12,6 +14,28 @@ from .trust_models import (
     TrustEventType,
 )
 from .trust_service import TrustControlConflict, refresh_lease_status
+
+
+def _verify_human_allow(action_id: str) -> None:
+    action = store.proposed_actions[action_id]
+    authorization = next(
+        (
+            item
+            for item in store.action_authorizations.values()
+            if item.action_id == action_id
+        ),
+        None,
+    )
+    if authorization is None:
+        raise TrustControlConflict(
+            "Human-authorized ALLOW is missing its signed exact-action decision."
+        )
+    if authorization.decision != ActionAuthorizationDecision.ALLOW:
+        raise TrustControlConflict("Human authorization does not allow this action.")
+    if not verify_action_authorization(authorization, action):
+        raise TrustControlConflict(
+            "Human authorization signature or exact action payload hash is invalid."
+        )
 
 
 def consume_effective_action(
@@ -26,6 +50,9 @@ def consume_effective_action(
     decision = latest_policy_decision(action.id)
     if decision is None or decision.decision != PolicyDecisionType.ALLOW:
         raise TrustControlConflict("Only an effective ALLOW decision can be consumed.")
+    if "+human-decision" in decision.evaluated_policy_version:
+        _verify_human_allow(action.id)
+
     existing = store.action_consumptions.get(action.id)
     if existing:
         if existing != consumption:
