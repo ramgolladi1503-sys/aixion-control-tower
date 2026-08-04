@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timezone
 
 from .agent_run_models import AgentRunStatus, AgentRunStepStatus, AgentRunSummary
+from .relay_metrics import prometheus_relay_metrics
 from .store import store
 from .trust_metrics import prometheus_trust_metrics
 
@@ -156,4 +157,4 @@ def prometheus_agent_run_metrics() -> str:
         ]
     )
     run_metrics = "\n".join(lines) + "\n"
-    return run_metrics + prometheus_trust_metrics()
+    return run_metrics + prometheus_trust_metrics() + prometheus_relay_metrics()
