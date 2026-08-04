@@ -12,7 +12,7 @@ client = TestClient(app)
 
 
 def test_native_connector_inventory_is_exposed_fail_closed() -> None:
-    response = client.get("/connectors/native-capabilities")
+    response = client.get("/native-connectors")
 
     assert response.status_code == 200
     payload = response.json()
@@ -46,7 +46,7 @@ def test_native_connector_inventory_is_exposed_fail_closed() -> None:
 
 def test_native_connector_inventory_can_filter_provider_case_insensitively() -> None:
     response = client.get(
-        "/connectors/native-capabilities",
+        "/native-connectors",
         params={"provider": "codex"},
     )
 
@@ -56,7 +56,7 @@ def test_native_connector_inventory_can_filter_provider_case_insensitively() -> 
 
 def test_native_connector_detail_reports_provider_access_blocker() -> None:
     response = client.get(
-        "/connectors/native-capabilities/CODEX/codex-native-desktop"
+        "/native-connectors/CODEX/codex-native-desktop"
     )
 
     assert response.status_code == 200
@@ -69,7 +69,7 @@ def test_native_connector_detail_reports_provider_access_blocker() -> None:
 
 def test_unknown_native_connector_returns_404() -> None:
     response = client.get(
-        "/connectors/native-capabilities/CODEX/not-registered"
+        "/native-connectors/CODEX/not-registered"
     )
 
     assert response.status_code == 404
