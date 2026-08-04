@@ -130,7 +130,7 @@ def test_session_enforces_provider_adapter_workspace_and_repository_scope() -> N
             user=_owner(),
         )
 
-    with pytest.raises(RelayConflict, match="repository allowlist"):
+    with pytest.raises(RelayConflict, match="relay allowlist"):
         create_relay_session(
             RelaySessionCreate(
                 relay_id=relay.id,
