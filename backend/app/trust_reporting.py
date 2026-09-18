@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .models import RiskLevel
 from .store import store
+from .trust_action_authorization import action_payload_hash
 from .trust_decisions import latest_policy_decision
 from .trust_models import (
     AgentReliabilityScorecard,
@@ -180,6 +181,7 @@ def build_exception_queue() -> list[ExceptionQueueItem]:
         decision = latest_policy_decision(action.id)
         if decision is None or decision.decision == PolicyDecisionType.ALLOW:
             continue
+        metadata = action.metadata
         items.append(
             ExceptionQueueItem(
                 id=f"action:{action.id}",
@@ -195,6 +197,30 @@ def build_exception_queue() -> list[ExceptionQueueItem]:
                 task_id=action.task_id,
                 action_id=action.id,
                 lease_id=action.lease_id,
+                provider=action.provider,
+                action_type=action.action_type,
+                command=action.command,
+                paths=action.paths,
+                network_domains=action.network_domains,
+                repository=action.repository,
+                branch=action.branch,
+                cwd=str(metadata.get("cwd") or "") or None,
+                relay_session_id=(
+                    str(metadata.get("relay_session_id") or "") or None
+                ),
+                adapter_id=str(metadata.get("adapter_id") or "") or None,
+                native_conversation_id=(
+                    str(metadata.get("conversation_id") or "") or None
+                ),
+                native_step_index=(
+                    int(metadata["step_index"])
+                    if metadata.get("step_index") is not None
+                    else None
+                ),
+                provider_payload_sha256=(
+                    str(metadata.get("provider_payload_sha256") or "") or None
+                ),
+                action_payload_sha256=action_payload_hash(action),
                 created_at=decision.evaluated_at,
             )
         )

@@ -362,5 +362,19 @@ class ExceptionQueueItem(BaseModel):
     task_id: str | None = None
     action_id: str | None = None
     lease_id: str | None = None
+    provider: AgentProvider | None = None
+    action_type: CapabilityActionType | None = None
+    command: str | None = None
+    paths: list[str] = Field(default_factory=list)
+    network_domains: list[str] = Field(default_factory=list)
+    repository: str | None = None
+    branch: str | None = None
+    cwd: str | None = None
+    relay_session_id: str | None = None
+    adapter_id: str | None = None
+    native_conversation_id: str | None = None
+    native_step_index: int | None = None
+    provider_payload_sha256: str | None = None
+    action_payload_sha256: str | None = None
     created_at: datetime
     requires_human: bool = True

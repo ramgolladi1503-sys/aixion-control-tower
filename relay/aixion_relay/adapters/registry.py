@@ -5,7 +5,10 @@ import os
 from collections.abc import Iterable
 
 from ..contracts import RelayProvider
-from .antigravity import build_antigravity_adapter
+from .antigravity import (
+    NativeAntigravityHookAdapter,
+    build_antigravity_adapter,
+)
 from .base import AgentAdapter
 from .claude import ClaudeAgentSdkAdapter
 from .codex import CodexAppServerAdapter
@@ -96,6 +99,7 @@ def discover_default_adapters() -> AdapterRegistry:
     adapters: list[AgentAdapter] = [
         CodexAppServerAdapter(),
         ClaudeAgentSdkAdapter(),
+        NativeAntigravityHookAdapter(),
     ]
     for optional in (
         build_antigravity_adapter(),
