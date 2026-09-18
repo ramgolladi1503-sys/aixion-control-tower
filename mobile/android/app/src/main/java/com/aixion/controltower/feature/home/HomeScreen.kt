@@ -25,6 +25,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.api.dto.TrustExceptionDto
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.model.safeNetworkDomains
+import com.aixion.controltower.core.model.safePaths
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
