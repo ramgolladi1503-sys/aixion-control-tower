@@ -45,6 +45,7 @@ PROVIDER_TO_TRUST_PROVIDER = {
     RelayProvider.CODEX: AgentProvider.CODEX,
     RelayProvider.CHATGPT: AgentProvider.CHATGPT,
     RelayProvider.CLAUDE: AgentProvider.CLAUDE,
+    RelayProvider.ANTIGRAVITY: AgentProvider.ANTIGRAVITY,
     RelayProvider.CURSOR: AgentProvider.CURSOR,
     RelayProvider.GITHUB_ACTIONS: AgentProvider.GITHUB_ACTIONS,
 }

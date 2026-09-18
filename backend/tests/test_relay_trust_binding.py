@@ -26,7 +26,7 @@ from app.relay_models import (
     RelayProvider,
     RelaySession,
 )
-from app.relay_service import RelayConflict
+from app.relay_service import RelayConflict, relay_provider_to_trust_provider
 from app.relay_trust_binding import evaluate_bound_relay_action
 from app.store import store
 from app.trust_crypto import sign_payload
@@ -185,3 +185,9 @@ def test_linked_run_without_capability_lease_fails_closed() -> None:
                 command="python -m pytest backend/tests/test_safe.py",
             ),
         )
+
+
+def test_antigravity_provider_identity_is_preserved_for_trust_actions() -> None:
+    assert relay_provider_to_trust_provider(RelayProvider.ANTIGRAVITY) == (
+        AgentProvider.ANTIGRAVITY
+    )
