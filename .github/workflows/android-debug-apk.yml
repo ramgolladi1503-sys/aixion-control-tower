@@ -1,3 +1,4 @@
+# Certification refresh trigger: no runtime behavior change.
 name: Android Debug APK
 
 on:
