@@ -227,10 +227,12 @@ private fun NativeActionPreviewCard(
     action: TrustExceptionDto,
     onReview: () -> Unit
 ) {
+    val safePaths = action.safePaths
+    val safeNetworkDomains = action.safeNetworkDomains
     val exactTarget = when {
         !action.command.isNullOrBlank() -> action.command
-        action.paths.isNotEmpty() -> action.paths.joinToString()
-        action.networkDomains.isNotEmpty() -> action.networkDomains.joinToString()
+        safePaths.isNotEmpty() -> safePaths.joinToString()
+        safeNetworkDomains.isNotEmpty() -> safeNetworkDomains.joinToString()
         else -> action.actionType ?: "Native-agent side effect"
     }
     TowerPanel(elevated = true) {

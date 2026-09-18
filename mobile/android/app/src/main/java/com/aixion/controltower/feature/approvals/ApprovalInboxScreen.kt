@@ -27,6 +27,8 @@ import com.aixion.controltower.core.model.ApprovalDashboardBucket
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.dashboardBucket
+import com.aixion.controltower.core.model.safeNetworkDomains
+import com.aixion.controltower.core.model.safePaths
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerPanel
@@ -260,10 +262,12 @@ private fun NativeExactActionCard(
 ) {
     val actionId = action.actionId
     val pending = action.isPendingExactAction && actionId != null
+    val safePaths = action.safePaths
+    val safeNetworkDomains = action.safeNetworkDomains
     val exactTarget = when {
         !action.command.isNullOrBlank() -> action.command
-        action.paths.isNotEmpty() -> action.paths.joinToString(separator = "\n")
-        action.networkDomains.isNotEmpty() -> action.networkDomains.joinToString(separator = "\n")
+        safePaths.isNotEmpty() -> safePaths.joinToString(separator = "\n")
+        safeNetworkDomains.isNotEmpty() -> safeNetworkDomains.joinToString(separator = "\n")
         else -> "No executable target was supplied. Deny unless this is expected."
     }
 
