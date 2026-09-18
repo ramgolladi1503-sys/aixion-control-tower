@@ -6,7 +6,7 @@ plugins {
 }
 
 val aixionApiBaseUrl = providers.gradleProperty("AIXION_API_BASE_URL")
-    .orElse("http://10.0.2.2:8000/")
+    .orElse("http://192.168.29.235:8000/")
 
 val signingPropertiesFile = rootProject.file("keystore.properties")
 val signingProperties = Properties().apply {
