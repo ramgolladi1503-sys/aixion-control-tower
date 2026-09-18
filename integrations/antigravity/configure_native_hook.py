@@ -78,6 +78,19 @@ def _absolute_executable(raw: str) -> str:
     return str(path)
 
 
+def _absolute_relay_config(raw: Path) -> str:
+    path = raw.expanduser()
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Relay configuration is not a regular file: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Could not read valid relay JSON from {path}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Expected a JSON object in relay configuration: {path}")
+    return str(path.resolve())
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -88,6 +101,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--relay-executable", default="")
+    parser.add_argument("--relay-config", required=True, type=Path)
     parser.add_argument(
         "--hook-script",
         type=Path,
@@ -114,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     if not hook_script.is_file():
         raise RuntimeError(f"Hook script does not exist: {hook_script}")
     relay_executable = _absolute_executable(args.relay_executable)
+    relay_config = _absolute_relay_config(args.relay_config)
 
     config_file = args.config_file.expanduser().resolve()
     local_config = _load_object(config_file)
@@ -122,8 +137,9 @@ def main(argv: list[str] | None = None) -> int:
     workspaces[str(workspace)] = session_id
     local_config.update(
         {
-            "version": 1,
+            "version": 2,
             "relayExecutable": relay_executable,
+            "relayConfig": relay_config,
             "workspaces": workspaces,
         }
     )
@@ -161,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                 "workspace": str(workspace),
                 "hooks_file": str(hooks_file),
                 "hook_config_file": str(config_file),
+                "relay_config": relay_config,
                 "native_agent": "Antigravity",
                 "replacement_agent_launched": False,
             },

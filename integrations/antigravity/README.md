@@ -108,7 +108,8 @@ Run the configurator from a normal macOS terminal:
 python3 integrations/antigravity/configure_native_hook.py \
   --workspace /absolute/path/to/disposable-workspace \
   --session-id relay_session_xxx \
-  --relay-executable /absolute/path/to/aixion-relay
+  --relay-executable /absolute/path/to/aixion-relay \
+  --relay-config /absolute/path/to/aixion-relay-config.json
 ```
 
 It updates:
@@ -118,9 +119,13 @@ It updates:
 ~/.config/aixion/antigravity-hook.json
 ```
 
-The Antigravity file uses the documented named-hook schema. The Aixion file maps
-workspace roots to non-secret relay session IDs and is written atomically with mode
-`0600`.
+The Antigravity file uses the documented named-hook schema. The Aixion file pins the
+exact non-secret relay configuration path and maps workspace roots to non-secret relay
+session IDs. It is written atomically with mode `0600`.
+
+The hook always launches `aixion-relay` with the pinned `--config` path. It never
+falls back to another default relay configuration. Missing, unreadable, symlinked, or
+invalid relay configuration fails closed with a native `deny`.
 
 The configurator preserves unrelated hooks already present in `hooks.json`.
 
@@ -154,6 +159,8 @@ The hook:
 - bounds input and output sizes;
 - executes an argv array with `shell=False`;
 - resolves the workspace using a local mapping;
+- pins the exact relay configuration path used by the native hook subprocess;
+- refuses to fall back to an unrelated/default relay configuration;
 - reads the relay credential only through `aixion-relay` and its OS secret store;
 - sends the exact command or target paths plus a canonical payload hash;
 - does not copy source-code bodies into generic cloud metadata;
@@ -192,6 +199,7 @@ Also test:
 ```text
 backend unavailable -> deny
 relay executable unavailable -> deny
+relay config missing/invalid/symlinked -> deny
 unpaired workspace -> deny
 approval timeout -> deny
 malformed hook payload -> deny
