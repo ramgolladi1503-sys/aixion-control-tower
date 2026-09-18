@@ -124,6 +124,22 @@ def _resolve_executable(config: dict[str, Any]) -> str:
     return configured or "aixion-relay"
 
 
+def _resolve_relay_config(config: dict[str, Any]) -> Path | None:
+    raw = str(config.get("relayConfig") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return path.resolve()
+
+
 def _timeout_seconds() -> int:
     raw = os.getenv(
         "AIXION_HOOK_APPROVAL_TIMEOUT_SECONDS",
@@ -153,11 +169,19 @@ def main() -> int:
             "This Antigravity workspace is not paired with an Aixion relay session."
         )
 
+    relay_config = _resolve_relay_config(config)
+    if relay_config is None:
+        return _deny(
+            "Aixion relay configuration is missing or invalid for this Antigravity hook."
+        )
+
     executable = _resolve_executable(config)
     try:
         completed = subprocess.run(
             [
                 executable,
+                "--config",
+                str(relay_config),
                 "hook",
                 "antigravity",
                 "--session-id",
