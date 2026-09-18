@@ -6,7 +6,7 @@ plugins {
 }
 
 val aixionApiBaseUrl = providers.gradleProperty("AIXION_API_BASE_URL")
-    .orElse("http://10.0.2.2:8000/")
+    .orElse("https://aixioncontroltower.aixionlab.com:18082/")
 
 val signingPropertiesFile = rootProject.file("keystore.properties")
 val signingProperties = Properties().apply {
@@ -35,7 +35,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.aixion.controltower"
+        applicationId = "com.aixion.controltower.antigravitycert"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
