@@ -1,0 +1,1 @@
+{"id":"AIXION-CT-E001","date":"2026-09-18","kind":"bootstrap","claim":"Control Tower already defines fail-closed approval, connector, validation, audit, and release gates suitable for the harness verification layer.","sources":["README.md","docs/FINAL_RELEASE_CHECKLIST.md"],"status":"verified-from-repo"}

@@ -1,0 +1,68 @@
+version: 1
+task_id: TBD
+project: aixion-control-tower
+objective: TBD
+why_now: TBD
+
+inputs:
+  required_files:
+    - .aixion/project.yaml
+    - .aixion/context.md
+  optional_files: []
+  evidence_refs: []
+
+scope:
+  allowed_paths: []
+  forbidden_paths: []
+  allowed_tools: []
+  network: false
+
+risk:
+  mutating_path: false
+  approval_boundary_touched: false
+  auth_boundary_touched: false
+  production_config_touched: false
+  requires_human_approval: false
+
+constraints:
+  - no direct main edits
+  - no auto-merge
+  - no approval bypass
+  - no silent mutating MCP/tool calls
+  - no scope expansion
+  - no validation bypass
+  - preserve audit trail
+  - unsafe configuration must fail closed
+
+acceptance:
+  - TBD
+
+verification:
+  backend_commands:
+    - cd backend && python -m pytest
+  android_commands:
+    - cd mobile/android && ./gradlew testDebugUnitTest
+    - cd mobile/android && ./gradlew assembleDebug
+  security_paths: []
+  artifacts: []
+
+stop_conditions:
+  - acceptance criteria pass
+  - required evidence is unavailable
+  - requested work exceeds declared scope
+  - mutation requires approval not present
+  - validation cannot be executed
+  - security boundary would need weakening
+
+output:
+  summary_max_words: 250
+  must_report:
+    - what_changed
+    - boundary_impact
+    - what_did_not_change
+    - verification_run
+    - remaining_failure_modes
+  persist:
+    - decisions
+    - failures
+    - evidence
