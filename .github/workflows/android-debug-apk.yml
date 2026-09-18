@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       api_base_url:
-        description: "Backend base URL baked into the debug APK. Use your laptop LAN URL for Phase 0, for example http://192.168.29.235:8000/"
+        description: "Backend base URL baked into the debug APK. Use your laptop LAN URL for Phase 0, for example http://10.0.2.2:8000/"
         required: true
-        default: "http://192.168.29.235:8000/"
+        default: "http://10.0.2.2:8000/"
       artifact_name:
         description: "Uploaded artifact name"
         required: true
@@ -47,16 +47,16 @@ jobs:
 
       - name: Show build inputs
         run: |
-          echo "API base URL: ${{ github.event.inputs.api_base_url || 'http://192.168.29.235:8000/' }}"
+          echo "API base URL: ${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}"
           echo "Artifact name: ${{ github.event.inputs.artifact_name || 'aixion-debug-apk' }}"
 
       - name: Run Android unit tests
         working-directory: mobile/android
-        run: ./gradlew testDebugUnitTest -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://192.168.29.235:8000/' }}
+        run: ./gradlew testDebugUnitTest -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}
 
       - name: Build debug APK
         working-directory: mobile/android
-        run: ./gradlew assembleDebug -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://192.168.29.235:8000/' }}
+        run: ./gradlew assembleDebug -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
