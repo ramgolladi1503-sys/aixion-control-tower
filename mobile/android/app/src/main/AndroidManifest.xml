@@ -4,7 +4,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Aixion Control Tower"
+        android:label="Aixion Control Tower - Antigravity Cert"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme">

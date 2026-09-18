@@ -6,11 +6,11 @@ on:
       api_base_url:
         description: "Backend base URL baked into the debug APK. Use your laptop LAN URL for Phase 0, for example http://192.168.29.235:8000/"
         required: true
-        default: "http://10.0.2.2:8000/"
+        default: "https://aixioncontroltower.aixionlab.com:18082/"
       artifact_name:
         description: "Uploaded artifact name"
         required: true
-        default: "aixion-debug-apk"
+        default: "aixion-antigravity-certification"
   pull_request:
     paths:
       - "mobile/android/**"
@@ -47,21 +47,21 @@ jobs:
 
       - name: Show build inputs
         run: |
-          echo "API base URL: ${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}"
-          echo "Artifact name: ${{ github.event.inputs.artifact_name || 'aixion-debug-apk' }}"
+          echo "API base URL: ${{ github.event.inputs.api_base_url || 'https://aixioncontroltower.aixionlab.com:18082/' }}"
+          echo "Artifact name: ${{ github.event.inputs.artifact_name || 'aixion-antigravity-certification' }}"
 
       - name: Run Android unit tests
         working-directory: mobile/android
-        run: ./gradlew testDebugUnitTest -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}
+        run: ./gradlew testDebugUnitTest -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://aixioncontroltower.aixionlab.com:18082/' }}
 
       - name: Build debug APK
         working-directory: mobile/android
-        run: ./gradlew assembleDebug -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'http://10.0.2.2:8000/' }}
+        run: ./gradlew assembleDebug -PAIXION_API_BASE_URL=${{ github.event.inputs.api_base_url || 'https://aixioncontroltower.aixionlab.com:18082/' }}
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.event.inputs.artifact_name || 'aixion-debug-apk' }}
+          name: ${{ github.event.inputs.artifact_name || 'aixion-antigravity-certification' }}
           path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
