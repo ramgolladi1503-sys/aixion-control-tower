@@ -25,6 +25,7 @@ from .trust_models import (
     TrustEventType,
 )
 from .postgres_trust_event_repository import PostgresTrustEventRepository
+from .trust_policy import evaluate_proposed_action as evaluate_action_policy
 
 T = TypeVar("T")
 
@@ -363,6 +364,76 @@ class PostgresTrustRepository:
             columns=(("lease_id", "lease_id"), ("project_id", "project_id"), ("task_id", "task_id"), ("run_id", "run_id"), ("created_at", "created_at")),
             for_update=for_update,
         )
+
+    def evaluate_proposed_action(
+        self,
+        conn: Connection,
+        *,
+        action: ProposedAction,
+        actor: str,
+        now: datetime,
+        trust_event_repository: PostgresTrustEventRepository,
+    ) -> tuple[PolicyDecision, CapabilityLease | None]:
+        """Persist one standalone action evaluation and its ledger events atomically."""
+        workspace_id = action.workspace_id
+        if not workspace_id:
+            raise ValueError("PostgreSQL action evaluation requires workspace scope")
+        if not actor or conn.autocommit:
+            raise ValueError("Action evaluation requires an actor and transaction")
+        if action.run_id or action.task_id:
+            raise PostgresTrustRepositoryConflict(
+                "Run-linked action evaluation requires the durable AgentRun execution transaction"
+            )
+
+        lease: CapabilityLease | None = None
+        if action.lease_id:
+            lease = self.get_capability_lease(
+                conn, action.lease_id, workspace_id, for_update=True
+            )
+            if lease is None:
+                raise ValueError("Capability lease not found")
+
+        decision = evaluate_action_policy(action, lease, now=now)
+        self.insert_proposed_action(conn, action)
+        self.insert_policy_decision(conn, decision, workspace_id=workspace_id)
+        correlation_id = action.run_id or action.task_id
+        trust_event_repository.append_in_transaction(
+            conn,
+            TrustEventType.ACTION_RECEIVED,
+            entity_type="proposed_action",
+            entity_id=action.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            correlation_id=correlation_id,
+            payload={
+                "provider": action.provider,
+                "agent_id": action.agent_id,
+                "action_type": action.action_type,
+                "lease_id": action.lease_id,
+            },
+        )
+        event_type = {
+            PolicyDecisionType.ALLOW: TrustEventType.ACTION_ALLOWED,
+            PolicyDecisionType.REQUIRE_APPROVAL: TrustEventType.ACTION_REQUIRES_APPROVAL,
+            PolicyDecisionType.BLOCK: TrustEventType.ACTION_BLOCKED,
+        }[decision.decision]
+        trust_event_repository.append_in_transaction(
+            conn,
+            event_type,
+            entity_type="proposed_action",
+            entity_id=action.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            correlation_id=correlation_id,
+            payload={
+                "decision_id": decision.id,
+                "decision": decision.decision,
+                "risk_level": decision.risk_level,
+                "reasons": decision.reasons,
+                "obligations": decision.obligations,
+            },
+        )
+        return decision, lease
 
     def insert_policy_decision(
         self, conn: Connection, record: PolicyDecision, *, workspace_id: str

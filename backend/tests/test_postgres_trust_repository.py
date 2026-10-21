@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from app.application_repositories import ApplicationRepositories
 from app.models import (
+    AgentProvider,
     ApprovalRequest,
     ApprovalStatus,
     AuthUser,
@@ -35,7 +36,7 @@ from app.postgres_trust_event_repository import (
     PostgresTrustEventRepositoryError,
 )
 from app.store import store
-from app.trust_routes import consume_manual_action
+from app.trust_routes import consume_manual_action, evaluate_manual_action
 from app.trust_action_authorization_models import (
     ActionAuthorization,
     ActionAuthorizationDecision,
@@ -502,6 +503,105 @@ def test_postgres_manual_consumption_route_uses_durable_trust_state(
             "AND event_type=%s AND entity_id=%s",
             (workspace_id, TrustEventType.ACTION_CONSUMED.value, action.id),
         ).fetchone()[0] == 1
+
+
+def test_postgres_manual_action_evaluation_route_is_durable_and_workspace_scoped(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, _approval_id = trust_repository
+    repositories = ApplicationRepositories.from_connector(connect)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_repositories=repositories,
+        approval_decision_repository=repositories.approval_decisions,
+        workspace_membership_repository=repositories.workspace_membership,
+        trust_repository=repositories.trust,
+        trust_event_repository=repositories.trust_events,
+        project_repository=repositories.projects,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    user = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="Trust route maintainer",
+        role=UserRole.MAINTAINER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    action = ProposedAction(
+        provider=AgentProvider.CODEX,
+        project_id=project_id,
+        action_type=CapabilityActionType.READ_REPOSITORY,
+        repository="owner/repo",
+        branch="feature/trust-test",
+    )
+
+    result = evaluate_manual_action(action, user, request)
+
+    assert result.decision.decision == PolicyDecisionType.REQUIRE_APPROVAL
+    assert action.id not in store.proposed_actions
+    with connect() as conn:
+        assert repository.get_proposed_action(conn, action.id, workspace_id) == result.action
+        assert repository.get_policy_decision(conn, result.decision.id, workspace_id) == result.decision
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s",
+            (workspace_id, action.id),
+        ).fetchone()[0] == 2
+
+
+def test_postgres_manual_action_evaluation_rolls_back_when_ledger_is_inconsistent(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, _approval_id = trust_repository
+    repositories = ApplicationRepositories.from_connector(connect)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_repositories=repositories,
+        approval_decision_repository=repositories.approval_decisions,
+        workspace_membership_repository=repositories.workspace_membership,
+        trust_repository=repositories.trust,
+        trust_event_repository=repositories.trust_events,
+        project_repository=repositories.projects,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    user = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="Trust route maintainer",
+        role=UserRole.MAINTAINER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    action = ProposedAction(
+        provider=AgentProvider.CODEX,
+        project_id=project_id,
+        action_type=CapabilityActionType.READ_REPOSITORY,
+        repository="owner/repo",
+        branch="feature/trust-test",
+    )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE trust_event_heads SET event_hash=%s WHERE singleton=TRUE",
+            ("0" * 64,),
+        )
+
+    with pytest.raises(PostgresTrustEventRepositoryError, match="empty ledger"):
+        evaluate_manual_action(action, user, request)
+
+    with connect() as conn:
+        assert repository.get_proposed_action(conn, action.id, workspace_id) is None
+        assert conn.execute("SELECT count(*) FROM policy_decisions").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0
 
 
 def test_postgres_consumption_serializes_shared_lease_budget_and_is_idempotent(

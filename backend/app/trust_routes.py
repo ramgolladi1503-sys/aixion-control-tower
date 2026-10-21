@@ -113,6 +113,16 @@ def _postgres_trust_runtime(request: Request | None):
     return _postgres_attestation_runtime(request)
 
 
+def _postgres_action_runtime(request: Request | None):
+    runtime = _postgres_trust_runtime(request)
+    if runtime is None or request is None:
+        return None
+    repositories = request.app.state.postgres_repositories
+    if getattr(request.app.state, "project_repository", None) is not repositories.projects:
+        return None
+    return runtime
+
+
 def _approval_for_user(approval_id: str, workspace_id: str | None):
     approval = approval_decision_repository.get(approval_id)
     if (
@@ -370,7 +380,46 @@ def evaluate_external_agent_action(
 def evaluate_manual_action(
     payload: ProposedAction,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> AgentGatewayResult:
+    runtime = _postgres_action_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        if payload.project_id:
+            project = repositories.projects.get(payload.project_id)
+            if project is None or project.workspace_id != workspace_id:
+                raise HTTPException(status_code=404, detail="Project not found")
+        if payload.run_id or payload.task_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Run-linked action evaluation requires the durable AgentRun execution transaction",
+            )
+        action = payload.model_copy(update={"workspace_id": workspace_id})
+        try:
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    decision, lease = repositories.trust.evaluate_proposed_action(
+                        conn,
+                        action=action,
+                        actor=user.email,
+                        now=now_utc(),
+                        trust_event_repository=repositories.trust_events,
+                    )
+            return AgentGatewayResult(
+                action=action,
+                decision=decision,
+                lease=_public(lease) if lease else None,
+            )
+        except (ValueError, PostgresTrustRepositoryConflict) as error:
+            raise _trust_error(error) from error
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="PostgreSQL action evaluation requires the complete durable project and trust repository bundle",
+        )
     workspace_id = workspace_id_for_user(user)
     if payload.project_id:
         if workspace_id is not None and project_workspace_id(payload.project_id) != workspace_id:
