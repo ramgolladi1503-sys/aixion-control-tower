@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+
+import psycopg
+from pydantic import ValidationError
+from psycopg import Connection
 
 from .approval_decisions import approval_decision_repository
 from .approval_integrity import compute_approval_payload_hash
 from .models import ApprovalRequest, ApprovalStatus, AuthUser, RiskLevel, now_utc
+from .postgres_trust_event_repository import PostgresTrustEventRepository
+from .postgres_trust_repository import PostgresTrustRepository
 from .store import store
-from .trust_crypto import issue_bearer_token, new_nonce, sha256_hex, sign_payload
+from .trust_crypto import (
+    issue_bearer_token,
+    new_nonce,
+    sha256_hex,
+    sign_payload,
+    verify_payload_signature,
+)
 from .trust_flight_recorder import append_trust_event
 from .trust_models import (
     ActionConsumption,
@@ -163,6 +176,159 @@ def record_reviewer_attestation(
     )
     store.persist()
     return attestation
+
+
+def record_reviewer_attestation_postgres(
+    payload: ReviewerAttestationCreate,
+    *,
+    user: AuthUser,
+    workspace_id: str,
+    connect: Callable[[], Connection],
+    trust_repository: PostgresTrustRepository,
+    trust_event_repository: PostgresTrustEventRepository,
+) -> ReviewerAttestation:
+    """Atomically persist one immutable attestation and its durable ledger event."""
+    if not workspace_id:
+        raise ValueError("Reviewer attestation workspace is required.")
+
+    def same_decision(
+        existing: ReviewerAttestation, *, approval_payload_hash: str
+    ) -> bool:
+        material = {
+            "approval_request_id": existing.approval_request_id,
+            "approval_payload_hash": existing.approval_payload_hash,
+            "reviewer_user_id": existing.reviewer_user_id,
+            "reviewer_role": existing.reviewer_role,
+            "decision": existing.decision,
+            "reason": existing.reason,
+        }
+        if (
+            existing.approval_request_id != payload.approval_request_id
+            or existing.workspace_id != workspace_id
+            or existing.reviewer_user_id != user.id
+            or existing.approval_payload_hash != approval_payload_hash
+            or existing.decision != payload.decision
+            or existing.reason != payload.reason
+            or existing.reviewer_role != user.role
+            or not verify_payload_signature(material, existing.signature)
+        ):
+            raise TrustControlConflict("Reviewer attestation is immutable once recorded.")
+        return True
+
+    expected_payload_hash: str | None = None
+    try:
+        with connect() as conn:
+            with conn.transaction():
+                row = conn.execute(
+                    "SELECT approval.payload,approval.approval_id,approval.workspace_id,"
+                    "approval.project_id,project.workspace_id,approval.status FROM approval_requests AS approval "
+                    "JOIN projects AS project ON project.project_id=approval.project_id "
+                    "WHERE approval.approval_id=%s AND approval.workspace_id=%s "
+                    "FOR SHARE OF approval",
+                    (payload.approval_request_id, workspace_id),
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Approval request not found.")
+                try:
+                    approval = ApprovalRequest.model_validate(row[0])
+                except ValidationError as error:
+                    # Corrupt durable state is an integrity failure, not a
+                    # client-side missing-approval response.
+                    raise RuntimeError("Stored approval payload is invalid.") from error
+                if (
+                    approval.id != row[1]
+                    or approval.workspace_id != row[2]
+                    or approval.project_id != row[3]
+                    or row[4] != workspace_id
+                    or approval.status.value != row[5]
+                ):
+                    raise TrustControlConflict("Approval ownership scope is inconsistent.")
+                if approval.status != ApprovalStatus.APPROVED:
+                    raise TrustControlConflict(
+                        "Reviewer attestations require an APPROVED request."
+                    )
+                if (
+                    not approval.approved_payload_hash
+                    or approval.approved_payload_hash
+                    != compute_approval_payload_hash(approval)
+                ):
+                    raise TrustControlConflict(
+                        "Approval payload must be sealed before attestation."
+                    )
+
+                expected_payload_hash = approval.approved_payload_hash
+                if approval.created_by_user_id == user.id:
+                    raise TrustControlConflict(
+                        "The approval creator cannot attest their own request."
+                    )
+                existing = trust_repository.list_reviewer_attestations(
+                    conn,
+                    workspace_id=workspace_id,
+                    approval_request_id=approval.id,
+                    reviewer_user_id=user.id,
+                    approval_payload_hash=approval.approved_payload_hash,
+                )
+                if existing:
+                    same_decision(
+                        existing[0], approval_payload_hash=expected_payload_hash
+                    )
+                    return existing[0]
+
+                material = {
+                    "approval_request_id": approval.id,
+                    "approval_payload_hash": approval.approved_payload_hash,
+                    "reviewer_user_id": user.id,
+                    "reviewer_role": user.role,
+                    "decision": payload.decision,
+                    "reason": payload.reason,
+                }
+                attestation = ReviewerAttestation(
+                    approval_request_id=approval.id,
+                    workspace_id=workspace_id,
+                    approval_payload_hash=approval.approved_payload_hash,
+                    reviewer_user_id=user.id,
+                    reviewer_role=user.role,
+                    decision=payload.decision,
+                    reason=payload.reason,
+                    signature=sign_payload(material),
+                )
+                trust_repository.insert_reviewer_attestation(conn, attestation)
+                trust_event_repository.append_in_transaction(
+                    conn,
+                    TrustEventType.ATTESTATION_RECORDED,
+                    entity_type="approval_request",
+                    entity_id=approval.id,
+                    actor=user.email,
+                    workspace_id=workspace_id,
+                    payload={
+                        "attestation_id": attestation.id,
+                        "decision": attestation.decision,
+                        "reviewer_role": attestation.reviewer_role,
+                        "approval_payload_hash": approval.approved_payload_hash,
+                    },
+                )
+                return attestation
+    except psycopg.errors.UniqueViolation as error:
+        # A concurrent identical request may win the unique key. Re-read only
+        # after the failed transaction has rolled back; never append a second event.
+        if expected_payload_hash is None:
+            raise TrustControlConflict(
+                "Reviewer attestation conflicted before approval identity was verified."
+            ) from error
+        with connect() as conn:
+            existing = trust_repository.list_reviewer_attestations(
+                conn,
+                workspace_id=workspace_id,
+                approval_request_id=payload.approval_request_id,
+                reviewer_user_id=user.id,
+                approval_payload_hash=expected_payload_hash,
+            )
+        if len(existing) != 1:
+            raise TrustControlConflict(
+                "Reviewer attestation conflicted with another durable write."
+            ) from error
+        same_decision(existing[0], approval_payload_hash=expected_payload_hash)
+        return existing[0]
 
 
 def _validate_scope_against_approval(

@@ -171,6 +171,55 @@ class PostgresTrustRepository:
             columns=(("approval_id", "approval_request_id"), ("reviewer_user_id", "reviewer_user_id"), ("approval_payload_hash", "approval_payload_hash"), ("decision", "decision"), ("created_at", "created_at")),
         )
 
+    def list_reviewer_attestations(
+        self,
+        conn: Connection,
+        *,
+        workspace_id: str,
+        approval_request_id: str | None = None,
+        reviewer_user_id: str | None = None,
+        approval_payload_hash: str | None = None,
+    ) -> list[ReviewerAttestation]:
+        self._require_scope(workspace_id)
+        filters = ["workspace_id=%s"]
+        values: list[Any] = [workspace_id]
+        for column, value in (
+            ("approval_id", approval_request_id),
+            ("reviewer_user_id", reviewer_user_id),
+            ("approval_payload_hash", approval_payload_hash),
+        ):
+            if value is not None:
+                filters.append(f"{column}=%s")
+                values.append(value)
+        rows = conn.execute(
+            "SELECT attestation_id,approval_id,workspace_id,reviewer_user_id,"
+            "approval_payload_hash,decision,created_at,payload FROM reviewer_attestations "
+            f"WHERE {' AND '.join(filters)} ORDER BY created_at DESC,attestation_id",
+            values,
+        ).fetchall()
+        records: list[ReviewerAttestation] = []
+        for row in rows:
+            try:
+                record = ReviewerAttestation.model_validate(row[7])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored reviewer attestation payload is invalid"
+                ) from error
+            if (
+                record.id != row[0]
+                or record.approval_request_id != row[1]
+                or record.workspace_id != row[2]
+                or record.reviewer_user_id != row[3]
+                or record.approval_payload_hash != row[4]
+                or record.decision.value != row[5]
+                or record.created_at != row[6]
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored reviewer attestation does not match its indexed columns"
+                )
+            records.append(record)
+        return records
+
     def insert_proposed_action(self, conn: Connection, record: ProposedAction) -> None:
         if not record.workspace_id:
             raise ValueError("Proposed action workspace is required")

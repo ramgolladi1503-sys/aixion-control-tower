@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from .agent_auth import assert_agent_can, require_external_agent
 from .approval_decisions import approval_decision_repository
+from .application_repository_access import workspace_id_for_request
 from .auth import require_maintainer, require_owner, require_reviewer
 from .models import AgentAction, AuthUser, ExternalAgent
 from .store import store
@@ -53,6 +54,7 @@ from .trust_service import (
     evaluate_gateway_action,
     issue_capability_lease,
     issue_credential_grant,
+    record_reviewer_attestation_postgres,
     record_reviewer_attestation,
     refresh_lease_status,
     revoke_capability_lease,
@@ -75,6 +77,29 @@ router = APIRouter(prefix="/trust", tags=["agent-trust"])
 ReviewerDependency = Depends(require_reviewer)
 MaintainerDependency = Depends(require_maintainer)
 OwnerDependency = Depends(require_owner)
+
+
+def _postgres_attestation_runtime(request: Request | None):
+    """Select PostgreSQL only when every attestation authority shares its runtime."""
+    if request is None:
+        return None
+    state = request.app.state
+    runtime = getattr(state, "postgres_runtime", None)
+    repositories = getattr(state, "postgres_repositories", None)
+    if runtime is None or repositories is None:
+        return None
+    bindings = (
+        ("approval_decision_repository", "approval_decisions"),
+        ("workspace_membership_repository", "workspace_membership"),
+        ("trust_repository", "trust"),
+        ("trust_event_repository", "trust_events"),
+    )
+    if any(
+        getattr(state, state_name, None) is not getattr(repositories, repository_name, None)
+        for state_name, repository_name in bindings
+    ):
+        return None
+    return runtime
 
 
 def _approval_for_user(approval_id: str, workspace_id: str | None):
@@ -135,10 +160,25 @@ def _trust_error(error: Exception) -> HTTPException:
 def create_attestation(
     payload: ReviewerAttestationCreate,
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> ReviewerAttestation:
-    workspace_id = workspace_id_for_user(user)
-    _approval_for_user(payload.approval_request_id, workspace_id)
     try:
+        runtime = _postgres_attestation_runtime(request)
+        if runtime is not None:
+            workspace_id = workspace_id_for_request(user, request)
+            if workspace_id is None:
+                raise HTTPException(status_code=403, detail="Workspace membership is required")
+            repositories = request.app.state.postgres_repositories
+            return record_reviewer_attestation_postgres(
+                payload,
+                user=user,
+                workspace_id=workspace_id,
+                connect=runtime.connect,
+                trust_repository=repositories.trust,
+                trust_event_repository=repositories.trust_events,
+            )
+        workspace_id = workspace_id_for_user(user)
+        _approval_for_user(payload.approval_request_id, workspace_id)
         return record_reviewer_attestation(payload, user=user)
     except (ValueError, TrustControlConflict) as error:
         raise _trust_error(error) from error
@@ -148,7 +188,21 @@ def create_attestation(
 def list_attestations(
     approval_request_id: str | None = None,
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> list[ReviewerAttestation]:
+    runtime = _postgres_attestation_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        with runtime.connect() as conn:
+            return repositories.trust.list_reviewer_attestations(
+                conn,
+                workspace_id=workspace_id,
+                approval_request_id=approval_request_id,
+            )
+
     items = list(store.reviewer_attestations.values())
     workspace_id = workspace_id_for_user(user)
     if workspace_id is not None:
