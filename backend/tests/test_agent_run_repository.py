@@ -18,6 +18,7 @@ from app.agent_run_models import (
     AgentRun,
     AgentRunEvent,
     AgentRunEventType,
+    AgentRunStatus,
     AgentRunStep,
     AgentRunStepStatus,
     AgentRunStepType,
@@ -46,10 +47,10 @@ from app.agent_run_supervisor import (
     DefaultAgentRunStepExecutor,
     acquire_run_lease,
     heartbeat_run,
-    pause_agent_run,
     recover_stale_leases,
     resume_agent_run,
 )
+from app.agent_run_state_machine import transition_run
 from app.application_repositories import ApplicationRepositories
 
 
@@ -369,12 +370,68 @@ def test_postgres_agent_run_create_is_workspace_scoped_and_durable(
     assert validation_result.decision.value == "PASS"
     assert validation_result.evidence["repository"] == task.repository
     assert validation_result.evidence["approval_status"] == "APPROVED"
-    paused = pause_agent_run(
-        run,
-        actor="postgres-control-test",
-        reason="exercise repository-bound pause",
-        run_repository=repository,
+    expected_run = run
+    expected_steps = repository.list_steps_for_run(run.id)
+    updated_run = expected_run.model_copy(deep=True)
+    previous_status, new_status = transition_run(
+        updated_run,
+        AgentRunStatus.PAUSED,
+        reason="exercise caller-owned PostgreSQL transaction",
     )
+    updated_steps = [step.model_copy(deep=True) for step in expected_steps]
+    control_event = AgentRunEvent(
+        run_id=updated_run.id,
+        task_id=updated_run.task_id,
+        step_id=updated_run.current_step_id,
+        correlation_id=updated_run.correlation_id,
+        event_type=AgentRunEventType.OPERATOR_ACTION,
+        previous_status=previous_status.value,
+        new_status=new_status.value,
+        message="Test transaction-scoped AgentRun pause.",
+        actor="postgres-control-test",
+    )
+    control_audit = AuditEvent(
+        event_type="agent_run.paused",
+        entity_id=updated_run.id,
+        workspace_id=updated_run.workspace_id,
+        actor="postgres-control-test",
+        details={"event_ids": [control_event.id]},
+    )
+    with pytest.raises(RuntimeError, match="abort outer transaction"):
+        with connect() as connection:
+            with connection.transaction():
+                snapshot_run, snapshot_steps = repository.get_control_snapshot_in_transaction(
+                    connection,
+                    run_id=run.id,
+                    workspace_id=workspace.id,
+                )
+                assert snapshot_run == expected_run
+                assert snapshot_steps == expected_steps
+                repository.commit_control_transition_in_transaction(
+                    connection,
+                    expected_run=expected_run,
+                    updated_run=updated_run,
+                    expected_steps=expected_steps,
+                    updated_steps=updated_steps,
+                    events=[control_event],
+                    audits=[control_audit],
+                )
+                raise RuntimeError("abort outer transaction")
+    assert repository.get(run.id) == expected_run
+    with connect() as connection:
+        with connection.transaction():
+            repository.commit_control_transition_in_transaction(
+                connection,
+                expected_run=expected_run,
+                updated_run=updated_run,
+                expected_steps=expected_steps,
+                updated_steps=updated_steps,
+                events=[control_event],
+                audits=[control_audit],
+            )
+    paused = repository.get(run.id)
+    assert paused == updated_run
+    assert paused is not None
     assert repository.get(run.id) == paused
     assert paused.status.value == "PAUSED"
     assert repository.list_steps_for_run(run.id)[0].status.value == "READY"

@@ -1271,6 +1271,67 @@ class PostgresAgentRunRepository:
             project_id=row[3],
         )
 
+    def get_control_snapshot_in_transaction(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        workspace_id: str,
+    ) -> tuple[AgentRun, list[AgentRunStep]]:
+        """Lock and validate a run with its complete step set in the caller's transaction."""
+        if not workspace_id:
+            raise AgentRunRepositoryConflict(
+                "PostgreSQL control transition requires workspace scope"
+            )
+        run_row = conn.execute(
+            "SELECT run_id,workspace_id,task_id,project_id,status,updated_at,payload "
+            "FROM agent_runs WHERE run_id=%s AND workspace_id=%s FOR UPDATE",
+            (run_id, workspace_id),
+        ).fetchone()
+        if run_row is None:
+            raise AgentRunRepositoryNotFound("AgentRun is not visible in this workspace")
+        run = _validate_run(
+            payload=run_row[6],
+            row_id=run_row[0],
+            workspace_id=run_row[1],
+            task_id=run_row[2],
+            project_id=run_row[3],
+        )
+        if run.status.value != run_row[4] or run.updated_at != run_row[5]:
+            raise AgentRunRepositoryIntegrityError(
+                "Stored AgentRun payload does not match its indexed control state"
+            )
+        rows = conn.execute(
+            "SELECT step_id,run_id,task_id,workspace_id,sequence,status,updated_at,payload "
+            "FROM agent_run_steps WHERE run_id=%s AND workspace_id=%s "
+            "ORDER BY sequence,step_id FOR UPDATE",
+            (run_id, workspace_id),
+        ).fetchall()
+        steps: list[AgentRunStep] = []
+        for row in rows:
+            try:
+                step = AgentRunStep.model_validate(row[7])
+            except Exception as error:
+                raise AgentRunRepositoryIntegrityError(
+                    "Stored AgentRun step payload is invalid"
+                ) from error
+            if (
+                step.id != row[0]
+                or step.run_id != run.id
+                or step.task_id != run.task_id
+                or row[1] != run.id
+                or row[2] != run.task_id
+                or row[3] != workspace_id
+                or step.sequence != row[4]
+                or step.status.value != row[5]
+                or step.updated_at != row[6]
+            ):
+                raise AgentRunRepositoryIntegrityError(
+                    "Stored AgentRun step identity or scope is inconsistent"
+                )
+            steps.append(step)
+        return run, steps
+
     def list_for_workspace(
         self,
         *,
@@ -1867,6 +1928,30 @@ class PostgresAgentRunRepository:
         events: list[AgentRunEvent],
         audits: list[AuditEvent],
     ) -> None:
+        with self._connect() as conn:
+            with conn.transaction():
+                self.commit_control_transition_in_transaction(
+                    conn,
+                    expected_run=expected_run,
+                    updated_run=updated_run,
+                    expected_steps=expected_steps,
+                    updated_steps=updated_steps,
+                    events=events,
+                    audits=audits,
+                )
+
+    def commit_control_transition_in_transaction(
+        self,
+        conn: Connection,
+        *,
+        expected_run: AgentRun,
+        updated_run: AgentRun,
+        expected_steps: list[AgentRunStep],
+        updated_steps: list[AgentRunStep],
+        events: list[AgentRunEvent],
+        audits: list[AuditEvent],
+    ) -> None:
+        """Persist a run transition without committing the caller's transaction."""
         _validate_control_transition(
             expected_run=expected_run, updated_run=updated_run,
             expected_steps=expected_steps, updated_steps=updated_steps,
@@ -1874,100 +1959,64 @@ class PostgresAgentRunRepository:
         )
         if not expected_run.workspace_id:
             raise AgentRunRepositoryConflict("PostgreSQL control transition requires workspace scope")
-        with self._connect() as conn:
-            run_row = conn.execute(
-                "SELECT run_id,workspace_id,task_id,project_id,payload "
-                "FROM agent_runs WHERE run_id=%s FOR UPDATE",
-                (expected_run.id,),
-            ).fetchone()
-            if run_row is None:
-                raise AgentRunRepositoryConflict("AgentRun is missing during control transition")
-            durable_run = _validate_run(
-                payload=run_row[4], row_id=run_row[0], workspace_id=run_row[1],
-                task_id=run_row[2], project_id=run_row[3],
-            )
-            if durable_run != expected_run:
-                raise AgentRunRepositoryConflict("AgentRun changed before control transition")
+        durable_run, durable_steps = self.get_control_snapshot_in_transaction(
+            conn,
+            run_id=expected_run.id,
+            workspace_id=expected_run.workspace_id,
+        )
+        if durable_run != expected_run:
+            raise AgentRunRepositoryConflict("AgentRun changed before control transition")
+        expected_by_id = {step.id: step for step in expected_steps}
+        durable_by_id = {step.id: step for step in durable_steps}
+        if durable_by_id != expected_by_id:
+            raise AgentRunRepositoryConflict("AgentRun step set changed before control transition")
 
-            all_step_rows = conn.execute(
-                "SELECT step_id,run_id,task_id,workspace_id,payload "
-                "FROM agent_run_steps WHERE run_id=%s ORDER BY sequence,step_id FOR UPDATE",
-                (expected_run.id,),
-            ).fetchall()
-            if {row[0] for row in all_step_rows} != {
-                expected_step.id for expected_step in expected_steps
-            }:
-                raise AgentRunRepositoryConflict("AgentRun step set changed before control transition")
-
-            step_rows: dict[str, tuple[AgentRunStep, object]] = {}
-            for expected_step in expected_steps:
-                row = conn.execute(
-                    "SELECT step_id,run_id,task_id,workspace_id,payload "
-                    "FROM agent_run_steps WHERE step_id=%s FOR UPDATE",
-                    (expected_step.id,),
-                ).fetchone()
-                if row is None:
-                    raise AgentRunRepositoryConflict("AgentRun step is missing during control transition")
-                try:
-                    stored_step = AgentRunStep.model_validate(row[4])
-                except Exception as error:
-                    raise AgentRunRepositoryIntegrityError("Stored AgentRun step payload is invalid") from error
-                if (
-                    row[0] != expected_step.id
-                    or row[1] != expected_run.id
-                    or row[2] != expected_run.task_id
-                    or row[3] != expected_run.workspace_id
-                    or stored_step != expected_step
-                ):
-                    raise AgentRunRepositoryConflict("AgentRun step changed before control transition")
-                step_rows[expected_step.id] = (stored_step, row[4])
-
+        changed = conn.execute(
+            "UPDATE agent_runs SET status=%s,current_step_id=%s,updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (
+                updated_run.status.value, updated_run.current_step_id,
+                updated_run.updated_at, Jsonb(updated_run.model_dump(mode="json")),
+                updated_run.id, updated_run.workspace_id,
+            ),
+        )
+        if changed.rowcount != 1:
+            raise AgentRunRepositoryConflict("AgentRun changed during control transition")
+        updated_by_id = {step.id: step for step in updated_steps}
+        for step in durable_steps:
+            updated_step = updated_by_id[step.id]
             changed = conn.execute(
-                "UPDATE agent_runs SET status=%s,current_step_id=%s,updated_at=%s,payload=%s "
-                "WHERE run_id=%s AND workspace_id=%s",
+                "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
                 (
-                    updated_run.status.value, updated_run.current_step_id,
-                    updated_run.updated_at, Jsonb(updated_run.model_dump(mode="json")),
-                    updated_run.id, updated_run.workspace_id,
+                    updated_step.status.value, updated_step.updated_at,
+                    Jsonb(updated_step.model_dump(mode="json")), updated_step.id,
+                    updated_step.run_id, updated_run.workspace_id,
                 ),
             )
             if changed.rowcount != 1:
-                raise AgentRunRepositoryConflict("AgentRun changed during control transition")
-            updated_by_id = {step.id: step for step in updated_steps}
-            for step_id in step_rows:
-                updated_step = updated_by_id[step_id]
-                changed = conn.execute(
-                    "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
-                    "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
-                    (
-                        updated_step.status.value, updated_step.updated_at,
-                        Jsonb(updated_step.model_dump(mode="json")), updated_step.id,
-                        updated_step.run_id, updated_run.workspace_id,
-                    ),
-                )
-                if changed.rowcount != 1:
-                    raise AgentRunRepositoryConflict("AgentRun step changed during control transition")
-            for event in events:
-                conn.execute(
-                    "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,created_at,event_type,payload) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                    (
-                        event.id, event.run_id, event.task_id, updated_run.workspace_id,
-                        event.created_at, event.event_type.value,
-                        Jsonb(event.model_dump(mode="json")),
-                    ),
-                )
-            for audit in audits:
-                conn.execute(
-                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
-                    "event_type,actor,details,created_at,payload) "
-                    "VALUES(%s,%s,NULL,'agent_run',%s,%s,%s,%s,%s,%s)",
-                    (
-                        audit.id, updated_run.workspace_id, updated_run.id, audit.event_type,
-                        audit.actor, Jsonb(audit.details), audit.created_at,
-                        Jsonb(audit.model_dump(mode="json")),
-                    ),
-                )
+                raise AgentRunRepositoryConflict("AgentRun step changed during control transition")
+        for event in events:
+            conn.execute(
+                "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,created_at,event_type,payload) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    event.id, event.run_id, event.task_id, updated_run.workspace_id,
+                    event.created_at, event.event_type.value,
+                    Jsonb(event.model_dump(mode="json")),
+                ),
+            )
+        for audit in audits:
+            conn.execute(
+                "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
+                "event_type,actor,details,created_at,payload) "
+                "VALUES(%s,%s,NULL,'agent_run',%s,%s,%s,%s,%s,%s)",
+                (
+                    audit.id, updated_run.workspace_id, updated_run.id, audit.event_type,
+                    audit.actor, Jsonb(audit.details), audit.created_at,
+                    Jsonb(audit.model_dump(mode="json")),
+                ),
+            )
 
     def attach_capability_lease(
         self,
