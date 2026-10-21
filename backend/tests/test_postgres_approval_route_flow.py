@@ -4,6 +4,7 @@ import os
 import hashlib
 import importlib.util
 import multiprocessing
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -12,6 +13,7 @@ from urllib.parse import urlparse
 
 import psycopg
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -307,6 +309,169 @@ def _retry_antigravity_hook_in_fresh_process(
         results.put(("ok", retry))
     except BaseException as error:
         results.put(("error", f"{type(error).__name__}: {error}"))
+
+
+def _serve_postgres_approval_http_api(
+    dsn: str,
+    schema: str,
+    reviewer_id: str,
+    reviewer_email: str,
+    workspace_id: str,
+    status_queue: multiprocessing.queues.Queue,
+    stop_event: multiprocessing.synchronize.Event,
+) -> None:
+    """Run one real Uvicorn process bound only to an ephemeral loopback port."""
+    import asyncio
+    import socket
+
+    import uvicorn
+
+    listener: socket.socket | None = None
+    status_reported = False
+    try:
+        def connect() -> Connection:
+            connection = psycopg.connect(dsn)
+            connection.execute(
+                sql.SQL("SET search_path TO {}").format(sql.Identifier(schema))
+            )
+            return connection
+
+        repositories = ApplicationRepositories.from_connector(connect)
+        for name, value in {
+            "approval_decision_repository": repositories.approval_decisions,
+            "project_repository": repositories.projects,
+            "workspace_membership_repository": repositories.workspace_membership,
+            "work_order_repository": repositories.work_orders,
+            "agent_task_repository": repositories.agent_tasks,
+            "agent_run_repository": repositories.agent_runs,
+            "external_agent_auth_repository": repositories.external_agent_auth,
+        }.items():
+            setattr(main.app.state, name, value)
+
+        reviewer = AuthUser(
+            id=reviewer_id,
+            email=reviewer_email,
+            display_name="Restart regression reviewer",
+            role=UserRole.OWNER,
+            workspace_id=workspace_id,
+        )
+        main.app.dependency_overrides[main.ReviewerDependency.dependency] = (
+            lambda: reviewer
+        )
+        main._workspace_id_for_route = lambda user, _request: user.workspace_id
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(128)
+        port = listener.getsockname()[1]
+        config = uvicorn.Config(
+            main.app,
+            host="127.0.0.1",
+            port=port,
+            lifespan="on",
+            log_level="warning",
+            access_log=False,
+        )
+        server = uvicorn.Server(config)
+
+        async def serve_until_stopped() -> None:
+            nonlocal status_reported
+            server_task = asyncio.create_task(server.serve(sockets=[listener]))
+            startup_deadline = asyncio.get_running_loop().time() + 20
+            while (
+                not server.started
+                and not server_task.done()
+                and asyncio.get_running_loop().time() < startup_deadline
+            ):
+                await asyncio.sleep(0.02)
+            if not server.started:
+                status_queue.put(("error", "Uvicorn did not complete lifespan startup"))
+                status_reported = True
+                server.should_exit = True
+                await server_task
+                return
+
+            status_queue.put(("ready", port))
+            status_reported = True
+            await asyncio.to_thread(stop_event.wait)
+            server.should_exit = True
+            await server_task
+
+        asyncio.run(serve_until_stopped())
+    except BaseException as error:
+        if not status_reported:
+            status_queue.put(("error", f"{type(error).__name__}: {error}"))
+    finally:
+        if listener is not None:
+            listener.close()
+
+
+def _start_postgres_approval_http_api(
+    *,
+    dsn: str,
+    schema: str,
+    reviewer: AuthUser,
+) -> tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]:
+    """Start an isolated app process and wait until its real HTTP server is ready."""
+    process_context = multiprocessing.get_context("spawn")
+    status_queue = process_context.Queue()
+    stop_event = process_context.Event()
+    process = process_context.Process(
+        target=_serve_postgres_approval_http_api,
+        args=(
+            dsn,
+            schema,
+            reviewer.id,
+            reviewer.email,
+            reviewer.workspace_id or "",
+            status_queue,
+            stop_event,
+        ),
+    )
+    process.start()
+    try:
+        status, value = status_queue.get(timeout=30)
+        status_queue.close()
+        if status != "ready":
+            pytest.fail(f"PostgreSQL approval HTTP server failed to start: {value}")
+        api_base = f"http://127.0.0.1:{value}"
+        with httpx.Client(timeout=1) as client:
+            for _ in range(100):
+                if not process.is_alive():
+                    pytest.fail(
+                        f"PostgreSQL approval HTTP server exited during startup: "
+                        f"{process.exitcode}"
+                    )
+                try:
+                    response = client.get(f"{api_base}/health")
+                    if response.status_code == 200 and response.json().get("status") == "ok":
+                        return process, stop_event, api_base
+                except httpx.HTTPError:
+                    pass
+                time.sleep(0.05)
+        pytest.fail("Uvicorn reported startup but its health endpoint stayed unavailable")
+    except BaseException:
+        stop_event.set()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        raise
+
+
+def _stop_postgres_approval_http_api(
+    handle: tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str],
+) -> None:
+    """Request graceful Uvicorn shutdown and reap only this test-owned process."""
+    process, stop_event, _api_base = handle
+    stop_event.set()
+    process.join(timeout=20)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+        pytest.fail("Isolated PostgreSQL approval Uvicorn process did not stop gracefully")
+    assert process.exitcode == 0
 
 
 def test_postgres_http_approval_flow_stays_in_bound_store(
@@ -680,6 +845,130 @@ def test_postgres_same_invocation_recovers_after_fresh_api_process(
             "AND event_type='approval.delivery_claimed'",
             (approval_id,),
         ).fetchone()[0] == 1
+
+
+def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
+    postgres_approval_route_runtime,
+) -> None:
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    connect, workspace, project, user, repositories, agent, agent_token, schema = (
+        postgres_approval_route_runtime
+    )
+    payload = {
+        "conversationId": f"session-postgres-uvicorn-restart-{uuid.uuid4().hex}",
+        "stepIdx": 31,
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "echo restart-safe"}},
+    }
+    environment = {
+        "AIXION_API_BASE_URL": "",
+        "AIXION_AGENT_ID": agent.id,
+        "AIXION_AGENT_TOKEN": agent_token,
+        "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+        "AIXION_PROJECT_ID": project.id,
+        "AIXION_APPROVAL_TIMEOUT_SECONDS": "5",
+    }
+    servers: list[
+        tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]
+    ] = []
+
+    def start_server() -> tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]:
+        handle = _start_postgres_approval_http_api(
+            dsn=dsn,
+            schema=schema,
+            reviewer=user,
+        )
+        servers.append(handle)
+        return handle
+
+    try:
+        first_server = start_server()
+        environment["AIXION_API_BASE_URL"] = first_server[2]
+        real_request = antigravity_hook._request
+        created: dict[str, dict] = {}
+
+        def lose_committed_create_response(
+            method: str,
+            url: str,
+            request_agent_id: str,
+            request_token: str,
+            body: dict | None = None,
+        ) -> dict:
+            result = real_request(
+                method, url, request_agent_id, request_token, body
+            )
+            if method == "POST" and urlparse(url).path == "/agents/approvals":
+                created["approval"] = result
+                raise antigravity_hook.AmbiguousRequestError(
+                    "simulated lost HTTP response after PostgreSQL commit"
+                )
+            return result
+
+        with patch.object(
+            antigravity_hook, "_request", side_effect=lose_committed_create_response
+        ), patch.object(antigravity_hook.time, "sleep"):
+            with pytest.raises(antigravity_hook.AmbiguousRequestError):
+                antigravity_hook.run(payload, environment)
+
+        first_approval = created["approval"]
+        approval_id = first_approval["id"]
+        invocation_id = first_approval["source_invocation_id"]
+        assert first_approval["status"] == ApprovalStatus.PENDING_REVIEW
+        _stop_postgres_approval_http_api(first_server)
+
+        second_server = start_server()
+        with httpx.Client(timeout=10) as client:
+            decision = client.post(
+                f"{second_server[2]}/approvals/{approval_id}/decision",
+                json={
+                    "decision": "approve",
+                    "reason": "approve after actual API server restart",
+                },
+            )
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["status"] == ApprovalStatus.APPROVED
+        _stop_postgres_approval_http_api(second_server)
+
+        third_server = start_server()
+        environment["AIXION_API_BASE_URL"] = third_server[2]
+        with patch.object(antigravity_hook.time, "sleep"):
+            recovered = antigravity_hook.run(payload, environment)
+        assert recovered["decision"] == "allow"
+        assert recovered["reason"] == "Approved from Aixion Control Tower"
+
+        durable = repositories.approval_decisions.get(approval_id)
+        assert durable is not None
+        assert durable.status == ApprovalStatus.APPROVED
+        assert durable.source_invocation_id == invocation_id
+        with connect() as connection:
+            rows = connection.execute(
+                "SELECT approval_id,status,source_invocation_id FROM approval_requests "
+                "WHERE workspace_id=%s AND source_agent_id=%s AND source_invocation_id=%s",
+                (workspace.id, agent.id, invocation_id),
+            ).fetchall()
+            assert rows == [(approval_id, ApprovalStatus.APPROVED, invocation_id)]
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.created_by_agent'",
+                (approval_id,),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.decision'",
+                (approval_id,),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.delivery_claimed'",
+                (approval_id,),
+            ).fetchone()[0] == 1
+    finally:
+        for server in reversed(servers):
+            if server[0].is_alive():
+                _stop_postgres_approval_http_api(server)
 
 
 def test_postgres_standard_approval_creation_does_not_project_to_sqlite(
