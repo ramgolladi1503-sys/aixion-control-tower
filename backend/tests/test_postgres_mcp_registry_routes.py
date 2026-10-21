@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 
 from app import main, mcp_registry_routes
 from app.application_repositories import ApplicationRepositories
+from app.mcp_gateway_routes import child_received_count_for_test
 from app.models import AuthUser, Project, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
 from app.store import store
@@ -148,3 +149,63 @@ def test_mcp_registry_http_routes_use_bound_postgres_repository(
     ]
     assert set(store.mcp_child_servers) == initial_server_ids
     assert {event.id for event in store.audit_events} == initial_audit_ids
+
+
+def test_mcp_jsonrpc_fails_closed_with_bound_postgres_registry(
+    postgres_mcp_registry_route_runtime,
+) -> None:
+    connect, _workspace, project, _user = postgres_mcp_registry_route_runtime
+    client = TestClient(main.app)
+    registered = client.post(
+        "/mcp-registry/child-servers",
+        json={
+            "project_id": project.id,
+            "name": "postgres-backed-child",
+            "description": "Registry entry for transport fail-closed regression",
+            "transport": "test",
+            "endpoint": "memory://postgres-backed-child",
+            "enabled": True,
+            "tools": [
+                {
+                    "name": "write_file",
+                    "description": "Mutating test tool",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["path"],
+                        "additionalProperties": False,
+                        "properties": {"path": {"type": "string"}},
+                    },
+                    "mutating": True,
+                }
+            ],
+        },
+    )
+    assert registered.status_code == 200, registered.text
+
+    before_sqlite_pending = set(store.mcp_pending_requests)
+    before_sqlite_approvals = set(store.approval_requests)
+    before_sqlite_audit_ids = {event.id for event in store.audit_events}
+    before_child_received = child_received_count_for_test()
+    response = client.post(
+        f"/mcp/{project.id}/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "postgres-guard",
+            "method": "tools/call",
+            "params": {
+                "name": "write_file",
+                "server_name": "postgres-backed-child",
+                "arguments": {"path": "README.md"},
+                "mutating": False,
+            },
+        },
+    )
+
+    assert response.status_code == 503
+    with connect() as connection:
+        assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 0
+    assert set(store.mcp_pending_requests) == before_sqlite_pending
+    assert set(store.approval_requests) == before_sqlite_approvals
+    assert {event.id for event in store.audit_events} == before_sqlite_audit_ids
+    assert child_received_count_for_test() == before_child_received
