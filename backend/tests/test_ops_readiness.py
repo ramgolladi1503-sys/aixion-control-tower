@@ -42,6 +42,8 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     assert body["status"] == "ready"
     assert body["auth_enabled"] is False
     assert body["database_backend"] == "sqlite"
+    assert body["application_store_mode"] == "sqlite_local"
+    assert body["application_store_ready"] is True
     assert body["postgres_probe_enabled"] is False
     assert body["postgres_auth_rate_limits_enabled"] is False
     assert body["postgres_probe_status"] == "disabled"
@@ -113,6 +115,20 @@ def test_readiness_reports_postgres_probe_without_claiming_it_is_active_store(
     assert readiness.postgres_pool_waiting == 1
     assert readiness.postgres_auth_rate_limits_enabled is True
     assert readiness.database_backend == "sqlite"
+    assert readiness.application_store_mode == "postgres_probe_only"
+    assert readiness.application_store_ready is False
+
+
+def test_production_readiness_rejects_sqlite_application_store(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+
+    readiness = build_runtime_readiness()
+
+    assert readiness.status == "not_ready"
+    assert readiness.application_store_mode == "sqlite_local"
+    assert readiness.application_store_ready is False
+    assert any("not bound to one complete PostgreSQL" in error for error in readiness.errors)
 
 
 def test_readiness_fails_closed_when_enabled_postgres_probe_is_unavailable(

@@ -29,6 +29,8 @@ class RuntimeReadinessResponse(BaseModel):
     trust_enforcement: bool
     lease_signing_key_configured: bool
     database_backend: Literal["sqlite"]
+    application_store_mode: Literal["sqlite_local", "postgres_probe_only"]
+    application_store_ready: bool
     postgres_probe_enabled: bool
     postgres_auth_rate_limits_enabled: bool
     postgres_probe_status: Literal["disabled", "ready", "not_ready"]
@@ -155,6 +157,19 @@ def build_runtime_readiness(
         and lease.expires_at > now_utc()
         for lease in store.capability_leases.values()
     )
+    # A healthy PostgreSQL schema probe does not mean the routes, workers, or
+    # outboxes are bound to that database. Until the application publishes a
+    # complete PostgreSQL repository bundle and the SQLite-backed surfaces are
+    # disabled/migrated, report the actual SQLite authority explicitly.
+    application_store_mode: Literal["sqlite_local", "postgres_probe_only"] = (
+        "postgres_probe_only" if postgres_runtime is not None else "sqlite_local"
+    )
+    application_store_ready = application_store_mode == "sqlite_local" and not settings.is_production
+    if settings.is_production:
+        errors.append(
+            "Application persistence is not production-ready: authoritative routes and workers "
+            "are not bound to one complete PostgreSQL repository runtime."
+        )
     ready = (
         db_reachable
         and migrations_applied
@@ -171,6 +186,8 @@ def build_runtime_readiness(
         trust_enforcement=settings.trust_enforcement,
         lease_signing_key_configured=settings.lease_signing_key_configured,
         database_backend="sqlite",
+        application_store_mode=application_store_mode,
+        application_store_ready=application_store_ready,
         postgres_probe_enabled=settings.postgres_runtime_probe_enabled,
         postgres_auth_rate_limits_enabled=settings.postgres_auth_rate_limits_enabled,
         postgres_probe_status=postgres_probe_status,
