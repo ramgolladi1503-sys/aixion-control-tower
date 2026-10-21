@@ -38,8 +38,8 @@ class ApprovalStaleDecisionViewModelTest {
             viewModel.decide("approve", "reviewed after inbox refresh")
             runCurrent()
 
-            assertEquals(1, api.decisionCalls)
-            assertEquals(listOf(APPROVAL_ID), api.decisionApprovalIds)
+            assertEquals("A stale approval must not receive a decision POST.", 0, api.decisionCalls)
+            assertTrue(api.decisionApprovalIds.isEmpty())
             assertEquals(listOf(APPROVAL_ID), api.statusApprovalIds)
             assertEquals(ApprovalStatus.DENIED, viewModel.state.value.selectedApproval?.status)
             assertTrue(viewModel.state.value.approvals.none {
@@ -50,12 +50,13 @@ class ApprovalStaleDecisionViewModelTest {
             assertEquals(APPROVAL_ID, viewModel.state.value.lastActionApprovalId)
             assertTrue(
                 viewModel.state.value.lastActionMessage.orEmpty()
-                    .contains("No retry was sent.")
+                    .contains("No decision was sent.")
             )
 
             viewModel.decide("approve", "retry must remain blocked for the terminal request")
             runCurrent()
-            assertEquals("A terminal request must not receive a second decision.", 1, api.decisionCalls)
+            assertEquals("A stale approval must not receive any decision POST.", 0, api.decisionCalls)
+            assertTrue(api.decisionApprovalIds.isEmpty())
         } finally {
             Dispatchers.resetMain()
         }
