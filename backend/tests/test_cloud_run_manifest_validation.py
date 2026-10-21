@@ -63,6 +63,30 @@ def test_candidate_with_unpinned_container_image_is_rejected() -> None:
     )
 
 
+def test_candidate_without_service_maximum_instance_cap_is_rejected() -> None:
+    candidate = _resolved_candidate().replace(
+        '    run.googleapis.com/maxScale: "1"\n',
+        "",
+    )
+
+    assert (
+        "Cloud Run service maximum instance count must be explicitly set to 1"
+        in validate_manifest_text(candidate)
+    )
+
+
+def test_candidate_with_increased_service_maximum_instance_cap_is_rejected() -> None:
+    candidate = _resolved_candidate().replace(
+        '    run.googleapis.com/maxScale: "1"',
+        '    run.googleapis.com/maxScale: "2"',
+    )
+
+    assert (
+        "Cloud Run service maximum instance count must be explicitly set to 1"
+        in validate_manifest_text(candidate)
+    )
+
+
 def test_candidate_with_plaintext_secret_is_rejected() -> None:
     candidate = _resolved_candidate().replace(
         "              valueFrom:\n"

@@ -84,6 +84,8 @@ def validate_manifest_text(text: str) -> list[str]:
         issues.append("Cloud Run ingress must be explicitly set to all for mobile clients")
     if service_annotations.get("run.googleapis.com/invoker-iam-disabled") != "true":
         issues.append("public invocation must be explicit; API authentication remains mandatory")
+    if service_annotations.get("run.googleapis.com/maxScale") != "1":
+        issues.append("Cloud Run service maximum instance count must be explicitly set to 1")
 
     spec = document.get("spec")
     template = spec.get("template") if isinstance(spec, dict) else None

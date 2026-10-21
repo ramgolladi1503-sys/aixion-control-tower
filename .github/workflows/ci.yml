@@ -52,6 +52,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
+      - name: Run provider hook CLI tests
+        run: >-
+          python -m pytest
+          ../integrations/antigravity/test_antigravity_hook_cli.py
+          ../integrations/codex/test_codex_hook_cli.py
+
       - name: Run backend tests
         run: python -m pytest
 

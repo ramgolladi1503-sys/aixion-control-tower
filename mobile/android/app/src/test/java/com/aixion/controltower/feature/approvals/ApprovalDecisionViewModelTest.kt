@@ -11,6 +11,7 @@ import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.data.repository.ApprovalRepository
 import com.aixion.controltower.data.repository.BaseFakeControlTowerApi
+import com.aixion.controltower.data.repository.toUiSummary
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -30,6 +31,7 @@ class ApprovalDecisionViewModelTest {
     fun quickDuplicateTapsDispatchOnlyOneDecision() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
+            assertEquals(approvalSummary(REQUEST_ID), approvalDto(REQUEST_ID, "REQUESTED").toUiSummary())
             val api = RecordingApprovalApi()
             val viewModel = newViewModel(api)
             runCurrent()
@@ -47,14 +49,68 @@ class ApprovalDecisionViewModelTest {
     }
 
     @Test
+    fun changedApprovalSnapshotIsUpdatedAndDecisionIsNotSent() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                getResult = { id, _ -> approvalDto(id, "REQUESTED").copy(title = "Changed after review") }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            val reviewed = approvalSummary(REQUEST_ID)
+            viewModel.selectApproval(reviewed)
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+
+            assertEquals("A changed approval must never receive a decision POST.", 0, api.decisionCalls)
+            assertEquals(listOf(REQUEST_ID), api.statusApprovalIds)
+            assertEquals("Changed after review", viewModel.state.value.selectedApproval?.title)
+            assertEquals("Changed after review", viewModel.state.value.approvals.single().title)
+            assertFalse(viewModel.state.value.decisionInFlight)
+            assertFalse(viewModel.state.value.decisionNeedsReconciliation)
+            assertTrue(viewModel.state.value.lastActionMessage.orEmpty().contains("No decision was sent"))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun failedApprovalPreflightDoesNotSendDecision() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                getResult = { _, _ -> throw IOException("approval refresh unavailable") }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+
+            assertEquals(0, api.decisionCalls)
+            assertEquals(listOf(REQUEST_ID), api.statusApprovalIds)
+            assertFalse(viewModel.state.value.decisionInFlight)
+            assertFalse(viewModel.state.value.decisionNeedsReconciliation)
+            assertTrue(viewModel.state.value.lastActionMessage.orEmpty().contains("No decision was sent"))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
     fun ambiguousDecisionStaysBlockedUntilSameApprovalIsReconciled() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val api = RecordingApprovalApi().apply {
                 decideResult = { _, _ -> throw IOException("decision response lost") }
                 getResult = { id, callNumber ->
-                    if (callNumber == 1) throw IOException("status endpoint unavailable")
-                    approvalDto(id, "APPROVED")
+                    when (callNumber) {
+                        1 -> approvalDto(id, "REQUESTED") // Preflight must match the snapshot the reviewer saw.
+                        2 -> throw IOException("status endpoint unavailable")
+                        else -> approvalDto(id, "APPROVED")
+                    }
                 }
             }
             val viewModel = newViewModel(api)
@@ -66,7 +122,7 @@ class ApprovalDecisionViewModelTest {
 
             assertEquals(1, api.decisionCalls)
             assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
-            assertEquals(listOf(REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
             assertTrue(viewModel.state.value.decisionNeedsReconciliation)
             assertEquals(REQUEST_ID, viewModel.state.value.lastActionApprovalId)
             assertEquals(ApprovalStatus.REQUESTED, viewModel.state.value.selectedApproval?.status)
@@ -82,7 +138,7 @@ class ApprovalDecisionViewModelTest {
             viewModel.reconcileDecisionStatus()
             runCurrent()
 
-            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
             assertFalse(viewModel.state.value.decisionNeedsReconciliation)
             assertEquals(REQUEST_ID, viewModel.state.value.lastActionApprovalId)
             assertEquals(ApprovalStatus.APPROVED, viewModel.state.value.approvals.single().status)
@@ -100,8 +156,11 @@ class ApprovalDecisionViewModelTest {
             val api = RecordingApprovalApi().apply {
                 decideResult = { _, _ -> throw IOException("decision response lost") }
                 getResult = { id, callNumber ->
-                    if (callNumber == 1) throw IOException("automatic status check failed")
-                    approvalDto(id, "REQUESTED")
+                    when (callNumber) {
+                        1 -> approvalDto(id, "REQUESTED")
+                        2 -> throw IOException("automatic status check failed")
+                        else -> approvalDto(id, "REQUESTED")
+                    }
                 }
             }
             val viewModel = newViewModel(api)
@@ -115,7 +174,7 @@ class ApprovalDecisionViewModelTest {
             viewModel.reconcileDecisionStatus()
             runCurrent()
 
-            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
             assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
             assertEquals(1, api.decisionCalls)
             assertFalse(viewModel.state.value.decisionNeedsReconciliation)
@@ -133,8 +192,11 @@ class ApprovalDecisionViewModelTest {
             val api = RecordingApprovalApi().apply {
                 decideResult = { _, _ -> throw IOException("decision response lost") }
                 getResult = { id, callNumber ->
-                    if (callNumber == 1) throw IOException("automatic status check failed")
-                    approvalDto(id, "DENIED")
+                    when (callNumber) {
+                        1 -> approvalDto(id, "REQUESTED")
+                        2 -> throw IOException("automatic status check failed")
+                        else -> approvalDto(id, "DENIED")
+                    }
                 }
             }
             val viewModel = newViewModel(api)
@@ -146,7 +208,7 @@ class ApprovalDecisionViewModelTest {
             viewModel.reconcileDecisionStatus()
             runCurrent()
 
-            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
             assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
             assertEquals(1, api.decisionCalls)
             assertFalse(viewModel.state.value.decisionNeedsReconciliation)
@@ -163,7 +225,10 @@ class ApprovalDecisionViewModelTest {
         try {
             val api = RecordingApprovalApi().apply {
                 decideResult = { _, _ -> throw IOException("decision response lost") }
-                getResult = { _, _ -> throw IOException("status endpoint unavailable") }
+                getResult = { id, callNumber ->
+                    if (callNumber == 1) approvalDto(id, "REQUESTED")
+                    else throw IOException("status endpoint unavailable")
+                }
             }
             val viewModel = newViewModel(api)
             runCurrent()
@@ -178,7 +243,7 @@ class ApprovalDecisionViewModelTest {
             viewModel.decide("approve", "reviewed")
             runCurrent()
 
-            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
             assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
             assertEquals(1, api.decisionCalls)
             assertTrue(viewModel.state.value.decisionNeedsReconciliation)
@@ -196,8 +261,11 @@ class ApprovalDecisionViewModelTest {
             val api = RecordingApprovalApi().apply {
                 decideResult = { id, _ -> approvalDto(id, "DENIED") }
                 getResult = { id, callNumber ->
-                    if (callNumber == 1) throw IOException("automatic status check failed")
-                    approvalDto(id, "DENIED")
+                    when (callNumber) {
+                        1 -> approvalDto(id, "REQUESTED")
+                        2 -> throw IOException("automatic status check failed")
+                        else -> approvalDto(id, "DENIED")
+                    }
                 }
             }
             val viewModel = newViewModel(api)
@@ -213,7 +281,7 @@ class ApprovalDecisionViewModelTest {
 
             assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
             assertEquals(1, api.decisionCalls)
-            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
             assertFalse(viewModel.state.value.decisionNeedsReconciliation)
             assertEquals(ApprovalStatus.DENIED, viewModel.state.value.selectedApproval?.status)
             assertEquals(REQUEST_ID, viewModel.state.value.lastActionApprovalId)
@@ -282,6 +350,7 @@ private fun approvalDto(id: String, status: String) = ApprovalRequestDto(
     project_id = "project-1",
     title = "Approval request",
     summary = "Review this change",
+    agent_name = "Antigravity",
     target_branch = "main",
     status = status,
     risk = RiskAssessmentDto(level = "LOW")
@@ -299,5 +368,6 @@ private fun approvalSummary(id: String) = ApprovalSummary(
     files = emptyList(),
     requiredActions = emptyList(),
     testPlan = emptyList(),
-    rollbackPlan = "Revert"
+    rollbackPlan = "",
+    projectId = "project-1"
 )

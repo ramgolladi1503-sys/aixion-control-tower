@@ -246,6 +246,44 @@ class ApprovalsViewModel internal constructor(
             selected
         }
         viewModelScope.launch {
+            val latest = try {
+                repository.getApproval(approval.id)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _state.value = _state.value.copy(
+                    decisionInFlight = false,
+                    lastActionMessage = "Approval could not be refreshed before the decision. No decision was sent. Refresh and review the request before trying again. ${error.message ?: ""}".trim(),
+                    lastActionApprovalId = approval.id
+                )
+                return@launch
+            }
+            if (latest != approval) {
+                _state.value = _state.value.copy(
+                    decisionInFlight = false,
+                    decisionNeedsReconciliation = false,
+                    decisionBeingReconciled = null,
+                    selectedApproval = latest,
+                    approvals = retainDecisionInHistory(_state.value.approvals, latest),
+                    lastActionMessage = "This approval changed after it was opened. No decision was sent. Review the current request before deciding.",
+                    lastActionApprovalId = latest.id
+                )
+                return@launch
+            }
+            if (latest.status != ApprovalStatus.REQUESTED &&
+                latest.status != ApprovalStatus.PENDING_REVIEW
+            ) {
+                _state.value = _state.value.copy(
+                    decisionInFlight = false,
+                    decisionNeedsReconciliation = false,
+                    decisionBeingReconciled = null,
+                    selectedApproval = latest,
+                    approvals = retainDecisionInHistory(_state.value.approvals, latest),
+                    lastActionMessage = "This approval is now ${latest.status.name}. No decision was sent.",
+                    lastActionApprovalId = latest.id
+                )
+                return@launch
+            }
             val updated = try {
                 repository.decide(approval.id, decision, reason).also { result ->
                     if (!decisionMatchesStatus(decision, result.status)) {
