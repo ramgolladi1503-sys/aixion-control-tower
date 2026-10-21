@@ -96,8 +96,16 @@ internal fun reconcileApprovalsAfterRefresh(
     )
 }
 
-class ApprovalsViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = ApprovalRepository(ApiClient.create(application.applicationContext))
+class ApprovalsViewModel internal constructor(
+    application: Application,
+    private val repository: ApprovalRepository
+) : AndroidViewModel(application) {
+    constructor(application: Application) : this(
+        application,
+        ApprovalRepository(ApiClient.create(application.applicationContext))
+    )
+
+    private val decisionSubmissionLock = Any()
 
     private val _state = MutableStateFlow(ApprovalsUiState())
     val state: StateFlow<ApprovalsUiState> = _state.asStateFlow()
@@ -222,15 +230,19 @@ class ApprovalsViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun decide(decision: String, reason: String, onCompleted: () -> Unit = {}) {
-        val approval = _state.value.selectedApproval ?: return
-        if (!canStartApprovalDecision(_state.value)) return
-        viewModelScope.launch {
-            _state.value = _state.value.copy(
+        val approval = synchronized(decisionSubmissionLock) {
+            val current = _state.value
+            if (!canStartApprovalDecision(current)) return
+            val selected = current.selectedApproval ?: return
+            _state.value = current.copy(
                 decisionInFlight = true,
                 decisionBeingReconciled = null,
                 lastActionMessage = "Sending $decision decision...",
-                lastActionApprovalId = approval.id
+                lastActionApprovalId = selected.id
             )
+            selected
+        }
+        viewModelScope.launch {
             val updated = try {
                 repository.decide(approval.id, decision, reason).also { result ->
                     if (!decisionMatchesStatus(decision, result.status)) {
