@@ -530,3 +530,21 @@ def test_mcp_jsonrpc_returns_404_for_unknown_project() -> None:
     )
 
     assert response.status_code == 404
+
+
+def test_mcp_jsonrpc_fails_closed_when_app_store_is_not_sqlite(monkeypatch) -> None:
+    monkeypatch.setattr(app.state, "mcp_child_server_repository", object())
+    project_id = _create_project()
+    before_pending_ids = set(store.mcp_pending_requests)
+    before_received = child_received_count_for_test()
+
+    response = _jsonrpc(
+        project_id,
+        "tools/call",
+        {"name": "update_config", "arguments": {"key": "demo", "value": "must-not-run"}, "mutating": True},
+    )
+
+    assert response.status_code == 503
+    assert "durable runtime" in response.json()["detail"]
+    assert set(store.mcp_pending_requests) == before_pending_ids
+    assert child_received_count_for_test() == before_received
