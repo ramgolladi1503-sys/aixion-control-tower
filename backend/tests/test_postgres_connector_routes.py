@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import json
+import time
 import uuid
 from collections.abc import Callable, Iterator
 
@@ -15,7 +17,9 @@ from app.application_repositories import ApplicationRepositories
 from app.auth import require_owner
 from app.connector_models import AgentConnector
 from app.connector_repository import PostgresConnectorRepository
-from app.models import AuditEvent, AuthUser, User, UserRole, Workspace
+from app.connector_credentials import hash_connector_secret
+from app.connector_webhook import expected_hmac_v1_signature
+from app.models import AuditEvent, AuthUser, Project, User, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
 from app.store import store
 
@@ -69,6 +73,7 @@ def postgres_connector_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterato
             )
         repositories = ApplicationRepositories.from_connector(connect)
         monkeypatch.setattr(main.app.state, "connector_repository", repositories.connectors, raising=False)
+        monkeypatch.setattr(main.app.state, "agent_task_repository", repositories.agent_tasks, raising=False)
         monkeypatch.setattr(main.app.state, "project_repository", repositories.projects, raising=False)
         monkeypatch.setattr(main.app.state, "workspace_membership_repository",
                             repositories.workspace_membership, raising=False)
@@ -271,3 +276,117 @@ def test_connector_credentials_and_status_transitions_commit_to_postgres(
     ]
     assert set(store.agent_connectors) == before_connectors
     assert {event.id for event in store.audit_events} == before_audits
+
+
+def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
+    postgres_connector_route_runtime,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Webhook project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+    client = TestClient(main.app)
+    before_task_ids = set(store.agent_tasks)
+    before_connector_ids = set(store.agent_connectors)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": "PostgreSQL Antigravity hook",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK"],
+            "rate_limit_per_minute": 1,
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+    body = json.dumps(
+        {
+            "action": "CREATE_AGENT_TASK",
+            "project_id": project.id,
+            "title": "Persist connector task",
+            "goal": "Create the task through PostgreSQL repositories.",
+            "requires_approval": True,
+        },
+        separators=(",", ":"),
+    ).encode()
+    timestamp = str(int(time.time()))
+    replay_nonce = f"nonce_{uuid.uuid4().hex}"
+    def signature_for(nonce: str) -> str:
+        return expected_hmac_v1_signature(
+            hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+        )
+    headers = {
+        "X-Aixion-Signature-Version": "v1",
+        "X-Aixion-Timestamp": timestamp,
+        "X-Aixion-Nonce": replay_nonce,
+        "X-Aixion-Connector-Signature": f"v1={signature_for(replay_nonce)}",
+        "Content-Type": "application/json",
+    }
+
+    accepted = client.post(f"/connectors/{connector_id}/webhook", content=body, headers=headers)
+    replayed = client.post(f"/connectors/{connector_id}/webhook", content=body, headers=headers)
+    limited_nonce = f"nonce_{uuid.uuid4().hex}"
+    limited_headers = {
+        **headers,
+        "X-Aixion-Nonce": limited_nonce,
+        "X-Aixion-Connector-Signature": f"v1={signature_for(limited_nonce)}",
+    }
+    limited = client.post(
+        f"/connectors/{connector_id}/webhook", content=body, headers=limited_headers
+    )
+
+    assert accepted.status_code == 200, accepted.text
+    assert replayed.status_code == 401
+    assert replayed.json()["detail"] == "Connector HMAC nonce has already been used"
+    assert limited.status_code == 429
+    task_id = accepted.json()["task_id"]
+    with connect() as conn:
+        task_rows = conn.execute(
+            "SELECT task_id,workspace_id,payload FROM agent_tasks WHERE task_id=%s", (task_id,)
+        ).fetchall()
+        connector_payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        connector_audits = conn.execute(
+            "SELECT event_type FROM audit_events WHERE entity_id=%s ORDER BY created_at,event_id",
+            (connector_id,),
+        ).fetchall()
+    assert len(task_rows) == 1
+    assert task_rows[0][0:2] == (task_id, workspace.id)
+    assert task_rows[0][2]["provider"] == "ANTIGRAVITY"
+    assert task_rows[0][2]["external_agent_id"] is None
+    assert task_rows[0][2]["metadata"]["connector_id"] == connector_id
+    assert replay_nonce in connector_payload["config"]["hmac_nonce_history"]
+    assert limited_nonce in connector_payload["config"]["hmac_nonce_history"]
+    assert connector_payload["config"]["rate_limit_request_count"] == 2
+    assert [row[0] for row in connector_audits].count("connector.webhook_authenticated") == 1
+    assert [row[0] for row in connector_audits].count("connector.webhook_auth_failed") == 1
+    assert [row[0] for row in connector_audits].count("connector.webhook_rate_limited") == 1
+    assert set(store.agent_tasks) == before_task_ids
+    assert connector_id not in store.agent_connectors
+    assert set(store.agent_connectors) == before_connector_ids
+
+
+def test_postgres_webhook_rejects_mixed_repository_runtime(
+    postgres_connector_route_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main.app.state, "agent_task_repository", None)
+    response = TestClient(main.app).post(
+        "/connectors/missing/webhook",
+        json={"action": "CREATE_AGENT_TASK"},
+    )
+    assert response.status_code == 503
+    assert "one PostgreSQL connector, task, project, and workspace runtime" in response.json()["detail"]

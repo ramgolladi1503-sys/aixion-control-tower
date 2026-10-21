@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
+from .agent_task_repository import PostgresAgentTaskRepository
 from .auth import require_owner
 from .connector_credentials import (
     ConnectorCredentialStatus,
@@ -41,8 +42,13 @@ from .application_repository_access import (
     workspace_membership_repository_for_request,
 )
 from .models import AuditEvent, AuthUser, now_utc
-from .connector_repository import ConnectorRepositoryConflict, ConnectorRepositoryScopeError
-from .project_repository import ProjectRepository
+from .connector_repository import (
+    ConnectorRepositoryConflict,
+    ConnectorRepositoryScopeError,
+    PostgresConnectorRepository,
+)
+from .project_repository import PostgresProjectRepository, ProjectRepository
+from .workspace_membership_repository import PostgresWorkspaceMembershipRepository
 from .store import store
 from .workspace_access import (
     connector_scope_is_consistent,
@@ -311,7 +317,37 @@ async def connector_webhook(
     x_aixion_timestamp: str | None = Header(default=None),
     x_aixion_nonce: str | None = Header(default=None),
 ) -> ConnectorWebhookResponse:
-    connector = _get_connector_or_404(connector_id)
+    selected_repository = getattr(request.app.state, "connector_repository", None)
+    if selected_repository is None:
+        connector = _get_connector_or_404(connector_id)
+        return await handle_connector_webhook(
+            connector,
+            request,
+            authorization,
+            x_aixion_connector_signature,
+            x_aixion_signature_version,
+            x_aixion_timestamp,
+            x_aixion_nonce,
+        )
+
+    selected_task_repository = getattr(request.app.state, "agent_task_repository", None)
+    selected_project_repository = getattr(request.app.state, "project_repository", None)
+    selected_memberships = getattr(request.app.state, "workspace_membership_repository", None)
+    if not all((
+        isinstance(selected_repository, PostgresConnectorRepository),
+        isinstance(selected_task_repository, PostgresAgentTaskRepository),
+        isinstance(selected_project_repository, PostgresProjectRepository),
+        isinstance(selected_memberships, PostgresWorkspaceMembershipRepository),
+    )):
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL connector webhook requires one PostgreSQL connector, task, project, and workspace runtime",
+        )
+    connector = selected_repository.get_for_authentication(connector_id)
+    if connector is None or not connector_scope_is_consistent(
+        connector, projects=selected_project_repository, memberships=selected_memberships
+    ):
+        raise HTTPException(status_code=404, detail="Connector not found")
     return await handle_connector_webhook(
         connector,
         request,
@@ -320,6 +356,10 @@ async def connector_webhook(
         x_aixion_signature_version,
         x_aixion_timestamp,
         x_aixion_nonce,
+        connector_repository=selected_repository,
+        task_repository=selected_task_repository,
+        project_repository=selected_project_repository,
+        workspace_memberships=selected_memberships,
     )
 
 
