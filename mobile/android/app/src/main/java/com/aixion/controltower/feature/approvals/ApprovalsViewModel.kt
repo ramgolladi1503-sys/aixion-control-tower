@@ -234,6 +234,9 @@ class ApprovalsViewModel internal constructor(
             val current = _state.value
             if (!canStartApprovalDecision(current)) return
             val selected = current.selectedApproval ?: return
+            if (selected.status != ApprovalStatus.REQUESTED &&
+                selected.status != ApprovalStatus.PENDING_REVIEW
+            ) return
             _state.value = current.copy(
                 decisionInFlight = true,
                 decisionBeingReconciled = null,
