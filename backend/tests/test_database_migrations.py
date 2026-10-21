@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
-from app.database_migrations import MIGRATION_TABLE, get_applied_migrations, run_migrations
+from app.database_migrations import MIGRATIONS, MIGRATION_TABLE, get_applied_migrations, run_migrations
 from app.models import User, UserRole
 from app.store import SQLiteBackedStore
 
@@ -66,6 +70,54 @@ def test_migration_runner_is_idempotent(tmp_path) -> None:
 
         assert migration_count == 8
     assert kv_table_count == 1
+
+
+def test_concurrent_process_migrations_apply_each_migration_once(tmp_path) -> None:
+    db_path = tmp_path / "concurrent-startup.sqlite3"
+    start_file = tmp_path / "start-migrations"
+    backend_root = Path(__file__).resolve().parents[1]
+    script = """
+import pathlib
+import sqlite3
+import sys
+import time
+
+sys.path.insert(0, sys.argv[3])
+from app.database_migrations import run_migrations
+
+database = pathlib.Path(sys.argv[1])
+start = pathlib.Path(sys.argv[2])
+while not start.exists():
+    time.sleep(0.005)
+with sqlite3.connect(database, timeout=30.0) as connection:
+    run_migrations(connection)
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(db_path), str(start_file), str(backend_root)],
+            env=os.environ.copy(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    try:
+        start_file.touch()
+        outputs = [process.communicate(timeout=30) for process in processes]
+        assert [process.returncode for process in processes] == [0, 0], outputs
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
+    with sqlite3.connect(db_path) as conn:
+        applied = conn.execute(
+            f"SELECT migration_id FROM {MIGRATION_TABLE} ORDER BY migration_id"
+        ).fetchall()
+    assert len(applied) == len(MIGRATIONS)
+    assert len({migration_id for (migration_id,) in applied}) == len(MIGRATIONS)
 
 
 def test_approval_invocation_index_rejects_duplicate_scoped_identity(tmp_path) -> None:

@@ -269,7 +269,15 @@ def fail_on_unknown_migrations(applied_ids: set[str]) -> None:
 
 
 def run_migrations(conn: sqlite3.Connection) -> None:
-    """Apply pending database migrations safely and idempotently."""
+    """Apply pending database migrations safely and idempotently.
+
+    Take SQLite's write reservation before reading the migration ledger. Without
+    this reservation, two processes starting together can both observe the same
+    pending migration and race on the ledger's primary key after applying it.
+    """
+    if conn.in_transaction:
+        raise RuntimeError("SQLite migrations require a connection without an active transaction")
+    conn.execute("BEGIN IMMEDIATE")
     ensure_migration_table(conn)
     applied_ids = {
         row[0]
