@@ -19,16 +19,18 @@ python scripts/validate_cloud_run_manifest.py /path/to/reviewed-cloud-run-stagin
 The validator fails closed for invalid YAML, unresolved placeholders, non-production
 profile settings, missing PostgreSQL/outbox requirements, SQLite configuration,
 plaintext secret values, duplicate environment names, Secret Manager aliases missing
-from the project-scoped mapping, mutable image tags, missing resource limits, and an
-invalid startup probe.
+from the project-scoped mapping, mutable image tags, image sources outside the
+project's expected Artifact Registry repository, nonnumeric secret versions, missing
+resource limits, and an invalid startup probe.
 
 ## Validation
 
-The preflight tests passed **9/9**. The full backend suite ran with the isolated
-PostgreSQL test database and passed **1,351 tests, 0 skipped, 6 existing warnings**.
-Ruff, Python compilation, and `git diff --check` passed for the preflight files.
-Running the default command on the checked-in template returns the expected
-`NOT APPLY-READY` result because the deployment values remain unresolved.
+The preflight tests passed **13/13**. The full backend suite ran with the isolated
+PostgreSQL test database and passed **1,357 tests, 0 skipped, 6 existing warnings**
+in 70.62 seconds. Ruff and Python compilation passed for the preflight files, and
+`git diff --check` passed. Running the default command on the checked-in template
+returns the expected `NOT APPLY-READY` result because deployment values remain
+unresolved.
 
 ## Limits and rollout
 

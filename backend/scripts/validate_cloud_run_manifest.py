@@ -95,11 +95,20 @@ def validate_manifest_text(text: str) -> list[str]:
         issues.append("spec.template.metadata.annotations must be a mapping")
         template_annotations = {}
     cloudsql = template_annotations.get("run.googleapis.com/cloudsql-instances")
-    if not isinstance(cloudsql, str) or not re.fullmatch(
-        r"[a-z][a-z0-9-]{4,28}[a-z0-9]:asia-south1:[a-z][a-z0-9-]{0,62}",
-        cloudsql,
-    ):
+    cloudsql_match = (
+        re.fullmatch(
+            r"(?P<project>[a-z][a-z0-9-]{4,28}[a-z0-9]):"
+            r"(?P<region>asia-south1):[a-z][a-z0-9-]{0,62}",
+            cloudsql,
+        )
+        if isinstance(cloudsql, str)
+        else None
+    )
+    if cloudsql_match is None:
         issues.append("Cloud SQL instance must name a concrete asia-south1 instance")
+        cloudsql_project = None
+    else:
+        cloudsql_project = cloudsql_match.group("project")
 
     secret_mapping = template_annotations.get("run.googleapis.com/secrets")
     secret_aliases: dict[str, str] = {}
@@ -141,10 +150,25 @@ def validate_manifest_text(text: str) -> list[str]:
         containers = []
     container = containers[0] if containers and isinstance(containers[0], dict) else {}
     image = container.get("image")
-    if not isinstance(image, str) or not re.fullmatch(
-        r"[^@\s]+@sha256:[a-f0-9]{64}", image
-    ):
+    if not isinstance(image, str) or not re.fullmatch(r"[^@\s]+@sha256:[a-f0-9]{64}", image):
         issues.append("container image must be pinned to a lowercase SHA-256 digest")
+    image_match = (
+        re.fullmatch(
+            r"asia-south1-docker\.pkg\.dev/"
+            r"(?P<project>[a-z][a-z0-9-]{4,28}[a-z0-9])/"
+            r"aixion/aixion-api@sha256:[a-f0-9]{64}",
+            image,
+        )
+        if isinstance(image, str)
+        else None
+    )
+    if image_match is None:
+        issues.append(
+            "container image must use this project's asia-south1 Artifact Registry "
+            "aixion/aixion-api repository"
+        )
+    elif cloudsql_project is not None and image_match.group("project") != cloudsql_project:
+        issues.append("container image and Cloud SQL instance must use the same GCP project")
 
     env_entries = container.get("env")
     if not isinstance(env_entries, list):
@@ -176,6 +200,8 @@ def validate_manifest_text(text: str) -> list[str]:
             issues.append(f"{name} must come from a named Secret Manager-backed key reference")
         elif ref["name"] not in secret_aliases:
             issues.append(f"{name} references an alias absent from run.googleapis.com/secrets")
+        elif not re.fullmatch(r"[1-9][0-9]*", str(ref["key"])):
+            issues.append(f"{name} must use a positive numeric Secret Manager version")
 
     resources = container.get("resources")
     limits = resources.get("limits") if isinstance(resources, dict) else None
