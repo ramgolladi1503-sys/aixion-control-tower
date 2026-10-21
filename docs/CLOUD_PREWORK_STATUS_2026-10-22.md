@@ -15,6 +15,12 @@ On 2026-10-22, the open Google Cloud console showed:
 
 The page was a billing-account view. It did not show a selected project ID or prove which project, if any, is linked to that billing account. The local `gcloud` CLI is not installed, so project discovery through the authenticated CLI was unavailable. No project ID, project owner, billing association, or project-level billing status is confirmed by this check. Account email and billing-account identifiers are intentionally not recorded here.
 
+A subsequent read-only inspection of the local gcloud configuration file found
+`upstox-oauth` as its configured default project. That identifier is not
+confirmed as an Aixion staging project or as linked to the billing account
+above, so it is not adopted for the staging plan. No gcloud command or cloud
+setting was changed.
+
 The zero displayed cost is an observation from this billing page and reporting window; it is not evidence that a specific project is free of resources or that future usage will cost zero.
 
 ## Current design and offline checks
