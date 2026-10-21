@@ -39,6 +39,15 @@ internal fun decisionOutcomeUnknown(
 internal fun canStartApprovalDecision(state: ApprovalsUiState): Boolean =
     !state.decisionInFlight && !state.decisionNeedsReconciliation
 
+internal fun retainDecisionInHistory(
+    history: List<ApprovalSummary>,
+    updated: ApprovalSummary
+): List<ApprovalSummary> = if (history.any { it.id == updated.id }) {
+    history.map { if (it.id == updated.id) updated else it }
+} else {
+    history + updated
+}
+
 data class ApprovalsUiState(
     val loading: Boolean = true,
     val approvals: List<ApprovalSummary> = emptyList(),
@@ -366,13 +375,18 @@ class ApprovalsViewModel(application: Application) : AndroidViewModel(applicatio
         } else {
             ""
         }
-        val remaining = _state.value.approvals.filterNot { it.id == updated.id }
+        val history = retainDecisionInHistory(_state.value.approvals, updated)
+        val otherApprovals = history.filterNot { it.id == updated.id }
+        val nextSelection = otherApprovals.firstOrNull {
+            it.status == com.aixion.controltower.core.model.ApprovalStatus.REQUESTED ||
+                it.status == com.aixion.controltower.core.model.ApprovalStatus.PENDING_REVIEW
+        } ?: otherApprovals.firstOrNull() ?: updated
         _state.value = _state.value.copy(
             decisionInFlight = false,
             decisionNeedsReconciliation = false,
             decisionBeingReconciled = null,
-            approvals = remaining,
-            selectedApproval = remaining.firstOrNull(),
+            approvals = history,
+            selectedApproval = nextSelection,
             openingApprovalId = null,
             detailTargetApprovalId = null,
             lastActionMessage = if (reconciled) {

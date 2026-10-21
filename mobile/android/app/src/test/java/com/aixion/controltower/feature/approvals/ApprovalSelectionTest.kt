@@ -67,6 +67,27 @@ class ApprovalSelectionTest {
         assertEquals(first.id, refreshed.selectedApproval?.id)
         assertNull(refreshed.detailTargetApprovalId)
     }
+
+    @Test
+    fun completedDecisionRemainsInHistoryAndDoesNotReplaceOtherApprovals() {
+        val pending = approval("approval_pending")
+        val denied = approval("approval_denied").copy(status = ApprovalStatus.DENIED)
+        val approved = approval("approval_pending").copy(status = ApprovalStatus.APPROVED)
+
+        val history = retainDecisionInHistory(listOf(pending, denied), approved)
+
+        assertEquals(listOf(approved, denied), history)
+    }
+
+    @Test
+    fun completedDeepLinkedDecisionIsAddedWithoutDroppingExistingHistory() {
+        val existing = approval("approval_existing").copy(status = ApprovalStatus.APPROVED)
+        val deepLinked = approval("approval_deep_linked").copy(status = ApprovalStatus.DENIED)
+
+        val history = retainDecisionInHistory(listOf(existing), deepLinked)
+
+        assertEquals(listOf(existing, deepLinked), history)
+    }
 }
 
 private fun approval(id: String) = ApprovalSummary(
