@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
@@ -36,9 +37,15 @@ from app.postgres_trust_event_repository import (
     PostgresTrustEventRepositoryError,
 )
 from app.store import store
-from app.trust_routes import consume_manual_action, evaluate_manual_action
+from app.trust_routes import (
+    consume_manual_action,
+    decide_exact_action,
+    evaluate_manual_action,
+    get_exact_action_decision,
+)
 from app.trust_action_authorization_models import (
     ActionAuthorization,
+    ActionAuthorizationCreate,
     ActionAuthorizationDecision,
 )
 from app.trust_models import (
@@ -505,9 +512,18 @@ def test_postgres_manual_consumption_route_uses_durable_trust_state(
         ).fetchone()[0] == 1
 
 
-def test_postgres_manual_action_evaluation_route_is_durable_and_workspace_scoped(
+@pytest.mark.parametrize(
+    ("authorization_decision", "effective_decision"),
+    [
+        (ActionAuthorizationDecision.ALLOW, PolicyDecisionType.ALLOW),
+        (ActionAuthorizationDecision.BLOCK, PolicyDecisionType.BLOCK),
+    ],
+)
+def test_postgres_manual_action_evaluation_and_reviewer_decision_are_durable(
     trust_repository,
     monkeypatch: pytest.MonkeyPatch,
+    authorization_decision: ActionAuthorizationDecision,
+    effective_decision: PolicyDecisionType,
 ):
     repository, connect, workspace_id, user_id, project_id, _approval_id = trust_repository
     repositories = ApplicationRepositories.from_connector(connect)
@@ -545,9 +561,113 @@ def test_postgres_manual_action_evaluation_route_is_durable_and_workspace_scoped
 
     assert result.decision.decision == PolicyDecisionType.REQUIRE_APPROVAL
     assert action.id not in store.proposed_actions
+    decision_payload = ActionAuthorizationCreate(
+        decision=authorization_decision,
+        reason="Reviewed exact action on the approval console.",
+    )
+    authorization = decide_exact_action(action.id, decision_payload, user, request)
+    assert isinstance(authorization, ActionAuthorization)
+    assert authorization.action_payload_hash
+    assert get_exact_action_decision(action.id, user, request) == authorization
+    assert decide_exact_action(action.id, decision_payload, user, request) == authorization
+    with pytest.raises(HTTPException) as conflicting_retry:
+        decide_exact_action(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=authorization_decision,
+                reason="A different reason cannot replace the immutable decision.",
+            ),
+            user,
+            request,
+        )
+    assert conflicting_retry.value.status_code == 409
     with connect() as conn:
         assert repository.get_proposed_action(conn, action.id, workspace_id) == result.action
-        assert repository.get_policy_decision(conn, result.decision.id, workspace_id) == result.decision
+        stored_effective = repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        )
+        assert stored_effective is not None
+        assert stored_effective.decision == effective_decision
+        assert repository.get_action_authorization_for_action(
+            conn, action.id, workspace_id
+        ) == authorization
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s",
+            (workspace_id, action.id),
+        ).fetchone()[0] == 3
+
+    tampered = authorization.model_copy(update={"signature": "invalid-signature"})
+    with connect() as conn:
+        conn.execute(
+            "UPDATE action_authorizations SET payload=%s WHERE authorization_id=%s",
+            (Jsonb(tampered.model_dump(mode="json")), authorization.id),
+        )
+    with pytest.raises(HTTPException) as invalid_signature:
+        get_exact_action_decision(action.id, user, request)
+    assert invalid_signature.value.status_code == 409
+
+
+def test_postgres_manual_action_decision_rolls_back_when_ledger_is_inconsistent(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, _approval_id = trust_repository
+    repositories = ApplicationRepositories.from_connector(connect)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_repositories=repositories,
+        approval_decision_repository=repositories.approval_decisions,
+        workspace_membership_repository=repositories.workspace_membership,
+        trust_repository=repositories.trust,
+        trust_event_repository=repositories.trust_events,
+        project_repository=repositories.projects,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    user = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="Trust route maintainer",
+        role=UserRole.MAINTAINER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    action = ProposedAction(
+        provider=AgentProvider.CODEX,
+        project_id=project_id,
+        action_type=CapabilityActionType.READ_REPOSITORY,
+        repository="owner/repo",
+        branch="feature/trust-test",
+    )
+    evaluated = evaluate_manual_action(action, user, request)
+    with connect() as conn:
+        conn.execute(
+            "UPDATE trust_event_heads SET event_hash=%s WHERE singleton=TRUE",
+            ("0" * 64,),
+        )
+
+    with pytest.raises(PostgresTrustEventRepositoryError, match="ledger"):
+        decide_exact_action(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Reviewed exact action.",
+            ),
+            user,
+            request,
+        )
+
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(
+            conn, action.id, workspace_id
+        ) is None
+        latest = repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        )
+        assert latest == evaluated.decision
         assert conn.execute(
             "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s",
             (workspace_id, action.id),

@@ -460,6 +460,39 @@ class PostgresTrustRepository:
             columns=(("action_id", "proposed_action_id"), ("lease_id", "lease_id"), ("decision", "decision"), ("evaluated_at", "evaluated_at")),
         )
 
+    def get_latest_policy_decision_for_action(
+        self,
+        conn: Connection,
+        action_id: str,
+        workspace_id: str,
+        *,
+        for_update: bool = False,
+    ) -> PolicyDecision | None:
+        self._require_scope(workspace_id)
+        row = conn.execute(
+            "SELECT decision_id,action_id,workspace_id,lease_id,decision,evaluated_at,payload "
+            "FROM policy_decisions WHERE action_id=%s AND workspace_id=%s "
+            "ORDER BY evaluated_at DESC,decision_id DESC LIMIT 1" +
+            (" FOR UPDATE" if for_update else ""),
+            (action_id, workspace_id),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            decision = PolicyDecision.model_validate(row[6])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored policy decision payload is invalid") from error
+        if (
+            decision.id != row[0]
+            or decision.proposed_action_id != row[1]
+            or decision.lease_id != row[3]
+            or decision.decision.value != row[4]
+            or decision.evaluated_at != row[5]
+            or row[2] != workspace_id
+        ):
+            raise PostgresTrustRepositoryError("Stored policy decision scope is inconsistent")
+        return decision
+
     def insert_action_authorization(self, conn: Connection, record: ActionAuthorization) -> None:
         if not record.workspace_id:
             raise ValueError("Action authorization workspace is required")
@@ -483,6 +516,42 @@ class PostgresTrustRepository:
             model=ActionAuthorization,
             columns=(("action_id", "action_id"), ("policy_decision_id", "policy_decision_id"), ("reviewer_user_id", "reviewer_user_id"), ("decision", "decision"), ("action_payload_hash", "action_payload_hash"), ("created_at", "created_at")),
         )
+
+    def get_action_authorization_for_action(
+        self,
+        conn: Connection,
+        action_id: str,
+        workspace_id: str,
+        *,
+        for_update: bool = False,
+    ) -> ActionAuthorization | None:
+        self._require_scope(workspace_id)
+        row = conn.execute(
+            "SELECT authorization_id,action_id,workspace_id,policy_decision_id,"
+            "reviewer_user_id,decision,action_payload_hash,created_at,payload "
+            "FROM action_authorizations WHERE action_id=%s AND workspace_id=%s" +
+            (" FOR UPDATE" if for_update else ""),
+            (action_id, workspace_id),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            authorization = ActionAuthorization.model_validate(row[8])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored action authorization payload is invalid") from error
+        if (
+            authorization.id != row[0]
+            or authorization.action_id != row[1]
+            or authorization.workspace_id != row[2]
+            or authorization.policy_decision_id != row[3]
+            or authorization.reviewer_user_id != row[4]
+            or authorization.decision.value != row[5]
+            or authorization.action_payload_hash != row[6]
+            or authorization.created_at != row[7]
+            or row[2] != workspace_id
+        ):
+            raise PostgresTrustRepositoryError("Stored action authorization scope is inconsistent")
+        return authorization
 
     def insert_action_consumption(
         self,

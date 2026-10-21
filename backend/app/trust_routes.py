@@ -11,6 +11,8 @@ from .store import store
 from .trust_action_authorization import (
     ActionAuthorizationConflict,
     record_action_authorization,
+    record_action_authorization_postgres,
+    verify_action_authorization_payload,
 )
 from .trust_action_authorization_models import (
     ActionAuthorization,
@@ -442,7 +444,32 @@ def decide_exact_action(
     action_id: str,
     payload: ActionAuthorizationCreate,
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> ActionAuthorization:
+    runtime = _postgres_action_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        try:
+            return record_action_authorization_postgres(
+                action_id,
+                payload,
+                user=user,
+                workspace_id=workspace_id,
+                connect=runtime.connect,
+                trust_repository=repositories.trust,
+                trust_event_repository=repositories.trust_events,
+                now=now_utc(),
+            )
+        except (ValueError, ActionAuthorizationConflict, PostgresTrustRepositoryConflict) as error:
+            raise _trust_error(error) from error
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="PostgreSQL action decisions require the complete durable project and trust repository bundle",
+        )
     action = store.proposed_actions.get(action_id)
     workspace_id = workspace_id_for_user(user)
     if action is None or not proposed_action_scope_is_consistent(action) or (
@@ -462,7 +489,35 @@ def decide_exact_action(
 def get_exact_action_decision(
     action_id: str,
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> ActionAuthorization | None:
+    runtime = _postgres_action_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        with runtime.connect() as conn:
+            with conn.transaction():
+                action = repositories.trust.get_proposed_action(conn, action_id, workspace_id)
+                if action is None:
+                    raise HTTPException(status_code=404, detail="Proposed action not found")
+                authorization = repositories.trust.get_action_authorization_for_action(
+                    conn, action_id, workspace_id
+                )
+                if authorization is not None and not verify_action_authorization_payload(
+                    authorization, action
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Stored action authorization does not match its signed action payload",
+                    )
+                return authorization
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="PostgreSQL action decisions require the complete durable project and trust repository bundle",
+        )
     action = store.proposed_actions.get(action_id)
     workspace_id = workspace_id_for_user(user)
     if action is None or not proposed_action_scope_is_consistent(action) or (

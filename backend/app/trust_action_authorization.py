@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
+
+from psycopg import Connection
+
 from .agent_run_models import (
     AgentRunEvent,
     AgentRunEventType,
@@ -15,6 +20,8 @@ from .trust_action_authorization_models import (
     ActionAuthorizationDecision,
 )
 from .trust_crypto import sha256_hex, sign_payload, verify_payload_signature
+from .postgres_trust_event_repository import PostgresTrustEventRepository
+from .postgres_trust_repository import PostgresTrustRepository
 from .trust_decisions import latest_policy_decision
 from .trust_flight_recorder import append_trust_event
 from .trust_models import PolicyDecision, PolicyDecisionType, ProposedAction, TrustEventType
@@ -57,12 +64,20 @@ def verify_action_authorization(
 ) -> bool:
     return (
         action_authorization_scope_is_consistent(authorization)
-        and
+        and verify_action_authorization_payload(authorization, action)
+    )
+
+
+def verify_action_authorization_payload(
+    authorization: ActionAuthorization,
+    action: ProposedAction,
+) -> bool:
+    """Verify the signed action binding without consulting process-local scope."""
+    return (
         authorization.action_id == action.id
         and authorization.action_payload_hash == action_payload_hash(action)
         and verify_payload_signature(
-            authorization_signature_payload(authorization),
-            authorization.signature,
+            authorization_signature_payload(authorization), authorization.signature
         )
     )
 
@@ -258,3 +273,155 @@ def record_action_authorization(
     )
     store.persist()
     return authorization
+
+
+def record_action_authorization_postgres(
+    action_id: str,
+    payload: ActionAuthorizationCreate,
+    *,
+    user: AuthUser,
+    workspace_id: str,
+    connect: Callable[[], Connection],
+    trust_repository: PostgresTrustRepository,
+    trust_event_repository: PostgresTrustEventRepository,
+    now: datetime,
+) -> ActionAuthorization:
+    """Persist one exact-action reviewer decision and policy event atomically."""
+    if not workspace_id:
+        raise ValueError("Action authorization workspace is required.")
+    if user.role not in REVIEWER_ROLES:
+        raise ActionAuthorizationConflict("A reviewer role is required for action decisions.")
+
+    with connect() as conn:
+        with conn.transaction():
+            action = trust_repository.get_proposed_action(
+                conn, action_id, workspace_id, for_update=True
+            )
+            if action is None:
+                raise ValueError("Proposed action not found.")
+            if action.run_id or action.task_id:
+                raise ActionAuthorizationConflict(
+                    "Run-linked action decisions require the durable AgentRun execution transaction."
+                )
+
+            current = trust_repository.get_latest_policy_decision_for_action(
+                conn, action_id, workspace_id, for_update=True
+            )
+            if current is None:
+                raise ActionAuthorizationConflict("Action has no policy decision.")
+            existing = trust_repository.get_action_authorization_for_action(
+                conn, action_id, workspace_id, for_update=True
+            )
+
+            def verify_existing() -> ActionAuthorization:
+                if (
+                    existing is None
+                    or existing.workspace_id != workspace_id
+                    or not verify_action_authorization_payload(existing, action)
+                ):
+                    raise ActionAuthorizationConflict(
+                        "Stored action authorization no longer matches the immutable action payload."
+                    )
+                prior = trust_repository.get_policy_decision(
+                    conn, existing.policy_decision_id, workspace_id
+                )
+                expected_effective = (
+                    PolicyDecisionType.ALLOW
+                    if existing.decision == ActionAuthorizationDecision.ALLOW
+                    else PolicyDecisionType.BLOCK
+                )
+                if (
+                    prior is None
+                    or prior.proposed_action_id != action.id
+                    or prior.decision != PolicyDecisionType.REQUIRE_APPROVAL
+                    or not current.evaluated_policy_version.endswith("+human-decision")
+                    or current.decision != expected_effective
+                ):
+                    raise ActionAuthorizationConflict(
+                        "Stored action authorization is inconsistent with the effective policy decision."
+                    )
+                if (
+                    existing.decision != payload.decision
+                    or existing.reason != payload.reason
+                ):
+                    raise ActionAuthorizationConflict(
+                        "Action authorization is immutable once recorded."
+                    )
+                return existing
+
+            if existing is not None:
+                return verify_existing()
+            if current.decision == PolicyDecisionType.BLOCK:
+                raise ActionAuthorizationConflict(
+                    "A policy-blocked action cannot be overridden; revise scope and create a new action."
+                )
+            if current.decision == PolicyDecisionType.ALLOW:
+                raise ActionAuthorizationConflict("Action is already allowed by policy.")
+            if current.decision != PolicyDecisionType.REQUIRE_APPROVAL:
+                raise ActionAuthorizationConflict("Action policy decision is not reviewable.")
+
+            action_hash = action_payload_hash(action)
+            authorization = ActionAuthorization(
+                action_id=action.id,
+                workspace_id=workspace_id,
+                action_payload_hash=action_hash,
+                policy_decision_id=current.id,
+                reviewer_user_id=user.id,
+                reviewer_role=user.role,
+                decision=payload.decision,
+                reason=payload.reason,
+                signature="pending",
+            )
+            authorization.signature = sign_payload(
+                authorization_signature_payload(authorization)
+            )
+            effective_decision = (
+                PolicyDecisionType.ALLOW
+                if payload.decision == ActionAuthorizationDecision.ALLOW
+                else PolicyDecisionType.BLOCK
+            )
+            effective = PolicyDecision(
+                proposed_action_id=action.id,
+                lease_id=action.lease_id,
+                decision=effective_decision,
+                risk_level=current.risk_level,
+                reasons=[
+                    "A human reviewer allowed this exact proposed action."
+                    if effective_decision == PolicyDecisionType.ALLOW
+                    else "A human reviewer denied this exact proposed action."
+                ],
+                obligations=(
+                    ["Execute only the immutable action payload and record consumption evidence."]
+                    if effective_decision == PolicyDecisionType.ALLOW
+                    else ["Do not execute; revise the action or capability lease."]
+                ),
+                evaluated_policy_version=current.evaluated_policy_version
+                + "+human-decision",
+                evaluated_at=now,
+            )
+            trust_repository.insert_action_authorization(conn, authorization)
+            trust_repository.insert_policy_decision(
+                conn, effective, workspace_id=workspace_id
+            )
+            trust_event_repository.append_in_transaction(
+                conn,
+                (
+                    TrustEventType.ACTION_ALLOWED
+                    if effective_decision == PolicyDecisionType.ALLOW
+                    else TrustEventType.ACTION_BLOCKED
+                ),
+                entity_type="proposed_action",
+                entity_id=action.id,
+                actor=user.email,
+                workspace_id=workspace_id,
+                correlation_id=action.run_id or action.task_id,
+                payload={
+                    "authorization_id": authorization.id,
+                    "action_payload_hash": action_hash,
+                    "prior_policy_decision_id": current.id,
+                    "effective_policy_decision_id": effective.id,
+                    "decision": effective_decision,
+                    "reason": payload.reason,
+                },
+            )
+            return authorization
