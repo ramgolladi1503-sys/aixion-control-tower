@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta
 
 import psycopg
 import pytest
@@ -14,8 +15,9 @@ from app import main
 from app.application_repositories import ApplicationRepositories
 from app.agent_routes import APPROVAL_CONNECTOR_ACTIONS
 from app.auth import require_owner
-from app.models import AuthUser, Project, User, UserRole, Workspace
+from app.models import AuthUser, Project, User, UserRole, Workspace, now_utc
 from app.postgres_database import run_postgres_migrations
+from app.settings import get_settings
 from app.store import store
 
 
@@ -84,6 +86,7 @@ def test_postgres_agent_owner_lifecycle_is_scoped_audited_and_does_not_project_t
     connect, workspace, project, _user, repositories = postgres_agent_route_runtime
     client = TestClient(main.app)
     initial_sqlite_ids = set(store.external_agents)
+    registered_started = now_utc()
     create = client.post("/agents", json={
         "provider": "ANTIGRAVITY", "display_name": "Local Antigravity",
         "auth_type": "API_KEY", "allowed_project_ids": [project.id],
@@ -95,13 +98,26 @@ def test_postgres_agent_owner_lifecycle_is_scoped_audited_and_does_not_project_t
     assert first_token and agent_id not in store.external_agents
     assert [item["id"] for item in client.get("/agents").json()] == [agent_id]
     assert client.get(f"/agents/{agent_id}").status_code == 200
+    ttl_seconds = get_settings().external_agent_token_ttl_seconds
     status = client.get(f"/agents/{agent_id}/credentials")
+    registered_finished = now_utc()
     assert status.status_code == 200 and status.json()["credential_state"] == "ACTIVE"
+    registered_expiry = datetime.fromisoformat(status.json()["token_expires_at"])
+    assert registered_expiry >= registered_started + timedelta(seconds=ttl_seconds - 2)
+    assert registered_expiry <= registered_finished + timedelta(seconds=ttl_seconds + 2)
 
+    rotated_started = now_utc()
     rotated = client.post(f"/agents/{agent_id}/token/rotate", json={"rate_limit_per_minute": 37})
     assert rotated.status_code == 200, rotated.text
     second_token = rotated.json()["agent_token"]
     assert second_token and second_token != first_token
+    rotated_status = client.get(f"/agents/{agent_id}/credentials")
+    rotated_finished = now_utc()
+    assert rotated_status.status_code == 200
+    rotated_expiry = datetime.fromisoformat(rotated_status.json()["token_expires_at"])
+    assert rotated_expiry >= rotated_started + timedelta(seconds=ttl_seconds - 2)
+    assert rotated_expiry <= rotated_finished + timedelta(seconds=ttl_seconds + 2)
+    assert rotated_status.json()["credential_state"] == "ACTIVE"
     assert client.get("/agents/identity", params={"provider": "ANTIGRAVITY", "project_id": project.id},
                       headers={"X-Aixion-Agent-Id": agent_id,
                                "X-Aixion-Agent-Token": first_token}).status_code == 401
