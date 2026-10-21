@@ -49,6 +49,28 @@ class ApprovalDecisionViewModelTest {
     }
 
     @Test
+    fun resolvedProjectNameDoesNotBlockExactApprovalDecision() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi()
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID).copy(projectName = "Reviewed project"))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+
+            assertEquals(1, api.decisionCalls)
+            assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
+            assertEquals(listOf(REQUEST_ID), api.statusApprovalIds)
+            assertEquals("Reviewed project", viewModel.state.value.approvals.single().projectName)
+            assertEquals(ApprovalStatus.APPROVED, viewModel.state.value.approvals.single().status)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
     fun changedApprovalSnapshotIsUpdatedAndDecisionIsNotSent() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {

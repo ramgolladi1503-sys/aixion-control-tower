@@ -247,7 +247,7 @@ class ApprovalsViewModel internal constructor(
         }
         viewModelScope.launch {
             val latest = try {
-                repository.getApproval(approval.id)
+                repository.getApproval(approval.id, approval.projectName)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -285,7 +285,12 @@ class ApprovalsViewModel internal constructor(
                 return@launch
             }
             val updated = try {
-                repository.decide(approval.id, decision, reason).also { result ->
+                repository.decide(
+                    approval.id,
+                    decision,
+                    reason,
+                    approval.projectName
+                ).also { result ->
                     if (!decisionMatchesStatus(decision, result.status)) {
                         throw IllegalStateException(
                             "Server returned ${result.status.name} for the requested $decision decision."

@@ -16,11 +16,16 @@ class ApprovalRepository(private val api: ControlTowerApi) {
         return api.getApproval(approvalId).toUiSummary(projectName)
     }
 
-    suspend fun decide(approvalId: String, decision: String, reason: String): ApprovalSummary {
+    suspend fun decide(
+        approvalId: String,
+        decision: String,
+        reason: String,
+        projectName: String = "Project"
+    ): ApprovalSummary {
         return api.decideApproval(
             approvalId,
             DecisionRequestDto(decision = decision, reason = reason)
-        ).toUiSummary()
+        ).toUiSummary(projectName)
     }
 
     suspend fun resolveMCPApproval(approvalId: String): MCPGatewayDecisionDto {
