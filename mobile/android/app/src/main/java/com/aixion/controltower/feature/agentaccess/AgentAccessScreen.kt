@@ -43,6 +43,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.data.repository.AgentAccessSummary
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
@@ -263,6 +264,13 @@ private fun clearClipboardToken(context: android.content.Context, token: String?
     }
 }
 
+internal fun authenticatedActivityLabel(credential: AgentCredentialStatusDto?): String = when {
+    credential == null -> "Activity status unavailable"
+    !credential.token_present -> "No active token; activity is unavailable"
+    credential.last_used_at.isNullOrBlank() -> "No authenticated activity recorded"
+    else -> "Last authenticated API activity: ${credential.last_used_at} (not a live connection check)"
+}
+
 @Composable
 private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRotate: () -> Unit, onRevoke: () -> Unit) {
     val agent = agentSummary.agent
@@ -279,9 +287,15 @@ private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRota
                 "UNKNOWN", "EXPIRED" -> RiskMedium
                 else -> RiskBlocked
             }
-            StatusBadge(label = credentialState, color = statusColor)
+            StatusBadge(label = "TOKEN $credentialState", color = statusColor)
         }
         Spacer(Modifier.height(TowerSpacing.sm))
+        Text(
+            authenticatedActivityLabel(agentSummary.credential),
+            color = TowerTextMuted,
+            fontSize = 12.sp,
+            lineHeight = 17.sp
+        )
         Text("Projects: ${agent.allowed_project_ids.joinToString().ifBlank { "none" }}", color = TowerTextMuted, fontSize = 12.sp)
         Text("Actions: ${agent.allowed_actions.joinToString()}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

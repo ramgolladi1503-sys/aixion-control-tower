@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.agentaccess
 
 import com.aixion.controltower.core.api.dto.AgentCreateRequestDto
+import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.core.api.dto.ExternalAgentDto
 import com.aixion.controltower.core.api.dto.ANTIGRAVITY_APPROVAL_ACTIONS
 import com.aixion.controltower.core.api.dto.isExpectedAntigravityApprovalAgent
@@ -49,6 +50,36 @@ class AgentAccessPolicyTest {
         )
 
         assertEquals("UNKNOWN", summary.credentialState)
+    }
+
+    @Test
+    fun credentialActivityIsNotPresentedAsProofOfALiveConnection() {
+        val activeWithoutUse = AgentCredentialStatusDto(
+            agent_id = "agent-1",
+            auth_type = "API_KEY",
+            credential_state = "ACTIVE",
+            token_present = true
+        )
+        assertEquals("No authenticated activity recorded", authenticatedActivityLabel(activeWithoutUse))
+
+        val recentlyUsed = activeWithoutUse.copy(last_used_at = "2026-10-22T10:30:00Z")
+        assertEquals(
+            "Last authenticated API activity: 2026-10-22T10:30:00Z (not a live connection check)",
+            authenticatedActivityLabel(recentlyUsed)
+        )
+    }
+
+    @Test
+    fun missingOrUnavailableCredentialActivityDoesNotClaimConnection() {
+        assertEquals("Activity status unavailable", authenticatedActivityLabel(null))
+        val revoked = AgentCredentialStatusDto(
+            agent_id = "agent-1",
+            auth_type = "API_KEY",
+            credential_state = "REVOKED",
+            token_present = false,
+            last_used_at = "2026-10-22T10:30:00Z"
+        )
+        assertEquals("No active token; activity is unavailable", authenticatedActivityLabel(revoked))
     }
 
     @Test
