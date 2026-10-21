@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-22  
 **Scope:** Pre-billing connector recovery evidence for Slices 2 and 6  
-**Status:** Focused local regression passed; full slice gates remain open
+**Status:** Focused local regression and full PostgreSQL-enabled backend suite passed; full slice gates remain open
 
 ## Scenario exercised
 
@@ -19,14 +19,25 @@ The test owns its Uvicorn subprocesses and ephemeral loopback ports. Its Postgre
 
 ## Validation
 
-Command:
+The focused restart suite was rerun from `backend/` against the currently accepting isolated PostgreSQL service:
 
 ```bash
 AIXION_TEST_POSTGRES_DSN='host=/tmp/aixion-ct-pg.O8jwnb/socket dbname=aixion_test user=madhuram port=55432' \
-  backend/.venv/bin/pytest -q backend/tests/test_postgres_approval_route_flow.py
+  .venv/bin/python -m pytest -q tests/test_postgres_approval_route_flow.py
 ```
 
-Result: **6 passed**, one existing Starlette/httpx deprecation warning. Ruff, Python compilation, and `git diff --check` passed.
+Result: **6 passed**, one existing Starlette/httpx deprecation warning.
+
+The full backend suite was run from `backend/` with PostgreSQL integration enabled:
+
+```bash
+AIXION_TEST_POSTGRES_DSN='host=/tmp/aixion-ct-pg.O8jwnb/socket dbname=aixion_test user=madhuram port=55432' \
+  .venv/bin/python -m pytest -q
+```
+
+Result: **1,342 passed, 0 skipped, 6 existing deprecation warnings** in 73.25 seconds.
+
+Ruff, Python compilation, and `git diff --check` passed in the earlier focused validation run; they were not rerun with the full suite.
 
 ## Limits
 
