@@ -55,3 +55,55 @@ exposure control, not a hard project spend limit. No cloud credentials are neede
 run this preflight. `PyYAML` is a development-only dependency used by this offline
 validation tool. No application runtime configuration key or database migration was
 added.
+
+## Dispatcher Jobs and Cloud Scheduler preflight
+
+The separate draft `deploy/gcp/cloud-run-jobs-staging.yaml` describes one push
+dispatcher Job and one email dispatcher Job. Each runs the corresponding bounded
+one-shot script with one task, parallelism one, zero Cloud Run task retries, a
+300-second task timeout, resource limits, a job-specific runtime identity, and a
+digest-pinned image placeholder. The push Job receives only its PostgreSQL
+connection secret and uses the job identity's Application Default Credentials for
+FCM. The email Job receives its PostgreSQL connection and SMTP/outbox secrets. Do
+not copy service-account JSON keys into either Job.
+
+`deploy/gcp/cloud-scheduler-staging.tf` defines separate schedules with unresolved
+cron/timezone/project/region inputs. Each scheduler trigger uses OAuth to call the
+Cloud Run Jobs v2 `:run` API endpoint. A dedicated Scheduler identity receives
+`roles/run.invoker` only on the named push and email jobs through job-level IAM
+members; no project-wide Invoker grant is intended. Configured Scheduler retries
+are set to zero to avoid retry amplification and defer failed work to a later
+owner-approved tick. Cloud Scheduler still delivers at least once and rare
+duplicate requests can occur even with retries disabled. This does not establish
+exactly-once external delivery; database leasing and idempotency remain required.
+
+Run the offline preflight and focused tests from `backend/`:
+
+```bash
+python scripts/validate_cloud_run_jobs_manifest.py
+python -m pytest tests/test_cloud_run_jobs_manifest_validation.py -q
+python -m ruff check scripts/validate_cloud_run_jobs_manifest.py tests/test_cloud_run_jobs_manifest_validation.py
+```
+
+The checked-in job and Terraform templates must report **NOT APPLY-READY** while
+placeholders remain. A clean local result for a reviewed candidate proves only the
+static shape invariants: two separate jobs, same project/region/digest-pinned image,
+secret boundaries, one task, zero task retries, OAuth target, and job-level invoker
+grants. It does not validate Terraform provider schema, effective IAM, service-agent
+permissions, project/billing state, secret existence, worker startup, schedule
+adequacy, cloud cost, or actual delivery. `terraform fmt -check` and the organization's
+normal IaC review are still required once Terraform is installed; do not initialize
+or apply Terraform during this pre-billing phase.
+
+**Known code blocker:** both dispatcher scripts call the API-wide production startup
+validator. That currently rejects production while the whole application remains
+SQLite-backed and also requires settings outside each dispatcher's scoped secrets.
+Do not bypass this with a local/demo profile or by distributing all secrets to both
+jobs. A worker-specific production validation path and its tests must land after the
+Slice 1 runtime design before these job templates can be considered deployable.
+
+Google references: [Cloud Run Jobs YAML](https://docs.cloud.google.com/run/docs/reference/yaml/v1#job),
+[create Cloud Run Jobs](https://docs.cloud.google.com/run/docs/create-jobs),
+[schedule Cloud Run Jobs with Cloud Scheduler](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule),
+[Cloud Scheduler delivery and retry semantics](https://docs.cloud.google.com/scheduler/docs/overview),
+and [Cloud Run IAM permissions](https://docs.cloud.google.com/run/docs/reference/iam/permissions).

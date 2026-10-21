@@ -577,6 +577,150 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     assert set(store.external_agents) == initial_store_agent_ids
 
 
+def test_postgres_reviewer_from_other_workspace_cannot_decide_approval(
+    postgres_approval_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, _workspace, project, _owner, _repositories, agent, agent_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    client = TestClient(main.app)
+    created = client.post(
+        "/agents/approvals",
+        headers={
+            "X-Aixion-Agent-Id": agent.id,
+            "X-Aixion-Agent-Token": agent_token,
+        },
+        json={
+            "project_id": project.id,
+            "title": "Must remain pending",
+            "summary": "A reviewer from another workspace must not decide this request.",
+            "agent_name": agent.display_name,
+            "target_branch": "feature/cross-workspace-denial",
+            "files": [
+                {
+                    "path": "antigravity://tool/run_command",
+                    "change_type": "tool_call",
+                    "diff": '{"command":"echo workspace-scope-test"}',
+                }
+            ],
+            "source_invocation_id": f"invocation-{uuid.uuid4().hex}",
+        },
+    )
+    assert created.status_code == 200, created.text
+    approval_id = created.json()["id"]
+
+    other_workspace = Workspace(
+        id=f"workspace_{uuid.uuid4().hex}",
+        name="Unrelated reviewer workspace",
+        owner_user_id=f"user_{uuid.uuid4().hex}",
+    )
+    other_user = User(
+        id=other_workspace.owner_user_id,
+        email=f"other-reviewer-{uuid.uuid4().hex}@example.test",
+        display_name="Other workspace reviewer",
+        role=UserRole.OWNER,
+        password_hash="0" * 64,
+        password_salt="0" * 32,
+        workspace_id=other_workspace.id,
+    )
+    other_auth_user = AuthUser(
+        id=other_user.id,
+        email=other_user.email,
+        display_name=other_user.display_name,
+        role=UserRole.OWNER,
+        workspace_id=other_workspace.id,
+    )
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES (%s,%s)",
+            (other_workspace.id, Jsonb(other_workspace.model_dump(mode="json"))),
+        )
+        connection.execute(
+            "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                other_user.id,
+                other_user.workspace_id,
+                other_user.email,
+                other_user.email.lower(),
+                other_user.role,
+                other_user.disabled,
+                other_user.email_verified,
+                Jsonb(other_user.model_dump(mode="json")),
+            ),
+        )
+
+    # Route through an authenticated identity whose durable PostgreSQL
+    # membership and claimed workspace both belong to the second workspace.
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        main.ReviewerDependency.dependency,
+        lambda: other_auth_user,
+    )
+    monkeypatch.setattr(
+        main,
+        "_workspace_id_for_route",
+        lambda _user, _request: other_workspace.id,
+    )
+
+    with connect() as connection:
+        approval_before = connection.execute(
+            "SELECT status,payload FROM approval_requests WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()
+        audit_before = connection.execute(
+            "SELECT event_id,event_type,workspace_id,actor,details,payload "
+            "FROM audit_events WHERE approval_id=%s ORDER BY event_id",
+            (approval_id,),
+        ).fetchall()
+        notifications_before = connection.execute(
+            "SELECT notification_id,status,payload FROM notifications WHERE approval_id=%s "
+            "ORDER BY notification_id",
+            (approval_id,),
+        ).fetchall()
+        outbox_before = connection.execute(
+            "SELECT notification_id,status,attempts,next_attempt_at,lease_expires_at,payload "
+            "FROM notifications WHERE approval_id=%s ORDER BY notification_id",
+            (approval_id,),
+        ).fetchall()
+
+    response = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "reason": "cross-workspace attempt"},
+    )
+    assert response.status_code == 404, response.text
+
+    with connect() as connection:
+        approval_after = connection.execute(
+            "SELECT status,payload FROM approval_requests WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()
+        audit_after = connection.execute(
+            "SELECT event_id,event_type,workspace_id,actor,details,payload "
+            "FROM audit_events WHERE approval_id=%s ORDER BY event_id",
+            (approval_id,),
+        ).fetchall()
+        notifications_after = connection.execute(
+            "SELECT notification_id,status,payload FROM notifications WHERE approval_id=%s "
+            "ORDER BY notification_id",
+            (approval_id,),
+        ).fetchall()
+        outbox_after = connection.execute(
+            "SELECT notification_id,status,attempts,next_attempt_at,lease_expires_at,payload "
+            "FROM notifications WHERE approval_id=%s ORDER BY notification_id",
+            (approval_id,),
+        ).fetchall()
+
+    assert approval_before is not None and approval_before[0] == ApprovalStatus.PENDING_REVIEW.value
+    assert approval_after == approval_before
+    assert audit_after == audit_before
+    assert notifications_after == notifications_before
+    assert outbox_after == outbox_before
+    assert not any(row[1] == "approval.decision" for row in audit_after)
+    assert len(notifications_after) == 1  # creation notification only; no decision notification
+
+
 def test_postgres_hook_denies_lost_consume_response_and_same_invocation_retry(
     postgres_approval_route_runtime,
 ) -> None:

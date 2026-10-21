@@ -447,6 +447,23 @@ def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[
     if not 1 <= approval_timeout_seconds <= MAX_POLL_SECONDS:
         return _decision("deny", "Approval timeout must be between 1 and 900 seconds")
 
+    # A session identifier is part of the idempotency key. Never coerce or
+    # truncate it: distinct provider sessions must not collapse to one identity.
+    if "conversationId" in payload:
+        session_id = payload["conversationId"]
+    else:
+        session_id = payload.get("sessionId")
+    step_index = payload.get("stepIdx")
+    if (
+        not isinstance(session_id, str)
+        or not session_id.strip()
+        or len(session_id) > 200
+        or isinstance(step_index, bool)
+        or not isinstance(step_index, int)
+        or step_index < 0
+    ):
+        return _decision("deny", "Antigravity request is missing a valid session or step identity")
+
     config = _configuration(env, payload)
     api_base = _validated_api_base(config["api_base_url"])
     agent_id = config["agent_id"]
@@ -458,10 +475,6 @@ def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[
     arg_bytes = json.dumps(args, sort_keys=True, separators=(",", ":")).encode("utf-8")
     if len(arg_bytes) > MAX_ARGUMENTS_BYTES:
         return _decision("deny", "Tool arguments exceed the approval display limit")
-    session_id = str(payload.get("conversationId") or payload.get("sessionId") or "")[:200]
-    step_index = payload.get("stepIdx")
-    if not session_id or isinstance(step_index, bool) or not isinstance(step_index, int) or step_index < 0:
-        return _decision("deny", "Antigravity request is missing its session or step identity")
     invocation_material = json.dumps(
         [session_id, step_index, tool_name, args], sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -479,7 +492,7 @@ def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[
         }],
         "test_plan": ["Confirm the tool and arguments match the intended task"],
         "rollback_plan": "Deny this request if uncertain. Approval authorizes only this displayed invocation.",
-        "source_session_id": session_id or None,
+        "source_session_id": session_id,
         "source_invocation_id": invocation_id,
     }
     created = _request("POST", f"{api_base}/agents/approvals", agent_id, token, approval_body)

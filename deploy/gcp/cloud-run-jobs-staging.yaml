@@ -1,0 +1,127 @@
+# PRE-BILLING DRAFT ONLY
+# DO NOT APPLY: Slice 1's production PostgreSQL runtime and owner/account gates
+# are still open. The current worker startup validator also rejects production.
+# These templates document the intended isolated job permissions and inputs.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: aixion-push-dispatch
+  namespace: REPLACE_WITH_GCP_PROJECT_NUMBER
+  labels:
+    cloud.googleapis.com/location: REPLACE_WITH_REGION
+  annotations:
+    run.googleapis.com/description: "PRE-BILLING DRAFT ONLY; do not apply before Slice 1 and owner approval"
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/cloudsql-instances: REPLACE_WITH_PROJECT_ID:REPLACE_WITH_REGION:REPLACE_WITH_CLOUDSQL_INSTANCE
+        run.googleapis.com/secrets: >-
+          postgres-dsn:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/REPLACE_WITH_POSTGRES_SECRET_NAME
+    spec:
+      parallelism: 1
+      taskCount: 1
+      template:
+        spec:
+          maxRetries: 0
+          timeoutSeconds: 300s
+          serviceAccountName: REPLACE_WITH_PUSH_RUNTIME_SERVICE_ACCOUNT
+          containers:
+            - image: REPLACE_WITH_IMMUTABLE_ARTIFACT_REGISTRY_IMAGE
+              command: [python]
+              args: [scripts/run_postgres_push_dispatch_once.py]
+              env:
+                - name: AIXION_PROFILE
+                  value: production
+                - name: AIXION_OUTBOX_DISPATCH_MODE
+                  value: scheduled
+                - name: AIXION_POSTGRES_RUNTIME_PROBE_ENABLED
+                  value: "true"
+                - name: AIXION_PUSH_DISPATCH_ENABLED
+                  value: "true"
+                - name: AIXION_EMAIL_DISPATCH_ENABLED
+                  value: "false"
+                - name: AIXION_FCM_PROJECT_ID
+                  value: REPLACE_WITH_FIREBASE_PROJECT_ID
+                - name: AIXION_POSTGRES_DSN
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-dsn
+                      key: "REPLACE_WITH_POSTGRES_SECRET_VERSION"
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: 512Mi
+---
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: aixion-email-dispatch
+  namespace: REPLACE_WITH_GCP_PROJECT_NUMBER
+  labels:
+    cloud.googleapis.com/location: REPLACE_WITH_REGION
+  annotations:
+    run.googleapis.com/description: "PRE-BILLING DRAFT ONLY; do not apply before Slice 1 and owner approval"
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/cloudsql-instances: REPLACE_WITH_PROJECT_ID:REPLACE_WITH_REGION:REPLACE_WITH_CLOUDSQL_INSTANCE
+        run.googleapis.com/secrets: >-
+          postgres-dsn:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/REPLACE_WITH_POSTGRES_SECRET_NAME,
+          smtp-username:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/REPLACE_WITH_SMTP_USERNAME_SECRET_NAME,
+          smtp-password:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/REPLACE_WITH_SMTP_PASSWORD_SECRET_NAME,
+          email-outbox-key:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/REPLACE_WITH_EMAIL_OUTBOX_KEY_SECRET_NAME
+    spec:
+      parallelism: 1
+      taskCount: 1
+      template:
+        spec:
+          maxRetries: 0
+          timeoutSeconds: 300s
+          serviceAccountName: REPLACE_WITH_EMAIL_RUNTIME_SERVICE_ACCOUNT
+          containers:
+            - image: REPLACE_WITH_IMMUTABLE_ARTIFACT_REGISTRY_IMAGE
+              command: [python]
+              args: [scripts/run_postgres_email_dispatch_once.py]
+              env:
+                - name: AIXION_PROFILE
+                  value: production
+                - name: AIXION_OUTBOX_DISPATCH_MODE
+                  value: scheduled
+                - name: AIXION_POSTGRES_RUNTIME_PROBE_ENABLED
+                  value: "true"
+                - name: AIXION_PUSH_DISPATCH_ENABLED
+                  value: "false"
+                - name: AIXION_EMAIL_DISPATCH_ENABLED
+                  value: "true"
+                - name: AIXION_EMAIL_SMTP_HOST
+                  value: REPLACE_WITH_APPROVED_SMTP_HOST
+                - name: AIXION_EMAIL_SMTP_PORT
+                  value: "587"
+                - name: AIXION_EMAIL_FROM
+                  value: REPLACE_WITH_VERIFIED_SENDER
+                - name: AIXION_POSTGRES_DSN
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-dsn
+                      key: "REPLACE_WITH_POSTGRES_SECRET_VERSION"
+                - name: AIXION_EMAIL_SMTP_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: smtp-username
+                      key: "REPLACE_WITH_SMTP_USERNAME_SECRET_VERSION"
+                - name: AIXION_EMAIL_SMTP_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: smtp-password
+                      key: "REPLACE_WITH_SMTP_PASSWORD_SECRET_VERSION"
+                - name: AIXION_EMAIL_OUTBOX_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: email-outbox-key
+                      key: "REPLACE_WITH_EMAIL_OUTBOX_KEY_SECRET_VERSION"
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: 512Mi

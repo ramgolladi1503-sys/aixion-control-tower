@@ -81,6 +81,64 @@ def test_invalid_approval_timeout_denies_before_network(timeout: str) -> None:
     request.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "identity_fields",
+    [
+        {"conversationId": "s" * 201, "sessionId": "valid-fallback"},
+        {"conversationId": 42, "sessionId": "valid-fallback"},
+        {"conversationId": "   ", "sessionId": "valid-fallback"},
+        {"sessionId": "s" * 201},
+        {"sessionId": None},
+        {"sessionId": "\t  \n"},
+    ],
+)
+def test_invalid_session_identity_denies_before_credentials_or_network(identity_fields: dict) -> None:
+    payload = {
+        **identity_fields,
+        "stepIdx": 1,
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe"}},
+    }
+
+    with patch.object(hook, "_request") as request, patch.object(hook, "_agent_token") as token:
+        result = _raw_hook_run(payload, ENV)
+
+    assert result["decision"] == "deny"
+    assert "session" in result["reason"].lower()
+    token.assert_not_called()
+    request.assert_not_called()
+
+
+def test_valid_session_fallback_is_preserved_exactly() -> None:
+    created_body: dict = {}
+
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+        nonlocal created_body
+        if method == "POST":
+            created_body = body or {}
+            return {
+                **created_body,
+                "id": "approval-test",
+                "status": "PENDING_REVIEW",
+                "source_provider": "ANTIGRAVITY",
+                "source_agent_id": agent_id,
+                "source_agent_name": "Antigravity test",
+            }
+        return {**created_body, "id": "approval-test", "status": "DENIED",
+                "source_provider": "ANTIGRAVITY", "source_agent_id": agent_id}
+
+    session_id = "  session-fallback-exact  "
+    payload = {
+        "sessionId": session_id,
+        "stepIdx": 1,
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe"}},
+    }
+    with patch.object(hook, "_request", side_effect=request):
+        result = _raw_hook_run(payload, ENV)
+
+    assert result["decision"] == "deny"
+    assert created_body["source_session_id"] == session_id
+
+
 def _approved_record(body: dict) -> dict:
     record = {
         **body,

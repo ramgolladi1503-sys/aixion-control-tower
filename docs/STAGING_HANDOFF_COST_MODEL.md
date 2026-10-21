@@ -15,15 +15,33 @@ Use Google Cloud for the first hosted staging environment, with **Mumbai (`asia-
 
 Keep staging small and disposable:
 
+The API service manifest is supplemented by `deploy/gcp/cloud-run-jobs-staging.yaml`
+and `deploy/gcp/cloud-scheduler-staging.tf`. Job schedules remain unresolved until
+the owner approves notification latency and measured expected/peak outbox volume;
+do not choose a cadence for convenience or treat a faster schedule as free. Each
+trigger currently has zero configured Scheduler retries, and each Cloud Run Job
+has zero task retries and processes at most one item. Cloud Scheduler remains an
+at-least-once delivery system, so rare duplicate triggers are still possible;
+database leasing and idempotency are required. Failed/ambiguous work depends on
+durable outbox state and a later tick, not Scheduler's retry mechanism. Price the expected
+and peak Job invocation/runtime profile separately from the request-billed API.
+
 | Component | Proposed staging shape | Cost and reliability notes |
 | --- | --- | --- |
 | HTTPS API | Cloud Run, request-based billing, minimum instances 0, maximum 1 until load evidence supports more | Scales to zero when idle. Set request timeout, concurrency, CPU/memory, and max instances explicitly. Never run correctness-critical periodic dispatch solely in a request-scaled process. |
 | PostgreSQL | Cloud SQL for PostgreSQL, single zone, encrypted connection, automated backups enabled, bounded storage | A shared-core `db-g1-small` is an inexpensive **staging smoke-test candidate only**. Google excludes shared-core types from the Cloud SQL SLA, so this is not a production database choice. Production needs a separately priced non-shared-core tier and recovery design. |
-| Approval workers | Cloud Run Jobs invoked on a schedule after the complete application PostgreSQL cutover | `python scripts/run_postgres_push_dispatch_once.py` validates startup settings and PostgreSQL schema, then dispatches at most one push item and exits. Keep an always-on worker out of the initial cost model. This command is not deployable for production while the production startup guard is active, and current notification producers still use SQLite. |
+| Approval workers | Separate push and email Cloud Run Jobs invoked on owner-approved schedules after the complete application PostgreSQL cutover | `python scripts/run_postgres_push_dispatch_once.py` and `python scripts/run_postgres_email_dispatch_once.py` each attempt at most one due outbox item and exit. Each job has one task, parallelism one, zero task retries, and a separate runtime identity. Scheduler invokes the exact Jobs v2 `:run` endpoint with OAuth and job-scoped Invoker bindings. These are design templates only: the production startup guard is active, and current notification producers still use SQLite. |
 | Images | Artifact Registry in the same region | Apply image retention and delete untagged build artifacts. |
 | Secrets | Secret Manager, least-privilege runtime service account, versioned secret rotation | Store database, email, and push credentials outside images and source control. Secret/API usage and replication settings must be included in the final estimate. |
 | Logs and metrics | Cloud Logging/Monitoring with explicit retention and alert limits | Set retention, log-volume alerts, and redaction before sending approval payloads. Avoid action arguments and credentials in logs. |
 | Push | Firebase Cloud Messaging | FCM is a wake-up signal only; approval state remains authoritative in PostgreSQL. Real device delivery and any associated project usage remain unverified. |
+
+See [`STAGING_SECRET_INVENTORY.md`](STAGING_SECRET_INVENTORY.md) for secret names,
+purposes, consumers, intended access boundaries, rotation notes, and whether each
+is needed for staging. It contains no values. Push and email dispatch Jobs have
+separate runtime identities and secret references; FCM uses Google Application
+Default Credentials from the push Job identity, not a downloaded service-account
+key.
 
 Do not add a load balancer, Cloud NAT, Redis, multi-region database, or high-availability database to this first staging footprint unless a measured requirement justifies the recurring cost. Use the Cloud Run HTTPS endpoint directly and Cloud SQL's supported authenticated connector path; do not open PostgreSQL to `0.0.0.0/0`.
 
@@ -89,7 +107,7 @@ The proposed operator response is: at 50%, review usage; at 80%, stop nonessenti
 - **Operations identity:** a named operator who can inspect billing, pause services, restore a database, and rotate secrets. Keep a second reviewed break-glass principal.
 - **APIs to consider after authorization:** Cloud Run, Cloud SQL Admin, Artifact Registry, Secret Manager, Cloud Logging, Cloud Monitoring, Cloud Scheduler, and the required Firebase/FCM APIs. Enable only the APIs required by the approved manifest.
 
-These role names are a least-privilege starting point; verify exact permissions against the chosen deployment workflow before granting them. Do not create service accounts, grant roles, enable APIs, or activate billing during this pre-billing phase.
+These role names are a least-privilege starting point; verify exact permissions against the chosen deployment workflow before granting them. Do not create service accounts, grant roles, enable APIs, or activate billing during this pre-billing phase. The draft Scheduler service account is a dedicated identity with `roles/run.invoker` on each named job through job-level IAM members. It must not receive project-wide Invoker, secret access, Cloud SQL access, job administration, or image publication.
 
 ### Generic role and API mapping (account-independent)
 
@@ -106,7 +124,7 @@ Do not grant project `Owner` or `Editor` to automation identities.
 | CI deployer | `roles/run.developer` scoped to the staging service where supported; `roles/iam.serviceAccountUser` on only the selected runtime service account; image read access only if required by deployment | Deploy a reviewed image and service configuration | Secret payload access; database data access; IAM policy administration; billing administration |
 | Cloud Run runtime identity | `roles/cloudsql.client` only if the selected Cloud SQL connector path requires it; Secret Manager Secret Accessor on individually named secrets/versions; narrowly required log/metric write permissions | Connect to the selected database and read runtime secrets; emit operational telemetry | Image publishing/deployment; secret version creation; migration DDL; project IAM changes; billing; broad database administration |
 | Migration identity | A separate short-lived identity with the minimum Cloud SQL connection permission and database DDL grants required by the reviewed migration runner | Apply the exact, reviewed migration set during a controlled window | Runtime service use; secret administration; project IAM/billing changes; interactive application access |
-| Scheduler invoker | `roles/run.invoker` on only the one-shot worker service/job endpoint and only where the chosen trigger requires it | Trigger the scheduled dispatcher after the durable runtime gate passes | Read application secrets directly; access Cloud SQL; deploy or alter the worker |
+| Scheduler invoker | `roles/run.invoker` on only `aixion-push-dispatch` and `aixion-email-dispatch` through separate job-level IAM members | Trigger the scheduled dispatcher after the durable runtime gate passes | Project-wide Invoker; read application secrets; access Cloud SQL; deploy or alter the worker |
 | Operations primary and break-glass operators | Individually scoped operational roles for service inspection/disablement, database backup/restore, secret rotation, and alert/budget visibility; grant each capability separately | Respond to alerts, stop spend, execute an approved restore or rotation | Permanent project Owner/Editor; shared operator identity; routine use of break-glass access |
 
 The API list below describes when an API might be needed. Enabling an API can
@@ -176,6 +194,16 @@ This document does not satisfy Slice 7's exit gate yet. Before the billing bound
 3. Confirm spend-cap eligibility for the selected billing account. Current documentation says Cloud Run spend caps cover all Cloud Run resource types, including Jobs, but only Cloud Run usage in one project. Cloud SQL and several supporting services remain uncapped; choose a topology and approve maximum exposure for those charges. Configure any eligible-service cap and test notification plus shutdown/teardown in a disposable project only after separate authorization.
 4. Finish PostgreSQL application routing, one-shot worker design, migration/rollback automation, backup/restore drill, health/readiness checks, retention configuration, and alerts.
 5. Review the exact manifest, IAM bindings, secrets, data flow, and teardown procedure. A reviewer must sign off before billing/API/resource actions.
+
+The new Jobs and Scheduler files close only the account-independent manifest
+design omission. Their templates intentionally retain unresolved project, region,
+image digest, secret identity, and schedule values, so the offline validator must
+report **NOT APPLY-READY**. The validator does not contact GCP or verify Terraform
+provider schema/effective IAM. The current worker scripts use the API-wide
+production settings validator, which refuses production while the whole app is not
+PostgreSQL-authoritative and requires configuration outside each isolated job's
+secret boundary. Add and test worker-scoped production configuration after Slice 1;
+do not bypass the production guard or share every API secret with both Jobs.
 
 ## Source pricing references
 
