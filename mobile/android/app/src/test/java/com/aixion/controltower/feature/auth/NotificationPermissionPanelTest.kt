@@ -64,6 +64,14 @@ class NotificationPermissionPanelTest {
     }
 
     @Test
+    fun revokedPermissionShowsPendingServerCleanup() {
+        assertEquals(
+            "Notifications are off, and server cleanup is pending. The app will retry removing this device registration.",
+            PushRegistrationCopy.status(PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING)
+        )
+    }
+
+    @Test
     fun backgroundRegistrationDoesNotClaimSuccessWithoutNotificationPermission() {
         assertEquals(
             "Allow notifications to register this device for approval alerts.",

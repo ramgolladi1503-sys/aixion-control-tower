@@ -18,6 +18,7 @@ internal enum class PushRegistrationResult {
     REGISTERED,
     REGISTERED_CLEANUP_PENDING,
     PERMISSION_REQUIRED,
+    PERMISSION_REQUIRED_CLEANUP_PENDING,
     FIREBASE_NOT_CONFIGURED,
     BACKEND_UNAVAILABLE
 }
@@ -31,7 +32,11 @@ internal class PushDeviceRegistrationRepository(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(appContext, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
-            return PushRegistrationResult.PERMISSION_REQUIRED
+            return if (unregisterCurrentDevice()) {
+                PushRegistrationResult.PERMISSION_REQUIRED
+            } else {
+                PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING
+            }
         }
 
         // An older app version stored FCM refresh tokens as plaintext. Reading

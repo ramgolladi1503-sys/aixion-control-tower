@@ -37,6 +37,7 @@ internal enum class PushRegistrationUiState {
     REGISTERED,
     REGISTERED_CLEANUP_PENDING,
     PERMISSION_REQUIRED,
+    PERMISSION_REQUIRED_CLEANUP_PENDING,
     FIREBASE_NOT_CONFIGURED,
     BACKEND_UNAVAILABLE
 }
@@ -46,6 +47,7 @@ internal object PushRegistrationCopy {
         PushRegistrationUiState.CHECKING -> "Connecting this device to approval alerts…"
         PushRegistrationUiState.REGISTERED -> "This device is registered to receive approval alerts."
         PushRegistrationUiState.REGISTERED_CLEANUP_PENDING -> "Alerts are registered, but an older device registration could not be removed yet."
+        PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING -> "Notifications are off, and server cleanup is pending. The app will retry removing this device registration."
         PushRegistrationUiState.FIREBASE_NOT_CONFIGURED -> "Firebase is not configured for this app build. Push alerts are unavailable."
         PushRegistrationUiState.BACKEND_UNAVAILABLE -> "Could not register this device with the server. Reopen Account to retry."
         PushRegistrationUiState.PERMISSION_REQUIRED -> "Allow notifications to register this device for approval alerts."
@@ -107,10 +109,6 @@ internal fun NotificationPermissionPanel() {
     }
 
     LaunchedEffect(permissionState, registrationRefresh) {
-        if (permissionState == NotificationPermissionState.DENIED) {
-            registrationState = PushRegistrationUiState.PERMISSION_REQUIRED
-            return@LaunchedEffect
-        }
         registrationState = PushRegistrationUiState.CHECKING
         registrationState = PushDeviceRegistrationRepository(context).registerCurrentDevice().toUiState()
     }
@@ -126,6 +124,7 @@ internal fun NotificationPermissionPanel() {
                     }
                     if (requiresRuntimePermission) NotificationPermissionState.GRANTED else NotificationPermissionState.NOT_REQUIRED
                 } else {
+                    registrationRefresh += 1
                     NotificationPermissionState.DENIED
                 }
             }
@@ -163,6 +162,8 @@ private fun PushRegistrationResult.toUiState(): PushRegistrationUiState = when (
     PushRegistrationResult.REGISTERED -> PushRegistrationUiState.REGISTERED
     PushRegistrationResult.REGISTERED_CLEANUP_PENDING -> PushRegistrationUiState.REGISTERED_CLEANUP_PENDING
     PushRegistrationResult.PERMISSION_REQUIRED -> PushRegistrationUiState.PERMISSION_REQUIRED
+    PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING ->
+        PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING
     PushRegistrationResult.FIREBASE_NOT_CONFIGURED -> PushRegistrationUiState.FIREBASE_NOT_CONFIGURED
     PushRegistrationResult.BACKEND_UNAVAILABLE -> PushRegistrationUiState.BACKEND_UNAVAILABLE
 }
