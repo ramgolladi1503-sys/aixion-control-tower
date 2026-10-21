@@ -35,11 +35,13 @@ from .connector_simulator import ConnectorSimulationRequest, ConnectorSimulation
 from .connector_templates import ConnectorTemplate, ConnectorTemplateList, connector_templates, get_connector_template
 from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
 from .application_repository_access import (
+    connector_repository_for_request,
     project_repository_for_request,
     workspace_id_for_request,
     workspace_membership_repository_for_request,
 )
 from .models import AuditEvent, AuthUser, now_utc
+from .connector_repository import ConnectorRepositoryConflict, ConnectorRepositoryScopeError
 from .project_repository import ProjectRepository
 from .store import store
 from .workspace_access import (
@@ -103,6 +105,35 @@ def _get_connector_or_404(connector_id: str, user: AuthUser | None = None) -> Ag
     return connector
 
 
+def _get_bound_connector_or_404(
+    connector_id: str, user: AuthUser, request: Request
+) -> AgentConnector | None:
+    """Read from the explicitly bound repository, or signal local adapter use."""
+    if getattr(request.app.state, "connector_repository", None) is None:
+        return None
+    workspace_id = workspace_id_for_request(user, request) or user.workspace_id
+    if not workspace_id:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    connector = connector_repository_for_request(request).get_for_workspace(
+        connector_id, workspace_id=workspace_id
+    )
+    if connector is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    return connector
+
+
+def _connector_audit(
+    connector: AgentConnector, event_type: str, details: dict, actor: str
+) -> AuditEvent:
+    return AuditEvent(
+        event_type=event_type,
+        entity_id=connector.id,
+        workspace_id=connector.workspace_id,
+        details=details,
+        actor=actor,
+    )
+
+
 def _validate_scopes(
     payload: ConnectorCreate | ConnectorUpdate,
     workspace_id: str | None,
@@ -156,6 +187,15 @@ def create_connector(
         if http_request is None
         else workspace_id_for_request(user, http_request)
     )
+    repository = (
+        None
+        if http_request is None or getattr(http_request.app.state, "connector_repository", None) is None
+        else connector_repository_for_request(http_request)
+    )
+    if repository is not None and not workspace_id:
+        workspace_id = user.workspace_id
+    if repository is not None and not workspace_id:
+        raise HTTPException(status_code=404, detail="Workspace not found")
     project_repository = (
         None if http_request is None else project_repository_for_request(http_request)
     )
@@ -177,9 +217,20 @@ def create_connector(
         workspace_id=workspace_id,
         config=payload.config,
     )
-    store.agent_connectors[connector.id] = connector
-    _audit("connector.created", connector.id, _connector_details(connector), actor=user.email)
-    store.persist()
+    if repository is None:
+        store.agent_connectors[connector.id] = connector
+        _audit("connector.created", connector.id, _connector_details(connector), actor=user.email)
+        store.persist()
+    else:
+        try:
+            repository.create(
+                connector=connector,
+                audit_event=_connector_audit(
+                    connector, "connector.created", _connector_details(connector), user.email
+                ),
+            )
+        except ConnectorRepositoryScopeError as error:
+            raise HTTPException(status_code=404, detail="Connector scope not found") from error
     return _to_public(connector)
 
 
@@ -201,6 +252,15 @@ def list_connectors(
         if http_request is None
         else workspace_membership_repository_for_request(http_request)
     )
+    if http_request is not None and getattr(http_request.app.state, "connector_repository", None) is not None:
+        if not workspace_id:
+            workspace_id = user.workspace_id
+        if not workspace_id:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        return [
+            _to_public(connector)
+            for connector in connector_repository_for_request(http_request).list_for_workspace(workspace_id)
+        ]
     return [_to_public(connector) for connector in store.agent_connectors.values()
             if connector_scope_is_consistent(
                 connector,
@@ -268,15 +328,32 @@ def preview_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperPr
 
 
 @router.get("/{connector_id}", response_model=ConnectorPublic)
-def get_connector(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    return _to_public(_get_connector_or_404(connector_id, user))
+def get_connector(
+    connector_id: str, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorPublic:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    return _to_public(bound if bound is not None else _get_connector_or_404(connector_id, user))
 
 
 @router.patch("/{connector_id}", response_model=ConnectorPublic)
-def update_connector(connector_id: str, payload: ConnectorUpdate, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    workspace_id = workspace_id_for_user(user)
-    _validate_scopes(payload, workspace_id)
-    connector = _get_connector_or_404(connector_id, user)
+def update_connector(
+    connector_id: str, payload: ConnectorUpdate, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorPublic:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    workspace_id = (
+        workspace_id_for_request(user, http_request) or user.workspace_id
+        if http_request is not None else workspace_id_for_user(user)
+    )
+    project_repository = (
+        project_repository_for_request(http_request)
+        if http_request is not None and getattr(http_request.app.state, "connector_repository", None) is not None
+        else None
+    )
+    _validate_scopes(payload, workspace_id, project_repository)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     previous_status = connector.status
     update = payload.model_dump(exclude_unset=True)
     for field_name, value in update.items():
@@ -288,13 +365,21 @@ def update_connector(connector_id: str, payload: ConnectorUpdate, user: AuthUser
         elif hasattr(connector, field_name):
             setattr(connector, field_name, value)
     connector.updated_at = now_utc()
-    _audit(
-        "connector.updated",
-        connector.id,
-        {"previous_status": previous_status, "new": _connector_details(connector)},
-        actor=user.email,
-    )
-    store.persist()
+    details = {"previous_status": previous_status, "new": _connector_details(connector)}
+    if bound is None:
+        _audit("connector.updated", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        try:
+            connector_repository_for_request(http_request).update(
+                connector=connector,
+                expected_updated_at=expected_updated_at,
+                audit_event=_connector_audit(connector, "connector.updated", details, user.email),
+            )
+        except ConnectorRepositoryConflict as error:
+            raise HTTPException(status_code=409, detail="Connector changed; reload and retry") from error
+        except ConnectorRepositoryScopeError as error:
+            raise HTTPException(status_code=404, detail="Connector scope not found") from error
     return _to_public(connector)
 
 

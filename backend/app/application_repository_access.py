@@ -10,6 +10,7 @@ from .agent_auth_repository import ExternalAgentAuthenticationRepository
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
 from .approval_repository import ApprovalDecisionRepository
 from .project_repository import ProjectRepository
+from .connector_repository import ConnectorRepository
 from .idea_repository import IdeaRepository
 from .settings import get_settings
 from .workspace_access import workspace_id_for_user as resolve_workspace_id_for_user
@@ -98,6 +99,16 @@ def project_repository_for_request(request: _RequestState | None) -> ProjectRepo
     repository = getattr(state, "project_repository", None)
     if repository is None:
         raise RuntimeError("Application project repository is unavailable")
+    return repository
+
+
+def connector_repository_for_request(request: _RequestState | None) -> ConnectorRepository:
+    """Return the connector adapter explicitly bound to this FastAPI app."""
+    app = getattr(request, "app", None)
+    state = getattr(app, "state", None)
+    repository = getattr(state, "connector_repository", None)
+    if repository is None:
+        raise RuntimeError("Application connector repository is unavailable")
     return repository
 
 
