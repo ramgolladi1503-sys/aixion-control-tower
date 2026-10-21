@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.api.dto.ConnectorDto
 import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
+import com.aixion.controltower.core.api.dto.webhookNativeSessionLimitation
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
@@ -171,7 +172,7 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
                 Text("Connect a platform", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = if (state.loading) "Loading connections..." else "Connect Antigravity, Codex, and other supported agents so approval requests can reach your phone.",
+                    text = if (state.loading) "Loading connections..." else "Set up webhook task intake here. Antigravity has a separate local hook setup; its live phone round trip is still being verified. Native Codex permission approvals are not connected yet.",
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
@@ -192,10 +193,10 @@ private fun FirstTimeConnectorGuide() {
     TowerPanel(elevated = true) {
         Text("How to connect", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("1. Choose the platform you use, such as Antigravity or Codex.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
-        Text("2. Create its connection and copy the one-time credential securely.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
-        Text("3. Follow the setup instructions in that agent and run the connection test.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
-        Text("4. When an agent needs a decision, open Approvals to review, approve, or deny it.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("1. Choose a webhook integration to submit task requests.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("2. Create its connection and store the one-time credential securely.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("3. Configure the external webhook and send a test task.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("4. Review any resulting approval request in Approvals. Webhooks do not pause or resume a native agent session.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
     }
 }
 
@@ -225,9 +226,9 @@ private fun TemplatePanel(
     onCreate: () -> Unit
 ) {
     TowerPanel(elevated = true) {
-        Text("Choose an agent platform", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Choose a webhook integration", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Select Antigravity, Codex, or another supported agent to see its setup instructions.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("These integrations submit task requests. They do not install native approval hooks or resume a paused agent session.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         val selectedTemplate = templates.firstOrNull { it.id == selectedTemplateId }
         var platformMenuExpanded by remember { mutableStateOf(false) }
@@ -256,6 +257,9 @@ private fun TemplatePanel(
         }
         selectedTemplate?.let { template ->
             Text(template.description, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+            webhookNativeSessionLimitation(template.provider_label, template.connector_type)?.let { limitation ->
+                Text(limitation, color = RiskMedium, fontSize = 12.sp, lineHeight = 17.sp)
+            }
             if (template.setup_notes.isNotEmpty()) {
                 Text("Setup instructions", color = TowerTextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 template.setup_notes.forEach { note ->
@@ -383,8 +387,8 @@ private fun ConnectorDto.setupGuidance(): ConnectorSetupGuidance {
             healthy = true
         )
         else -> ConnectorSetupGuidance(
-            stage = "Live",
-            nextAction = "Connection is ready. Review incoming requests and their status in Approvals.",
+            stage = "Recently used",
+            nextAction = "The last authenticated webhook request was accepted. This does not prove the integration is currently online. Review task and approval status in the app.",
             healthy = true
         )
     }

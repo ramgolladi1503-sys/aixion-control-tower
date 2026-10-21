@@ -5,6 +5,7 @@ import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.core.api.dto.ExternalAgentDto
 import com.aixion.controltower.core.api.dto.ANTIGRAVITY_APPROVAL_ACTIONS
 import com.aixion.controltower.core.api.dto.isExpectedAntigravityApprovalAgent
+import com.aixion.controltower.core.api.dto.webhookNativeSessionLimitation
 import com.aixion.controltower.data.repository.AgentAccessSummary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -80,6 +81,19 @@ class AgentAccessPolicyTest {
             last_used_at = "2026-10-22T10:30:00Z"
         )
         assertEquals("No active token; activity is unavailable", authenticatedActivityLabel(revoked))
+    }
+
+    @Test
+    fun codexWebhookIsNotDescribedAsNativePermissionIntegration() {
+        assertEquals(
+            "Webhook task intake only: this does not connect to Codex Desktop permission prompts or resume a paused native Codex session.",
+            webhookNativeSessionLimitation("CODEX", "WEBHOOK")
+        )
+        assertEquals(
+            "Webhook task intake only: this does not intercept or resume a native agent session.",
+            webhookNativeSessionLimitation("ANTIGRAVITY", "WEBHOOK")
+        )
+        assertEquals(null, webhookNativeSessionLimitation("CODEX", "GPT_ACTIONS"))
     }
 
     @Test
