@@ -175,6 +175,8 @@ def test_sqlite_create_commits_run_steps_events_and_audit_atomically(tmp_path: P
     ) == [run]
     assert repository.list_for_workspace(workspace_id="another_workspace") == []
     assert repository.list_steps_for_run(run.id) == [step]
+    assert repository.list_steps_for_runs([run]) == [step]
+    assert repository.list_steps_for_runs([]) == []
     assert repository.list_events_for_run(run.id) == [event]
 
     with connect() as connection:
@@ -354,6 +356,8 @@ def test_postgres_agent_run_create_is_workspace_scoped_and_durable(
     assert repository.get_active_for_task(task.id) == run
     assert repository.get("missing_run") is None
     assert repository.list_steps_for_run(run.id) == [step]
+    assert repository.list_steps_for_runs([run]) == [step]
+    assert repository.list_steps_for_runs([]) == []
     assert repository.list_events_for_run(run.id) == [event]
     application_repositories = ApplicationRepositories.from_connector(connect)
     executor = DefaultAgentRunStepExecutor(

@@ -32,11 +32,7 @@ def build_agent_run_summary(
             )
     run_ids = {run.id for run in runs}
     steps = (
-        [
-            step
-            for run_id in run_ids
-            for step in repository.list_steps_for_run(run_id)
-        ]
+        repository.list_steps_for_runs(runs)
         if repository is not None
         else list(store.agent_run_steps.values())
     )

@@ -48,6 +48,8 @@ class AgentRunRepository(Protocol):
 
     def list_steps_for_run(self, run_id: str) -> list[AgentRunStep]: ...
 
+    def list_steps_for_runs(self, runs: list[AgentRun]) -> list[AgentRunStep]: ...
+
     def list_events_for_run(self, run_id: str) -> list[AgentRunEvent]: ...
 
     def list_expired_leases(
@@ -686,6 +688,41 @@ class SQLiteAgentRunRepository:
                 raise AgentRunRepositoryIntegrityError("Stored AgentRun step payload is invalid") from error
             if row[0] != step.id or step.run_id != run.id or step.task_id != run.task_id:
                 raise AgentRunRepositoryIntegrityError("Stored AgentRun step identity or scope is inconsistent")
+            steps.append(step)
+        return steps
+
+    def list_steps_for_runs(self, runs: list[AgentRun]) -> list[AgentRunStep]:
+        """Fetch steps for an explicit run set without an N+1 query pattern."""
+        if not runs:
+            return []
+        runs_by_id = {run.id: run for run in runs}
+        if len(runs_by_id) != len(runs):
+            raise ValueError("AgentRun summary contains duplicate run identities")
+        unique_run_ids = sorted(runs_by_id)
+        placeholders = ",".join("?" for _ in unique_run_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT entity_id,payload FROM kv_store WHERE entity_type='agent_run_step' "
+                f"AND json_extract(payload,'$.run_id') IN ({placeholders}) "
+                "ORDER BY json_extract(payload,'$.run_id'),"
+                "json_extract(payload,'$.sequence'),entity_id",
+                unique_run_ids,
+            ).fetchall()
+        steps: list[AgentRunStep] = []
+        for row_id, payload in rows:
+            try:
+                step = AgentRunStep.model_validate_json(payload)
+            except Exception as error:
+                raise AgentRunRepositoryIntegrityError("Stored AgentRun step payload is invalid") from error
+            run = runs_by_id.get(step.run_id)
+            if (
+                run is None
+                or row_id != step.id
+                or step.task_id != run.task_id
+            ):
+                raise AgentRunRepositoryIntegrityError(
+                    "Stored AgentRun step identity or scope is inconsistent"
+                )
             steps.append(step)
         return steps
 
@@ -1403,6 +1440,41 @@ class PostgresAgentRunRepository:
                 or step.task_id != run.task_id
             ):
                 raise AgentRunRepositoryIntegrityError("Stored AgentRun step identity or scope is inconsistent")
+            steps.append(step)
+        return steps
+
+    def list_steps_for_runs(self, runs: list[AgentRun]) -> list[AgentRunStep]:
+        """Fetch steps for an explicit run set without an N+1 query pattern."""
+        if not runs:
+            return []
+        runs_by_id = {run.id: run for run in runs}
+        if len(runs_by_id) != len(runs):
+            raise ValueError("AgentRun summary contains duplicate run identities")
+        unique_run_ids = sorted(runs_by_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT step_id,run_id,task_id,workspace_id,payload FROM agent_run_steps "
+                "WHERE run_id = ANY(%s) ORDER BY run_id,sequence,step_id",
+                (unique_run_ids,),
+            ).fetchall()
+        steps: list[AgentRunStep] = []
+        for row in rows:
+            try:
+                step = AgentRunStep.model_validate(row[4])
+            except Exception as error:
+                raise AgentRunRepositoryIntegrityError("Stored AgentRun step payload is invalid") from error
+            run = runs_by_id.get(row[1])
+            if (
+                run is None
+                or row[0] != step.id
+                or row[2] != step.task_id
+                or row[3] != run.workspace_id
+                or step.run_id != run.id
+                or step.task_id != run.task_id
+            ):
+                raise AgentRunRepositoryIntegrityError(
+                    "Stored AgentRun step identity or scope is inconsistent"
+                )
             steps.append(step)
         return steps
 
