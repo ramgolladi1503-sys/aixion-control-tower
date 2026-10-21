@@ -512,8 +512,29 @@ def bind_run_capability_lease(
     run_id: str,
     payload: AgentRunCapabilityLeaseRequest,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
-    run = _run_or_404(run_id, user)
+    run_repository = (
+        agent_run_repository_for_request(request) if request is not None else None
+    )
+    if run_repository is not None and not isinstance(run_repository, SQLiteAgentRunRepository):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Capability lease binding is unavailable for the configured AgentRun "
+                "repository until capability and trust records share its durable transaction path."
+            ),
+        )
+    if request is None:
+        run = _run_or_404(run_id, user)
+    else:
+        run = _durable_run_or_404(run_id, user=user, request=request)
+        store.project_agent_run_snapshot(
+            run,
+            run_repository.list_steps_for_run(run.id),
+            run_repository.list_events_for_run(run.id),
+        )
+        run = store.agent_runs[run.id]
     _require_step_boundary(run, "bind a capability lease")
     try:
         attach_capability_lease(

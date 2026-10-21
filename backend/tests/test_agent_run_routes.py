@@ -288,6 +288,31 @@ def test_execute_route_fails_closed_for_non_sqlite_runtime_before_global_trust_a
     assert step.status == AgentRunStepStatus.READY
 
 
+def test_capability_binding_fails_closed_for_non_sqlite_runtime_before_store_access(
+    monkeypatch,
+) -> None:
+    from app import agent_run_routes
+
+    run_id, run, step = _create_run()
+    original_run = run.model_copy(deep=True)
+    original_step = step.model_copy(deep=True)
+    monkeypatch.setattr(
+        agent_run_routes,
+        "agent_run_repository_for_request",
+        lambda _request: object(),
+    )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": "lease-not-used"},
+    )
+
+    assert response.status_code == 409
+    assert "capability and trust records" in response.json()["detail"]
+    assert run == original_run
+    assert step == original_step
+
+
 def test_mutating_controls_are_rejected_while_step_is_in_flight() -> None:
     run_id, run, step = _create_run()
     run.status = AgentRunStatus.RUNNING
