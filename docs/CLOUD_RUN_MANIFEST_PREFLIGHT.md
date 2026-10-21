@@ -87,9 +87,11 @@ python -m ruff check scripts/validate_cloud_run_jobs_manifest.py tests/test_clou
 
 The checked-in job and Terraform templates must report **NOT APPLY-READY** while
 placeholders remain. A clean local result for a reviewed candidate proves only the
-static shape invariants: two separate jobs, same project/region/digest-pinned image,
-secret boundaries, one task, zero task retries, OAuth target, and job-level invoker
-grants. It does not validate Terraform provider schema, effective IAM, service-agent
+static shape invariants: two separate jobs, matching Cloud Run project and region
+defaults across the Terraform and Job YAML, same project/region/digest-pinned image,
+validly shaped job-specific service-account IDs, secret boundaries, one task, zero
+task retries, OAuth target, and job-level invoker grants. It does not validate
+Terraform variable overrides, provider schema, effective IAM, service-agent
 permissions, project/billing state, secret existence, worker startup, schedule
 adequacy, cloud cost, or actual delivery. `terraform fmt -check` and the organization's
 normal IaC review are still required once Terraform is installed; do not initialize

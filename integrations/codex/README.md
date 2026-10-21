@@ -26,18 +26,17 @@ credentials, and timeout.
 - The Codex process and this hook must remain running and connected while the
   phone decision is pending. Cloud delivery cannot resume a sleeping,
   disconnected, or terminated host process.
-- A unique invocation identity requires `tool_use_id`, in addition to
-  `session_id` and `turn_id`. The hook denies before any API request when that
-  field is absent, because payload-derived identity can collide for repeated
-  identical calls in one turn. The currently documented Codex
-  [`PermissionRequest` input schema](https://github.com/openai/codex/blob/main/codex-rs/hooks/schema/generated/permission-request.command.input.schema.json)
-  omits `tool_use_id`, so that documented build is
-  not compatible with this strict adapter and will deny these requests. Do not
-  install this integration for live use until Codex exposes a stable
-  per-invocation identifier in `PermissionRequest` and the installed app's
-  emitted event is verified. When the field is present, retries of the same
-  event reuse the same identity, while different tool calls in one session
-  retain the same session identity and receive distinct invocation identities.
+- Codex's documented `PermissionRequest` payload includes `session_id` and
+  `turn_id`, but does not list `tool_use_id`. If Codex supplies a valid
+  `tool_use_id`, the hook uses it for restart-stable identity. Otherwise it
+  creates a cryptographically random ID for that synchronous hook callback and
+  keeps it through the create, wait, and single-use consume sequence. Repeated
+  identical calls in one turn therefore get different IDs. If the hook process
+  or Codex restarts, the new callback gets a new ID and cannot inherit an old
+  approval; the old request can only expire or remain unconsumed. This fallback
+  preserves fail-closed binding but does not provide restart recovery for an
+  event whose callback process was lost. The installed app's actual input shape
+  and callback behavior still require device/app verification.
 - This is a per-project integration. It does not alter global Codex settings
   or take over existing conversations that do not load this project's hook.
 - This hook handles Codex's local permission prompts. Codex-hosted tools that
@@ -107,6 +106,7 @@ default; local tests must set both `AIXION_AGENT_TOKEN` and
 `AIXION_ALLOW_AGENT_TOKEN_ENV=true`. Do not enable process-environment tokens
 for a live host integration.
 
-Unit tests mock the Control Tower API and verify protocol/decision behavior.
-They do not certify the installed Codex app. Certification requires a real
-Codex local permission request and the same task resuming after the phone tap.
+Unit tests mock the Control Tower API and verify protocol/decision behavior,
+including callback-scoped identity when `tool_use_id` is absent. They do not
+certify the installed Codex app. Certification requires a real Codex local
+permission request and the same task resuming after the phone tap.

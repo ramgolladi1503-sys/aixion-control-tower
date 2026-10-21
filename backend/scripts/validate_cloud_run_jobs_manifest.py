@@ -59,6 +59,19 @@ def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _terraform_string_default(text: str, variable: str) -> str | None:
+    """Read a literal string default from one simple Terraform variable block."""
+    block = re.search(
+        rf'variable\s+"{re.escape(variable)}"\s*\{{(?P<body>.*?)\n\}}',
+        text,
+        re.DOTALL,
+    )
+    if block is None:
+        return None
+    default = re.search(r'\bdefault\s*=\s*"([^"\n]*)"', block.group("body"))
+    return default.group(1) if default else None
+
+
 def _parse_jobs(text: str, issues: list[str]) -> list[dict[str, Any]]:
     try:
         documents = list(yaml.safe_load_all(text))
@@ -149,7 +162,7 @@ def _validate_job(
     if task_spec.get("timeoutSeconds") not in {"300s", 300}:
         issues.append(f"{name} must set the reviewed 300-second task timeout")
     service_account = task_spec.get("serviceAccountName")
-    account_re = rf"[A-Za-z0-9][A-Za-z0-9._-]*@{PROJECT_ID_RE}\.iam\.gserviceaccount\.com"
+    account_re = rf"[a-z][a-z0-9-]{{4,28}}[a-z0-9]@{PROJECT_ID_RE}\.iam\.gserviceaccount\.com"
     if not isinstance(service_account, str) or not re.fullmatch(account_re, service_account):
         issues.append(f"{name} must use a concrete job-specific runtime service account")
 
@@ -288,13 +301,34 @@ def _terraform_resource(text: str, kind: str, name: str) -> str | None:
     return None
 
 
-def _validate_scheduler(text: str, issues: list[str]) -> None:
+def _validate_scheduler(
+    text: str,
+    issues: list[str],
+    *,
+    job_projects: set[str],
+    job_regions: set[str],
+) -> None:
     if any(marker in text for marker in PLACEHOLDER_MARKERS):
         issues.append("Cloud Scheduler Terraform contains unresolved project, region, or schedule inputs")
     for marker in SCHEDULE_DEFAULTS:
         if marker in text:
             issues.append("Cloud Scheduler Terraform has unresolved required variables")
             break
+    terraform_project = _terraform_string_default(text, "project_id")
+    terraform_region = _terraform_string_default(text, "cloud_run_region")
+    if terraform_project is None or terraform_region is None:
+        issues.append("Cloud Scheduler must declare literal project_id and cloud_run_region inputs")
+    else:
+        if job_projects and job_projects != {terraform_project}:
+            issues.append("Cloud Scheduler project_id must match the Job image and Cloud SQL project")
+        if job_regions and job_regions != {terraform_region}:
+            issues.append("Cloud Scheduler cloud_run_region must match the Job image and location")
+
+    scheduler_account_id = _terraform_string_default(text, "scheduler_service_account_id")
+    if scheduler_account_id is not None and not re.fullmatch(
+        r"[a-z][a-z0-9-]{4,28}[a-z0-9]", scheduler_account_id
+    ):
+        issues.append("Scheduler service account ID must be 6-30 lowercase letters, digits, or dashes")
     if "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.cloud_run_region}/jobs/aixion-push-dispatch:run" not in text:
         issues.append("push Scheduler target must call the exact Cloud Run Jobs v2 run endpoint")
     if "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.cloud_run_region}/jobs/aixion-email-dispatch:run" not in text:
@@ -348,6 +382,8 @@ def validate_manifest_text(jobs_text: str, scheduler_text: str) -> list[str]:
     """Return detected blockers; empty means local shape checks passed only."""
     issues: list[str] = []
     jobs = _parse_jobs(jobs_text, issues)
+    regions: set[str] = set()
+    cloudsql_projects: set[str] = set()
     if len(jobs) == 2:
         found: dict[str, dict[str, Any]] = {}
         service_accounts: list[str] = []
@@ -361,8 +397,6 @@ def validate_manifest_text(jobs_text: str, scheduler_text: str) -> list[str]:
         if set(found) != set(COMMAND_BY_JOB):
             issues.append("the push and email dispatcher job names are both required")
         project_numbers: set[str] = set()
-        regions: set[str] = set()
-        cloudsql_projects: set[str] = set()
         for name in COMMAND_BY_JOB:
             if name not in found:
                 continue
@@ -379,7 +413,12 @@ def validate_manifest_text(jobs_text: str, scheduler_text: str) -> list[str]:
             issues.append("push and email jobs must use separate runtime service accounts")
         if len(project_numbers) > 1 or len(regions) > 1 or len(cloudsql_projects) > 1:
             issues.append("push and email jobs must use the same project and region")
-    _validate_scheduler(scheduler_text, issues)
+    _validate_scheduler(
+        scheduler_text,
+        issues,
+        job_projects=cloudsql_projects,
+        job_regions=regions,
+    )
     return issues
 
 

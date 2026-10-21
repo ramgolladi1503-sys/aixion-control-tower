@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 from typing import Any
@@ -287,22 +288,27 @@ def _identity_matches(approval: dict[str, Any], *, approval_id: str,
 def _invocation_identity(
     event: dict[str, Any], *, tool_name: str, tool_input: Any
 ) -> tuple[str, str] | None:
-    """Derive a restart-stable key from the identity fields in PermissionRequest."""
+    """Bind identity to Codex's call ID or this synchronous hook callback."""
     session = event.get("session_id")
     turn = event.get("turn_id")
-    tool_use = event.get("tool_use_id")
     if not isinstance(session, str) or not session.strip():
         return None
     if not isinstance(turn, str) or not turn.strip():
         return None
     if len(session) > 200 or len(turn) > 200 or len(tool_name) > 256:
         return None
-    # PermissionRequest must be uniquely correlated with one tool invocation.
-    # Payload-derived identity alone can collide for identical calls in one turn.
-    if not isinstance(tool_use, str) or not tool_use.strip():
-        return None
-    if len(tool_use) > 200:
-        return None
+    if "tool_use_id" in event:
+        tool_use = event["tool_use_id"]
+        if not isinstance(tool_use, str) or not tool_use.strip() or len(tool_use) > 200:
+            return None
+        identity_source = "provider"
+    else:
+        # PermissionRequest omits tool_use_id in the documented schema. The hook
+        # runs synchronously for one pending native request, so a per-process
+        # nonce binds this approval to that callback. A restarted callback gets
+        # a new ID and cannot reuse an earlier phone decision.
+        tool_use = "callback:" + uuid.uuid4().hex
+        identity_source = "callback"
     session_material = json.dumps(
         {"session_id": session},
         sort_keys=True,
@@ -311,6 +317,7 @@ def _invocation_identity(
     normalized = {
         "session_id": session[:200],
         "turn_id": turn[:200],
+        "identity_source": identity_source,
         "tool_use_id": tool_use[:200],
         "tool_name": tool_name,
         "tool_input": tool_input,

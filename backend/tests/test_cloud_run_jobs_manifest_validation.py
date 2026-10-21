@@ -134,6 +134,46 @@ def test_scheduler_must_use_google_jobs_run_endpoint() -> None:
     assert any("push Scheduler target" in issue for issue in _issues(jobs, scheduler))
 
 
+def test_scheduler_project_must_match_job_project() -> None:
+    jobs, scheduler = _valid_inputs()
+    scheduler = scheduler.replace(
+        'variable "project_id" {\n  description = "Owner-approved dedicated staging project ID."\n  type        = string\n  default     = "aixion-staging-123"',
+        'variable "project_id" {\n  description = "Owner-approved dedicated staging project ID."\n  type        = string\n  default     = "aixion-other-project"',
+        1,
+    )
+    assert any("project_id must match the Job" in issue for issue in _issues(jobs, scheduler))
+
+
+def test_scheduler_cloud_run_region_must_match_job_region() -> None:
+    jobs, scheduler = _valid_inputs()
+    scheduler = scheduler.replace(
+        'variable "cloud_run_region" {\n  description = "Owner-approved region matching the Cloud Run Job manifests."\n  type        = string\n  default     = "asia-south1"',
+        'variable "cloud_run_region" {\n  description = "Owner-approved region matching the Cloud Run Job manifests."\n  type        = string\n  default     = "us-central1"',
+        1,
+    )
+    assert any("cloud_run_region must match the Job" in issue for issue in _issues(jobs, scheduler))
+
+
+def test_invalid_scheduler_service_account_id_is_rejected() -> None:
+    jobs, scheduler = _valid_inputs()
+    scheduler = scheduler.replace(
+        'variable "scheduler_service_account_id" {\n  description = "Dedicated, non-human service account ID used only to invoke the two jobs."\n  type        = string\n  default     = "aixion-scheduler"',
+        'variable "scheduler_service_account_id" {\n  description = "Dedicated, non-human service account ID used only to invoke the two jobs."\n  type        = string\n  default     = "Bad_ID"',
+        1,
+    )
+    assert any("Scheduler service account ID must be 6-30" in issue for issue in _issues(jobs, scheduler))
+
+
+def test_invalid_runtime_service_account_email_is_rejected() -> None:
+    jobs, scheduler = _valid_inputs()
+    jobs = jobs.replace(
+        "aixion-push@aixion-staging-123.iam.gserviceaccount.com",
+        "AIXION@aixion-staging-123.iam.gserviceaccount.com",
+        1,
+    )
+    assert any("concrete job-specific runtime service account" in issue for issue in _issues(jobs, scheduler))
+
+
 def test_scheduler_job_iam_must_be_exactly_scoped() -> None:
     jobs, scheduler = _valid_inputs()
     scheduler = scheduler.replace('name     = "aixion-push-dispatch"', 'name     = "aixion-email-dispatch"', 1)

@@ -307,7 +307,7 @@ def test_repeated_ambiguous_decision_polls_expire_and_deny(monkeypatch) -> None:
     assert not any(url.endswith("/consume") for _, url in calls)
 
 
-def test_invocation_identity_is_stable_across_hook_restarts() -> None:
+def test_provider_invocation_identity_is_stable_across_hook_restarts() -> None:
     first = hook._invocation_identity(_event(), tool_name="Bash", tool_input=_event()["tool_input"])
     retry = hook._invocation_identity(_event(), tool_name="Bash", tool_input=_event()["tool_input"])
     different_turn = hook._invocation_identity(
@@ -334,6 +334,48 @@ def test_invocation_identity_is_stable_across_hook_restarts() -> None:
     assert first[1] != different_turn[1]
     assert first[1] != different_input[1]
     assert first[1] != different_tool_call[1]
+
+
+def test_documented_permission_request_gets_callback_scoped_invocation_identity() -> None:
+    event = _event()
+    event.pop("tool_use_id")
+
+    first_callback = hook._invocation_identity(
+        event, tool_name="Bash", tool_input=event["tool_input"]
+    )
+    second_callback = hook._invocation_identity(
+        event, tool_name="Bash", tool_input=event["tool_input"]
+    )
+
+    assert first_callback is not None and second_callback is not None
+    assert first_callback[0] == second_callback[0]
+    assert first_callback[1] != second_callback[1]
+
+
+def test_documented_permission_request_without_tool_use_id_completes_phone_flow(monkeypatch) -> None:
+    event = _event()
+    event.pop("tool_use_id")
+    calls: list[tuple[str, str, dict | None]] = []
+    approval: dict = {}
+
+    def request(method, url, _config, _token, body=None):
+        nonlocal approval
+        calls.append((method, url, body))
+        if method == "POST" and url.endswith("/consume"):
+            return {"consumed": True}
+        if method == "POST":
+            approval = _record(body or {}, status="APPROVED")
+            approval["approved_payload_hash"] = hook._hash(approval)
+            return approval
+        return approval
+
+    monkeypatch.setattr(hook, "_request", request)
+
+    assert hook.run(event, ENV) == ("allow", "Approved from Aixion Control Tower")
+    create = calls[0][2]
+    assert create is not None
+    assert create["source_invocation_id"].startswith("codex:v1:")
+    assert calls[-1][0] == "POST" and calls[-1][1].endswith("/consume")
 
 
 def test_session_identity_is_stable_across_turns_and_tool_calls() -> None:
@@ -372,10 +414,20 @@ def test_restart_retry_can_resume_existing_approved_invocation(monkeypatch) -> N
     assert calls == ["POST", "GET", "POST"]
 
 
-@pytest.mark.parametrize("missing", ["session_id", "turn_id", "tool_use_id"])
+@pytest.mark.parametrize("missing", ["session_id", "turn_id"])
 def test_missing_stable_invocation_identity_denies_before_network(missing: str, monkeypatch) -> None:
     event = _event()
     event.pop(missing)
+    monkeypatch.setattr(hook, "_request", lambda *args, **kwargs: pytest.fail("must not call API"))
+
+    behavior, reason = hook.run(event, ENV)
+
+    assert behavior == "deny"
+    assert "stable session, turn, or tool-call identity" in reason
+
+
+def test_malformed_present_tool_use_id_denies_before_network(monkeypatch) -> None:
+    event = {**_event(), "tool_use_id": 42}
     monkeypatch.setattr(hook, "_request", lambda *args, **kwargs: pytest.fail("must not call API"))
 
     behavior, reason = hook.run(event, ENV)
