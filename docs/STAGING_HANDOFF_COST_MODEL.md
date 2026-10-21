@@ -45,6 +45,29 @@ Google's current Cloud Run page lists Mumbai (`asia-south1`) as an available reg
 | Metrics, data transfer, DNS, taxes | Usage/configuration-dependent or not yet priced. Enter explicit quantities in the calculator; do not assume these are zero. |
 | Production-grade database | **Not estimated in this staging envelope.** A non-shared-core, possibly HA database has a materially different recurring cost and requires a separate production estimate. |
 
+### Workload inputs for the dated calculator estimate
+
+Do not convert an unknown input to zero. Complete this worksheet with the project owner and attach evidence (measurement, test plan, or an explicitly approved estimate) before exporting a price calculation. The calculator export must record its timestamp, currency, region, selected SKUs, free-tier assumptions, and billing-account scope.
+
+| Input | Unit / definition | Value | Evidence or owner decision |
+| --- | --- | --- | --- |
+| GCP project and billing account | Exact project ID and billing account used for the estimate | **PENDING** | Owner confirmation; do not infer from the local `gcloud` default |
+| Region | Region for Cloud Run, Cloud SQL, Artifact Registry, and regional logs where supported | **PENDING** | Owner/data-residency approval; `asia-south1` is only a proposal |
+| API calls | Expected and peak requests per day, plus active days per month | **PENDING** | Instrumented test plan or owner-approved workload |
+| API compute | vCPU and GiB memory per instance; mean and p95 active seconds per request | **PENDING** | Cloud Run configuration and measured/requested profile |
+| API concurrency and scale | Max concurrency, max instances, min instances, and expected idle hours | **PENDING** | Reviewed service limits; do not assume scale-to-zero if availability requires a warm instance |
+| PostgreSQL compute | Exact edition/tier, instance-hours per month, and single-zone or HA | **PENDING** | Application/runtime design and approved availability target |
+| PostgreSQL storage | Provisioned data GiB, growth allowance, backup/PITR GiB, and retention days | **PENDING** | Synthetic staging data estimate and approved recovery policy |
+| Scheduled jobs | Invocations per day, active seconds per invocation, vCPU, memory, retries, and active days | **PENDING** | Deployed one-shot worker design; price separately from API requests |
+| Artifact Registry | Retained image count, average compressed GiB, and retention period | **PENDING** | Build cadence and immutable-image retention policy |
+| Logs and metrics | Ingested GiB per month and retained GiB-days beyond included retention | **PENDING** | Redacted event volume estimate and approved retention policy |
+| Secrets | Active secret versions, replication location, and accesses per month | **PENDING** | Secret rotation and expected connector/runtime access pattern |
+| Network and egress | Expected GiB by source/destination and any connector/Cloud SQL transfer | **PENDING** | Same-region design and observed/test workload; include nonzero estimate where applicable |
+| Operations reserve | Taxes, monitoring products, image scanning, DNS, and other usage-dependent charges | **PENDING** | Calculator line items or documented reason for exclusion |
+| Maximum exposure | Approved total monthly amount and maximum for services outside any eligible spend cap | **PENDING** | Owner approval plus reviewed teardown plan; alerts alone are not a ceiling |
+
+Calculate request-based Cloud Run API and Cloud Run Jobs on their respective pricing modes; do not blend their free tiers. For Cloud SQL, storage, backups/PITR, egress, logging, secrets, and registry, enter separate line items using the selected region and configuration. Record both the expected-month and conservative peak-month totals. If a charge cannot be priced from the selected calculator inputs, label it **UNPRICED** and keep the handoff open. A proposed $75/month amount is not an approved exposure limit and does not fill any pending input above.
+
 ### Proposed spend limit and enforcement boundary
 
 For the first, time-bounded staging exercise, propose a **$75 USD per calendar month project spend cap**, with notifications at 50%, 80%, and 100%. This number is a review proposal, not approved spending authority. It is intended to cover the shared-core staging database plus low-volume API and observability usage; the final estimate must be recalculated for Mumbai and actual retention/network assumptions before any resource is created.
