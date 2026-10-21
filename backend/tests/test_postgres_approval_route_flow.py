@@ -514,14 +514,165 @@ def test_postgres_hook_denies_lost_consume_response_and_same_invocation_retry(
     assert state["consume_calls"] == 1
     approval_id = state["approval_id"]
     assert isinstance(approval_id, str)
-    assert repositories.approval_decisions.get(approval_id) is not None
+    durable = repositories.approval_decisions.get(approval_id)
+    assert durable is not None
+    assert durable.status == ApprovalStatus.APPROVED
     with _connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_requests WHERE approval_id=%s "
+            "AND workspace_id=%s AND source_agent_id=%s AND source_invocation_id=%s",
+            (
+                approval_id,
+                durable.workspace_id,
+                agent.id,
+                durable.source_invocation_id,
+            ),
+        ).fetchone()[0] == 1
         assert connection.execute(
             "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
             (approval_id,),
         ).fetchone()[0] == 1
         assert connection.execute(
             "SELECT COUNT(*) FROM approval_delivery_failures WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_claimed'",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_failed'",
+            (approval_id,),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_same_invocation_recovers_after_fresh_api_process(
+    postgres_approval_route_runtime,
+) -> None:
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    connect, workspace, project, _user, repositories, agent, agent_token, schema = (
+        postgres_approval_route_runtime
+    )
+    client = TestClient(main.app)
+    state: dict[str, dict | None] = {"approval": None}
+    payload = {
+        "conversationId": "session-postgres-create-response-loss",
+        "stepIdx": 23,
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "echo restart-safe"}},
+    }
+    environment = {
+        "AIXION_API_BASE_URL": "http://localhost:8000",
+        "AIXION_AGENT_ID": agent.id,
+        "AIXION_AGENT_TOKEN": agent_token,
+        "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+        "AIXION_PROJECT_ID": project.id,
+        "AIXION_APPROVAL_TIMEOUT_SECONDS": "5",
+    }
+
+    def lose_committed_create_response(
+        method: str,
+        url: str,
+        request_agent_id: str,
+        request_token: str,
+        body: dict | None = None,
+    ) -> dict:
+        assert method == "POST"
+        assert urlparse(url).path == "/agents/approvals"
+        assert request_agent_id == agent.id
+        assert request_token == agent_token
+        assert body is not None
+        response = client.post(
+            "/agents/approvals",
+            headers={
+                "X-Aixion-Agent-Id": agent.id,
+                "X-Aixion-Agent-Token": agent_token,
+                "X-Aixion-Approval-Protocol": "1",
+            },
+            json=body,
+        )
+        assert response.status_code == 200, response.text
+        state["approval"] = response.json()
+        raise antigravity_hook.AmbiguousRequestError(
+            "simulated process loss after the approval committed in PostgreSQL"
+        )
+
+    with patch.object(
+        antigravity_hook, "_request", side_effect=lose_committed_create_response
+    ), patch.object(antigravity_hook.time, "sleep"):
+        with pytest.raises(antigravity_hook.AmbiguousRequestError):
+            antigravity_hook.run(payload, environment)
+
+    created = state["approval"]
+    assert created is not None
+    approval_id = created["id"]
+    invocation_id = created["source_invocation_id"]
+    assert created["status"] == ApprovalStatus.PENDING_REVIEW
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "reason": "approve after simulated host restart"},
+    )
+    assert decision.status_code == 200, decision.text
+    assert decision.json()["status"] == ApprovalStatus.APPROVED
+    client.close()
+
+    process_context = multiprocessing.get_context("spawn")
+    results = process_context.Queue()
+    process = process_context.Process(
+        target=_retry_antigravity_hook_in_fresh_process,
+        args=(
+            dsn,
+            schema,
+            agent.id,
+            agent_token,
+            project.id,
+            payload,
+            results,
+        ),
+    )
+    process.start()
+    try:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+            pytest.fail("Fresh API process did not recover the invocation within 30 seconds")
+        assert process.exitcode == 0
+        process_outcome = results.get(timeout=5)
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        results.close()
+
+    assert process_outcome[0] == "ok", process_outcome[1]
+    recovered = process_outcome[1]
+    assert recovered["decision"] == "allow"
+    durable = repositories.approval_decisions.get(approval_id)
+    assert durable is not None
+    assert durable.status == ApprovalStatus.APPROVED
+    assert durable.source_invocation_id == invocation_id
+    with connect() as connection:
+        rows = connection.execute(
+            "SELECT approval_id,status,source_invocation_id FROM approval_requests "
+            "WHERE workspace_id=%s AND source_agent_id=%s AND source_invocation_id=%s",
+            (workspace.id, agent.id, invocation_id),
+        ).fetchall()
+        assert rows == [(approval_id, ApprovalStatus.APPROVED, invocation_id)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.created_by_agent'",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.decision'",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
             (approval_id,),
         ).fetchone()[0] == 1
         assert connection.execute(
