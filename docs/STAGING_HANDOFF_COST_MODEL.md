@@ -91,6 +91,73 @@ The proposed operator response is: at 50%, review usage; at 80%, stop nonessenti
 
 These role names are a least-privilege starting point; verify exact permissions against the chosen deployment workflow before granting them. Do not create service accounts, grant roles, enable APIs, or activate billing during this pre-billing phase.
 
+### Generic role and API mapping (account-independent)
+
+The following matrix is a permission-design baseline, not a grant request. Exact
+permissions vary with the deployment mechanism and must be checked against the
+selected Cloud Run, Cloud SQL connector, Secret Manager, and CI documentation
+before assigning roles. Prefer repository/resource-level grants where supported.
+Do not grant project `Owner` or `Editor` to automation identities.
+
+| Principal | Candidate role boundary | Allowed purpose | Explicitly excluded |
+| --- | --- | --- | --- |
+| Human project/billing owner | Project IAM administration and billing-account association, held by named human administrators only | Select project, associate approved billing account, approve IAM and spend controls | Routine application runtime; shared credentials; CI use |
+| CI image publisher | `roles/artifactregistry.writer` on the single target repository | Push immutable, reviewed container images | Deploy service; read runtime secrets; connect to database; project-wide Artifact Registry administration |
+| CI deployer | `roles/run.developer` scoped to the staging service where supported; `roles/iam.serviceAccountUser` on only the selected runtime service account; image read access only if required by deployment | Deploy a reviewed image and service configuration | Secret payload access; database data access; IAM policy administration; billing administration |
+| Cloud Run runtime identity | `roles/cloudsql.client` only if the selected Cloud SQL connector path requires it; Secret Manager Secret Accessor on individually named secrets/versions; narrowly required log/metric write permissions | Connect to the selected database and read runtime secrets; emit operational telemetry | Image publishing/deployment; secret version creation; migration DDL; project IAM changes; billing; broad database administration |
+| Migration identity | A separate short-lived identity with the minimum Cloud SQL connection permission and database DDL grants required by the reviewed migration runner | Apply the exact, reviewed migration set during a controlled window | Runtime service use; secret administration; project IAM/billing changes; interactive application access |
+| Scheduler invoker | `roles/run.invoker` on only the one-shot worker service/job endpoint and only where the chosen trigger requires it | Trigger the scheduled dispatcher after the durable runtime gate passes | Read application secrets directly; access Cloud SQL; deploy or alter the worker |
+| Operations primary and break-glass operators | Individually scoped operational roles for service inspection/disablement, database backup/restore, secret rotation, and alert/budget visibility; grant each capability separately | Respond to alerts, stop spend, execute an approved restore or rotation | Permanent project Owner/Editor; shared operator identity; routine use of break-glass access |
+
+The API list below describes when an API might be needed. Enabling an API can
+change billing eligibility and is a post-authorization action. The exact service
+agent roles created by Google during enablement must be reviewed as part of the
+change record.
+
+| API / service | Enable only when | Identity/resource boundary |
+| --- | --- | --- |
+| Cloud Run Admin API (`run.googleapis.com`) | The reviewed manifest deploys the HTTPS API or one-shot worker to Cloud Run | Deployment identity operates only the approved staging service/job; runtime identity is separate |
+| Cloud SQL Admin API (`sqladmin.googleapis.com`) | The approved topology includes Cloud SQL or its managed connection path | Provisioning/migration principals are separate from the application runtime; do not expose a public database address |
+| Artifact Registry API (`artifactregistry.googleapis.com`) | CI publishes or Cloud Run pulls the container from Artifact Registry | Writer scoped to the target repository; runtime/deployer receives read access only if required |
+| Secret Manager API (`secretmanager.googleapis.com`) | A reviewed service configuration references Secret Manager versions | Runtime reads only named secrets; rotation principal manages versions; CI must not receive secret payloads |
+| Cloud Logging API (`logging.googleapis.com`) | Managed services export logs or an operator queries configured log sinks | Enforce payload redaction and approved retention; no credentials or raw tool arguments |
+| Cloud Monitoring API (`monitoring.googleapis.com`) | The approved alert matrix and metrics policies are implemented | Alert policy administration is separate from runtime metric-write permissions |
+| Cloud Scheduler API (`cloudscheduler.googleapis.com`) | A reviewed Cloud Scheduler job triggers the one-shot worker | Scheduler uses an invoker identity scoped to the target only; do not use API-process polling loops for correctness-critical work |
+| Firebase Cloud Messaging API (`fcm.googleapis.com`) | The approved mobile push path sends FCM messages | Sender identity receives only required FCM send permission; mobile tokens remain protected data |
+| Service Usage API (`serviceusage.googleapis.com`) | A named administrator must enable the specifically approved APIs | Restricted to the human/platform provisioning principal; never grant API-enablement permission to runtime or ordinary CI |
+
+#### Post-authorization sequence
+
+These steps are deliberately not performed by this pre-billing handoff. Start only
+after the owner records the exact project ID, billing association, region/data
+residency, approved monthly exposure (including uncapped services), workload
+estimate, operators, and rollback/teardown authority—and after the production
+PostgreSQL runtime gate in Slice 1 passes:
+
+1. Have the owner verify the project and billing association in the console. Do
+   not infer either from a local CLI default or a billing-account screen.
+2. Review the dated cost estimate and approve both the total exposure and each
+   uncapped resource category. An alert budget is not a hard spend limit.
+3. Freeze the project-specific manifest, immutable image reference, secret-name
+   map, region, retention settings, and API list. Reject unresolved placeholders.
+4. Enable only the APIs mapped above and required by that frozen manifest; record
+   the operator, time, API name, and resulting service-agent changes.
+5. Create separate CI, runtime, migration, scheduler, and operations identities.
+   Bind each role to the narrowest supported resource scope; review effective
+   permissions before deploying. Use Workload Identity Federation for CI where
+   supported and avoid downloadable service-account keys.
+6. Create secrets through the approved secure channel, grant runtime access to
+   named secrets only, and verify that CI logs, images, and repository contain no
+   secret values.
+7. Apply infrastructure from the reviewed manifest, then run migration,
+   readiness, backup/isolated-restore, alert-delivery, cost-notification, and
+   teardown rehearsals with synthetic staging data before real approval traffic.
+
+At every step, stop if the effective project, principal, permissions, expected
+charges, or target resource differs from the reviewed record. No API enablement,
+IAM binding, billing association, or resource creation is authorized by this
+document.
+
 ## Data, retention, and rollback constraints
 
 - Store account, workspace, connector, approval, decision, audit, and outbox state in PostgreSQL only after Slice 1's complete application-runtime gate passes. Never dual-write SQLite and PostgreSQL as competing authorities.
