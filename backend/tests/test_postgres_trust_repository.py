@@ -5,15 +5,18 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from types import SimpleNamespace
 
 import psycopg
 import pytest
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
+from app.application_repositories import ApplicationRepositories
 from app.models import (
     ApprovalRequest,
     ApprovalStatus,
+    AuthUser,
     Project,
     RiskAssessment,
     RiskLevel,
@@ -31,6 +34,8 @@ from app.postgres_trust_event_repository import (
     PostgresTrustEventRepository,
     PostgresTrustEventRepositoryError,
 )
+from app.store import store
+from app.trust_routes import consume_manual_action
 from app.trust_action_authorization_models import (
     ActionAuthorization,
     ActionAuthorizationDecision,
@@ -439,6 +444,64 @@ def _action_with_allow_decision(
         workspace_id=workspace_id,
     )
     return action
+
+
+def test_postgres_manual_consumption_route_uses_durable_trust_state(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _action_with_allow_decision(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+
+    repositories = ApplicationRepositories.from_connector(connect)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_repositories=repositories,
+        approval_decision_repository=repositories.approval_decisions,
+        workspace_membership_repository=repositories.workspace_membership,
+        trust_repository=repositories.trust,
+        trust_event_repository=repositories.trust_events,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    user = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="Trust route maintainer",
+        role=UserRole.MAINTAINER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    consumption = ActionConsumption(actual_runtime_seconds=1, evidence={"result": "ok"})
+
+    first = consume_manual_action(action.id, consumption, user, request)
+    retry = consume_manual_action(action.id, consumption, user, request)
+
+    assert first == retry == consumption
+    assert action.id not in store.proposed_actions
+    assert action.id not in store.action_consumptions
+    with connect() as conn:
+        assert repository.get_action_consumption(conn, action.id, workspace_id) == consumption
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s "
+            "AND event_type=%s AND entity_id=%s",
+            (workspace_id, TrustEventType.ACTION_CONSUMED.value, action.id),
+        ).fetchone()[0] == 1
 
 
 def test_postgres_consumption_serializes_shared_lease_budget_and_is_idempotent(

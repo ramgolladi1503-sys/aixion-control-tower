@@ -108,6 +108,11 @@ def _postgres_lease_runtime(request: Request | None):
     return _postgres_attestation_runtime(request)
 
 
+def _postgres_trust_runtime(request: Request | None):
+    """Select PostgreSQL trust mutations only with the complete app-bound bundle."""
+    return _postgres_attestation_runtime(request)
+
+
 def _approval_for_user(approval_id: str, workspace_id: str | None):
     approval = approval_decision_repository.get(approval_id)
     if (
@@ -458,7 +463,39 @@ def consume_manual_action(
     action_id: str,
     payload: ActionConsumption,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> ActionConsumption:
+    runtime = _postgres_trust_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        try:
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    action = repositories.trust.get_proposed_action(
+                        conn, action_id, workspace_id
+                    )
+                    if action is None:
+                        raise HTTPException(
+                            status_code=404, detail="Proposed action not found"
+                        )
+                    return repositories.trust.consume_effective_action(
+                        conn,
+                        action_id=action_id,
+                        workspace_id=workspace_id,
+                        consumption=payload,
+                        actor=user.email,
+                        now=now_utc(),
+                    )
+        except PostgresTrustRepositoryConflict as error:
+            raise _trust_error(error) from error
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="PostgreSQL action consumption requires the complete durable trust repository bundle",
+        )
     action = store.proposed_actions.get(action_id)
     workspace_id = workspace_id_for_user(user)
     if action is None or not proposed_action_scope_is_consistent(action) or (
