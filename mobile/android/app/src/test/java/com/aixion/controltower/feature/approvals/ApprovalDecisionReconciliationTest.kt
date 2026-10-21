@@ -1,6 +1,8 @@
 package com.aixion.controltower.feature.approvals
 
 import com.aixion.controltower.core.model.ApprovalStatus
+import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.model.RiskLevel
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
@@ -17,6 +19,37 @@ class ApprovalDecisionReconciliationTest {
         assertFalse(decisionMatchesStatus("approve", ApprovalStatus.DENIED))
         assertFalse(decisionMatchesStatus("unknown", ApprovalStatus.APPROVED))
         assertFalse(decisionMatchesStatus(null, ApprovalStatus.APPROVED))
+    }
+
+    @Test
+    fun onlyTheRequestedApprovalIdIsBoundToAnUnknownDecision() {
+        val unrelatedSelection = ApprovalSummary(
+            id = "approval-other",
+            projectName = "Project",
+            title = "Other request",
+            summary = "Summary",
+            agentName = "Antigravity",
+            targetBranch = "main",
+            status = ApprovalStatus.REQUESTED,
+            risk = RiskLevel.LOW,
+            files = emptyList(),
+            requiredActions = emptyList(),
+            testPlan = emptyList(),
+            rollbackPlan = "Revert"
+        )
+        val current = ApprovalsUiState(selectedApproval = unrelatedSelection)
+
+        val unresolved = decisionOutcomeUnknown(
+            current = current,
+            approvalId = "approval-submitted",
+            decision = "reject",
+            message = "The server result is unknown."
+        )
+
+        assertEquals("approval-submitted", unresolved.lastActionApprovalId)
+        assertEquals("approval-other", unresolved.selectedApproval?.id)
+        assertEquals("reject", unresolved.decisionBeingReconciled)
+        assertFalse(canStartApprovalDecision(unresolved))
     }
 
     @Test
@@ -38,6 +71,9 @@ class ApprovalDecisionReconciliationTest {
         assertEquals("approve", unresolved.decisionBeingReconciled)
         assertEquals("approval-cancelled", unresolved.lastActionApprovalId)
         assertFalse(canStartApprovalDecision(unresolved))
+        assertFalse(
+            canStartApprovalDecision(unresolved.copy(decisionNeedsReconciliation = false, decisionInFlight = true))
+        )
         assertTrue(canStartApprovalDecision(unresolved.copy(decisionNeedsReconciliation = false)))
     }
 }
