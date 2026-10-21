@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from .agent_credential_models import AgentCredentialRecord
+from .agent_token_lifetime import effective_agent_token_expiry
 from .models import AgentAuthType, AuditEvent, ExternalAgent, Project, Workspace
 
 
@@ -186,7 +187,7 @@ class SQLiteExternalAgentAuthRepository:
             return "agent_disabled"
         if not agent.secret_hash or credential.token_revoked_at is not None:
             return "token_revoked_or_missing"
-        if credential.token_expires_at is not None and credential.token_expires_at <= occurred_at:
+        if effective_agent_token_expiry(credential) <= occurred_at:
             return "token_expired"
         presented_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         if not hmac.compare_digest(agent.secret_hash, presented_hash):

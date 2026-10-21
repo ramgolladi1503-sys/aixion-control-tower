@@ -53,6 +53,8 @@ spec:
               value: "true"
             - name: AIXION_TRUST_ENFORCEMENT
               value: "true"
+            - name: AIXION_EXTERNAL_AGENT_TOKEN_TTL_SECONDS
+              value: "2592000"
             - name: AIXION_OUTBOX_DISPATCH_MODE
               value: scheduled
             - name: AIXION_POSTGRES_RUNTIME_PROBE_ENABLED

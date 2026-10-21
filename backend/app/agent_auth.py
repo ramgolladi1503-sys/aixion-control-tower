@@ -13,6 +13,7 @@ from .agent_credential_models import (
     AgentCreateWithCredentialPolicy,
 )
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
+from .agent_token_lifetime import effective_agent_token_expiry, resolve_agent_token_expiry
 from .approval_decisions import project_repository
 from .application_repository_access import (
     external_agent_auth_repository_for_request,
@@ -74,7 +75,7 @@ def _credential_state(
         return AgentCredentialState.REVOKED
     if not agent.secret_hash:
         return AgentCredentialState.NOT_CONFIGURED
-    if credential.token_expires_at is not None and credential.token_expires_at <= now_utc():
+    if effective_agent_token_expiry(credential) <= now_utc():
         return AgentCredentialState.EXPIRED
     return AgentCredentialState.ACTIVE
 
@@ -83,12 +84,17 @@ def to_credential_status(
     agent: ExternalAgent, credential: AgentCredentialRecord | None = None
 ) -> AgentCredentialStatus:
     credential = credential or _credential_for(agent)
+    effective_expiry = (
+        effective_agent_token_expiry(credential)
+        if agent.secret_hash and agent.auth_type != AgentAuthType.MANUAL
+        else credential.token_expires_at
+    )
     return AgentCredentialStatus(
         agent_id=agent.id,
         auth_type=agent.auth_type,
         credential_state=_credential_state(agent, credential),
         token_present=bool(agent.secret_hash),
-        token_expires_at=credential.token_expires_at,
+        token_expires_at=effective_expiry,
         token_revoked_at=credential.token_revoked_at,
         token_rotated_at=credential.token_rotated_at,
         last_used_at=credential.last_used_at,
@@ -170,9 +176,15 @@ def register_external_agent(
         enabled=payload.enabled,
         secret_hash=secret_hash,
     )
+    token_expires_at = None
+    if raw_token is not None:
+        try:
+            token_expires_at = resolve_agent_token_expiry(payload.token_expires_at)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
     credential = AgentCredentialRecord(
         agent_id=agent.id,
-        token_expires_at=payload.token_expires_at,
+        token_expires_at=token_expires_at,
         rate_limit_per_minute=payload.rate_limit_per_minute,
     )
     event = AuditEvent(
@@ -204,12 +216,16 @@ def rotate_external_agent_token(
 ) -> AgentRegistrationResponse:
     if agent.auth_type == AgentAuthType.MANUAL:
         raise HTTPException(status_code=400, detail="Manual agents do not have rotatable tokens")
-    raw_token, secret_hash = _issue_agent_token()
     now = now_utc()
+    try:
+        resolved_expiry = resolve_agent_token_expiry(token_expires_at, issued_at=now)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    raw_token, secret_hash = _issue_agent_token()
     credential = credential or _credential_for(agent)
     agent.secret_hash = secret_hash
     agent.updated_at = now
-    credential.token_expires_at = token_expires_at
+    credential.token_expires_at = resolved_expiry
     credential.token_revoked_at = None
     credential.token_rotated_at = now
     credential.rate_limit_window_started_at = None

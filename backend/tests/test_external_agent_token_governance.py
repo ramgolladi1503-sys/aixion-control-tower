@@ -345,14 +345,12 @@ def test_external_agent_token_revoke_blocks_future_agent_auth() -> None:
 def test_external_agent_token_expiry_is_enforced() -> None:
     project = _project()
     agent_id, old_token = _register_agent(project)
-    expired_at = (now_utc() - timedelta(minutes=1)).isoformat()
-    rotated = client.post(
-        f"/agents/{agent_id}/token/rotate",
-        json={"token_expires_at": expired_at},
-    )
+    rotated = client.post(f"/agents/{agent_id}/token/rotate")
     assert rotated.status_code == 200
     token = rotated.json()["agent_token"]
     assert token != old_token
+    store.external_agent_credentials[agent_id].token_expires_at = now_utc() - timedelta(minutes=1)
+    store.persist()
 
     response = client.post(
         "/agents/tasks",
@@ -371,8 +369,9 @@ def test_external_agent_token_expiry_is_enforced() -> None:
 
 def test_external_agent_registration_expiry_is_enforced() -> None:
     project = _project()
-    expired_at = (now_utc() - timedelta(minutes=1)).isoformat()
-    agent_id, token = _register_agent(project, token_expires_at=expired_at)
+    agent_id, token = _register_agent(project)
+    store.external_agent_credentials[agent_id].token_expires_at = now_utc() - timedelta(minutes=1)
+    store.persist()
 
     response = client.post(
         "/agents/tasks",

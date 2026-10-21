@@ -390,6 +390,32 @@ def test_invalid_or_unusable_credentials_fail_closed_and_record_known_agent_fail
     assert audit_count == 1
 
 
+def test_postgres_auth_expires_legacy_token_without_explicit_expiry(
+    agent_repository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIXION_EXTERNAL_AGENT_TOKEN_TTL_SECONDS", "300")
+    repository, _, workspace_id, owner_id = agent_repository
+    agent, credential, raw_token = _agent_and_credential(workspace_id, owner_id)
+    credential.token_expires_at = None
+    credential.token_rotated_at = None
+    credential.created_at = now_utc() - timedelta(seconds=301)
+    _create_agent(repository, agent, credential)
+
+    result = repository.authenticate_and_consume(
+        agent_id=agent.id,
+        token=raw_token,
+        occurred_at=now_utc(),
+        window_seconds=60,
+        require_workspace=True,
+    )
+
+    assert result.reason == "token_expired"
+    assert result.credential is not None
+    assert result.audit_event is not None
+    assert result.audit_event.details["reason"] == "token_expired"
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_reason"),
     [
