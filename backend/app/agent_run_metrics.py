@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timezone
 
 from .agent_run_models import AgentRunStatus, AgentRunStepStatus, AgentRunSummary
+from .agent_run_repository import AgentRunRepository
 from .store import store
 from .notification_outbox_repository import PostgresNotificationOutboxRepository
 from .trust_metrics import prometheus_trust_metrics
@@ -17,9 +18,28 @@ def _workspace_runs(workspace_id: str | None):
     return [run for run in runs if agent_run_workspace_id(run) == workspace_id]
 
 
-def build_agent_run_summary(workspace_id: str | None = None) -> AgentRunSummary:
+def build_agent_run_summary(
+    workspace_id: str | None = None,
+    *,
+    repository: AgentRunRepository | None = None,
+) -> AgentRunSummary:
     runs = _workspace_runs(workspace_id)
+    if repository is not None:
+        runs = repository.list_for_workspace(workspace_id=workspace_id, limit=500)
+        if len(runs) == 500:
+            raise RuntimeError(
+                "AgentRun summary exceeded the repository page limit; refusing to report partial totals."
+            )
     run_ids = {run.id for run in runs}
+    steps = (
+        [
+            step
+            for run_id in run_ids
+            for step in repository.list_steps_for_run(run_id)
+        ]
+        if repository is not None
+        else list(store.agent_run_steps.values())
+    )
     statuses = Counter(run.status for run in runs)
     active_statuses = {
         AgentRunStatus.SCHEDULED,
@@ -31,9 +51,9 @@ def build_agent_run_summary(workspace_id: str | None = None) -> AgentRunSummary:
     }
     queue_depth = sum(
         1
-        for step in store.agent_run_steps.values()
+        for step in steps
         if step.run_id in run_ids
-        if step.status
+        and step.status
         in {
             AgentRunStepStatus.PENDING,
             AgentRunStepStatus.READY,

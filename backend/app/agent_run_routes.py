@@ -334,8 +334,19 @@ def _require_non_production_fault_injection() -> None:
 
 
 @router.get("/summary", response_model=AgentRunSummary)
-def get_run_summary(user: AuthUser = ReviewerDependency) -> AgentRunSummary:
-    return build_agent_run_summary(workspace_id_for_user(user))
+def get_run_summary(
+    user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
+) -> AgentRunSummary:
+    if request is None:
+        return build_agent_run_summary(workspace_id_for_user(user))
+    workspace_id = workspace_id_for_request(user, request)
+    if get_settings().auth_enabled and workspace_id is None:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return build_agent_run_summary(
+        workspace_id,
+        repository=agent_run_repository_for_request(request),
+    )
 
 
 @router.get("/metrics")

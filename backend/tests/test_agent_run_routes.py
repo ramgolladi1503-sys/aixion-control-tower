@@ -113,6 +113,10 @@ def test_create_list_detail_summary_and_metrics_routes() -> None:
     assert len(durable_detail.json()["steps"]) == 7
     assert durable_steps.status_code == 200 and len(durable_steps.json()) == 7
     assert durable_events.status_code == 200 and durable_events.json()
+    durable_summary = client.get("/agent/runs/summary")
+    assert durable_summary.status_code == 200
+    assert durable_summary.json()["total"] == 1
+    assert durable_summary.json()["queue_depth"] == 7
 
     paused = client.post(f"/agent/runs/{run_id}/pause", json={"reason": "route test"})
     assert paused.status_code == 200 and paused.json()["run"]["status"] == "PAUSED"
