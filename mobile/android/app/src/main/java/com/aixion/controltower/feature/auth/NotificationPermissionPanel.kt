@@ -47,7 +47,7 @@ internal object PushRegistrationCopy {
         PushRegistrationUiState.CHECKING -> "Connecting this device to approval alerts…"
         PushRegistrationUiState.REGISTERED -> "This device is registered to receive approval alerts."
         PushRegistrationUiState.REGISTERED_CLEANUP_PENDING -> "Alerts are registered, but an older device registration could not be removed yet."
-        PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING -> "Notifications are off, and server cleanup is pending. The app will retry removing this device registration."
+        PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING -> "Notifications are off, and server cleanup is pending. Cleanup will retry when the owning account is available."
         PushRegistrationUiState.FIREBASE_NOT_CONFIGURED -> "Firebase is not configured for this app build. Push alerts are unavailable."
         PushRegistrationUiState.BACKEND_UNAVAILABLE -> "Could not register this device with the server. Reopen Account to retry."
         PushRegistrationUiState.PERMISSION_REQUIRED -> "Allow notifications to register this device for approval alerts."

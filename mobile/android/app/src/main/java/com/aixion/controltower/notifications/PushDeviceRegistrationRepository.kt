@@ -125,7 +125,7 @@ internal class PushDeviceRegistrationRepository(context: Context) {
             val userId = api.me().id
             val remaining = cleanupUnregistrations(pending, userId)
             writePendingUnregistrations(remaining)
-            pending.none { it.second == userId && it in remaining }
+            remaining.isEmpty()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
