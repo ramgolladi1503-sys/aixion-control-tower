@@ -178,3 +178,96 @@ def test_connector_management_routes_hide_other_workspaces(postgres_connector_ro
 
     assert workspace.id != other_workspace.id
     assert client.get(f"/connectors/{connector.id}").status_code == 404
+
+
+def test_connector_credentials_and_status_transitions_commit_to_postgres(
+    postgres_connector_route_runtime,
+) -> None:
+    connect, workspace, _user = postgres_connector_route_runtime
+    before_connectors = set(store.agent_connectors)
+    before_audits = {event.id for event in store.audit_events}
+    client = TestClient(main.app)
+    created = client.post("/connectors", json={"name": "Credential connector"})
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+
+    issued = client.post(f"/connectors/{connector_id}/secret/issue", json={"note": "initial"})
+    assert issued.status_code == 200, issued.text
+    first_secret = issued.json()["secret"]
+    with connect() as conn:
+        stored = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s AND workspace_id=%s",
+            (connector_id, workspace.id),
+        ).fetchone()[0]
+    first_hash = stored["config"]["secret_hash"]
+    assert first_hash != first_secret
+    assert first_secret not in str(stored)
+
+    rotated = client.post(f"/connectors/{connector_id}/secret/rotate", json={"note": "rotation"})
+    assert rotated.status_code == 200, rotated.text
+    second_secret = rotated.json()["secret"]
+    assert second_secret != first_secret
+    with connect() as conn:
+        stored = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s AND workspace_id=%s",
+            (connector_id, workspace.id),
+        ).fetchone()[0]
+        audit_types = conn.execute(
+            "SELECT event_type FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "ORDER BY created_at,event_id",
+            (workspace.id, connector_id),
+        ).fetchall()
+    assert stored["config"]["secret_hash"] not in {first_secret, second_secret, first_hash}
+    assert second_secret not in str(stored)
+
+    revoked = client.post(f"/connectors/{connector_id}/secret/revoke")
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["secret_configured"] is False
+    credentials = client.get(f"/connectors/{connector_id}/credentials")
+    assert credentials.status_code == 200
+    assert credentials.json()["secret_configured"] is False
+    disabled = client.post(f"/connectors/{connector_id}/disable")
+    assert disabled.status_code == 200 and disabled.json()["status"] == "DISABLED"
+    enabled = client.post(f"/connectors/{connector_id}/enable")
+    assert enabled.status_code == 200 and enabled.json()["status"] == "ENABLED"
+    healthy = client.post(f"/connectors/{connector_id}/health/success")
+    assert healthy.status_code == 200 and healthy.json()["health_status"] == "HEALTHY"
+    failing = client.post(
+        f"/connectors/{connector_id}/health/failure", json={"note": "test failure"}
+    )
+    assert failing.status_code == 200 and failing.json()["health_status"] == "DEGRADED"
+    mapper = client.put(
+        f"/connectors/{connector_id}/schema-mapper",
+        json={"enabled": True, "field_paths": {"title": "task.title"}, "defaults": {}},
+    )
+    assert mapper.status_code == 200, mapper.text
+    assert mapper.json()["mapper_enabled"] is True
+    mapper_read = client.get(f"/connectors/{connector_id}/schema-mapper")
+    assert mapper_read.status_code == 200 and mapper_read.json()["mapper_enabled"] is True
+
+    with connect() as conn:
+        stored = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s",
+            (connector_id,),
+        ).fetchone()[0]
+        audit_types = conn.execute(
+            "SELECT event_type FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "ORDER BY created_at,event_id",
+            (workspace.id, connector_id),
+        ).fetchall()
+    assert stored["secret_ref"] is None
+    assert stored["config"]["secret_hash"] is None
+    assert stored["config"]["secret_revoked_at"]
+    assert [item[0] for item in audit_types] == [
+        "connector.created",
+        "connector.secret_issued",
+        "connector.secret_rotated",
+        "connector.secret_revoked",
+        "connector.disabled",
+        "connector.enabled",
+        "connector.health_success",
+        "connector.health_failure",
+        "connector.schema_mapper_updated",
+    ]
+    assert set(store.agent_connectors) == before_connectors
+    assert {event.id for event in store.audit_events} == before_audits

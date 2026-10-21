@@ -134,6 +134,27 @@ def _connector_audit(
     )
 
 
+def _commit_bound_connector_update(
+    request: Request,
+    connector: AgentConnector,
+    *,
+    expected_updated_at,
+    event_type: str,
+    details: dict,
+    actor: str,
+) -> None:
+    try:
+        connector_repository_for_request(request).update(
+            connector=connector,
+            expected_updated_at=expected_updated_at,
+            audit_event=_connector_audit(connector, event_type, details, actor),
+        )
+    except ConnectorRepositoryConflict as error:
+        raise HTTPException(status_code=409, detail="Connector changed; reload and retry") from error
+    except ConnectorRepositoryScopeError as error:
+        raise HTTPException(status_code=404, detail="Connector scope not found") from error
+
+
 def _validate_scopes(
     payload: ConnectorCreate | ConnectorUpdate,
     workspace_id: str | None,
@@ -308,23 +329,42 @@ def simulate_connector_webhook_route(connector_id: str, payload: ConnectorSimula
 
 
 @router.get("/{connector_id}/schema-mapper", response_model=ConnectorSchemaMapperStatus)
-def get_connector_mapper(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorSchemaMapperStatus:
-    return get_connector_schema_mapper_status(_get_connector_or_404(connector_id, user))
+def get_connector_mapper(
+    connector_id: str, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorSchemaMapperStatus:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    return get_connector_schema_mapper_status(bound if bound is not None else _get_connector_or_404(connector_id, user))
 
 
 @router.put("/{connector_id}/schema-mapper", response_model=ConnectorSchemaMapperStatus)
-def update_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperConfig, user: AuthUser = OwnerDependency) -> ConnectorSchemaMapperStatus:
-    connector = _get_connector_or_404(connector_id, user)
+def update_connector_mapper(
+    connector_id: str, payload: ConnectorSchemaMapperConfig, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorSchemaMapperStatus:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     status = set_connector_schema_mapper(connector, payload)
     connector.updated_at = now_utc()
-    _audit("connector.schema_mapper_updated", connector.id, {"mapper_enabled": status.mapper_enabled, "mapped_fields": list(payload.field_paths.keys())}, actor=user.email)
-    store.persist()
+    details = {"mapper_enabled": status.mapper_enabled, "mapped_fields": list(payload.field_paths.keys())}
+    if bound is None:
+        _audit("connector.schema_mapper_updated", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
+                                       event_type="connector.schema_mapper_updated", details=details, actor=user.email)
     return status
 
 
 @router.post("/{connector_id}/schema-mapper/preview", response_model=ConnectorSchemaMapperPreviewResponse)
-def preview_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperPreviewRequest, user: AuthUser = OwnerDependency) -> ConnectorSchemaMapperPreviewResponse:
-    return preview_connector_schema_mapping(_get_connector_or_404(connector_id, user), payload)
+def preview_connector_mapper(
+    connector_id: str, payload: ConnectorSchemaMapperPreviewRequest, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorSchemaMapperPreviewResponse:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    return preview_connector_schema_mapping(connector, payload)
 
 
 @router.get("/{connector_id}", response_model=ConnectorPublic)
@@ -370,56 +410,68 @@ def update_connector(
         _audit("connector.updated", connector.id, details, actor=user.email)
         store.persist()
     else:
-        try:
-            connector_repository_for_request(http_request).update(
-                connector=connector,
-                expected_updated_at=expected_updated_at,
-                audit_event=_connector_audit(connector, "connector.updated", details, user.email),
-            )
-        except ConnectorRepositoryConflict as error:
-            raise HTTPException(status_code=409, detail="Connector changed; reload and retry") from error
-        except ConnectorRepositoryScopeError as error:
-            raise HTTPException(status_code=404, detail="Connector scope not found") from error
+        _commit_bound_connector_update(
+            http_request,
+            connector,
+            expected_updated_at=expected_updated_at,
+            event_type="connector.updated",
+            details=details,
+            actor=user.email,
+        )
     return _to_public(connector)
 
 
 @router.post("/{connector_id}/disable", response_model=ConnectorPublic)
-def disable_connector(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id, user)
+def disable_connector(
+    connector_id: str, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorPublic:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     previous_status = connector.status
     connector.status = ConnectorStatus.DISABLED
     connector.health_status = ConnectorHealthStatus.DISABLED
     connector.updated_at = now_utc()
-    _audit(
-        "connector.disabled",
-        connector.id,
-        {"previous_status": previous_status, "new_status": connector.status},
-        actor=user.email,
-    )
-    store.persist()
+    details = {"previous_status": previous_status, "new_status": connector.status}
+    if bound is None:
+        _audit("connector.disabled", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
+                                       event_type="connector.disabled", details=details, actor=user.email)
     return _to_public(connector)
 
 
 @router.post("/{connector_id}/enable", response_model=ConnectorPublic)
-def enable_connector(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id, user)
+def enable_connector(
+    connector_id: str, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorPublic:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     previous_status = connector.status
     connector.status = ConnectorStatus.ENABLED
     connector.health_status = ConnectorHealthStatus.UNKNOWN
     connector.updated_at = now_utc()
-    _audit(
-        "connector.enabled",
-        connector.id,
-        {"previous_status": previous_status, "new_status": connector.status},
-        actor=user.email,
-    )
-    store.persist()
+    details = {"previous_status": previous_status, "new_status": connector.status}
+    if bound is None:
+        _audit("connector.enabled", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
+                                       event_type="connector.enabled", details=details, actor=user.email)
     return _to_public(connector)
 
 
 @router.get("/{connector_id}/credentials", response_model=ConnectorCredentialStatus)
-def get_connector_credentials(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorCredentialStatus:
-    return connector_credential_status(_get_connector_or_404(connector_id, user))
+def get_connector_credentials(
+    connector_id: str, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorCredentialStatus:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    return connector_credential_status(bound if bound is not None else _get_connector_or_404(connector_id, user))
 
 
 @router.post("/{connector_id}/secret/issue", response_model=ConnectorSecretIssueResponse)
@@ -427,16 +479,19 @@ def issue_connector_secret_route(
     connector_id: str,
     payload: ConnectorSecretIssueRequest | None = None,
     user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSecretIssueResponse:
-    connector = _get_connector_or_404(connector_id, user)
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     secret, secret_ref, secret_hint = issue_connector_secret(connector)
-    _audit(
-        "connector.secret_issued",
-        connector.id,
-        {"secret_ref": secret_ref, "secret_hint": secret_hint, "note": payload.note if payload else ""},
-        actor=user.email,
-    )
-    store.persist()
+    details = {"secret_ref": secret_ref, "secret_hint": secret_hint, "note": payload.note if payload else ""}
+    if bound is None:
+        _audit("connector.secret_issued", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
+                                       event_type="connector.secret_issued", details=details, actor=user.email)
     return ConnectorSecretIssueResponse(connector=_to_public(connector), secret=secret, secret_hint=secret_hint)
 
 
@@ -445,35 +500,58 @@ def rotate_connector_secret_route(
     connector_id: str,
     payload: ConnectorSecretIssueRequest | None = None,
     user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSecretIssueResponse:
-    connector = _get_connector_or_404(connector_id, user)
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     secret, secret_ref, secret_hint = issue_connector_secret(connector)
-    _audit(
-        "connector.secret_rotated",
-        connector.id,
-        {"secret_ref": secret_ref, "secret_hint": secret_hint, "note": payload.note if payload else ""},
-        actor=user.email,
-    )
-    store.persist()
+    details = {"secret_ref": secret_ref, "secret_hint": secret_hint, "note": payload.note if payload else ""}
+    if bound is None:
+        _audit("connector.secret_rotated", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
+                                       event_type="connector.secret_rotated", details=details, actor=user.email)
     return ConnectorSecretIssueResponse(connector=_to_public(connector), secret=secret, secret_hint=secret_hint)
 
 
 @router.post("/{connector_id}/secret/revoke", response_model=ConnectorPublic)
-def revoke_connector_secret_route(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id, user)
+def revoke_connector_secret_route(
+    connector_id: str, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorPublic:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     revoke_connector_secret(connector)
-    _audit("connector.secret_revoked", connector.id, {"secret_configured": False}, actor=user.email)
-    store.persist()
+    details = {"secret_configured": False}
+    if bound is None:
+        _audit("connector.secret_revoked", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
+                                       event_type="connector.secret_revoked", details=details, actor=user.email)
     return _to_public(connector)
 
 
 @router.post("/{connector_id}/health/success", response_model=ConnectorPublic)
-def mark_connector_success(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id, user)
+def mark_connector_success(
+    connector_id: str, user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorPublic:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     record_connector_auth_success(connector)
     mark_connector_health_check(connector, healthy=True)
-    _audit("connector.health_success", connector.id, _connector_details(connector), actor=user.email)
-    store.persist()
+    details = _connector_details(connector)
+    if bound is None:
+        _audit("connector.health_success", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
+                                       event_type="connector.health_success", details=details, actor=user.email)
     return _to_public(connector)
 
 
@@ -482,11 +560,19 @@ def mark_connector_failure(
     connector_id: str,
     payload: ConnectorSecretIssueRequest | None = None,
     user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id, user)
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    expected_updated_at = connector.updated_at
     reason = payload.note if payload and payload.note else "manual health failure"
     record_connector_auth_failure(connector, reason)
     mark_connector_health_check(connector, healthy=False, reason=reason)
-    _audit("connector.health_failure", connector.id, {**_connector_details(connector), "reason": reason}, actor=user.email)
-    store.persist()
+    details = {**_connector_details(connector), "reason": reason}
+    if bound is None:
+        _audit("connector.health_failure", connector.id, details, actor=user.email)
+        store.persist()
+    else:
+        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
+                                       event_type="connector.health_failure", details=details, actor=user.email)
     return _to_public(connector)
