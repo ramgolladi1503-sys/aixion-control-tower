@@ -375,7 +375,13 @@ private fun approvalDto(id: String, status: String) = ApprovalRequestDto(
     agent_name = "Antigravity",
     target_branch = "main",
     status = status,
-    risk = RiskAssessmentDto(level = "LOW")
+    risk = RiskAssessmentDto(level = "LOW"),
+    source_provider = "ANTIGRAVITY",
+    source_agent_id = "agent-1",
+    source_session_id = "session-1",
+    source_invocation_id = "invocation-1",
+    expires_at = "2099-01-01T00:00:00Z",
+    verified_source = true
 )
 
 private fun approvalSummary(id: String) = ApprovalSummary(
@@ -391,5 +397,11 @@ private fun approvalSummary(id: String) = ApprovalSummary(
     requiredActions = emptyList(),
     testPlan = emptyList(),
     rollbackPlan = "",
+    sourceProvider = "ANTIGRAVITY",
+    sourceAgentId = "agent-1",
+    sourceSessionId = "session-1",
+    sourceInvocationId = "invocation-1",
+    expiresAt = "2099-01-01T00:00:00Z",
+    verifiedSource = true,
     projectId = "project-1"
 )

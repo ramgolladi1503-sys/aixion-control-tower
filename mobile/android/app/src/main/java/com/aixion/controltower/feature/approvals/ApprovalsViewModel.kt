@@ -7,6 +7,7 @@ import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.data.repository.ApprovalRepository
+import java.time.Clock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -98,7 +99,8 @@ internal fun reconcileApprovalsAfterRefresh(
 
 class ApprovalsViewModel internal constructor(
     application: Application,
-    private val repository: ApprovalRepository
+    private val repository: ApprovalRepository,
+    private val clock: Clock = Clock.systemUTC()
 ) : AndroidViewModel(application) {
     constructor(application: Application) : this(
         application,
@@ -280,6 +282,19 @@ class ApprovalsViewModel internal constructor(
                     selectedApproval = latest,
                     approvals = retainDecisionInHistory(_state.value.approvals, latest),
                     lastActionMessage = "This approval is now ${latest.status.name}. No decision was sent.",
+                    lastActionApprovalId = latest.id
+                )
+                return@launch
+            }
+            val expiryBlockReason = ApprovalDecisionPolicy.blockReason(latest, clock.instant())
+            if (expiryBlockReason != null) {
+                _state.value = _state.value.copy(
+                    decisionInFlight = false,
+                    decisionNeedsReconciliation = false,
+                    decisionBeingReconciled = null,
+                    selectedApproval = latest,
+                    approvals = retainDecisionInHistory(_state.value.approvals, latest),
+                    lastActionMessage = "$expiryBlockReason No decision was sent.",
                     lastActionApprovalId = latest.id
                 )
                 return@launch
