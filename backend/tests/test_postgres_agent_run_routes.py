@@ -462,6 +462,24 @@ def test_postgres_agent_run_capability_binding_is_durable_and_idempotent(
         ).fetchone()[0] == 1
     assert run_id not in store.agent_runs
 
+    with connect() as conn:
+        with conn.transaction():
+            repositories.trust.revoke_capability_lease(
+                conn,
+                lease_id=lease.id,
+                workspace_id=workspace.id,
+                actor_user_id=workspace.owner_user_id,
+                actor=f"{workspace.owner_user_id}@example.test",
+                reason="Operator revoked the lease",
+                now=now_utc(),
+                trust_event_repository=repositories.trust_events,
+            )
+    revoked_retry = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    assert revoked_retry.status_code == 409
+
 
 @pytest.mark.parametrize(
     (

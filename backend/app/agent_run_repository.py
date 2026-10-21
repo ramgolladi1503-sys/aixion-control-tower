@@ -1996,9 +1996,7 @@ class PostgresAgentRunRepository:
                 payload=row[4], row_id=row[0], workspace_id=row[1],
                 task_id=row[2], project_id=row[3],
             )
-            if run.capability_lease_id:
-                if run.capability_lease_id == lease_id:
-                    return run
+            if run.capability_lease_id and run.capability_lease_id != lease_id:
                 raise AgentRunRepositoryConflict(
                     "AgentRun capability lease cannot be replaced"
                 )
@@ -2022,6 +2020,41 @@ class PostgresAgentRunRepository:
                 raise AgentRunRepositoryConflict(
                     "Capability lease receipt signature is invalid"
                 )
+            if run.capability_lease_id == lease_id:
+                approval_row = conn.execute(
+                    "SELECT approval_id,project_id,workspace_id,payload FROM approval_requests "
+                    "WHERE approval_id=%s AND workspace_id=%s FOR SHARE",
+                    (run.approval_request_id, workspace_id),
+                ).fetchone()
+                if approval_row is None:
+                    raise AgentRunRepositoryConflict(
+                        "Capability lease approval is missing from this workspace"
+                    )
+                try:
+                    approval = ApprovalRequest.model_validate(approval_row[3])
+                except Exception as error:
+                    raise AgentRunRepositoryIntegrityError(
+                        "Capability lease approval payload is invalid"
+                    ) from error
+                if (
+                    approval.id != approval_row[0]
+                    or approval.project_id != approval_row[1]
+                    or approval.workspace_id != approval_row[2]
+                    or approval.id != run.approval_request_id
+                    or approval.project_id != run.project_id
+                    or approval.workspace_id != workspace_id
+                    or approval.status != ApprovalStatus.APPROVED
+                    or not approval.approved_payload_hash
+                    or approval.approved_payload_hash
+                    != compute_approval_payload_hash(approval)
+                    or lease.approval_request_id != approval.id
+                    or lease.approved_payload_hash != approval.approved_payload_hash
+                    or lease.scope.repository != run.repository
+                ):
+                    raise AgentRunRepositoryConflict(
+                        "Attached capability lease no longer matches the approved run"
+                    )
+                return run
             existing_binding = conn.execute(
                 "SELECT run_id FROM agent_runs WHERE workspace_id=%s "
                 "AND payload->>'capability_lease_id'=%s AND run_id<>%s FOR UPDATE",
