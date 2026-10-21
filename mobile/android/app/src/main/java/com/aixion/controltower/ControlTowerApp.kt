@@ -213,7 +213,13 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                     }
                     composable(Route.AgentRuns.value) { AgentRunsScreen() }
                     composable(Route.AgentAccess.value) { AgentAccessScreen() }
-                    composable(Route.Connectors.value) { ConnectorsScreen() }
+                    composable(Route.Connectors.value) {
+                        ConnectorsScreen(
+                            onOpenAgentAccess = {
+                                navController.navigate(Route.AgentAccess.value) { launchSingleTop = true }
+                            }
+                        )
+                    }
                     composable(Route.MCPQueue.value) {
                         MCPQueueScreen(
                             viewModel = mcpQueueViewModel,

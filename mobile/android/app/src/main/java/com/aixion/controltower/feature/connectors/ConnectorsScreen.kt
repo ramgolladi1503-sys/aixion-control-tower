@@ -55,7 +55,10 @@ private data class ConnectorSetupGuidance(
 )
 
 @Composable
-fun ConnectorsScreen(viewModel: ConnectorsViewModel = viewModel()) {
+fun ConnectorsScreen(
+    viewModel: ConnectorsViewModel = viewModel(),
+    onOpenAgentAccess: () -> Unit = {}
+) {
     val state by viewModel.state.collectAsState()
     val clipboard = LocalClipboardManager.current
 
@@ -72,7 +75,8 @@ fun ConnectorsScreen(viewModel: ConnectorsViewModel = viewModel()) {
         onIssueSecret = viewModel::issueSecret,
         onRevokeSecret = viewModel::revokeSecret,
         onApplyMapper = viewModel::applyTemplateMapper,
-        onPreviewMapper = viewModel::previewTemplateMapper
+        onPreviewMapper = viewModel::previewTemplateMapper,
+        onOpenAgentAccess = onOpenAgentAccess
     )
 }
 
@@ -87,7 +91,8 @@ fun ConnectorsContent(
     onIssueSecret: (ConnectorDto) -> Unit = {},
     onRevokeSecret: (ConnectorDto) -> Unit = {},
     onApplyMapper: (ConnectorDto) -> Unit = {},
-    onPreviewMapper: (ConnectorDto) -> Unit = {}
+    onPreviewMapper: (ConnectorDto) -> Unit = {},
+    onOpenAgentAccess: () -> Unit = {}
 ) {
     LazyColumn(
         modifier = Modifier
@@ -118,6 +123,8 @@ fun ConnectorsContent(
                 Text(state.preview, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
             }
         }
+
+        item { NativeAgentAccessPanel(onOpenAgentAccess = onOpenAgentAccess) }
 
         item { FirstTimeConnectorGuide() }
 
@@ -172,7 +179,7 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
                 Text("Connect a platform", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = if (state.loading) "Loading connections..." else "Set up webhook task intake here. Antigravity has a separate local hook setup; its live phone round trip is still being verified. Native Codex permission approvals are not connected yet.",
+                    text = if (state.loading) "Loading connections..." else "Use Antigravity Agent Access for native approval setup. The webhook integrations below submit tasks only; they do not pause or resume a native agent session. Native Codex permission approvals are not connected.",
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
@@ -189,9 +196,27 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
 }
 
 @Composable
+private fun NativeAgentAccessPanel(onOpenAgentAccess: () -> Unit) {
+    TowerPanel(elevated = true) {
+        Text("Antigravity native approvals", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            "Set up the Antigravity local hook and agent credentials here. This setup is separate from webhook task intake; the live phone approval round trip is still being verified. Native Codex permission approvals are not connected.",
+            color = TowerTextMuted,
+            fontSize = 13.sp,
+            lineHeight = 19.sp
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Button(onClick = onOpenAgentAccess, modifier = Modifier.fillMaxWidth()) {
+            Text("Open Antigravity Agent Access")
+        }
+    }
+}
+
+@Composable
 private fun FirstTimeConnectorGuide() {
     TowerPanel(elevated = true) {
-        Text("How to connect", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Webhook task intake", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text("1. Choose a webhook integration to submit task requests.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
         Text("2. Create its connection and store the one-time credential securely.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)

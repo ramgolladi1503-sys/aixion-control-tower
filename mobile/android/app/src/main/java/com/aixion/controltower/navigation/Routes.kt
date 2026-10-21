@@ -46,6 +46,7 @@ val allNavigationRoutes = primaryRoutes + laterReleaseRoutes
 
 fun primaryRouteFor(currentRoute: String): Route? = when (currentRoute) {
     Route.ApprovalDetail.value, Route.Diff.value -> Route.Inbox
+    Route.AgentAccess.value -> Route.Connectors
     else -> primaryRoutes.firstOrNull { it.value == currentRoute }
 }
 

@@ -29,6 +29,7 @@ class NavigationDestinationsTest {
     fun detailDestinationsSelectApprovalsInBottomNavigation() {
         assertEquals(Route.Inbox, primaryRouteFor(Route.ApprovalDetail.value))
         assertEquals(Route.Inbox, primaryRouteFor(Route.Diff.value))
+        assertEquals(Route.Connectors, primaryRouteFor(Route.AgentAccess.value))
         assertNull(primaryRouteFor(Route.Command.value))
     }
 

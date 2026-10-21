@@ -50,7 +50,7 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Connect a platform").assertExists()
         composeRule.onNodeWithText(
-            "Connect Antigravity, Codex, and other supported agents so approval requests can reach your phone."
+            "Use Antigravity Agent Access for native approval setup. The webhook integrations below submit tasks only; they do not pause or resume a native agent session. Native Codex permission approvals are not connected."
         ).assertExists()
         composeRule.onNodeWithText("Choose an agent platform").assertExists()
         composeRule.onNodeWithText("OpenClaw").assertExists()
@@ -67,6 +67,26 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Advanced settings").assertExists()
         composeRule.onAllNodesWithText("Apply selected mapper").assertCountEquals(0)
         composeRule.onAllNodesWithText("Authentication failures: 0").assertCountEquals(0)
+    }
+
+    @Test
+    fun nativeAntigravitySetupIsSeparateFromWebhookIntakeAndNavigates() {
+        var navigationRequested = false
+        composeRule.setContent {
+            ConnectorsContent(
+                state = ConnectorsUiState(loading = false),
+                onOpenAgentAccess = { navigationRequested = true }
+            )
+        }
+
+        composeRule.onNodeWithText("Antigravity native approvals").assertExists()
+        composeRule.onNodeWithText("Open Antigravity Agent Access").assertExists().performClick()
+        composeRule.onNodeWithText("Webhook task intake").assertExists()
+        composeRule.onNodeWithText(
+            "These integrations submit task requests. They do not install native approval hooks or resume a paused agent session."
+        ).assertExists()
+        composeRule.onNodeWithText("Native Codex permission approvals are not connected.").assertExists()
+        composeRule.runOnIdle { assertEquals(true, navigationRequested) }
     }
 
     @Test
