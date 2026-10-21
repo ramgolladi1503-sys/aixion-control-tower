@@ -6,13 +6,24 @@
 
 ## Current signal inventory
 
-The current repository provides:
+The repository contains these signal endpoints and metric implementations. Their
+presence in source does not mean they are all bound to, or ready to monitor, a
+production application runtime:
 
 - `GET /health` for process-level liveness.
 - `GET /ops/readiness` for configured dependencies, database migration checks, PostgreSQL probe state, recovery-snapshot availability, and configured integration flags. It is authenticated for maintainers.
-- `GET /agent/runs/metrics` for agent-run and trust metrics, protected by a workspace-bound metrics token in the production Prometheus configuration.
+- `GET /agent/runs/metrics` for agent-run and trust metrics. Production access
+  is intended to use a workspace-bound metrics token, but the complete
+  PostgreSQL application runtime and production scrape path are not currently
+  active. Treat this endpoint and its metrics as implementation groundwork,
+  not as an available production signal.
 
-These signals do not prove that approval requests reach a phone or that a phone decision returns to the same provider invocation. The API currently has split SQLite/PostgreSQL route and worker authority; production startup remains disabled.
+The endpoint implementations do not prove that approval requests reach a phone
+or that a phone decision returns to the same provider invocation. The API
+currently has split SQLite/PostgreSQL route and worker authority; production
+startup remains disabled. Do not configure staging alert policies against
+these application metrics until their producers, readers, workers, and scrape
+authentication are bound to the selected durable runtime and verified there.
 
 ## Proposed staging alert definitions
 
