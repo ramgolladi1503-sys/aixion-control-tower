@@ -10,10 +10,21 @@ import psycopg
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from .agent_run_models import AgentRun, AgentRunEvent, AgentRunEventType, AgentRunStep
+from .agent_run_models import (
+    AgentRun,
+    AgentRunEvent,
+    AgentRunEventType,
+    AgentRunStatus,
+    AgentRunStep,
+)
 from .agent_run_state_machine import can_transition_run, can_transition_step
 from .agent_task_models import AgentTask, AgentTaskStatus
+from .approval_integrity import compute_approval_payload_hash
 from .models import ApprovalRequest, ApprovalStatus, AuditEvent, Project
+from .postgres_trust_repository import PostgresTrustRepository
+from .trust_crypto import verify_payload_signature
+from .trust_models import CapabilityLeaseStatus
+from .trust_policy import lease_receipt_payload
 
 
 class AgentRunRepositoryIntegrityError(RuntimeError):
@@ -22,6 +33,10 @@ class AgentRunRepositoryIntegrityError(RuntimeError):
 
 class AgentRunRepositoryConflict(RuntimeError):
     """A durable AgentRun creation conflicts with existing or inconsistent state."""
+
+
+class AgentRunRepositoryNotFound(AgentRunRepositoryConflict):
+    """A workspace-scoped durable AgentRun or lease is not visible."""
 
 
 class AgentRunRepository(Protocol):
@@ -112,6 +127,11 @@ class AgentRunRepository(Protocol):
         events: list[AgentRunEvent],
         audits: list[AuditEvent],
     ) -> None: ...
+
+    def attach_capability_lease(
+        self, *, run_id: str, workspace_id: str, lease_id: str, actor: str,
+        now: datetime,
+    ) -> AgentRun: ...
 
     def create(
         self,
@@ -1948,6 +1968,224 @@ class PostgresAgentRunRepository:
                         Jsonb(audit.model_dump(mode="json")),
                     ),
                 )
+
+    def attach_capability_lease(
+        self,
+        *,
+        run_id: str,
+        workspace_id: str,
+        lease_id: str,
+        actor: str,
+        now: datetime,
+    ) -> AgentRun:
+        """Attach a capability lease and its audit trail in one scoped transaction."""
+        if not workspace_id:
+            raise AgentRunRepositoryConflict(
+                "PostgreSQL capability binding requires workspace scope"
+            )
+        trust_repository = PostgresTrustRepository()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT run_id,workspace_id,task_id,project_id,payload "
+                "FROM agent_runs WHERE run_id=%s AND workspace_id=%s FOR UPDATE",
+                (run_id, workspace_id),
+            ).fetchone()
+            if row is None:
+                raise AgentRunRepositoryNotFound("AgentRun not found")
+            run = _validate_run(
+                payload=row[4], row_id=row[0], workspace_id=row[1],
+                task_id=row[2], project_id=row[3],
+            )
+            if run.capability_lease_id:
+                if run.capability_lease_id == lease_id:
+                    return run
+                raise AgentRunRepositoryConflict(
+                    "AgentRun capability lease cannot be replaced"
+                )
+
+            lease = trust_repository.get_capability_lease(
+                conn, lease_id, workspace_id, for_update=True
+            )
+            if lease is None:
+                raise AgentRunRepositoryNotFound("Capability lease not found")
+            if lease.status != CapabilityLeaseStatus.ACTIVE or lease.expires_at <= now:
+                raise AgentRunRepositoryConflict("Capability lease is not active")
+            try:
+                receipt_is_valid = verify_payload_signature(
+                    lease_receipt_payload(lease), lease.receipt_signature
+                )
+            except RuntimeError as error:
+                raise AgentRunRepositoryConflict(
+                    "Capability lease receipt cannot be verified"
+                ) from error
+            if not receipt_is_valid:
+                raise AgentRunRepositoryConflict(
+                    "Capability lease receipt signature is invalid"
+                )
+            existing_binding = conn.execute(
+                "SELECT run_id FROM agent_runs WHERE workspace_id=%s "
+                "AND payload->>'capability_lease_id'=%s AND run_id<>%s FOR UPDATE",
+                (workspace_id, lease_id, run_id),
+            ).fetchone()
+            if existing_binding is not None:
+                raise AgentRunRepositoryConflict(
+                    "Capability lease is already bound to another AgentRun"
+                )
+
+            task_row = conn.execute(
+                "SELECT task_id,project_id,workspace_id,payload FROM agent_tasks "
+                "WHERE task_id=%s AND workspace_id=%s FOR SHARE",
+                (run.task_id, workspace_id),
+            ).fetchone()
+            approval_row = conn.execute(
+                "SELECT approval_id,project_id,workspace_id,payload FROM approval_requests "
+                "WHERE approval_id=%s AND workspace_id=%s FOR SHARE",
+                (run.approval_request_id, workspace_id),
+            ).fetchone()
+            if task_row is None or approval_row is None:
+                raise AgentRunRepositoryConflict(
+                    "Capability lease parents are missing from this workspace"
+                )
+            try:
+                task = AgentTask.model_validate(task_row[3])
+                approval = ApprovalRequest.model_validate(approval_row[3])
+            except Exception as error:
+                raise AgentRunRepositoryIntegrityError(
+                    "Capability lease parent payload is invalid"
+                ) from error
+            if (
+                task.id != task_row[0] or task.project_id != task_row[1]
+                or task.workspace_id != task_row[2]
+                or approval.id != approval_row[0]
+                or approval.project_id != approval_row[1]
+                or approval.workspace_id != approval_row[2]
+                or task.id != run.task_id or task.project_id != run.project_id
+                or task.workspace_id != workspace_id
+                or task.status != AgentTaskStatus.APPROVED
+                or task.approval_request_id != run.approval_request_id
+                or approval.id != run.approval_request_id
+                or approval.project_id != run.project_id
+                or approval.status != ApprovalStatus.APPROVED
+                or not approval.approved_payload_hash
+                or approval.approved_payload_hash
+                != compute_approval_payload_hash(approval)
+                or lease.workspace_id != workspace_id
+                or lease.approval_request_id != approval.id
+                or lease.approved_payload_hash != approval.approved_payload_hash
+                or lease.scope.repository != run.repository
+                or (task.repository and lease.scope.repository != task.repository)
+                or lease.scope.branch != task.branch_preference
+                or run.max_attempts_per_step > lease.scope.max_retries + 1
+                or lease.provider != task.provider
+                or (lease.agent_id and lease.agent_id != task.external_agent_id)
+            ):
+                raise AgentRunRepositoryConflict(
+                    "Capability lease does not match the approved run scope"
+                )
+
+            step_rows = conn.execute(
+                "SELECT step_id,run_id,task_id,workspace_id,payload "
+                "FROM agent_run_steps WHERE run_id=%s AND workspace_id=%s "
+                "ORDER BY sequence,step_id FOR UPDATE",
+                (run.id, workspace_id),
+            ).fetchall()
+            steps: list[AgentRunStep] = []
+            for step_row in step_rows:
+                try:
+                    step = AgentRunStep.model_validate(step_row[4])
+                except Exception as error:
+                    raise AgentRunRepositoryIntegrityError(
+                        "Stored AgentRun step payload is invalid"
+                    ) from error
+                if (
+                    step.id != step_row[0] or step.run_id != run.id
+                    or step.task_id != run.task_id or step_row[1] != run.id
+                    or step_row[2] != run.task_id or step_row[3] != workspace_id
+                ):
+                    raise AgentRunRepositoryIntegrityError(
+                        "Stored AgentRun step identity or scope is inconsistent"
+                    )
+                steps.append(step)
+            current_step = next(
+                (step for step in steps if step.id == run.current_step_id), None
+            )
+            if (
+                run.status in {
+                    AgentRunStatus.EVALUATING,
+                    AgentRunStatus.BLOCKED,
+                    AgentRunStatus.SUCCEEDED,
+                    AgentRunStatus.FAILED,
+                    AgentRunStatus.CANCELLED,
+                }
+                or
+                current_step is None
+                or current_step.status.value == "RUNNING"
+                or run.lease_owner is not None
+                or run.lease_token is not None
+                or any(
+                    step.attempt_count > 0
+                    and step.step_type.value in {
+                        "CREATE_BRANCH", "APPLY_CHANGES", "RUN_VALIDATION",
+                        "CREATE_PULL_REQUEST",
+                    }
+                    for step in steps
+                )
+            ):
+                raise AgentRunRepositoryConflict(
+                    "Capability lease must be attached before an active or side-effect attempt"
+                )
+
+            updated = run.model_copy(update={"capability_lease_id": lease.id, "updated_at": now})
+            event = AgentRunEvent(
+                run_id=run.id,
+                task_id=run.task_id,
+                correlation_id=run.correlation_id,
+                event_type=AgentRunEventType.CAPABILITY_LEASE_ATTACHED,
+                actor=actor,
+                created_at=now,
+                message="Signed capability lease attached to the durable run.",
+                metadata={
+                    "capability_lease_id": lease.id,
+                    "mode": lease.mode,
+                    "expires_at": lease.expires_at,
+                    "approved_payload_hash": lease.approved_payload_hash,
+                },
+            )
+            audit = AuditEvent(
+                event_type="agent_run.capability_lease_attached",
+                entity_id=run.id,
+                workspace_id=workspace_id,
+                actor=actor,
+                details={
+                    "event_id": event.id,
+                    "capability_lease_id": lease.id,
+                    "approved_payload_hash": lease.approved_payload_hash,
+                },
+                created_at=now,
+            )
+            changed = conn.execute(
+                "UPDATE agent_runs SET updated_at=%s,payload=%s "
+                "WHERE run_id=%s AND workspace_id=%s AND payload->>'capability_lease_id' IS NULL",
+                (now, Jsonb(updated.model_dump(mode="json")), run.id, workspace_id),
+            )
+            if changed.rowcount != 1:
+                raise AgentRunRepositoryConflict(
+                    "AgentRun changed during capability binding"
+                )
+            conn.execute(
+                "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,"
+                "created_at,event_type,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (event.id, run.id, run.task_id, workspace_id, event.created_at,
+                 event.event_type.value, Jsonb(event.model_dump(mode="json"))),
+            )
+            conn.execute(
+                "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,"
+                "entity_id,event_type,actor,details,created_at,payload) "
+                "VALUES(%s,%s,NULL,'agent_run',%s,%s,%s,%s,%s,%s)",
+                (audit.id, workspace_id, run.id, audit.event_type, actor,
+                 Jsonb(audit.details), now, Jsonb(audit.model_dump(mode="json"))),
+            )
+            return updated
 
     def commit_step_completion(
         self,

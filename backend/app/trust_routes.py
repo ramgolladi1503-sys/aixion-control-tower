@@ -6,7 +6,7 @@ from .agent_auth import assert_agent_can, require_external_agent
 from .approval_decisions import approval_decision_repository
 from .application_repository_access import workspace_id_for_request
 from .auth import require_maintainer, require_owner, require_reviewer
-from .models import AgentAction, AuthUser, ExternalAgent
+from .models import AgentAction, AuthUser, ExternalAgent, now_utc
 from .store import store
 from .trust_action_authorization import (
     ActionAuthorizationConflict,
@@ -59,6 +59,7 @@ from .trust_service import (
     refresh_lease_status,
     revoke_capability_lease,
 )
+from .postgres_trust_repository import PostgresTrustRepositoryConflict
 from .workspace_access import (
     approval_scope_is_consistent,
     approval_workspace_id,
@@ -100,6 +101,11 @@ def _postgres_attestation_runtime(request: Request | None):
     ):
         return None
     return runtime
+
+
+def _postgres_lease_runtime(request: Request | None):
+    """Select durable lease writes only when their trust and event authorities agree."""
+    return _postgres_attestation_runtime(request)
 
 
 def _approval_for_user(approval_id: str, workspace_id: str | None):
@@ -288,8 +294,33 @@ def revoke_lease(
     lease_id: str,
     payload: LeaseRevocationRequest,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> CapabilityLeasePublic:
     try:
+        runtime = _postgres_lease_runtime(request)
+        if runtime is not None:
+            workspace_id = workspace_id_for_request(user, request)
+            if workspace_id is None:
+                raise HTTPException(status_code=403, detail="Workspace membership is required")
+            repositories = request.app.state.postgres_repositories
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    lease = repositories.trust.revoke_capability_lease(
+                        conn,
+                        lease_id=lease_id,
+                        workspace_id=workspace_id,
+                        actor_user_id=user.id,
+                        actor=user.email,
+                        reason=payload.reason,
+                        now=now_utc(),
+                        trust_event_repository=repositories.trust_events,
+                    )
+            return _public(lease)
+        if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL lease revocation requires the complete durable trust repository bundle",
+            )
         return _public(
             revoke_capability_lease(
                 _lease_or_404(lease_id, user),
@@ -297,7 +328,7 @@ def revoke_lease(
                 reason=payload.reason,
             )
         )
-    except TrustControlConflict as error:
+    except (ValueError, TrustControlConflict, PostgresTrustRepositoryConflict) as error:
         raise _trust_error(error) from error
 
 

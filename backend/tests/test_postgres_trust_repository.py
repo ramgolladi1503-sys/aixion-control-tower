@@ -43,11 +43,13 @@ from app.trust_models import (
     CapabilityScope,
     CredentialGrant,
     CredentialGrantType,
+    CapabilityLeaseStatus,
     PolicyDecision,
     PolicyDecisionType,
     ProposedAction,
     ReviewerAttestation,
     ReviewerAttestationDecision,
+    TrustEventType,
 )
 
 
@@ -281,6 +283,133 @@ def _lease_with_runtime_budget(
         receipt_nonce=uuid.uuid4().hex,
         receipt_signature="signature",
     )
+
+
+def test_postgres_lease_revocation_updates_grants_and_appends_one_event(trust_repository):
+    repository, connect, workspace_id, user_id, _project_id, approval_id = trust_repository
+    events = PostgresTrustEventRepository(connect)
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    grants = [
+        CredentialGrant(
+            lease_id=lease.id,
+            workspace_id=workspace_id,
+            grant_type=CredentialGrantType.INTERNAL_CAPABILITY_TOKEN,
+            audience=f"runner-{index}",
+            subject="agent-1",
+            expires_at=now_utc() + timedelta(minutes=5),
+            token_hash=uuid.uuid4().hex,
+        )
+        for index in range(2)
+    ]
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            for grant in grants:
+                repository.insert_credential_grant(conn, grant)
+
+    with connect() as conn:
+        with conn.transaction():
+            revoked = repository.revoke_capability_lease(
+                conn,
+                lease_id=lease.id,
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+                actor="owner@example.test",
+                reason="Operator requested revoke",
+                now=now_utc(),
+                trust_event_repository=events,
+            )
+    assert revoked.status == CapabilityLeaseStatus.REVOKED
+    assert revoked.revoked_by_user_id == user_id
+    assert revoked.revocation_reason == "Operator requested revoke"
+    with connect() as conn:
+        durable = repository.get_capability_lease(conn, lease.id, workspace_id)
+        assert durable == revoked
+        rows = conn.execute(
+            "SELECT grant_id,revoked,payload FROM credential_grants "
+            "WHERE lease_id=%s AND workspace_id=%s ORDER BY grant_id",
+            (lease.id, workspace_id),
+        ).fetchall()
+        assert len(rows) == 2
+        assert all(row[1] and row[2]["revoked"] for row in rows)
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+            (lease.id, TrustEventType.LEASE_REVOKED.value),
+        ).fetchone()[0] == 1
+    assert events.verify().valid
+
+
+def test_postgres_lease_revocation_is_idempotent_and_hides_other_workspace(
+    trust_repository,
+):
+    repository, connect, workspace_id, user_id, _project_id, approval_id = trust_repository
+    events = PostgresTrustEventRepository(connect)
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+
+    def revoke(scope: str):
+        with connect() as conn:
+            with conn.transaction():
+                return repository.revoke_capability_lease(
+                    conn,
+                    lease_id=lease.id,
+                    workspace_id=scope,
+                    actor_user_id=user_id,
+                    actor="owner@example.test",
+                    reason="Operator requested revoke",
+                    now=now_utc(),
+                    trust_event_repository=events,
+                )
+
+    with pytest.raises(ValueError, match="not found"):
+        revoke("different-workspace")
+    first = revoke(workspace_id)
+    second = revoke(workspace_id)
+    assert first.status == second.status == CapabilityLeaseStatus.REVOKED
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+            (lease.id, TrustEventType.LEASE_REVOKED.value),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_lease_revocation_rolls_back_on_trust_event_failure(trust_repository):
+    repository, connect, workspace_id, user_id, _project_id, approval_id = trust_repository
+    events = PostgresTrustEventRepository(connect)
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+    with connect() as conn:
+        conn.execute(
+            "UPDATE trust_event_heads SET event_hash=%s WHERE singleton=TRUE", ("0" * 64,)
+        )
+
+    with pytest.raises(PostgresTrustEventRepositoryError, match="empty ledger"):
+        with connect() as conn:
+            with conn.transaction():
+                repository.revoke_capability_lease(
+                    conn,
+                    lease_id=lease.id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    actor="owner@example.test",
+                    reason="Operator requested revoke",
+                    now=now_utc(),
+                    trust_event_repository=events,
+                )
+    with connect() as conn:
+        persisted = repository.get_capability_lease(conn, lease.id, workspace_id)
+        assert persisted is not None and persisted.status == CapabilityLeaseStatus.ACTIVE
+        assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0
 
 
 def _action_with_allow_decision(

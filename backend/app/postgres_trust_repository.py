@@ -24,6 +24,7 @@ from .trust_models import (
     ReviewerAttestation,
     TrustEventType,
 )
+from .postgres_trust_event_repository import PostgresTrustEventRepository
 
 T = TypeVar("T")
 
@@ -146,6 +147,119 @@ class PostgresTrustRepository:
             columns=(("approval_id", "approval_request_id"), ("issued_by_user_id", "issued_by_user_id"), ("status", "status"), ("expires_at", "expires_at"), ("consumed_pull_requests", "consumed_pull_requests"), ("consumed_retries", "consumed_retries"), ("consumed_runtime_seconds", "consumed_runtime_seconds"), ("consumed_cost_usd", "consumed_cost_usd"), ("created_at", "created_at"), ("updated_at", "updated_at")),
             for_update=for_update,
         )
+
+    def revoke_capability_lease(
+        self,
+        conn: Connection,
+        *,
+        lease_id: str,
+        workspace_id: str,
+        actor_user_id: str,
+        actor: str,
+        reason: str,
+        now: datetime,
+        trust_event_repository: PostgresTrustEventRepository,
+    ) -> CapabilityLease:
+        """Revoke a lease and its child grants atomically with the trust event."""
+        self._require_scope(workspace_id)
+        if not actor_user_id or not actor or len(reason.strip()) < 3:
+            raise ValueError("Lease revocation requires actor and reason")
+        lease = self.get_capability_lease(
+            conn, lease_id, workspace_id, for_update=True
+        )
+        if lease is None:
+            raise ValueError("Capability lease not found")
+        if lease.status in {CapabilityLeaseStatus.REVOKED, CapabilityLeaseStatus.EXPIRED}:
+            return lease
+        if lease.status != CapabilityLeaseStatus.ACTIVE:
+            raise PostgresTrustRepositoryConflict(
+                f"Lease cannot be revoked from {lease.status}."
+            )
+
+        if lease.expires_at <= now:
+            updated = lease.model_copy(
+                update={"status": CapabilityLeaseStatus.EXPIRED, "updated_at": now}
+            )
+            event_type = TrustEventType.LEASE_EXPIRED
+            event_payload = {"expires_at": lease.expires_at}
+        else:
+            updated = lease.model_copy(
+                update={
+                    "status": CapabilityLeaseStatus.REVOKED,
+                    "revoked_at": now,
+                    "revoked_by_user_id": actor_user_id,
+                    "revocation_reason": reason.strip(),
+                    "updated_at": now,
+                }
+            )
+            event_type = TrustEventType.LEASE_REVOKED
+            event_payload = {"reason": reason.strip()}
+
+        if event_type == TrustEventType.LEASE_REVOKED:
+            grant_rows = conn.execute(
+                "SELECT grant_id,lease_id,workspace_id,revoked,payload "
+                "FROM credential_grants WHERE lease_id=%s AND workspace_id=%s "
+                "ORDER BY grant_id FOR UPDATE",
+                (lease_id, workspace_id),
+            ).fetchall()
+            for row in grant_rows:
+                try:
+                    grant = CredentialGrant.model_validate(row[4])
+                except Exception as error:
+                    raise PostgresTrustRepositoryError(
+                        "Stored credential grant payload is invalid"
+                    ) from error
+                if (
+                    grant.id != row[0]
+                    or grant.lease_id != row[1]
+                    or grant.workspace_id != row[2]
+                    or grant.revoked != row[3]
+                ):
+                    raise PostgresTrustRepositoryError(
+                        "Stored credential grant scope or state is inconsistent"
+                    )
+                if grant.revoked:
+                    continue
+                revoked_grant = grant.model_copy(
+                    update={"revoked": True, "revoked_at": now}
+                )
+                conn.execute(
+                    "UPDATE credential_grants SET revoked=TRUE,payload=%s "
+                    "WHERE grant_id=%s AND lease_id=%s AND workspace_id=%s AND revoked=FALSE",
+                    (
+                        Jsonb(_model_payload(revoked_grant)),
+                        grant.id,
+                        lease_id,
+                        workspace_id,
+                    ),
+                )
+
+        changed = conn.execute(
+            "UPDATE capability_leases SET status=%s,updated_at=%s,payload=%s "
+            "WHERE lease_id=%s AND workspace_id=%s AND status=%s",
+            (
+                updated.status.value,
+                updated.updated_at,
+                Jsonb(_model_payload(updated)),
+                lease_id,
+                workspace_id,
+                CapabilityLeaseStatus.ACTIVE.value,
+            ),
+        )
+        if changed.rowcount != 1:
+            raise PostgresTrustRepositoryConflict(
+                "Capability lease changed during revocation"
+            )
+        trust_event_repository.append_in_transaction(
+            conn,
+            event_type,
+            entity_type="capability_lease",
+            entity_id=lease.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            payload=event_payload,
+        )
+        return updated
 
     def insert_reviewer_attestation(self, conn: Connection, record: ReviewerAttestation) -> None:
         if not record.workspace_id:

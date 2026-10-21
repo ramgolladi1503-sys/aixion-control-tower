@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from threading import Barrier
 from types import SimpleNamespace
 
 import psycopg
@@ -13,6 +16,7 @@ from psycopg.types.json import Jsonb
 
 from app import main
 from app.agent_run_models import AgentRunStatus
+from app.agent_run_repository import AgentRunRepositoryConflict
 from app.agent_run_routes import MaintainerDependency, ReviewerDependency
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.approval_integrity import compute_approval_payload_hash
@@ -26,11 +30,23 @@ from app.models import (
     Project,
     RiskAssessment,
     RiskLevel,
+    User,
     UserRole,
     Workspace,
+    now_utc,
 )
 from app.postgres_database import run_postgres_migrations
 from app.store import store
+from app.trust_crypto import sign_payload
+from app.trust_models import (
+    CapabilityActionType,
+    CapabilityLease,
+    CapabilityLeaseMode,
+    CapabilityLeaseStatus,
+    CapabilityScope,
+)
+from app.postgres_trust_repository import PostgresTrustRepository
+from app.trust_policy import lease_receipt_payload
 
 
 @pytest.fixture
@@ -323,3 +339,322 @@ def test_postgres_agent_run_http_control_transitions_are_durable_and_audited(
     assert "OPERATOR_ACTION" in event_types
     assert "STEP_CANCELLED" in event_types
     assert run_id not in store.agent_runs
+
+
+def _create_run_with_postgres_capability_lease(
+    *,
+    connect: Callable[[], Connection],
+    workspace: Workspace,
+    task_id: str,
+    state: dict,
+    client: TestClient,
+    status: CapabilityLeaseStatus = CapabilityLeaseStatus.ACTIVE,
+    approved_payload_hash: str | None = None,
+    expires_at=None,
+    valid_signature: bool = True,
+    lease_branch: str = "feature/approved-branch",
+    lease_max_retries: int = 3,
+) -> tuple[str, CapabilityLease]:
+    with connect() as conn:
+        task_row = conn.execute(
+            "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        task = AgentTask.model_validate(task_row[0])
+        task.repository = "owner/approved-repository"
+        task.branch_preference = "feature/approved-branch"
+        conn.execute(
+            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
+        )
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (task.approval_request_id, workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    now = now_utc()
+    lease = CapabilityLease(
+        approval_request_id=approval.id,
+        workspace_id=workspace.id,
+        approved_payload_hash=approved_payload_hash or approval.approved_payload_hash,
+        provider=task.provider,
+        mode=CapabilityLeaseMode.BOUNDED,
+        scope=CapabilityScope(
+            repository="owner/approved-repository",
+            branch=lease_branch,
+            allowed_actions=[CapabilityActionType.CREATE_BRANCH],
+            max_retries=lease_max_retries,
+        ),
+        issued_by_user_id=workspace.owner_user_id,
+        status=status,
+        expires_at=expires_at or now + timedelta(minutes=5),
+        receipt_nonce=f"nonce_{uuid.uuid4().hex}",
+        receipt_signature="test-signature",
+    )
+    lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
+    if not valid_signature:
+        lease.receipt_signature = "invalid-signature"
+    with connect() as conn:
+        owner = User(
+            id=workspace.owner_user_id,
+            email=f"{workspace.owner_user_id}@example.test",
+            display_name="Lease issuer",
+            role=UserRole.OWNER,
+            password_hash="test-hash",
+            password_salt="test-salt",
+            workspace_id=workspace.id,
+            email_verified=True,
+        )
+        conn.execute(
+            "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,"
+            "email_verified,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (user_id) DO NOTHING",
+            (
+                owner.id, workspace.id, owner.email, owner.email.lower(), owner.role.value,
+                owner.disabled, owner.email_verified, Jsonb(owner.model_dump(mode="json")),
+            ),
+        )
+        PostgresTrustRepository().insert_capability_lease(conn, lease)
+    return run_id, lease
+
+
+def test_postgres_agent_run_capability_binding_is_durable_and_idempotent(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect, workspace=workspace, task_id=task_id, state=state, client=client
+    )
+
+    first = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    second = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["run"]["capability_lease_id"] == lease.id
+    assert second.json()["run"]["capability_lease_id"] == lease.id
+    persisted = repositories.agent_runs.get(run_id)
+    assert persisted is not None and persisted.capability_lease_id == lease.id
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='CAPABILITY_LEASE_ATTACHED'",
+            (run_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_run.capability_lease_attached'",
+            (run_id,),
+        ).fetchone()[0] == 1
+    assert run_id not in store.agent_runs
+
+
+@pytest.mark.parametrize(
+    (
+        "status", "approved_payload_hash", "expires_at", "valid_signature",
+        "lease_branch", "lease_max_retries",
+    ),
+    [
+        (CapabilityLeaseStatus.REVOKED, None, None, True, "feature/approved-branch", 3),
+        (CapabilityLeaseStatus.EXPIRED, None, now_utc() - timedelta(seconds=1), True, "feature/approved-branch", 3),
+        (CapabilityLeaseStatus.ACTIVE, "sha256:" + "f" * 64, None, True, "feature/approved-branch", 3),
+        (CapabilityLeaseStatus.ACTIVE, None, None, False, "feature/approved-branch", 3),
+        (CapabilityLeaseStatus.ACTIVE, None, None, True, "feature/other-branch", 3),
+        (CapabilityLeaseStatus.ACTIVE, None, None, True, "feature/approved-branch", 1),
+    ],
+)
+def test_postgres_agent_run_capability_binding_rejects_invalid_leases(
+    postgres_agent_run_route_runtime,
+    status,
+    approved_payload_hash,
+    expires_at,
+    valid_signature,
+    lease_branch,
+    lease_max_retries,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        state=state,
+        client=client,
+        status=status,
+        approved_payload_hash=approved_payload_hash,
+        expires_at=expires_at,
+        valid_signature=valid_signature,
+        lease_branch=lease_branch,
+        lease_max_retries=lease_max_retries,
+    )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+
+    assert response.status_code == 409
+    assert repositories.agent_runs.get(run_id).capability_lease_id is None
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='CAPABILITY_LEASE_ATTACHED'",
+            (run_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_run.capability_lease_attached'",
+            (run_id,),
+        ).fetchone()[0] == 0
+
+
+def test_postgres_agent_run_capability_binding_hides_other_workspace_lease(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    client = TestClient(main.app)
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=state["task_ids_by_workspace"][workspace.id],
+        state=state,
+        client=client,
+    )
+    state["current_user"]["value"] = state["users"][1]
+    foreign_created = client.post(
+        "/agent/runs",
+        json={"task_id": state["task_ids_by_workspace"][other_workspace.id]},
+    )
+    assert foreign_created.status_code == 200, foreign_created.text
+
+    response = client.post(
+        f"/agent/runs/{foreign_created.json()['run']['id']}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+
+    assert response.status_code == 404
+    assert state["repositories"].agent_runs.get(run_id).capability_lease_id is None
+
+
+def test_postgres_agent_run_capability_binding_serializes_concurrent_same_lease_requests(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repository = state["repositories"].agent_runs
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id, first = _create_run_with_postgres_capability_lease(
+        connect=connect, workspace=workspace, task_id=task_id, state=state, client=client
+    )
+    barrier = Barrier(2)
+
+    def attach() -> str | None:
+        barrier.wait()
+        try:
+            return repository.attach_capability_lease(
+                run_id=run_id,
+                workspace_id=workspace.id,
+                lease_id=first.id,
+                actor="owner@example.test",
+                now=now_utc(),
+            ).capability_lease_id
+        except AgentRunRepositoryConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: attach(), (1, 2)))
+
+    assert results == [first.id, first.id]
+    attached = repository.get(run_id)
+    assert attached is not None and attached.capability_lease_id == first.id
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
+            "AND event_type='CAPABILITY_LEASE_ATTACHED'",
+            (run_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_run.capability_lease_attached'",
+            (run_id,),
+        ).fetchone()[0] == 1
+
+    with pytest.raises(AgentRunRepositoryConflict, match="cannot be replaced"):
+        repository.attach_capability_lease(
+            run_id=run_id,
+            workspace_id=workspace.id,
+            lease_id="different-lease-id",
+            actor="owner@example.test",
+            now=now_utc(),
+        )
+
+
+def test_postgres_agent_run_capability_binding_rolls_back_if_audit_insert_fails(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repository = state["repositories"].agent_runs
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect, workspace=workspace, task_id=task_id, state=state, client=client
+    )
+    with connect() as conn:
+        conn.execute(
+            "CREATE FUNCTION reject_capability_binding_audit() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ BEGIN "
+            "IF NEW.event_type='agent_run.capability_lease_attached' THEN "
+            "RAISE EXCEPTION 'injected capability audit insert failure'; "
+            "END IF; RETURN NEW; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_capability_binding_audit "
+            "BEFORE INSERT ON audit_events FOR EACH ROW "
+            "EXECUTE FUNCTION reject_capability_binding_audit()"
+        )
+
+    with pytest.raises(psycopg.Error, match="injected capability audit insert failure"):
+        repository.attach_capability_lease(
+            run_id=run_id,
+            workspace_id=workspace.id,
+            lease_id=lease.id,
+            actor="owner@example.test",
+            now=now_utc(),
+        )
+
+    persisted = repository.get(run_id)
+    assert persisted is not None and persisted.capability_lease_id is None
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
+            "AND event_type='CAPABILITY_LEASE_ATTACHED'",
+            (run_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_run.capability_lease_attached'",
+            (run_id,),
+        ).fetchone()[0] == 0

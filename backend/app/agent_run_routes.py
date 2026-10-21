@@ -50,7 +50,12 @@ from .agent_run_trust import (
     authorize_run_step,
     consume_run_step_actions,
 )
-from .agent_run_repository import SQLiteAgentRunRepository
+from .agent_run_repository import (
+    AgentRunRepositoryConflict,
+    AgentRunRepositoryNotFound,
+    PostgresAgentRunRepository,
+    SQLiteAgentRunRepository,
+)
 from .approval_decisions import (
     agent_task_repository,
     approval_decision_repository,
@@ -58,7 +63,7 @@ from .approval_decisions import (
 from .agent_worker_validation_plan import MAX_VALIDATION_COMMANDS
 from .auth import require_maintainer, require_reviewer
 from .metrics_auth import METRICS_SCRAPER_USER_ID, require_metrics_or_maintainer
-from .models import AuditEvent, AuthUser
+from .models import AuditEvent, AuthUser, now_utc
 from .settings import get_settings
 from .store import store
 from .trust_run_capability import RunCapabilityConflict, ensure_run_capability
@@ -517,6 +522,23 @@ def bind_run_capability_lease(
     run_repository = (
         agent_run_repository_for_request(request) if request is not None else None
     )
+    if isinstance(run_repository, PostgresAgentRunRepository):
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=404, detail="Agent run not found")
+        try:
+            run = run_repository.attach_capability_lease(
+                run_id=run_id,
+                workspace_id=workspace_id,
+                lease_id=payload.capability_lease_id,
+                actor=user.email,
+                now=now_utc(),
+            )
+        except AgentRunRepositoryNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except AgentRunRepositoryConflict as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return _durable_detail(run, request)
     if run_repository is not None and not isinstance(run_repository, SQLiteAgentRunRepository):
         raise HTTPException(
             status_code=409,
