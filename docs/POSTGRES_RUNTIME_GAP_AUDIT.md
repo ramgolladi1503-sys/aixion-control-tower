@@ -1,6 +1,6 @@
 # PostgreSQL Runtime Gap Audit
 
-**Date:** 2026-10-22 (updated after exact-checkout inventory refresh)
+**Date:** 2026-10-21 (refreshed against the current checkout)
 
 **Scope:** Slice 1 in [PRE_BILLING_WORK_LOCK.md](PRE_BILLING_WORK_LOCK.md)
 
@@ -14,17 +14,17 @@ The application cannot safely activate PostgreSQL by toggling the current probe 
 
 ## Static inventory snapshot
 
-Generated with `backend/scripts/inventory_persistence.py --backend-root .` from `backend/` against the current checkout on 2026-10-22; the v7 AST report attaches callable ownership, follows direct imported/same-module calls from FastAPI routes, resolves common `Depends` aliases and literal `APIRouter` prefixes, joins lifespan `asyncio.create_task` workers through same-module dispatch calls, and enumerates direct entrypoints plus unresolved bare calls under conventional backend script `__main__` guards. This exact-checkout JSON was retained at `/tmp/aixion-persistence-inventory-20261022.json`. Earlier snapshots in this document and progress log are historical and should not be treated as current:
+Generated with `backend/scripts/inventory_persistence.py --backend-root .` from `backend/` against the current checkout on 2026-10-21; the v7 AST report attaches callable ownership, follows direct imported/same-module calls from FastAPI routes, resolves common `Depends` aliases and literal `APIRouter` prefixes, joins lifespan `asyncio.create_task` workers through same-module dispatch calls, and enumerates direct entrypoints plus unresolved bare calls under conventional backend script `__main__` guards. This exact-checkout JSON is retained locally at `/tmp/aixion-current-persistence-inventory.json`. Earlier snapshots in this document and progress log are historical and should not be treated as current:
 
 | Call-site action | Count |
 | --- | ---: |
-| Reads | 296 |
+| Reads | 295 |
 | Writes | 164 |
 | Persistence calls | 94 |
 | Direct persistence-boundary accesses | 33 |
 | Modules represented | 53 |
 
-The current report finds **145 decorated route entries**, **143** with reachable SQLite persistence, and **587 unique static SQLite access sites** across application modules. Those calls are attributed **1,455 times across route call graphs**, because shared helpers are counted once per route that reaches them; these route references cover **453 unique access sites**. The report identifies **31 process-local maps** on `SQLiteBackedStore`, **5 scheduled-task entries** (including mutually exclusive email worker branches and an unresolved `asyncio.to_thread` target), and **23 guarded Python script entrypoints**. The 2 routes with no statically reachable persistence access are not thereby proven persistence-free. These counts describe static paths, not runtime coverage or unique records.
+The current report finds **145 decorated route entries**, **143** with reachable SQLite persistence, and **586 unique static SQLite access sites** across application modules. Those calls are attributed **1,454 times across route call graphs**, because shared helpers are counted once per route that reaches them; these route references cover **453 unique access sites**. The report identifies **31 process-local maps** on `SQLiteBackedStore`, **5 scheduled-task entries** (including mutually exclusive email worker branches and an unresolved `asyncio.to_thread` target), and **24 guarded Python script entrypoints**. The 2 routes with no statically reachable persistence access are not thereby proven persistence-free. These counts describe static paths, not runtime coverage or unique records.
 
 The approval decision route and other high-risk endpoints should be re-extracted from the current JSON report before implementation; historical per-route access counts below are not current authority. The scanner limitations remain: it does not resolve dynamic dispatch, arbitrary callbacks, every dependency factory, indirect mutation through returned objects, or all external/shell schedulers.
 

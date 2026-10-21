@@ -152,6 +152,8 @@ jobs:
           GRAFANA_ADMIN_PASSWORD=ci-only-placeholder
           AIXION_METRICS_TOKEN=ci-only-prometheus-token-with-more-than-32-bytes
           AIXION_METRICS_WORKSPACE_ID=ci-test-workspace
+          AIXION_EMAIL_OUTBOX_KEY=0000000000000000000000000000000000000000000000000000000000000000
+          AIXION_AUTH_RATE_LIMIT_HMAC_KEY=1111111111111111111111111111111111111111111111111111111111111111
           EOF
           mkdir -p secrets
           printf '%s' 'ci-only-prometheus-token-with-more-than-32-bytes' > secrets/aixion_metrics_token
