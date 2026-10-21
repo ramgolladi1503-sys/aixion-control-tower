@@ -9,6 +9,10 @@ from .store import store
 from .trust_crypto import verify_bearer_token
 from .trust_flight_recorder import append_trust_event
 from .trust_models import CredentialGrant, CredentialGrantPublic, TrustEventType
+from .workspace_access import (
+    capability_lease_scope_is_consistent,
+    credential_grant_scope_is_consistent,
+)
 
 
 class CredentialIntrospectionRequest(BaseModel):
@@ -40,11 +44,21 @@ def introspect_credential(
         if not verify_bearer_token(payload.bearer_token, grant.token_hash):
             continue
         lease = store.capability_leases.get(grant.lease_id)
+        if not credential_grant_scope_is_consistent(grant):
+            return CredentialIntrospectionResult(
+                active=False,
+                reason="Credential ownership scope is inconsistent.",
+            )
         if grant.revoked:
             return CredentialIntrospectionResult(active=False, reason="Credential grant was revoked.")
         if grant.expires_at <= now:
             return CredentialIntrospectionResult(active=False, reason="Credential grant expired.")
-        if lease is None or lease.status.value != "ACTIVE" or lease.expires_at <= now:
+        if (
+            lease is None
+            or not capability_lease_scope_is_consistent(lease)
+            or lease.status.value != "ACTIVE"
+            or lease.expires_at <= now
+        ):
             return CredentialIntrospectionResult(active=False, reason="Capability lease is not active.")
         if grant.audience != payload.audience:
             return CredentialIntrospectionResult(active=False, reason="Credential audience mismatch.")
@@ -75,6 +89,8 @@ def revoke_credential_grant(
     canonical = store.credential_grants.get(grant.id)
     if canonical is None:
         raise ValueError("Credential grant not found.")
+    if not credential_grant_scope_is_consistent(canonical):
+        raise ValueError("Credential grant not found.")
     if canonical.revoked:
         return canonical
     canonical.revoked = True
@@ -89,6 +105,7 @@ def revoke_credential_grant(
         entity_type="credential_grant",
         entity_id=canonical.id,
         actor=user.email,
+        workspace_id=canonical.workspace_id,
         payload={"lease_id": canonical.lease_id, "reason": reason},
         persist=False,
     )

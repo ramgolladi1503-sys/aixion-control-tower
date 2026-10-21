@@ -30,6 +30,7 @@ fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier) {
         RiskLevel.HIGH -> RiskHigh
         RiskLevel.CRITICAL -> RiskCritical
         RiskLevel.BLOCKED -> RiskBlocked
+        RiskLevel.UNKNOWN -> RiskCritical
     }
 
     StatusBadge(label = risk.name, color = color, modifier = modifier)

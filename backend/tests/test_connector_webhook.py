@@ -11,6 +11,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.approval_decisions import agent_task_repository
 from app.models import Project
 from app.store import store
 
@@ -109,6 +110,10 @@ def test_bearer_connector_webhook_creates_agent_task() -> None:
     assert task.repository == REPOSITORY
     assert any(event.event_type == "connector.webhook_task_created" for event in store.audit_events)
     assert store.agent_connectors[connector["id"]].last_used_at is not None
+    store.agent_tasks.clear()
+    store.agent_task_events.clear()
+    assert agent_task_repository.get(body["task_id"]) is not None
+    assert agent_task_repository.list_events(body["task_id"])
 
 
 def test_hmac_connector_webhook_creates_agent_task_with_v1_signature() -> None:
@@ -203,6 +208,10 @@ def test_connector_webhook_appends_event_to_owned_task() -> None:
     assert event.message == "Connector produced a plan."
     assert event.metadata["connector_webhook"] is True
     assert any(event.event_type == "connector.webhook_task_event_appended" for event in store.audit_events)
+    store.agent_tasks.clear()
+    store.agent_task_events.clear()
+    assert agent_task_repository.get(created["task_id"]).status == "PLANNING"
+    assert agent_task_repository.list_events(created["task_id"])[-1].id == body["event_id"]
 
 
 def test_connector_webhook_rejects_missing_secret() -> None:

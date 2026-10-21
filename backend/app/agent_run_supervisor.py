@@ -27,6 +27,19 @@ from .agent_run_state_machine import (
 )
 from .agent_run_verifier import canonical_evidence_hash, classify_execution_result, validate_scope_contract
 from .agent_task_models import AgentTaskStatus
+from .agent_run_repository import (
+    AgentRunRepository,
+    AgentRunRepositoryConflict,
+    SQLiteAgentRunRepository,
+)
+from .agent_task_repository import AgentTaskRepository, SQLiteAgentTaskRepository
+from .approval_repository import ApprovalDecisionRepository, SQLiteApprovalDecisionRepository
+from .approval_decisions import (
+    agent_run_repository,
+    agent_task_repository,
+    approval_decision_repository,
+)
+from .approval_integrity import compute_approval_payload_hash
 from .agent_worker_container_validation import ContainerRuntime, ContainerValidationExecutor, ContainerValidationPolicy
 from .agent_worker_github_branch import GitHubBranchClient, run_agent_worker_github_branch_creation
 from .agent_worker_github_files import GitHubFileClient, run_agent_worker_github_file_application
@@ -39,6 +52,7 @@ from .agent_worker_workspace import (
 )
 from .models import ApprovalStatus, AuditEvent, now_utc
 from .store import store
+from .workspace_access import agent_run_scope_is_consistent
 
 StepExecutor = Callable[[AgentRun, AgentRunStep, int], AgentRunStepExecutionResult]
 
@@ -84,6 +98,7 @@ def _append_event(
     metadata: dict | None = None,
     input_evidence_hash: str | None = None,
     output_evidence_hash: str | None = None,
+    publish: bool = True,
 ) -> AgentRunEvent:
     event = AgentRunEvent(
         run_id=run.id,
@@ -101,32 +116,60 @@ def _append_event(
         output_evidence_hash=output_evidence_hash,
         metadata=metadata or {},
     )
-    store.agent_run_events[event.id] = event
+    if publish:
+        store.agent_run_events[event.id] = event
     return event
 
 
-def create_agent_run(payload: AgentRunCreate, *, actor: str = "system") -> AgentRun:
-    task = store.agent_tasks.get(payload.task_id)
+def create_agent_run(
+    payload: AgentRunCreate,
+    *,
+    actor: str = "system",
+    task_repository: AgentTaskRepository | None = None,
+    approval_repository: ApprovalDecisionRepository | None = None,
+    run_repository: AgentRunRepository | None = None,
+) -> AgentRun:
+    active_task_repository = task_repository or agent_task_repository
+    active_approval_repository = approval_repository or approval_decision_repository
+    active_run_repository = run_repository or agent_run_repository
+    sqlite_adapters = (
+        isinstance(active_task_repository, SQLiteAgentTaskRepository),
+        isinstance(active_approval_repository, SQLiteApprovalDecisionRepository),
+        isinstance(active_run_repository, SQLiteAgentRunRepository),
+    )
+    if any(sqlite_adapters) and not all(sqlite_adapters):
+        raise AgentRunConflict("AgentTask, approval, and AgentRun repositories must use one store")
+
+    task = active_task_repository.get(payload.task_id)
     if task is None:
         raise ValueError("Agent task not found.")
     if task.status != AgentTaskStatus.APPROVED:
         raise AgentRunConflict(f"Agent task must be APPROVED before a run is created; got {task.status}.")
-    approval = store.approval_requests.get(task.approval_request_id or "")
+    if not task.approval_request_id:
+        raise AgentRunConflict("A linked APPROVED approval is required before a run is created.")
+    approval = active_approval_repository.get(task.approval_request_id)
     if approval is None or approval.status != ApprovalStatus.APPROVED:
         raise AgentRunConflict("A linked APPROVED approval is required before a run is created.")
-
-    existing = [
-        run
-        for run in store.agent_runs.values()
-        if run.task_id == task.id
-        and run.status
-        not in {AgentRunStatus.FAILED, AgentRunStatus.CANCELLED, AgentRunStatus.BLOCKED}
-    ]
-    if existing:
-        return sorted(existing, key=lambda item: item.created_at)[-1]
+    if approval.project_id != task.project_id:
+        raise AgentRunConflict("Approved request project does not match the AgentTask project.")
+    if (
+        approval.workspace_id is not None
+        and task.workspace_id is not None
+        and approval.workspace_id != task.workspace_id
+    ):
+        raise AgentRunConflict("Approved request workspace does not match the AgentTask workspace.")
+    if (
+        not approval.approved_payload_hash
+        or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+    ):
+        raise AgentRunConflict("Approved request payload is missing or fails its frozen hash check.")
+    existing = active_run_repository.get_active_for_task(task.id)
+    if existing is not None:
+        return existing
 
     run = AgentRun(
         task_id=task.id,
+        workspace_id=task.workspace_id,
         approval_request_id=approval.id,
         project_id=task.project_id,
         repository=task.repository,
@@ -141,8 +184,8 @@ def create_agent_run(payload: AgentRunCreate, *, actor: str = "system") -> Agent
             "branch_preference": task.branch_preference,
         },
     )
-    store.agent_runs[run.id] = run
-
+    steps: list[AgentRunStep] = []
+    events: list[AgentRunEvent] = []
     for index, step_type in enumerate(DEFAULT_AGENT_RUN_STEPS):
         step = AgentRunStep(
             run_id=run.id,
@@ -153,118 +196,185 @@ def create_agent_run(payload: AgentRunCreate, *, actor: str = "system") -> Agent
             max_attempts=payload.max_attempts_per_step,
             idempotency_key=f"{run.id}:{index}:{step_type.value}",
         )
-        store.agent_run_steps[step.id] = step
+        steps.append(step)
         if index == 0:
             run.current_step_id = step.id
-            _append_event(
-                run,
-                AgentRunEventType.STEP_READY,
-                step=step,
-                new_status=step.status.value,
-                message="First Mission Control step is ready.",
-                actor=actor,
+            events.append(
+                AgentRunEvent(
+                    run_id=run.id,
+                    task_id=run.task_id,
+                    step_id=step.id,
+                    correlation_id=run.correlation_id,
+                    event_type=AgentRunEventType.STEP_READY,
+                    new_status=step.status.value,
+                    message="First Mission Control step is ready.",
+                    actor=actor,
+                    attempt_number=step.attempt_count,
+                )
             )
 
-    _append_event(
-        run,
-        AgentRunEventType.RUN_CREATED,
-        new_status=run.status.value,
-        message="Durable Mission Control run created from an approved AgentTask.",
-        actor=actor,
-        metadata={"step_count": len(DEFAULT_AGENT_RUN_STEPS)},
+    events.append(
+        AgentRunEvent(
+            run_id=run.id,
+            task_id=run.task_id,
+            correlation_id=run.correlation_id,
+            event_type=AgentRunEventType.RUN_CREATED,
+            new_status=run.status.value,
+            message="Durable Mission Control run created from an approved AgentTask.",
+            actor=actor,
+            metadata={"step_count": len(DEFAULT_AGENT_RUN_STEPS)},
+        )
     )
-    _audit(
-        "agent_run.created",
-        run.id,
-        {
+    audit = AuditEvent(
+        event_type="agent_run.created",
+        entity_id=run.id,
+        workspace_id=run.workspace_id,
+        actor=actor,
+        details={
             "task_id": run.task_id,
             "approval_request_id": run.approval_request_id,
             "correlation_id": run.correlation_id,
-            "step_count": len(DEFAULT_AGENT_RUN_STEPS),
+            "step_count": len(steps),
         },
-        actor=actor,
     )
-    store.persist()
+    scheduled_audit = None
+    if payload.metadata.get("scheduled_from") in {
+        "approval_decision",
+        "approval_recovery",
+    }:
+        scheduled_audit = AuditEvent(
+            event_type="agent_task.run_scheduled",
+            entity_id=task.id,
+            workspace_id=task.workspace_id,
+            actor=actor,
+            details={
+                "agent_run_id": run.id,
+                "approval_request_id": approval.id,
+                "run_status": run.status,
+            },
+        )
+    try:
+        active_run_repository.create(
+            run=run,
+            steps=steps,
+            events=events,
+            audit=audit,
+            scheduled_audit=scheduled_audit,
+        )
+    except AgentRunRepositoryConflict as error:
+        existing = active_run_repository.get_active_for_task(task.id)
+        if existing is not None:
+            return existing
+        raise AgentRunConflict(str(error)) from error
+    if isinstance(active_run_repository, SQLiteAgentRunRepository):
+        store.project_agent_run_creation(run, steps, events, audit)
+        if scheduled_audit is not None:
+            store.audit_events.append(scheduled_audit)
     return run
 
 
-def acquire_run_lease(run: AgentRun, *, worker_id: str, lease_seconds: int) -> str:
+def acquire_run_lease(
+    run: AgentRun,
+    *,
+    worker_id: str,
+    lease_seconds: int,
+    run_repository: AgentRunRepository | None = None,
+) -> str:
+    active_repository = run_repository or agent_run_repository
     now = _now()
-    if run.lease_owner and run.lease_expires_at and run.lease_expires_at > now:
-        if run.lease_owner != worker_id:
-            raise AgentRunConflict(f"Run is leased by {run.lease_owner} until {run.lease_expires_at.isoformat()}.")
-        if run.lease_token:
-            return run.lease_token
-    token = secrets.token_urlsafe(24)
-    run.lease_owner = worker_id
-    run.lease_token = token
-    run.heartbeat_at = now
-    run.lease_expires_at = now + timedelta(seconds=lease_seconds)
-    run.updated_at = now
-    _append_event(
-        run,
-        AgentRunEventType.RUN_LEASE_ACQUIRED,
-        message="Worker acquired the durable run lease.",
-        actor=worker_id,
-        metadata={"lease_seconds": lease_seconds},
-    )
-    store.persist()
-    return token
+    try:
+        updated, event, audit = active_repository.acquire_lease(
+            run_id=run.id,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            now=now,
+        )
+    except AgentRunRepositoryConflict as error:
+        raise AgentRunConflict(str(error)) from error
+    for field_name in AgentRun.model_fields:
+        setattr(run, field_name, getattr(updated, field_name))
+    if isinstance(active_repository, SQLiteAgentRunRepository):
+        if event is not None and audit is not None:
+            store.project_agent_run_lease(run, event, audit)
+    if not run.lease_token:
+        raise AgentRunConflict("Durable AgentRun lease result is missing its token")
+    return run.lease_token
 
 
-def heartbeat_run(run: AgentRun, *, worker_id: str, lease_token: str, lease_seconds: int) -> AgentRun:
-    if run.lease_owner != worker_id or run.lease_token != lease_token:
-        raise AgentRunConflict("Run heartbeat rejected because lease owner or token does not match.")
-    now = _now()
-    run.heartbeat_at = now
-    run.lease_expires_at = now + timedelta(seconds=lease_seconds)
-    run.updated_at = now
-    current = store.agent_run_steps.get(run.current_step_id or "")
-    if current and current.lease_owner == worker_id and current.lease_token == lease_token:
-        current.heartbeat_at = now
-        current.lease_expires_at = run.lease_expires_at
-        current.updated_at = now
-    _append_event(
-        run,
-        AgentRunEventType.RUN_HEARTBEAT,
-        step=current,
-        message="Worker renewed the Mission Control lease.",
-        actor=worker_id,
-        metadata={"lease_seconds": lease_seconds},
-    )
-    store.persist()
-    return run
+def heartbeat_run(
+    run: AgentRun,
+    *,
+    worker_id: str,
+    lease_token: str,
+    lease_seconds: int,
+    run_repository: AgentRunRepository | None = None,
+) -> AgentRun:
+    active_repository = run_repository or agent_run_repository
+    try:
+        updated_run, updated_step, event, audit = active_repository.update_lease(
+            run_id=run.id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            lease_seconds=lease_seconds,
+            now=_now(),
+        )
+    except (AgentRunRepositoryConflict, ValueError) as error:
+        raise AgentRunConflict(f"Run heartbeat rejected: {error}") from error
+    if isinstance(active_repository, SQLiteAgentRunRepository):
+        store.project_agent_run_lease(updated_run, event, audit, step=updated_step)
+        return store.agent_runs[run.id]
+    return updated_run
 
 
-def release_run_lease(run: AgentRun, *, worker_id: str, lease_token: str | None) -> None:
-    if lease_token and run.lease_token != lease_token:
-        return
-    run.lease_owner = None
-    run.lease_token = None
-    run.lease_expires_at = None
-    run.updated_at = _now()
-    _append_event(
-        run,
-        AgentRunEventType.RUN_LEASE_RELEASED,
-        message="Worker released the Mission Control lease.",
-        actor=worker_id,
-    )
-    store.persist()
+def release_run_lease(
+    run: AgentRun,
+    *,
+    worker_id: str,
+    lease_token: str | None,
+    run_repository: AgentRunRepository | None = None,
+) -> AgentRun:
+    if not lease_token:
+        return run
+    active_repository = run_repository or agent_run_repository
+    try:
+        updated_run, updated_step, event, audit = active_repository.update_lease(
+            run_id=run.id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            lease_seconds=None,
+            now=_now(),
+        )
+    except AgentRunRepositoryConflict:
+        # A newer owner or the stale-lease recovery path already superseded it.
+        return run
+    for field_name in AgentRun.model_fields:
+        setattr(run, field_name, getattr(updated_run, field_name))
+    if isinstance(active_repository, SQLiteAgentRunRepository):
+        store.project_agent_run_lease(updated_run, event, audit, step=updated_step)
+        return store.agent_runs[run.id]
+    return updated_run
 
 
-def _ready_step(run: AgentRun) -> AgentRunStep | None:
+def _ready_step(
+    run: AgentRun,
+    *,
+    pending_events: list[AgentRunEvent] | None = None,
+) -> AgentRunStep | None:
     now = _now()
     for step in _run_steps(run.id):
         if step.status == AgentRunStepStatus.RETRY_WAIT and step.next_retry_at and step.next_retry_at <= now:
             previous, new = transition_step(step, AgentRunStepStatus.READY, reason="Retry backoff elapsed.")
-            _append_event(
+            ready_event = _append_event(
                 run,
                 AgentRunEventType.STEP_READY,
                 step=step,
                 previous_status=previous.value,
                 new_status=new.value,
                 message="Retry backoff elapsed; step is ready again.",
+                publish=pending_events is None,
             )
+            if pending_events is not None:
+                pending_events.append(ready_event)
         if step.status == AgentRunStepStatus.READY:
             return step
         if step.status not in {AgentRunStepStatus.SUCCEEDED, AgentRunStepStatus.SKIPPED}:
@@ -481,10 +591,28 @@ def execute_next_step(
     lease_seconds: int = 300,
     timeout_seconds: int = 120,
     executor: StepExecutor | None = None,
+    task_repository: AgentTaskRepository | None = None,
+    approval_repository: ApprovalDecisionRepository | None = None,
+    run_repository: AgentRunRepository | None = None,
 ) -> AgentRunStepExecutionResult:
-    run = store.agent_runs.get(run_id)
-    if run is None:
-        raise ValueError("Agent run not found.")
+    active_run_repository = run_repository
+    if active_run_repository is not None and not isinstance(active_run_repository, SQLiteAgentRunRepository):
+        raise AgentRunConflict(
+            "AgentRun execution is unavailable until trust and worker effects are "
+            "bound to the configured durable repository."
+        )
+    if active_run_repository is None:
+        run = store.agent_runs.get(run_id)
+        if run is None:
+            raise ValueError("Agent run not found.")
+        active_run_repository = agent_run_repository
+    else:
+        run = active_run_repository.get(run_id)
+        if run is None:
+            raise ValueError("Agent run not found.")
+        run_steps = active_run_repository.list_steps_for_run(run_id)
+        run_events = active_run_repository.list_events_for_run(run_id)
+        store.project_agent_run_snapshot(run, run_steps, run_events)
     if run.status in {
         AgentRunStatus.BLOCKED,
         AgentRunStatus.SUCCEEDED,
@@ -498,10 +626,17 @@ def execute_next_step(
         cancel_agent_run(run, actor=worker_id, reason="Cancellation was already requested.")
         raise AgentRunConflict("Cancelled run cannot execute.")
 
-    lease_token = acquire_run_lease(run, worker_id=worker_id, lease_seconds=lease_seconds)
-    step = _ready_step(run)
+    lease_token = acquire_run_lease(
+        run, worker_id=worker_id, lease_seconds=lease_seconds,
+        run_repository=active_run_repository,
+    )
+    retry_ready_events: list[AgentRunEvent] = []
+    step = _ready_step(run, pending_events=retry_ready_events)
     if step is None:
-        release_run_lease(run, worker_id=worker_id, lease_token=lease_token)
+        release_run_lease(
+            run, worker_id=worker_id, lease_token=lease_token,
+            run_repository=active_run_repository,
+        )
         if run.status == AgentRunStatus.RETRY_WAIT:
             return AgentRunStepExecutionResult(
                 success=False,
@@ -509,6 +644,53 @@ def execute_next_step(
                 reason="No step is ready because retry backoff has not elapsed.",
             )
         raise AgentRunConflict("No executable step is ready.")
+
+    durable_run_after_ready = active_run_repository.get(run.id)
+    durable_steps_after_ready = active_run_repository.list_steps_for_run(run.id)
+    durable_steps_by_id = {item.id: item for item in durable_steps_after_ready}
+    changed_ready_steps = [
+        step for step in _run_steps(run.id)
+        if durable_steps_by_id.get(step.id) != step
+    ]
+    if changed_ready_steps:
+        if durable_run_after_ready is None or durable_run_after_ready != run:
+            release_run_lease(
+                run, worker_id=worker_id, lease_token=lease_token,
+                run_repository=active_run_repository,
+            )
+            raise AgentRunConflict("Run changed before retry readiness could be committed.")
+        ready_events = retry_ready_events
+        ready_audit = AuditEvent(
+            event_type="agent_run.retry_ready",
+            entity_id=run.id,
+            workspace_id=run.workspace_id,
+            actor=worker_id,
+            details={
+                "step_ids": [item.id for item in changed_ready_steps],
+                "event_ids": [event.id for event in ready_events],
+            },
+        )
+        try:
+            active_run_repository.commit_control_transition(
+                expected_run=durable_run_after_ready,
+                updated_run=durable_run_after_ready,
+                expected_steps=durable_steps_after_ready,
+                updated_steps=[item.model_copy(deep=True) for item in _run_steps(run.id)],
+                events=ready_events,
+                audits=[ready_audit],
+            )
+        except Exception as error:
+            release_run_lease(
+                run, worker_id=worker_id, lease_token=lease_token,
+                run_repository=active_run_repository,
+            )
+            raise AgentRunConflict("Retry readiness could not be committed.") from error
+        store.project_agent_run_control_transition(
+            run,
+            [item.model_copy(deep=True) for item in _run_steps(run.id)],
+            ready_events,
+            [ready_audit],
+        )
 
     if step.status == AgentRunStepStatus.SUCCEEDED:
         _append_event(
@@ -527,6 +709,14 @@ def execute_next_step(
             output_reference=step.output_reference,
         )
 
+    checkpoint_expected_run = active_run_repository.get(run.id)
+    if checkpoint_expected_run is None or checkpoint_expected_run != run:
+        release_run_lease(
+            run, worker_id=worker_id, lease_token=lease_token,
+            run_repository=active_run_repository,
+        )
+        raise AgentRunConflict("Run changed before the RUNNING checkpoint.")
+    checkpoint_expected_steps = active_run_repository.list_steps_for_run(run.id)
     previous, new = transition_step(step, AgentRunStepStatus.RUNNING)
     step.lease_owner = worker_id
     step.lease_token = lease_token
@@ -534,17 +724,19 @@ def execute_next_step(
     step.heartbeat_at = _now()
     run.current_step_id = step.id
     run.current_step_index = step.sequence
+    checkpoint_events: list[AgentRunEvent] = []
     if run.status in {AgentRunStatus.SCHEDULED, AgentRunStatus.RETRY_WAIT}:
         previous_run, new_run = transition_run(run, AgentRunStatus.RUNNING)
-        _append_event(
+        checkpoint_events.append(_append_event(
             run,
             AgentRunEventType.RUN_STATE_CHANGED,
             previous_status=previous_run.value,
             new_status=new_run.value,
             message="Mission Control worker started or resumed execution.",
             actor=worker_id,
-        )
-    _append_event(
+            publish=False,
+        ))
+    checkpoint_events.append(_append_event(
         run,
         AgentRunEventType.STEP_STARTED,
         step=step,
@@ -561,12 +753,82 @@ def execute_next_step(
             }
         ),
         metadata={"idempotency_key": step.idempotency_key},
+        publish=False,
+    ))
+
+    # Commit the RUNNING boundary before invoking external work. This is a
+    # compare-and-swap transaction over the run, every step, its checkpoint
+    # events, and the audit record; a whole-store rewrite could overwrite
+    # unrelated concurrent state.
+    updated_run = run.model_copy(deep=True)
+    expected_steps = checkpoint_expected_steps
+    updated_steps = [item.model_copy(deep=True) for item in _run_steps(run.id)]
+    checkpoint_audit = AuditEvent(
+        event_type="agent_run.step_started",
+        entity_id=run.id,
+        workspace_id=run.workspace_id,
+        actor=worker_id,
+        details={
+            "step_id": step.id,
+            "event_ids": [event.id for event in checkpoint_events],
+            "lease_owner": worker_id,
+        },
     )
-    store.persist()
+    try:
+        active_run_repository.commit_control_transition(
+            expected_run=checkpoint_expected_run,
+            updated_run=updated_run,
+            expected_steps=expected_steps,
+            updated_steps=updated_steps,
+            events=checkpoint_events,
+            audits=[checkpoint_audit],
+        )
+    except Exception as error:
+        # The lease was acquired in its own committed transaction. If the
+        # RUNNING checkpoint fails, release it and restore the in-memory view;
+        # never call the executor without a durable checkpoint.
+        for field_name in AgentRun.model_fields:
+            setattr(run, field_name, getattr(checkpoint_expected_run, field_name))
+        for snapshot in expected_steps:
+            current = store.agent_run_steps[snapshot.id]
+            for field_name in AgentRunStep.model_fields:
+                setattr(current, field_name, getattr(snapshot, field_name))
+        release_run_lease(
+            run, worker_id=worker_id, lease_token=lease_token,
+            run_repository=active_run_repository,
+        )
+        raise AgentRunConflict("AgentRun RUNNING checkpoint could not be committed.") from error
+    store.project_agent_run_control_transition(run, updated_steps, checkpoint_events, [checkpoint_audit])
+
+    # Completion compares against the committed RUNNING checkpoint. If its
+    # transaction fails, that checkpoint remains durable for lease recovery.
+    expected_run = run.model_copy(deep=True)
+    expected_steps = [item.model_copy(deep=True) for item in _run_steps(run.id)]
+    persisted_event_ids = {event.id for event in _run_events(run.id)}
+
+    def restore_completion_checkpoint() -> None:
+        # Keep existing object references coherent while hiding any result that
+        # failed to reach durable storage.
+        for field_name in AgentRun.model_fields:
+            setattr(run, field_name, getattr(expected_run, field_name))
+        for snapshot in expected_steps:
+            current = store.agent_run_steps[snapshot.id]
+            for field_name in AgentRunStep.model_fields:
+                setattr(current, field_name, getattr(snapshot, field_name))
+        for event_id, event in list(store.agent_run_events.items()):
+            if event.run_id == run.id and event_id not in persisted_event_ids:
+                del store.agent_run_events[event_id]
+        store.audit_events[:] = [
+            event for event in store.audit_events if event.id != completion_audit.id
+        ]
 
     try:
         raise_if_fault_configured(run.id, step.step_type)
-        effective_executor = executor or DefaultAgentRunStepExecutor()
+        effective_executor = executor or DefaultAgentRunStepExecutor(
+            task_repository=task_repository,
+            approval_repository=approval_repository,
+            run_repository=run_repository,
+        )
         result = effective_executor(run, step, timeout_seconds)
     except InjectedAgentRunFault as error:
         _append_event(
@@ -594,7 +856,7 @@ def execute_next_step(
     run.lease_token = None
     run.lease_expires_at = None
     run.updated_at = _now()
-    _audit(
+    completion_audit = _audit(
         "agent_run.step_completed",
         run.id,
         {
@@ -608,7 +870,31 @@ def execute_next_step(
         },
         actor=worker_id,
     )
-    store.persist()
+    changed_expected_steps: list[AgentRunStep] = []
+    changed_steps: list[AgentRunStep] = []
+    for previous_step in expected_steps:
+        current_step = store.agent_run_steps[previous_step.id]
+        if current_step != previous_step:
+            changed_expected_steps.append(previous_step)
+            changed_steps.append(current_step.model_copy(deep=True))
+    if not changed_expected_steps:
+        restore_completion_checkpoint()
+        raise AgentRunConflict("Step completion produced no durable step change.")
+    completion_events = [
+        event for event in _run_events(run.id) if event.id not in persisted_event_ids
+    ]
+    try:
+        active_run_repository.commit_step_completion(
+            expected_run=expected_run,
+            updated_run=run.model_copy(deep=True),
+            expected_steps=changed_expected_steps,
+            updated_steps=changed_steps,
+            events=completion_events,
+            audit=completion_audit,
+        )
+    except Exception as error:
+        restore_completion_checkpoint()
+        raise AgentRunConflict("AgentRun step completion could not be committed.") from error
     return result
 
 
@@ -624,6 +910,9 @@ class DefaultAgentRunStepExecutor:
         workspace_runner: WorkspaceCommandRunner | None = None,
         container_runtime: ContainerRuntime | None = None,
         workspace_parent: Path | None = None,
+        task_repository: AgentTaskRepository | None = None,
+        approval_repository: ApprovalDecisionRepository | None = None,
+        run_repository: AgentRunRepository | None = None,
     ) -> None:
         self.branch_client = branch_client
         self.file_client = file_client
@@ -631,6 +920,9 @@ class DefaultAgentRunStepExecutor:
         self.workspace_runner = workspace_runner
         self.container_runtime = container_runtime
         self.workspace_parent = workspace_parent
+        self.task_repository = task_repository
+        self.approval_repository = approval_repository
+        self.run_repository = run_repository
 
     def __call__(
         self,
@@ -638,13 +930,21 @@ class DefaultAgentRunStepExecutor:
         step: AgentRunStep,
         timeout_seconds: int,
     ) -> AgentRunStepExecutionResult:
-        task = store.agent_tasks.get(run.task_id)
+        task = (
+            self.task_repository.get(run.task_id)
+            if self.task_repository is not None
+            else store.agent_tasks.get(run.task_id)
+        )
         if task is None:
             return classify_execution_result(
                 success=False,
                 reason="Agent task not found during execution.",
             )
-        approval = store.approval_requests.get(run.approval_request_id or "")
+        approval = (
+            self.approval_repository.get(run.approval_request_id or "")
+            if self.approval_repository is not None
+            else approval_decision_repository.get(run.approval_request_id or "")
+        )
 
         if step.step_type == AgentRunStepType.VALIDATE_SCOPE:
             return validate_scope_contract(task, approval)
@@ -654,6 +954,7 @@ class DefaultAgentRunStepExecutor:
                 task_id=task.id,
                 worker_id=f"mission-control:{run.id}:branch",
                 client=self.branch_client,
+                task_repository=self.task_repository,
             )
             return classify_execution_result(
                 success=result.success,
@@ -667,6 +968,8 @@ class DefaultAgentRunStepExecutor:
                 task_id=task.id,
                 worker_id=f"mission-control:{run.id}:files",
                 client=self.file_client,
+                task_repository=self.task_repository,
+                approval_repository=self.approval_repository,
             )
             return classify_execution_result(
                 success=result.success,
@@ -729,6 +1032,8 @@ class DefaultAgentRunStepExecutor:
                 task_id=task.id,
                 worker_id=f"mission-control:{run.id}:pr",
                 client=self.pr_client,
+                task_repository=self.task_repository,
+                approval_repository=self.approval_repository,
             )
             classified = classify_execution_result(
                 success=result.success,
@@ -742,11 +1047,14 @@ class DefaultAgentRunStepExecutor:
             )
 
         if step.step_type == AgentRunStepType.VERIFY_RESULT:
-            task_events = [
-                event
-                for event in store.agent_task_events.values()
-                if event.task_id == task.id
-            ]
+            task_events = (
+                self.task_repository.list_events(task.id, workspace_id=task.workspace_id)
+                if self.task_repository is not None
+                else [
+                    event for event in store.agent_task_events.values()
+                    if event.task_id == task.id
+                ]
+            )
             pr_events = [
                 event
                 for event in task_events
@@ -788,7 +1096,16 @@ class DefaultAgentRunStepExecutor:
             )
 
         if step.step_type == AgentRunStepType.SEAL_EVIDENCE:
-            steps = _run_steps(run.id)
+            steps = (
+                self.run_repository.list_steps_for_run(run.id)
+                if self.run_repository is not None
+                else _run_steps(run.id)
+            )
+            run_events = (
+                self.run_repository.list_events_for_run(run.id)
+                if self.run_repository is not None
+                else _run_events(run.id)
+            )
             prior_steps = [item for item in steps if item.sequence < step.sequence]
             all_prior_passed = all(
                 item.status == AgentRunStepStatus.SUCCEEDED
@@ -810,7 +1127,7 @@ class DefaultAgentRunStepExecutor:
                     }
                     for item in prior_steps
                 ],
-                "event_count": len(_run_events(run.id)),
+                "event_count": len(run_events),
             }
             final_hash = canonical_evidence_hash(evidence_payload)
             run.final_evidence_hash = final_hash
@@ -833,151 +1150,325 @@ class DefaultAgentRunStepExecutor:
         )
 
 
-def recover_stale_leases(*, actor: str = "mission-control-watchdog") -> int:
+def recover_stale_leases(
+    *,
+    actor: str = "mission-control-watchdog",
+    workspace_id: str | None = None,
+    run_repository: AgentRunRepository | None = None,
+) -> int:
+    active_repository = run_repository or agent_run_repository
     now = _now()
     recovered = 0
-    for run in store.agent_runs.values():
-        if run.lease_expires_at is None or run.lease_expires_at > now:
+    candidates = active_repository.list_expired_leases(
+        now=now,
+        workspace_id=workspace_id,
+    )
+    for expected_run, expected_step in candidates:
+        # Keep malformed or cross-scope compatibility data from becoming an
+        # authorization or recovery source. Durable repository checks remain
+        # authoritative at commit time.
+        if (
+            isinstance(active_repository, SQLiteAgentRunRepository)
+            and not agent_run_scope_is_consistent(expected_run)
+        ):
             continue
-        expired_owner = run.lease_owner
-        run.lease_owner = None
-        run.lease_token = None
-        run.lease_expires_at = None
-        run.heartbeat_at = None
-        current = store.agent_run_steps.get(run.current_step_id or "")
-        if current and current.status == AgentRunStepStatus.RUNNING:
-            current.lease_owner = None
-            current.lease_token = None
-            current.lease_expires_at = None
-            if current.attempt_count < current.max_attempts:
+        if workspace_id is not None and expected_run.workspace_id != workspace_id:
+            continue
+
+        updated_run = expected_run.model_copy(deep=True)
+        expired_owner = expected_run.lease_owner
+        updated_run.lease_owner = None
+        updated_run.lease_token = None
+        updated_run.lease_expires_at = None
+        updated_run.heartbeat_at = None
+        updated_run.updated_at = now
+
+        updated_step = expected_step.model_copy(deep=True) if expected_step else None
+        previous_status = None
+        new_status = None
+        if updated_step and updated_step.status == AgentRunStepStatus.RUNNING:
+            updated_step.lease_owner = None
+            updated_step.lease_token = None
+            updated_step.lease_expires_at = None
+            if updated_step.attempt_count < updated_step.max_attempts:
                 previous, new = transition_step(
-                    current,
+                    updated_step,
                     AgentRunStepStatus.RETRY_WAIT,
                     reason="Worker lease expired.",
                 )
-                current.next_retry_at = now
-                if run.status == AgentRunStatus.RUNNING:
+                updated_step.next_retry_at = now
+                if updated_run.status == AgentRunStatus.RUNNING:
                     transition_run(
-                        run,
+                        updated_run,
                         AgentRunStatus.RETRY_WAIT,
                         reason="Worker lease expired.",
                     )
             else:
                 previous, new = transition_step(
-                    current,
+                    updated_step,
                     AgentRunStepStatus.NEEDS_HUMAN,
                     reason="Worker lease expired and retry budget is exhausted.",
                 )
-                if run.status in {
+                if updated_run.status in {
                     AgentRunStatus.RUNNING,
                     AgentRunStatus.RETRY_WAIT,
                 }:
                     transition_run(
-                        run,
+                        updated_run,
                         AgentRunStatus.NEEDS_HUMAN,
-                        reason=current.reason,
+                        reason=updated_step.reason,
                     )
-            _append_event(
-                run,
-                AgentRunEventType.STALE_LEASE_RECOVERED,
-                step=current,
-                previous_status=previous.value,
-                new_status=new.value,
-                message="Watchdog recovered an expired worker lease without claiming completion.",
-                actor=actor,
-                metadata={"expired_owner": expired_owner},
-            )
-        recovered += 1
-    if recovered:
-        _audit(
-            "agent_run.stale_leases_recovered",
-            "agent_runs",
-            {"count": recovered},
+            previous_status = previous.value
+            new_status = new.value
+            updated_step.updated_at = now
+        updated_run.updated_at = now
+
+        event = AgentRunEvent(
+            run_id=updated_run.id,
+            task_id=updated_run.task_id,
+            step_id=updated_step.id if updated_step else None,
+            correlation_id=updated_run.correlation_id,
+            event_type=AgentRunEventType.STALE_LEASE_RECOVERED,
+            previous_status=previous_status,
+            new_status=new_status,
+            message="Watchdog recovered an expired worker lease without claiming completion.",
             actor=actor,
+            metadata={"expired_owner": expired_owner},
         )
-        store.persist()
+        audit_event = AuditEvent(
+            event_type="agent_run.stale_lease_recovered",
+            entity_id=updated_run.id,
+            workspace_id=updated_run.workspace_id,
+            actor=actor,
+            details={"event_id": event.id, "step_id": event.step_id},
+        )
+        try:
+            active_repository.recover_expired_lease(
+                expected_run=expected_run,
+                updated_run=updated_run,
+                expected_step=expected_step,
+                updated_step=updated_step,
+                event=event,
+                audit=audit_event,
+                now=now,
+            )
+        except AgentRunRepositoryConflict:
+            # Another worker changed or recovered this exact lease first.
+            continue
+        if isinstance(active_repository, SQLiteAgentRunRepository):
+            store.project_agent_run_recovery(updated_run, updated_step, event, audit_event)
+        recovered += 1
     return recovered
 
 
-def pause_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun:
-    if run.status in {
+def pause_agent_run(
+    run: AgentRun,
+    *,
+    actor: str,
+    reason: str = "",
+    run_repository: AgentRunRepository | None = None,
+) -> AgentRun:
+    active_repository = run_repository or agent_run_repository
+    durable_run = active_repository.get(run.id)
+    if durable_run is None or durable_run != run:
+        raise AgentRunConflict("Run changed; refresh before pausing it.")
+    if durable_run.status in {
         AgentRunStatus.BLOCKED,
         AgentRunStatus.SUCCEEDED,
         AgentRunStatus.FAILED,
         AgentRunStatus.CANCELLED,
     }:
         raise AgentRunConflict("Terminal run cannot be paused.")
-    run.pause_requested = True
-    if run.status != AgentRunStatus.PAUSED:
-        previous, new = transition_run(run, AgentRunStatus.PAUSED, reason=reason)
-        _append_event(
-            run,
-            AgentRunEventType.OPERATOR_ACTION,
-            previous_status=previous.value,
-            new_status=new.value,
-            message="Operator paused the run.",
-            reason=reason,
-            actor=actor,
+    if (
+        durable_run.lease_owner is not None
+        or durable_run.lease_token is not None
+        or durable_run.lease_expires_at is not None
+    ):
+        raise AgentRunConflict("Run cannot be paused while a worker lease is active.")
+    expected_run = durable_run
+    updated_run = durable_run.model_copy(deep=True)
+    expected_steps = active_repository.list_steps_for_run(run.id)
+    expected_step = next(
+        (step for step in expected_steps if step.id == durable_run.current_step_id),
+        None,
+    )
+    if durable_run.current_step_id is not None and expected_step is None:
+        raise AgentRunConflict("Run current step is missing; pause was refused.")
+    if expected_step and expected_step.status == AgentRunStepStatus.RUNNING:
+        raise AgentRunConflict("Run cannot be paused while a step is running.")
+    updated_steps = [step.model_copy(deep=True) for step in expected_steps]
+    previous, new = transition_run(updated_run, AgentRunStatus.PAUSED, reason=reason)
+    updated_run.pause_requested = True
+    event = AgentRunEvent(
+        run_id=updated_run.id,
+        task_id=updated_run.task_id,
+        step_id=updated_run.current_step_id,
+        correlation_id=updated_run.correlation_id,
+        event_type=AgentRunEventType.OPERATOR_ACTION,
+        previous_status=previous.value,
+        new_status=new.value,
+        message="Operator paused the run.",
+        reason=reason,
+        actor=actor,
+    )
+    audit = AuditEvent(
+        event_type="agent_run.paused",
+        entity_id=updated_run.id,
+        workspace_id=updated_run.workspace_id,
+        actor=actor,
+        details={"event_id": event.id, "reason": reason},
+    )
+    try:
+        active_repository.commit_control_transition(
+            expected_run=expected_run,
+            updated_run=updated_run,
+            expected_steps=expected_steps,
+            updated_steps=updated_steps,
+            events=[event],
+            audits=[audit],
         )
-    store.persist()
-    return run
+    except AgentRunRepositoryConflict as error:
+        raise AgentRunConflict(f"Pause was not committed: {error}") from error
+    if isinstance(active_repository, SQLiteAgentRunRepository):
+        store.project_agent_run_control_transition(updated_run, updated_steps, [event], [audit])
+        return store.agent_runs[run.id]
+    return updated_run
 
 
-def resume_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun:
-    if run.status not in {
+def resume_agent_run(
+    run: AgentRun,
+    *,
+    actor: str,
+    reason: str = "",
+    run_repository: AgentRunRepository | None = None,
+) -> AgentRun:
+    active_repository = run_repository or agent_run_repository
+    durable_run = active_repository.get(run.id)
+    if durable_run is None or durable_run != run:
+        raise AgentRunConflict("Run changed; refresh before resuming it.")
+    if durable_run.status not in {
         AgentRunStatus.PAUSED,
         AgentRunStatus.NEEDS_HUMAN,
         AgentRunStatus.RETRY_WAIT,
     }:
-        raise AgentRunConflict(f"Run cannot resume from {run.status}.")
-    run.pause_requested = False
-    step = store.agent_run_steps.get(run.current_step_id or "")
-    if step and step.status in {
+        raise AgentRunConflict(f"Run cannot resume from {durable_run.status}.")
+    if (
+        durable_run.lease_owner is not None
+        or durable_run.lease_token is not None
+        or durable_run.lease_expires_at is not None
+    ):
+        raise AgentRunConflict("Run cannot resume while a worker lease is active.")
+    expected_run = durable_run
+    updated_run = durable_run.model_copy(deep=True)
+    expected_steps = active_repository.list_steps_for_run(run.id)
+    expected_step = next(
+        (step for step in expected_steps if step.id == durable_run.current_step_id),
+        None,
+    )
+    if durable_run.current_step_id is not None and expected_step is None:
+        raise AgentRunConflict("Run current step is missing; resume was refused.")
+    updated_steps = [step.model_copy(deep=True) for step in expected_steps]
+    events: list[AgentRunEvent] = []
+    current_step_index = next(
+        (index for index, step in enumerate(updated_steps) if step.id == durable_run.current_step_id),
+        None,
+    )
+    if current_step_index is not None and updated_steps[current_step_index].status in {
         AgentRunStepStatus.PAUSED,
         AgentRunStepStatus.NEEDS_HUMAN,
         AgentRunStepStatus.RETRY_WAIT,
     }:
+        step = updated_steps[current_step_index]
         previous_step, new_step = transition_step(
             step,
             AgentRunStepStatus.READY,
             reason=reason or "Operator resumed step.",
         )
         step.next_retry_at = None
-        _append_event(
-            run,
-            AgentRunEventType.STEP_READY,
-            step=step,
+        events.append(AgentRunEvent(
+            run_id=updated_run.id,
+            task_id=updated_run.task_id,
+            step_id=step.id,
+            correlation_id=updated_run.correlation_id,
+            event_type=AgentRunEventType.STEP_READY,
             previous_status=previous_step.value,
             new_status=new_step.value,
             message="Operator returned the current step to READY.",
             reason=reason,
             actor=actor,
-        )
-    previous, new = transition_run(run, AgentRunStatus.SCHEDULED, reason=reason)
-    _append_event(
-        run,
-        AgentRunEventType.OPERATOR_ACTION,
+            attempt_number=step.attempt_count,
+        ))
+    updated_run.pause_requested = False
+    previous, new = transition_run(updated_run, AgentRunStatus.SCHEDULED, reason=reason)
+    events.append(AgentRunEvent(
+        run_id=updated_run.id,
+        task_id=updated_run.task_id,
+        step_id=updated_run.current_step_id,
+        correlation_id=updated_run.correlation_id,
+        event_type=AgentRunEventType.OPERATOR_ACTION,
         previous_status=previous.value,
         new_status=new.value,
         message="Operator resumed the run.",
         reason=reason,
         actor=actor,
+    ))
+    audit = AuditEvent(
+        event_type="agent_run.resumed",
+        entity_id=updated_run.id,
+        workspace_id=updated_run.workspace_id,
+        actor=actor,
+        details={"event_ids": [event.id for event in events], "reason": reason},
     )
-    store.persist()
-    return run
+    try:
+        active_repository.commit_control_transition(
+            expected_run=expected_run,
+            updated_run=updated_run,
+            expected_steps=expected_steps,
+            updated_steps=updated_steps,
+            events=events,
+            audits=[audit],
+        )
+    except AgentRunRepositoryConflict as error:
+        raise AgentRunConflict(f"Resume was not committed: {error}") from error
+    if isinstance(active_repository, SQLiteAgentRunRepository):
+        store.project_agent_run_control_transition(updated_run, updated_steps, events, [audit])
+        return store.agent_runs[run.id]
+    return updated_run
 
 
-def cancel_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun:
-    if run.status == AgentRunStatus.CANCELLED:
+def cancel_agent_run(
+    run: AgentRun,
+    *,
+    actor: str,
+    reason: str = "",
+    run_repository: AgentRunRepository | None = None,
+) -> AgentRun:
+    active_repository = run_repository or agent_run_repository
+    durable_run = active_repository.get(run.id)
+    if durable_run is None or durable_run != run:
+        raise AgentRunConflict("Run changed; refresh before cancelling it.")
+    if durable_run.status == AgentRunStatus.CANCELLED:
         return run
-    if run.status in {
+    if durable_run.status in {
         AgentRunStatus.BLOCKED,
         AgentRunStatus.SUCCEEDED,
         AgentRunStatus.FAILED,
     }:
         raise AgentRunConflict("Completed terminal run cannot be cancelled.")
-    run.cancel_requested = True
-    for step in _run_steps(run.id):
+    if (
+        durable_run.lease_owner is not None
+        or durable_run.lease_token is not None
+        or durable_run.lease_expires_at is not None
+    ):
+        raise AgentRunConflict("Run cannot be cancelled while a worker lease is active.")
+    expected_run = durable_run
+    updated_run = durable_run.model_copy(deep=True)
+    expected_steps = active_repository.list_steps_for_run(run.id)
+    if any(step.status == AgentRunStepStatus.RUNNING for step in expected_steps):
+        raise AgentRunConflict("Run cannot be cancelled while a governed step is running.")
+    updated_steps = [step.model_copy(deep=True) for step in expected_steps]
+    events: list[AgentRunEvent] = []
+    for step in updated_steps:
         if step.status not in {
             AgentRunStepStatus.SUCCEEDED,
             AgentRunStepStatus.BLOCKED,
@@ -990,28 +1481,55 @@ def cancel_agent_run(run: AgentRun, *, actor: str, reason: str = "") -> AgentRun
                 AgentRunStepStatus.CANCELLED,
                 reason=reason or "Run cancelled.",
             )
-            _append_event(
-                run,
-                AgentRunEventType.STEP_CANCELLED,
-                step=step,
+            events.append(AgentRunEvent(
+                run_id=updated_run.id,
+                task_id=updated_run.task_id,
+                step_id=step.id,
+                correlation_id=updated_run.correlation_id,
+                event_type=AgentRunEventType.STEP_CANCELLED,
                 previous_status=previous.value,
                 new_status=new.value,
                 message="Pending work was cancelled.",
                 reason=reason,
                 actor=actor,
-            )
-    previous, new = transition_run(run, AgentRunStatus.CANCELLED, reason=reason)
-    _append_event(
-        run,
-        AgentRunEventType.OPERATOR_ACTION,
+                attempt_number=step.attempt_count,
+            ))
+    updated_run.cancel_requested = True
+    previous, new = transition_run(updated_run, AgentRunStatus.CANCELLED, reason=reason)
+    events.append(AgentRunEvent(
+        run_id=updated_run.id,
+        task_id=updated_run.task_id,
+        step_id=updated_run.current_step_id,
+        correlation_id=updated_run.correlation_id,
+        event_type=AgentRunEventType.OPERATOR_ACTION,
         previous_status=previous.value,
         new_status=new.value,
         message="Operator cancelled the run.",
         reason=reason,
         actor=actor,
+    ))
+    audit = AuditEvent(
+        event_type="agent_run.cancelled",
+        entity_id=updated_run.id,
+        workspace_id=updated_run.workspace_id,
+        actor=actor,
+        details={"event_ids": [event.id for event in events], "reason": reason},
     )
-    store.persist()
-    return run
+    try:
+        active_repository.commit_control_transition(
+            expected_run=expected_run,
+            updated_run=updated_run,
+            expected_steps=expected_steps,
+            updated_steps=updated_steps,
+            events=events,
+            audits=[audit],
+        )
+    except AgentRunRepositoryConflict as error:
+        raise AgentRunConflict(f"Cancellation was not committed: {error}") from error
+    if isinstance(active_repository, SQLiteAgentRunRepository):
+        store.project_agent_run_control_transition(updated_run, updated_steps, events, [audit])
+        return store.agent_runs[run.id]
+    return updated_run
 
 
 def retry_agent_run_step(
@@ -1020,42 +1538,97 @@ def retry_agent_run_step(
     *,
     actor: str,
     reason: str = "",
+    run_repository: AgentRunRepository | None = None,
 ) -> AgentRunStep:
+    active_repository = run_repository or agent_run_repository
     if step.run_id != run.id:
         raise AgentRunConflict("Step does not belong to run.")
-    if step.status not in {
+    durable_run = active_repository.get(run.id)
+    if durable_run is None or durable_run != run:
+        raise AgentRunConflict("Run changed; refresh before retrying the step.")
+    expected_steps = active_repository.list_steps_for_run(run.id)
+    durable_step = next((item for item in expected_steps if item.id == step.id), None)
+    if durable_step is None or durable_step != step:
+        raise AgentRunConflict("Step changed or no longer belongs to the durable run.")
+    if durable_run.status in {
+        AgentRunStatus.BLOCKED,
+        AgentRunStatus.SUCCEEDED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.CANCELLED,
+    }:
+        raise AgentRunConflict(f"Terminal run cannot be retried: {durable_run.status}.")
+    if (
+        durable_run.lease_owner is not None
+        or durable_run.lease_token is not None
+        or durable_run.lease_expires_at is not None
+    ):
+        raise AgentRunConflict("Run cannot be retried while a worker lease is active.")
+    if durable_step.status not in {
         AgentRunStepStatus.RETRY_WAIT,
         AgentRunStepStatus.NEEDS_HUMAN,
         AgentRunStepStatus.FAILED,
     }:
-        raise AgentRunConflict(f"Step cannot be retried from {step.status}.")
-    if step.attempt_count >= step.max_attempts:
+        raise AgentRunConflict(f"Step cannot be retried from {durable_step.status}.")
+    if durable_step.attempt_count >= durable_step.max_attempts:
         raise AgentRunConflict("Step retry budget is exhausted.")
-    if step.status == AgentRunStepStatus.FAILED:
-        step.status = AgentRunStepStatus.NEEDS_HUMAN
+    expected_run = durable_run
+    updated_run = durable_run.model_copy(deep=True)
+    updated_steps = [item.model_copy(deep=True) for item in expected_steps]
+    updated_step = next(item for item in updated_steps if item.id == durable_step.id)
+    if updated_step.status == AgentRunStepStatus.FAILED:
+        updated_step.status = AgentRunStepStatus.NEEDS_HUMAN
     previous, new = transition_step(
-        step,
+        updated_step,
         AgentRunStepStatus.READY,
         reason=reason or "Operator approved retry.",
     )
-    step.next_retry_at = None
-    run.current_step_id = step.id
-    run.current_step_index = step.sequence
-    run.pause_requested = False
-    if run.status in {AgentRunStatus.NEEDS_HUMAN, AgentRunStatus.RETRY_WAIT}:
-        transition_run(run, AgentRunStatus.SCHEDULED, reason=reason)
-    _append_event(
-        run,
-        AgentRunEventType.OPERATOR_ACTION,
-        step=step,
+    updated_step.next_retry_at = None
+    updated_run.current_step_id = updated_step.id
+    updated_run.current_step_index = updated_step.sequence
+    updated_run.pause_requested = False
+    if updated_run.status in {
+        AgentRunStatus.NEEDS_HUMAN,
+        AgentRunStatus.RETRY_WAIT,
+        AgentRunStatus.PAUSED,
+    }:
+        transition_run(updated_run, AgentRunStatus.SCHEDULED, reason=reason)
+    event = AgentRunEvent(
+        run_id=updated_run.id,
+        task_id=updated_run.task_id,
+        step_id=updated_step.id,
+        correlation_id=updated_run.correlation_id,
+        event_type=AgentRunEventType.OPERATOR_ACTION,
         previous_status=previous.value,
         new_status=new.value,
         message="Operator approved a bounded step retry.",
         reason=reason,
         actor=actor,
+        attempt_number=updated_step.attempt_count,
     )
-    store.persist()
-    return step
+    audit = AuditEvent(
+        event_type="agent_run.step_retry_requested",
+        entity_id=updated_run.id,
+        workspace_id=updated_run.workspace_id,
+        actor=actor,
+        details={"event_id": event.id, "step_id": updated_step.id, "reason": reason},
+    )
+    try:
+        active_repository.commit_control_transition(
+            expected_run=expected_run,
+            updated_run=updated_run,
+            expected_steps=expected_steps,
+            updated_steps=updated_steps,
+            events=[event],
+            audits=[audit],
+        )
+    except AgentRunRepositoryConflict as error:
+        raise AgentRunConflict(f"Step retry was not committed: {error}") from error
+    if isinstance(active_repository, SQLiteAgentRunRepository):
+        store.project_agent_run_control_transition(
+            updated_run, updated_steps, [event], [audit]
+        )
+        return store.agent_run_steps[updated_step.id]
+    return updated_step
 
 
 def recompute_run_status(run: AgentRun) -> AgentRunStatus:

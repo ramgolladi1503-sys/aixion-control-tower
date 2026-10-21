@@ -9,6 +9,7 @@ os.environ.setdefault("AIXION_LEASE_SIGNING_KEY", "run-capability-test-signing-k
 from fastapi.testclient import TestClient
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.approval_integrity import compute_approval_payload_hash
 from app.main import app
 from app.models import (
     AgentProvider,
@@ -54,8 +55,8 @@ def _seed_approved_task() -> AgentTask:
         status=ApprovalStatus.APPROVED,
         created_by_user_id="creator-user",
         approved_by_user_id="reviewer-user",
-        approved_payload_hash="sealed-automatic-capability-payload",
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
@@ -81,6 +82,7 @@ def test_first_execution_issues_and_attaches_exact_strict_capability(
     assert created.status_code == 200
     run_id = created.json()["run"]["id"]
     assert created.json()["run"]["capability_lease_id"] is None
+    store.approval_requests.pop(task.approval_request_id)
 
     executed = client.post(
         f"/agent/runs/{run_id}/execute-next",

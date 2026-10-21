@@ -7,7 +7,15 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.agent_worker_dry_run import run_agent_worker_dry_run
-from app.models import AgentProvider, Project
+from app.models import (
+    AgentProvider,
+    ApprovalRequest,
+    ApprovalStatus,
+    FileChange,
+    Project,
+    RiskAssessment,
+    RiskLevel,
+)
 from app.store import store
 
 
@@ -16,8 +24,18 @@ def setup_function() -> None:
 
 
 def _approved_task() -> AgentTask:
-    project = Project(name="Worker Dry Run", description="demo")
+    project = Project(name="Worker Dry Run", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
+    approval = ApprovalRequest(
+        project_id=project.id,
+        title="Dry-run task authorization",
+        summary="Approval required before worker claims this task.",
+        target_branch="feature/agent-worker-dry-run",
+        files=[FileChange(path="README.md", diff="+approved")],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.APPROVED,
+    )
+    store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
         project_id=project.id,
@@ -26,7 +44,7 @@ def _approved_task() -> AgentTask:
         repository="ramgolladi1503-sys/aixion-control-tower",
         branch_preference="feature/agent-worker-dry-run",
         status=AgentTaskStatus.APPROVED,
-        approval_request_id="approval_dry_run",
+        approval_request_id=approval.id,
     )
     store.agent_tasks[task.id] = task
     store.persist()
@@ -86,7 +104,7 @@ def test_dry_run_refuses_missing_task() -> None:
 
 
 def test_dry_run_refuses_unapproved_task_without_mutating_status() -> None:
-    project = Project(name="Worker Dry Run", description="demo")
+    project = Project(name="Worker Dry Run", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     task = AgentTask(
         provider=AgentProvider.CHATGPT,

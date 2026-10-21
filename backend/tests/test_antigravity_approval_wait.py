@@ -1,0 +1,839 @@
+from __future__ import annotations
+
+import importlib.util
+import os
+from datetime import timedelta
+from pathlib import Path
+from unittest.mock import patch
+from urllib.parse import urlparse
+
+os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
+
+from fastapi.testclient import TestClient
+
+from app.approval_integrity import compute_approval_payload_hash
+from app.approval_decisions import approval_decision_repository
+from app.models import ApprovalRequest
+from app.main import app
+from app.models import ApprovalStatus, Project, Workspace, now_utc
+from app.store import store
+
+client = TestClient(app)
+HOOK_PATH = Path(__file__).parents[2] / "integrations" / "antigravity" / "aixion_pre_tool_hook.py"
+HOOK_SPEC = importlib.util.spec_from_file_location("antigravity_expiry_hook", HOOK_PATH)
+assert HOOK_SPEC and HOOK_SPEC.loader
+antigravity_hook = importlib.util.module_from_spec(HOOK_SPEC)
+HOOK_SPEC.loader.exec_module(antigravity_hook)
+
+
+def setup_function() -> None:
+    store.reset()
+
+
+def _setup_agent(*, actions: list[str] | None = None) -> tuple[Project, str, str]:
+    workspace = next(iter(store.workspaces.values()), None)
+    if workspace is None:
+        workspace = Workspace(name="Antigravity approval test", owner_user_id="dev_user")
+        store.workspaces[workspace.id] = workspace
+    project = Project(
+        name="Antigravity approval", description="test", workspace_id=workspace.id
+    )
+    store.projects[project.id] = project
+    store.persist()
+    response = client.post(
+        "/agents",
+        json={
+            "provider": "ANTIGRAVITY",
+            "display_name": "Antigravity local hook",
+            "auth_type": "API_KEY",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": actions or [
+                "CREATE_APPROVAL", "READ_APPROVAL_DECISION", "CONSUME_APPROVAL_DECISION",
+                "EXPIRE_OWN_APPROVAL"
+            ],
+            "enabled": True,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    return project, body["agent"]["id"], body["agent_token"]
+
+
+def _headers(agent_id: str, token: str) -> dict[str, str]:
+    return {"X-Aixion-Agent-Id": agent_id, "X-Aixion-Agent-Token": token}
+
+
+def _approval(project_id: str, headers: dict[str, str]) -> str:
+    response = client.post(
+        "/agents/approvals",
+        headers=headers,
+        json={
+            "project_id": project_id,
+            "title": "Antigravity requests tool permission",
+            "summary": "Review exact tool input before allowing this invocation.",
+            "agent_name": "Antigravity",
+            "target_branch": "current-workspace",
+            "files": [{
+                "path": "antigravity://tool/run_command",
+                "change_type": "tool_call",
+                "diff": '{"command":"echo approval-test"}',
+            }],
+            "test_plan": ["Review the displayed tool and arguments"],
+            "rollback_plan": "Deny or let the request expire; no tool runs without approval.",
+            "source_session_id": "session-test-1",
+            "source_invocation_id": "antigravity:v1:hook-test",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["source_invocation_id"] == "antigravity:v1:hook-test"
+    created_audit = next(
+        event for event in store.audit_events
+        if event.event_type == "approval.created_by_agent" and event.entity_id == response.json()["id"]
+    )
+    assert created_audit.details["source_invocation_id"] == "antigravity:v1:hook-test"
+    return response.json()["id"]
+
+
+def test_invocation_retry_reuses_one_approval_and_changed_payload_conflicts() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    payload = {
+        "project_id": project.id,
+        "title": "Antigravity requests tool permission",
+        "summary": "Review exact tool input before allowing this invocation.",
+        "agent_name": "Antigravity",
+        "target_branch": "current-workspace",
+        "files": [{
+            "path": "antigravity://tool/run_command",
+            "change_type": "tool_call",
+            "diff": '{"command":"echo retry-safe"}',
+        }],
+        "test_plan": ["Review the displayed tool and arguments"],
+        "rollback_plan": "Deny or let the request expire; no tool runs without approval.",
+        "source_session_id": "session-retry-test",
+        "source_invocation_id": "antigravity:v1:retry-test",
+    }
+
+    first = client.post("/agents/approvals", headers=headers, json=payload)
+    retry = client.post("/agents/approvals", headers=headers, json=payload)
+    changed = client.post(
+        "/agents/approvals",
+        headers=headers,
+        json={**payload, "summary": "Different action on the same invocation."},
+    )
+
+    assert first.status_code == 200
+    assert retry.status_code == 200
+    assert retry.json()["id"] == first.json()["id"]
+    assert changed.status_code == 409
+    assert "different approval payload" in changed.json()["detail"]
+    approval_id = first.json()["id"]
+    assert sum(
+        event.event_type == "approval.created_by_agent" and event.entity_id == approval_id
+        for event in store.audit_events
+    ) == 1
+    assert sum(item.entity_id == approval_id for item in store.notifications.values()) == 1
+
+
+def test_approval_decision_is_visible_to_only_owning_scoped_agent() -> None:
+    project, owner_id, owner_token = _setup_agent()
+    _, other_id, other_token = _setup_agent()
+    approval_id = _approval(project.id, _headers(owner_id, owner_token))
+
+    assert client.get(
+        f"/agents/approvals/{approval_id}/decision",
+        headers=_headers(owner_id, owner_token),
+    ).json()["status"] == "PENDING_REVIEW"
+    denied = client.get(
+        f"/agents/approvals/{approval_id}/decision",
+        headers=_headers(other_id, other_token),
+    )
+    assert denied.status_code == 403
+
+
+def test_missing_read_decision_capability_is_denied() -> None:
+    project, agent_id, token = _setup_agent(actions=["CREATE_APPROVAL"])
+    approval_id = _approval(project.id, _headers(agent_id, token))
+
+    response = client.get(
+        f"/agents/approvals/{approval_id}/decision",
+        headers=_headers(agent_id, token),
+    )
+    assert response.status_code == 403
+
+
+def test_approved_invocation_delivery_is_claimed_once_and_audited() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve"},
+    )
+    assert decision.status_code == 200
+    assert decision.json()["approved_payload_hash_version"] == 2
+    assert decision.json()["approved_payload_hash"].startswith("sha256:v2:")
+
+    claimed = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
+    duplicate = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
+
+    assert claimed.status_code == 200
+    assert claimed.json() == {"consumed": True}
+    assert duplicate.status_code == 409
+    delivery_events = [
+        event for event in store.audit_events
+        if event.event_type == "approval.delivery_claimed" and event.entity_id == approval_id
+    ]
+    assert len(delivery_events) == 1
+    assert delivery_events[0].details["delivery"] == "at_most_once"
+
+
+def test_hook_denies_when_consume_commits_but_response_is_lost_and_retry_replays_claim() -> None:
+    project, agent_id, token = _setup_agent(actions=[
+        "CREATE_APPROVAL",
+        "READ_APPROVAL_DECISION",
+        "CONSUME_APPROVAL_DECISION",
+        "REPORT_APPROVAL_DELIVERY_FAILURE",
+        "EXPIRE_OWN_APPROVAL",
+    ])
+    state = {"approval_id": None, "drop_consume_response": True, "consume_calls": 0}
+
+    def request(
+        method: str,
+        url: str,
+        request_agent_id: str,
+        request_token: str,
+        body: dict | None = None,
+    ) -> dict:
+        assert request_agent_id == agent_id
+        assert request_token == token
+        parsed = urlparse(url)
+        response = client.request(
+            method,
+            parsed.path,
+            headers={
+                **_headers(agent_id, token),
+                "X-Aixion-Approval-Protocol": "1",
+            },
+            json=body,
+        )
+        if method == "POST" and parsed.path == "/agents/approvals":
+            assert response.status_code == 200, response.text
+            approval = response.json()
+            if state["approval_id"] is None:
+                state["approval_id"] = approval["id"]
+                decision = client.post(
+                    f"/approvals/{approval['id']}/decision",
+                    json={"decision": "approve"},
+                )
+                assert decision.status_code == 200, decision.text
+            else:
+                assert approval["id"] == state["approval_id"]
+        if method == "POST" and parsed.path.endswith("/consume"):
+            state["consume_calls"] += 1
+            if response.status_code == 200 and state["drop_consume_response"]:
+                state["drop_consume_response"] = False
+                # The endpoint has committed its unique claim. Only the response
+                # is lost, matching the ambiguous transport failure in production.
+                raise antigravity_hook.AmbiguousRequestError(
+                    "simulated connection loss after server commit"
+                )
+        if response.status_code >= 400:
+            raise antigravity_hook.GateError(
+                f"Control Tower returned HTTP {response.status_code}"
+            )
+        return response.json()
+
+    hook_payload = {
+        "conversationId": "session-lost-consume-response",
+        "stepIdx": 7,
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "echo gated"}},
+    }
+    hook_environment = {
+        "AIXION_API_BASE_URL": "http://localhost:8000",
+        "AIXION_AGENT_ID": agent_id,
+        "AIXION_AGENT_TOKEN": token,
+        "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+        "AIXION_PROJECT_ID": project.id,
+        "AIXION_APPROVAL_TIMEOUT_SECONDS": "5",
+    }
+
+    with patch.object(antigravity_hook, "_request", side_effect=request), patch.object(
+        antigravity_hook.time, "sleep"
+    ):
+        first = antigravity_hook.run(hook_payload, hook_environment)
+        retry = antigravity_hook.run(hook_payload, hook_environment)
+
+    assert first["decision"] == "deny"
+    assert "ambiguous" in first["reason"]
+    assert retry["decision"] == "deny"
+    assert state["consume_calls"] == 2
+    approval_id = state["approval_id"]
+    assert isinstance(approval_id, str)
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_failures WHERE approval_id=?",
+            (approval_id,),
+        ).fetchone()[0] == 1
+    assert sum(
+        event.event_type == "approval.created_by_agent" and event.entity_id == approval_id
+        for event in store.audit_events
+    ) == 1
+
+
+def test_revocation_after_phone_approval_read_blocks_delivery_claim() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    assert client.post(
+        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
+    ).status_code == 200
+
+    polled = client.get(
+        f"/agents/approvals/{approval_id}/decision", headers=headers
+    )
+    assert polled.status_code == 200
+    assert polled.json()["status"] == "APPROVED"
+
+    revoked = client.post(f"/agents/{agent_id}/token/revoke")
+    consume = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
+
+    assert revoked.status_code == 200
+    assert consume.status_code == 401
+    assert consume.json()["detail"] == "External agent token is revoked or not configured"
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=?",
+            (approval_id,),
+        ).fetchone()[0] == 0
+    assert not any(
+        event.event_type == "approval.delivery_claimed" and event.entity_id == approval_id
+        for event in store.audit_events
+    )
+
+
+def test_legacy_v1_approved_invocation_cannot_be_claimed() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    assert client.post(
+        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
+    ).status_code == 200
+
+    legacy = store.approval_requests[approval_id].model_copy(
+        update={"approved_payload_hash_version": 1, "approved_payload_hash": None}
+    )
+    legacy.approved_payload_hash = compute_approval_payload_hash(legacy)
+    store.approval_requests[approval_id] = legacy
+    store.persist()
+
+    response = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
+
+    assert response.status_code == 409
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=?",
+            (approval_id,),
+        ).fetchone()[0] == 0
+
+
+def test_ambiguous_delivery_failure_requires_explicit_capability_and_claim() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    assert client.post(
+        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
+    ).status_code == 200
+    approved = client.get(
+        f"/agents/approvals/{approval_id}/decision", headers=headers
+    ).json()
+    report = {
+        "source_invocation_id": approved["source_invocation_id"],
+        "approved_payload_hash": approved["approved_payload_hash"],
+        "reason_code": "CLAIM_RESPONSE_AMBIGUOUS",
+    }
+
+    response = client.post(
+        f"/agents/approvals/{approval_id}/delivery-failure", headers=headers, json=report
+    )
+
+    assert response.status_code == 403
+    assert not any(
+        event.event_type == "approval.delivery_failed" and event.entity_id == approval_id
+        for event in store.audit_events
+    )
+
+    _, capable_id, capable_token = _setup_agent(actions=[
+        "CREATE_APPROVAL", "READ_APPROVAL_DECISION", "CONSUME_APPROVAL_DECISION",
+        "REPORT_APPROVAL_DELIVERY_FAILURE",
+    ])
+    assert client.post(
+        f"/agents/approvals/{approval_id}/delivery-failure",
+        headers=_headers(capable_id, capable_token),
+        json=report,
+    ).status_code == 403
+
+
+def test_ambiguous_delivery_failure_is_identity_bound_idempotent_and_audited() -> None:
+    project, agent_id, token = _setup_agent(actions=[
+        "CREATE_APPROVAL", "READ_APPROVAL_DECISION", "CONSUME_APPROVAL_DECISION",
+        "REPORT_APPROVAL_DELIVERY_FAILURE",
+    ])
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    assert client.post(
+        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
+    ).status_code == 200
+    approved = client.get(
+        f"/agents/approvals/{approval_id}/decision", headers=headers
+    ).json()
+    assert client.post(f"/agents/approvals/{approval_id}/consume", headers=headers).status_code == 200
+    report = {
+        "source_invocation_id": approved["source_invocation_id"],
+        "approved_payload_hash": approved["approved_payload_hash"],
+        "reason_code": "CLAIM_RESPONSE_AMBIGUOUS",
+    }
+
+    first = client.post(
+        f"/agents/approvals/{approval_id}/delivery-failure", headers=headers, json=report
+    )
+    retry = client.post(
+        f"/agents/approvals/{approval_id}/delivery-failure", headers=headers, json=report
+    )
+    changed = client.post(
+        f"/agents/approvals/{approval_id}/delivery-failure",
+        headers=headers,
+        json={**report, "source_invocation_id": "another-invocation"},
+    )
+
+    assert first.status_code == retry.status_code == 200
+    assert first.json() == retry.json() == {"recorded": True}
+    assert changed.status_code == 409
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_failures WHERE approval_id=?",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
+            "AND json_extract(payload,'$.event_type')='approval.delivery_failed' "
+            "AND json_extract(payload,'$.entity_id')=?",
+            (approval_id,),
+        ).fetchone()[0] == 1
+
+
+def test_ambiguous_delivery_failure_requires_a_committed_claim() -> None:
+    project, agent_id, token = _setup_agent(actions=[
+        "CREATE_APPROVAL", "READ_APPROVAL_DECISION", "CONSUME_APPROVAL_DECISION",
+        "REPORT_APPROVAL_DELIVERY_FAILURE",
+    ])
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    assert client.post(
+        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
+    ).status_code == 200
+    approved = client.get(
+        f"/agents/approvals/{approval_id}/decision", headers=headers
+    ).json()
+
+    response = client.post(
+        f"/agents/approvals/{approval_id}/delivery-failure",
+        headers=headers,
+        json={
+            "source_invocation_id": approved["source_invocation_id"],
+            "approved_payload_hash": approved["approved_payload_hash"],
+            "reason_code": "CLAIM_RESPONSE_AMBIGUOUS",
+        },
+    )
+
+    assert response.status_code == 409
+    assert not any(
+        event.event_type == "approval.delivery_failed" and event.entity_id == approval_id
+        for event in store.audit_events
+    )
+
+
+def test_unapproved_invocation_cannot_be_claimed() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+
+    response = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
+
+    assert response.status_code == 409
+    assert not any(
+        event.event_type == "approval.delivery_claimed" and event.entity_id == approval_id
+        for event in store.audit_events
+    )
+
+
+def test_delivery_claim_requires_explicit_connector_capability() -> None:
+    project, agent_id, token = _setup_agent(
+        actions=["CREATE_APPROVAL", "READ_APPROVAL_DECISION"]
+    )
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    client.post(f"/approvals/{approval_id}/decision", json={"decision": "approve"})
+
+    response = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
+
+    assert response.status_code == 403
+    assert not any(
+        event.event_type == "approval.delivery_claimed" and event.entity_id == approval_id
+        for event in store.audit_events
+    )
+
+
+def test_missing_expire_own_approval_capability_is_denied() -> None:
+    project, agent_id, token = _setup_agent(actions=["CREATE_APPROVAL", "READ_APPROVAL_DECISION"])
+    approval_id = _approval(project.id, _headers(agent_id, token))
+
+    response = client.post(
+        f"/agents/approvals/{approval_id}/expire",
+        headers=_headers(agent_id, token),
+    )
+
+    assert response.status_code == 403
+    assert store.approval_requests[approval_id].status == "PENDING_REVIEW"
+
+
+def test_agent_can_expire_only_its_own_pending_approval_and_late_approval_is_rejected() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+
+    response = client.post(f"/agents/approvals/{approval_id}/expire", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "EXPIRED"
+    assert any(
+        event.event_type == "approval.expired" and event.entity_id == approval_id
+        for event in store.audit_events
+    )
+    late_decision = client.post(f"/approvals/{approval_id}/decision", json={"decision": "approve"})
+    assert late_decision.status_code == 409
+    assert store.approval_requests[approval_id].status == "EXPIRED"
+    assert store.approval_requests[approval_id].approved_payload_hash is None
+
+
+def test_timeout_cannot_overwrite_a_durable_phone_approval_with_stale_local_state() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    stale_pending = store.approval_requests[approval_id].model_copy(deep=True)
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve"},
+    )
+    assert decision.status_code == 200
+
+    # Model another API process retaining the pre-decision object in memory.
+    store.approval_requests[approval_id] = stale_pending
+    timeout = client.post(f"/agents/approvals/{approval_id}/expire", headers=headers)
+
+    assert timeout.status_code == 200
+    assert timeout.json()["status"] == "APPROVED"
+    assert store.approval_requests[approval_id].status == ApprovalStatus.APPROVED
+    assert not any(
+        event.event_type == "approval.expired" and event.entity_id == approval_id
+        for event in store.audit_events
+    )
+
+
+def test_agent_poll_returns_durable_state_committed_during_expiry_check(monkeypatch) -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+    original_repository = approval_decision_repository
+    approved = original_repository.get(approval_id)
+    assert approved is not None
+    approved = approved.model_copy(
+        update={
+            "status": ApprovalStatus.APPROVED,
+            "approved_payload_hash": compute_approval_payload_hash(approved),
+        }
+    )
+
+    class DecisionCommittedDuringPoll:
+        reads = 0
+
+        def get(self, requested_id: str) -> ApprovalRequest | None:
+            self.reads += 1
+            if requested_id == approval_id and self.reads > 1:
+                return approved
+            return original_repository.get(requested_id)
+
+    concurrent_repository = DecisionCommittedDuringPoll()
+    monkeypatch.setattr(
+        app.state,
+        "approval_decision_repository",
+        concurrent_repository,
+    )
+
+    response = client.get(
+        f"/agents/approvals/{approval_id}/decision",
+        headers=_headers(agent_id, token),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == ApprovalStatus.APPROVED
+    assert response.json()["approved_payload_hash"] == approved.approved_payload_hash
+    assert concurrent_repository.reads == 3
+
+
+def test_agent_cannot_expire_another_agents_approval() -> None:
+    project, owner_id, owner_token = _setup_agent()
+    _, other_id, other_token = _setup_agent()
+    approval_id = _approval(project.id, _headers(owner_id, owner_token))
+
+    response = client.post(
+        f"/agents/approvals/{approval_id}/expire",
+        headers=_headers(other_id, other_token),
+    )
+
+    assert response.status_code == 403
+    assert store.approval_requests[approval_id].status == "PENDING_REVIEW"
+
+
+def test_agent_poll_expires_request_after_server_deadline() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    store.approval_requests[approval_id].expires_at = now_utc() - timedelta(seconds=1)
+    store.persist()
+
+    response = client.get(f"/agents/approvals/{approval_id}/decision", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "EXPIRED"
+    assert store.approval_requests[approval_id].status == "EXPIRED"
+
+
+def test_antigravity_hook_denies_when_real_api_poll_expires_request(monkeypatch) -> None:
+    project, agent_id, token = _setup_agent()
+    calls: list[str] = []
+    approval_ids: list[str] = []
+
+    def request(method: str, url: str, request_agent_id: str, request_token: str,
+                body: dict | None = None) -> dict:
+        path = urlparse(url).path
+        calls.append(f"{method} {path}")
+        response = client.request(
+            method,
+            path,
+            headers={
+                **_headers(request_agent_id, request_token),
+                "X-Aixion-Approval-Protocol": "1",
+            },
+            json=body,
+        )
+        if response.status_code >= 400:
+            raise antigravity_hook.GateError(
+                f"Control Tower returned HTTP {response.status_code}"
+            )
+        result = response.json()
+        if method == "POST" and path == "/agents/approvals":
+            approval_ids.append(result["id"])
+            pending = approval_decision_repository.get(result["id"])
+            assert pending is not None
+            pending.expires_at = now_utc() - timedelta(seconds=1)
+            store.approval_requests[pending.id] = pending
+            store.persist()
+        return result
+
+    monkeypatch.setattr(antigravity_hook, "_request", request)
+    result = antigravity_hook.run(
+        {
+            "conversationId": "session-real-api-expiry",
+            "stepIdx": 1,
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe"}},
+        },
+        {
+            "AIXION_API_BASE_URL": "http://127.0.0.1:8000",
+            "AIXION_AGENT_ID": agent_id,
+            "AIXION_AGENT_TOKEN": token,
+            "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+            "AIXION_PROJECT_ID": project.id,
+        },
+    )
+
+    assert len(approval_ids) == 1
+    created_id = approval_ids[0]
+    assert result["decision"] == "deny"
+    assert store.approval_requests[created_id].status == ApprovalStatus.EXPIRED
+    assert calls == [
+        "POST /agents/approvals",
+        f"GET /agents/approvals/{created_id}/decision",
+    ]
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=?",
+            (created_id,),
+        ).fetchone()[0] == 0
+
+
+def test_mobile_approval_list_expires_overdue_agent_requests() -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+    store.approval_requests[approval_id].expires_at = now_utc() - timedelta(seconds=1)
+    store.persist()
+
+    response = client.get("/approvals")
+
+    assert response.status_code == 200
+    assert next(item for item in response.json() if item["id"] == approval_id)["status"] == "EXPIRED"
+
+
+def test_mobile_approval_list_backfills_deadline_for_legacy_agent_request() -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+    approval = store.approval_requests[approval_id]
+    approval.expires_at = None
+    approval.created_at = now_utc() - timedelta(minutes=11)
+    store.persist()
+
+    response = client.get("/approvals")
+
+    assert response.status_code == 200
+    serialized = next(item for item in response.json() if item["id"] == approval_id)
+    assert serialized["status"] == ApprovalStatus.EXPIRED
+    assert serialized["expires_at"] is not None
+
+
+def test_approved_decision_returns_the_hash_of_frozen_tool_payload() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    approval = store.approval_requests[approval_id]
+    expected_hash = compute_approval_payload_hash(
+        approval.model_copy(update={"approved_payload_hash_version": 2})
+    )
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve"},
+    )
+    assert decision.status_code == 200
+    polled = client.get(f"/agents/approvals/{approval_id}/decision", headers=headers)
+    assert polled.status_code == 200
+    assert polled.json()["status"] == "APPROVED"
+    assert polled.json()["approved_payload_hash"] == expected_hash
+
+
+def test_unapproved_or_denied_decision_never_has_approval_hash() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    client.post(f"/approvals/{approval_id}/decision", json={"decision": "deny"})
+
+    response = client.get(f"/agents/approvals/{approval_id}/decision", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "DENIED"
+    assert response.json()["approved_payload_hash"] is None
+
+
+def test_antigravity_shell_tool_is_never_labeled_medium_or_low_risk() -> None:
+    project, agent_id, token = _setup_agent()
+    response = client.post(
+        "/agents/approvals",
+        headers=_headers(agent_id, token),
+        json={
+            "project_id": project.id,
+            "title": "Antigravity shell request",
+            "summary": "Review the exact command before allowing the session to continue.",
+            "agent_name": "Antigravity",
+            "target_branch": "current-workspace",
+            "files": [{
+                "path": "antigravity://tool/run_command",
+                "change_type": "tool_call",
+                "diff": '{"CommandLine":"echo harmless"}',
+            }],
+            "test_plan": ["Review the exact command"],
+            "rollback_plan": "Deny to stop this command.",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["risk"]["level"] == "CRITICAL"
+
+
+def test_antigravity_file_edit_is_labeled_high_risk() -> None:
+    project, agent_id, token = _setup_agent()
+    response = client.post(
+        "/agents/approvals",
+        headers=_headers(agent_id, token),
+        json={
+            "project_id": project.id,
+            "title": "Antigravity file edit",
+            "summary": "Review the exact file content before allowing the session to continue.",
+            "agent_name": "Antigravity",
+            "target_branch": "current-workspace",
+            "files": [{
+                "path": "antigravity://tool/write_to_file",
+                "change_type": "tool_call",
+                "diff": '{"TargetFile":"README.md","CodeContent":"hello"}',
+            }],
+            "test_plan": ["Review the requested file change"],
+            "rollback_plan": "Deny to stop the file write.",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["risk"]["level"] == "HIGH"
+
+
+def test_antigravity_tool_marker_cannot_bypass_sensitive_path_block() -> None:
+    project, agent_id, token = _setup_agent()
+    response = client.post(
+        "/agents/approvals",
+        headers=_headers(agent_id, token),
+        json={
+            "project_id": project.id,
+            "title": "Mixed Antigravity payload",
+            "summary": "Must retain the sensitive-path hard block.",
+            "agent_name": "Antigravity",
+            "target_branch": "current-workspace",
+            "files": [
+                {
+                    "path": "antigravity://tool/run_command",
+                    "change_type": "tool_call",
+                    "diff": '{"command":"echo safe"}',
+                },
+                {
+                    "path": "config/.env.production",
+                    "change_type": "update",
+                    "diff": "-SECRET=old\n+SECRET=new",
+                },
+            ],
+            "test_plan": ["Review the exact command"],
+            "rollback_plan": "Deny this request.",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "BLOCKED"
+
+
+def test_antigravity_tool_marker_cannot_bypass_protected_branch_block() -> None:
+    project, agent_id, token = _setup_agent()
+    response = client.post(
+        "/agents/approvals",
+        headers=_headers(agent_id, token),
+        json={
+            "project_id": project.id,
+            "title": "Protected branch Antigravity command",
+            "summary": "Must retain the protected-branch hard block.",
+            "agent_name": "Antigravity",
+            "target_branch": "main",
+            "files": [{
+                "path": "antigravity://tool/run_command",
+                "change_type": "tool_call",
+                "diff": '{"command":"echo safe"}',
+            }],
+            "test_plan": ["Review the exact command"],
+            "rollback_plan": "Deny this request.",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "BLOCKED"

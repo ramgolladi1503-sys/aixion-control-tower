@@ -19,7 +19,7 @@ def setup_function() -> None:
 
 
 def _project() -> Project:
-    project = Project(name="Container Plan", description="demo")
+    project = Project(name="Container Plan", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     return project
 
@@ -35,6 +35,7 @@ def _approval(project: Project) -> ApprovalRequest:
         test_plan=["python -m pytest"],
         rollback_plan="Close PR.",
         risk=RiskAssessment(level=RiskLevel.LOW),
+        status="APPROVED",
     )
     store.approval_requests[approval.id] = approval
     return approval

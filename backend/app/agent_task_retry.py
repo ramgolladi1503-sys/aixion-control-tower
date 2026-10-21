@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from .approval_decisions import agent_task_repository
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from .models import AuditEvent, now_utc
-from .store import store
+from .agent_task_repository import RETRY_REQUESTED_OPERATION
 
-RETRY_REQUESTED_OPERATION = "agent_task_retry_requested"
 DEFAULT_MAX_RETRIES = 3
 
 
@@ -24,11 +24,7 @@ class AgentTaskRetrySummary(BaseModel):
 
 
 def count_retry_requests(task_id: str) -> int:
-    return sum(
-        1
-        for event in store.agent_task_events.values()
-        if event.task_id == task_id and event.metadata.get("operation_type") == RETRY_REQUESTED_OPERATION
-    )
+    return agent_task_repository.count_retries(task_id)
 
 
 def retry_summary(task: AgentTask, *, max_retries: int = DEFAULT_MAX_RETRIES) -> AgentTaskRetrySummary:
@@ -94,7 +90,6 @@ def append_retry_requested_event(
             "worker_lease_cleared": True,
         },
     )
-    store.agent_task_events[event.id] = event
     return event
 
 
@@ -102,6 +97,7 @@ def audit_retry_requested(task: AgentTask, *, actor: str, event: AgentTaskEvent)
     audit = AuditEvent(
         event_type="agent_task.retry_requested",
         entity_id=task.id,
+        workspace_id=task.workspace_id,
         actor=actor,
         details={
             "event_id": event.id,
@@ -112,5 +108,4 @@ def audit_retry_requested(task: AgentTask, *, actor: str, event: AgentTaskEvent)
             "worker_lease_cleared": True,
         },
     )
-    store.audit_events.append(audit)
     return audit

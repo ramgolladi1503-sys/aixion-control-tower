@@ -8,14 +8,13 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.mcp_gateway import FORWARDED_AFTER_APPROVAL
+from app.mcp_gateway import FORWARDED_AFTER_APPROVAL, MCP_PENDING_FORWARD_OUTCOME_UNKNOWN
 from app.mcp_gateway_routes import (
-    MCP_PENDING_LEASE_RELEASED,
     MCP_PENDING_RETRIED,
     child_received_count_for_test,
     reset_gateway_runtime_for_test,
 )
-from app.models import MCPPendingStatus, now_utc
+from app.models import ApprovalStatus, MCPPendingStatus, now_utc
 from app.store import store
 
 client = TestClient(app)
@@ -77,9 +76,12 @@ def test_http_mcp_gateway_waits_then_forwards_after_mobile_decision() -> None:
     assert decision.status_code == 200
     assert decision.json()["status"] == "APPROVED"
 
+    # Exercise the API path as if this process missed the committed decision.
+    store.approval_requests.pop(approval_id)
     resolved = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
 
     assert resolved.status_code == 200
+    assert store.approval_requests[approval_id].status.value == "APPROVED"
     resolved_body = resolved.json()
     assert resolved_body["forwarded"] is True
     assert resolved_body["approval_required"] is True
@@ -259,7 +261,7 @@ def test_http_mcp_pending_health_summary_counts_queue_risk_states() -> None:
     assert body["expired_leases"] == 1
     assert body["dead_letter"] == 1
     assert body["terminal"] == 1
-    assert body["retryable"] == 3
+    assert body["retryable"] == 2
     assert body["attention_required"] == 2
     assert body["oldest_waiting_created_at"] is not None
     assert body["oldest_dead_letter_created_at"] is not None
@@ -321,7 +323,7 @@ def test_http_mcp_pending_retry_dead_letter_clears_error_and_resets_attempts() -
     assert MCP_PENDING_RETRIED in [event.event_type for event in store.audit_events]
 
 
-def test_http_mcp_pending_retry_releases_expired_forwarding_lease() -> None:
+def test_http_mcp_pending_retry_dead_letters_expired_forwarding_lease_without_replay() -> None:
     project_id = _create_project()
     _submit_mutating_request(project_id)
     pending = _pending()
@@ -337,16 +339,45 @@ def test_http_mcp_pending_retry_releases_expired_forwarding_lease() -> None:
         json={"reason": "release stale lease", "reset_attempts": False},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 409
     body = response.json()
-    assert body["status"] == MCPPendingStatus.WAITING_FOR_APPROVAL
-    assert body["attempts"] == 2
-    assert body["lease_owner"] is None
-    assert body["lease_expires_at"] is None
-    assert body["last_error"] is None
+    assert "unknown child-server outcome" in body["detail"]
+    assert pending.status == MCPPendingStatus.DEAD_LETTER
+    assert pending.attempts == 2
+    assert pending.lease_owner is None
+    assert pending.lease_expires_at is None
+    assert pending.last_error == MCP_PENDING_FORWARD_OUTCOME_UNKNOWN
     event_types = [event.event_type for event in store.audit_events]
-    assert MCP_PENDING_LEASE_RELEASED in event_types
-    assert MCP_PENDING_RETRIED in event_types
+    assert "mcp.forward_outcome_unknown" in event_types
+    assert MCP_PENDING_RETRIED not in event_types
+    assert child_received_count_for_test() == 0
+
+
+def test_http_mcp_resolver_dead_letters_expired_forwarding_lease_without_replay() -> None:
+    project_id = _create_project()
+    submitted = _submit_mutating_request(project_id)
+    pending = _pending()
+    pending.status = MCPPendingStatus.FORWARDING
+    pending.attempts = 1
+    pending.lease_owner = "dead-worker"
+    pending.lease_expires_at = now_utc() - timedelta(seconds=1)
+    approval = store.approval_requests[submitted["approval_request_id"]]
+    approval.status = ApprovalStatus.APPROVED
+    from app.approval_integrity import compute_approval_payload_hash
+
+    approval.approved_payload_hash_version = 2
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
+    store.persist()
+
+    response = client.post(f"/mcp-gateway/approvals/{approval.id}/resolve")
+
+    assert response.status_code == 200
+    assert response.json()["forwarded"] is False
+    assert "unknown child-server outcome" in response.json()["reason"]
+    assert pending.status == MCPPendingStatus.DEAD_LETTER
+    assert pending.last_error == MCP_PENDING_FORWARD_OUTCOME_UNKNOWN
+    assert child_received_count_for_test() == 0
+    assert sum(event.event_type == "mcp.forward_outcome_unknown" for event in store.audit_events) == 1
 
 
 def test_http_mcp_pending_retry_blocks_active_forwarding_lease() -> None:

@@ -42,10 +42,36 @@ users
 sessions
 invites
 external_agents
+external_agent_credentials
+agent_connectors
 device_registrations
+capability_leases
+reviewer_attestations
+proposed_actions
+policy_decisions
+action_authorizations
+action_consumptions
+credential_grants
+trust_events
 ```
 
-Why: those collections can contain password hashes, session hashes, invitation state, agent secret hashes, or device tokens. A casual full export endpoint would be a security foot-gun.
+Why: those collections can contain password hashes, session hashes, invitation state, agent secrets, device tokens, or authorization material. A casual full export endpoint would be a security foot-gun.
+
+Other operational collections are also excluded and are now listed separately
+in the snapshot's `excluded_collections` field:
+
+```text
+workspaces
+agent_tasks
+agent_task_events
+agent_runs
+agent_run_steps
+agent_run_events
+agent_run_faults
+```
+
+This export is partial operational data, not a complete account backup. The
+exclusion inventory must be reviewed before any migration or restore use.
 
 ## Export workflow
 
@@ -79,6 +105,7 @@ Payload shape:
     "generated_at": "2026-05-12T00:00:00Z",
     "applied_migrations": [],
     "counts": {},
+    "excluded_collections": [],
     "excluded_sensitive_collections": [],
     "entities": {}
   }
@@ -91,12 +118,20 @@ Validation checks:
 
 ```text
 format_version is supported
-expected collections are lists
+all expected collections are present and lists
+declared collection counts match actual rows
+entity IDs are unique within each collection
 entity payloads validate against current Pydantic models
 unknown collections are rejected
+the excluded-collection inventory is compared with the current backend schema
 missing migration metadata creates a warning
 sensitive exclusion creates a warning
 ```
+
+Export captures collections and derives their counts while holding the store's
+writer lock. This keeps the artifact internally consistent for the current
+single-process SQLite profile. It does not make the export a transactionally
+consistent PostgreSQL backup or a recoverable physical database snapshot.
 
 ## What this does not solve yet
 

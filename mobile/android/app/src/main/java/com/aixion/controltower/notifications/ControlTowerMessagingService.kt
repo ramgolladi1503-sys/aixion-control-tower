@@ -10,17 +10,27 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.aixion.controltower.MainActivity
 import com.aixion.controltower.R
+import com.aixion.controltower.core.auth.SecureStringPreferences
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 
 class ControlTowerMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
         super.onNewToken(token)
-        getSharedPreferences("aixion_push", MODE_PRIVATE)
-            .edit()
-            .putString("pending_fcm_token", token)
-            .apply()
-        Log.i(TAG, "FCM token refreshed and stored for backend registration")
+        try {
+            SecureStringPreferences.put(
+                this,
+                PUSH_PREFERENCES,
+                PENDING_FCM_TOKEN,
+                PUSH_TOKEN_KEY_ALIAS,
+                token
+            )
+            Log.i(TAG, "FCM token refreshed and stored securely for backend registration")
+        } catch (_: Exception) {
+            // The app can retrieve the current token from Firebase on its next
+            // authenticated registration attempt; never log the token or fail open.
+            Log.w(TAG, "FCM token could not be stored securely; registration must retry")
+        }
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -28,19 +38,27 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
         val entityType = message.data["entity_type"]
         val entityId = message.data["entity_id"]
         val notificationId = message.data["notification_id"]
-        Log.i(TAG, "Push received entity=$entityType id=$entityId")
+        // Entity identifiers are useful for app routing but should not be copied
+        // into Android logcat, where routine diagnostics can expose private work.
+        Log.i(TAG, "Push received")
 
-        if (entityType.isNullOrBlank() || entityId.isNullOrBlank()) {
-            Log.w(TAG, "Push ignored because entity_type/entity_id is missing")
+        val approvalLink = NotificationDeepLink.fromPayload(
+            entityType = entityType,
+            entityId = entityId,
+            notificationId = notificationId
+        )
+        if (!approvalLink.isApprovalRequest()) {
+            Log.i(TAG, "Non-approval push ignored by release-one client")
             return
         }
+        val approvedLink = approvalLink as NotificationDeepLink.ApprovalRequest
 
         showNotification(
             title = message.notification?.title ?: message.data["title"] ?: "Aixion update",
             body = message.notification?.body ?: message.data["body"] ?: "Open Aixion Control Tower",
-            entityType = entityType,
-            entityId = entityId,
-            notificationId = notificationId
+            entityType = "approval_request",
+            entityId = approvedLink.entityId,
+            notificationId = approvedLink.notificationId
         )
     }
 
@@ -86,13 +104,18 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
     private fun ensureChannel(manager: NotificationManager) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val existing = manager.getNotificationChannel(CHANNEL_ID)
-        if (existing != null) return
+        if (existing != null) {
+            existing.name = "Aixion approval requests"
+            existing.description = "Approval requests that need your decision."
+            manager.createNotificationChannel(existing)
+            return
+        }
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Aixion approvals and agent tasks",
+            "Aixion approval requests",
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Notifications for approvals, agent tasks, and worker results"
+            description = "Approval requests that need your decision."
         }
         manager.createNotificationChannel(channel)
     }
@@ -100,5 +123,8 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
     companion object {
         private const val TAG = "AixionFCM"
         private const val CHANNEL_ID = "aixion_agent_tasks"
+        private const val PUSH_PREFERENCES = "aixion_push"
+        private const val PENDING_FCM_TOKEN = "pending_fcm_token"
+        private const val PUSH_TOKEN_KEY_ALIAS = "com.aixion.controltower.push.token.v1"
     }
 }

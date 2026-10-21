@@ -9,6 +9,7 @@ os.environ.setdefault("AIXION_LEASE_SIGNING_KEY", "route-test-signing-key-with-s
 from fastapi.testclient import TestClient
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.approval_integrity import compute_approval_payload_hash
 from app.main import app
 from app.models import (
     AgentProvider,
@@ -51,8 +52,8 @@ def _seed_approval() -> ApprovalRequest:
         status=ApprovalStatus.APPROVED,
         created_by_user_id="creator",
         approved_by_user_id="reviewer",
-        approved_payload_hash="route-approved-hash",
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,

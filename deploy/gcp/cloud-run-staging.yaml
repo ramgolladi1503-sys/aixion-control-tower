@@ -1,0 +1,123 @@
+# PRE-BILLING DRAFT ONLY
+# DO NOT APPLY: the application currently rejects the production profile because
+# the complete PostgreSQL runtime is not implemented and verified (Slice 1).
+# This file creates nothing until an operator explicitly applies it after review.
+# Public Cloud Run invocation is needed for Android clients; application routes
+# must continue to enforce account/connector authentication.
+# Scale-to-zero cannot host reliable background dispatch loops. The API uses
+# scheduled mode; external scheduled invocations may run the bounded one-shot
+# push/email workers only after the full PostgreSQL application path is certified.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: aixion-control-tower-staging
+  namespace: REPLACE_WITH_GCP_PROJECT_NUMBER
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/invoker-iam-disabled: "true"
+    run.googleapis.com/maxScale: "1"
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cloudsql-instances: REPLACE_WITH_PROJECT_ID:asia-south1:REPLACE_WITH_INSTANCE
+        run.googleapis.com/secrets: >-
+          postgres-dsn:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/replace-with-postgres-dsn,
+          lease-signing-key:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/replace-with-lease-signing-key,
+          auth-rate-limit-key:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/replace-with-auth-rate-limit-key,
+          metrics-token:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/replace-with-metrics-token,
+          smtp-username:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/replace-with-smtp-username,
+          smtp-password:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/replace-with-smtp-password,
+          email-outbox-key:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/replace-with-email-outbox-key,
+          github-token:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/replace-with-github-token
+    spec:
+      serviceAccountName: REPLACE_WITH_RUNTIME_SERVICE_ACCOUNT
+      containerConcurrency: 20
+      timeoutSeconds: 60
+      containers:
+        - image: asia-south1-docker.pkg.dev/REPLACE_WITH_PROJECT_ID/aixion/aixion-api@sha256:REPLACE_WITH_IMAGE_DIGEST
+          ports:
+            - name: http1
+              containerPort: 8000
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          env:
+            - name: AIXION_PROFILE
+              value: production
+            - name: AIXION_AUTH_ENABLED
+              value: "true"
+            - name: AIXION_TRUST_ENFORCEMENT
+              value: "true"
+            - name: AIXION_OUTBOX_DISPATCH_MODE
+              value: scheduled
+            - name: AIXION_POSTGRES_RUNTIME_PROBE_ENABLED
+              value: "true"
+            - name: AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED
+              value: "true"
+            - name: AIXION_POSTGRES_AUTH_ENABLED
+              value: "true"
+            - name: AIXION_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-dsn
+                  key: "1"
+            - name: AIXION_LEASE_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lease-signing-key
+                  key: "1"
+            - name: AIXION_AUTH_RATE_LIMIT_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: auth-rate-limit-key
+                  key: "1"
+            - name: AIXION_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: metrics-token
+                  key: "1"
+            - name: AIXION_METRICS_WORKSPACE_ID
+              value: REPLACE_WITH_STAGING_WORKSPACE_ID
+            - name: AIXION_FCM_PROJECT_ID
+              value: REPLACE_WITH_FIREBASE_PROJECT_ID
+            - name: AIXION_PUSH_DISPATCH_ENABLED
+              value: "true"
+            - name: AIXION_EMAIL_DISPATCH_ENABLED
+              value: "true"
+            - name: AIXION_EMAIL_SMTP_HOST
+              value: REPLACE_WITH_APPROVED_SMTP_HOST
+            - name: AIXION_EMAIL_FROM
+              value: REPLACE_WITH_VERIFIED_SENDER
+            - name: AIXION_EMAIL_SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-username
+                  key: "1"
+            - name: AIXION_EMAIL_SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-password
+                  key: "1"
+            - name: AIXION_EMAIL_OUTBOX_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: email-outbox-key
+                  key: "1"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 1
+            timeoutSeconds: 3
+            periodSeconds: 5
+            failureThreshold: 12

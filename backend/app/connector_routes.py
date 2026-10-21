@@ -34,8 +34,19 @@ from .connector_schema_mapper import (
 from .connector_simulator import ConnectorSimulationRequest, ConnectorSimulationResponse, simulate_connector_webhook
 from .connector_templates import ConnectorTemplate, ConnectorTemplateList, connector_templates, get_connector_template
 from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
+from .application_repository_access import (
+    project_repository_for_request,
+    workspace_id_for_request,
+    workspace_membership_repository_for_request,
+)
 from .models import AuditEvent, AuthUser, now_utc
+from .project_repository import ProjectRepository
 from .store import store
+from .workspace_access import (
+    connector_scope_is_consistent,
+    project_workspace_id,
+    workspace_id_for_user,
+)
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 OwnerDependency = Depends(require_owner)
@@ -81,17 +92,39 @@ def _to_public(connector: AgentConnector) -> ConnectorPublic:
     )
 
 
-def _get_connector_or_404(connector_id: str) -> AgentConnector:
+def _get_connector_or_404(connector_id: str, user: AuthUser | None = None) -> AgentConnector:
     connector = store.agent_connectors.get(connector_id)
-    if not connector:
+    if not connector or not connector_scope_is_consistent(connector):
         raise HTTPException(status_code=404, detail="Connector not found")
+    if user is not None:
+        workspace_id = workspace_id_for_user(user)
+        if workspace_id is not None and connector.workspace_id != workspace_id:
+            raise HTTPException(status_code=404, detail="Connector not found")
     return connector
 
 
-def _validate_scopes(payload: ConnectorCreate | ConnectorUpdate) -> None:
+def _validate_scopes(
+    payload: ConnectorCreate | ConnectorUpdate,
+    workspace_id: str | None,
+    project_repository: ProjectRepository | None = None,
+) -> None:
     project_ids = payload.allowed_project_ids
     if project_ids:
-        missing = [project_id for project_id in project_ids if project_id not in store.projects]
+        if project_repository is None:
+            missing = [
+                project_id for project_id in project_ids
+                if project_id not in store.projects
+                or (workspace_id is not None and project_workspace_id(project_id) != workspace_id)
+            ]
+        else:
+            missing = [
+                project_id
+                for project_id in project_ids
+                if (
+                    (project := project_repository.get(project_id)) is None
+                    or (workspace_id is not None and project.workspace_id != workspace_id)
+                )
+            ]
         if missing:
             raise HTTPException(status_code=404, detail={"message": "Project scope not found", "project_ids": missing})
 
@@ -113,8 +146,20 @@ def _connector_details(connector: AgentConnector) -> dict:
 
 
 @router.post("", response_model=ConnectorPublic)
-def create_connector(payload: ConnectorCreate, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    _validate_scopes(payload)
+def create_connector(
+    payload: ConnectorCreate,
+    user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorPublic:
+    workspace_id = (
+        workspace_id_for_user(user)
+        if http_request is None
+        else workspace_id_for_request(user, http_request)
+    )
+    project_repository = (
+        None if http_request is None else project_repository_for_request(http_request)
+    )
+    _validate_scopes(payload, workspace_id, project_repository)
     connector = AgentConnector(
         name=payload.name,
         connector_type=payload.connector_type,
@@ -129,6 +174,7 @@ def create_connector(payload: ConnectorCreate, user: AuthUser = OwnerDependency)
         allowed_actions=payload.allowed_actions,
         rate_limit_per_minute=payload.rate_limit_per_minute,
         created_by_user_id=user.id,
+        workspace_id=workspace_id,
         config=payload.config,
     )
     store.agent_connectors[connector.id] = connector
@@ -138,8 +184,30 @@ def create_connector(payload: ConnectorCreate, user: AuthUser = OwnerDependency)
 
 
 @router.get("", response_model=list[ConnectorPublic])
-def list_connectors(_: AuthUser = OwnerDependency) -> list[ConnectorPublic]:
-    return [_to_public(connector) for connector in store.agent_connectors.values()]
+def list_connectors(
+    user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> list[ConnectorPublic]:
+    workspace_id = (
+        workspace_id_for_user(user)
+        if http_request is None
+        else workspace_id_for_request(user, http_request)
+    )
+    project_repository = (
+        None if http_request is None else project_repository_for_request(http_request)
+    )
+    membership_repository = (
+        None
+        if http_request is None
+        else workspace_membership_repository_for_request(http_request)
+    )
+    return [_to_public(connector) for connector in store.agent_connectors.values()
+            if connector_scope_is_consistent(
+                connector,
+                projects=project_repository,
+                memberships=membership_repository,
+            )
+            and (workspace_id is None or connector.workspace_id == workspace_id)]
 
 
 @router.get("/templates", response_model=ConnectorTemplateList)
@@ -175,18 +243,18 @@ async def connector_webhook(
 
 
 @router.post("/{connector_id}/simulate", response_model=ConnectorSimulationResponse)
-def simulate_connector_webhook_route(connector_id: str, payload: ConnectorSimulationRequest, _: AuthUser = OwnerDependency) -> ConnectorSimulationResponse:
-    return simulate_connector_webhook(_get_connector_or_404(connector_id), payload)
+def simulate_connector_webhook_route(connector_id: str, payload: ConnectorSimulationRequest, user: AuthUser = OwnerDependency) -> ConnectorSimulationResponse:
+    return simulate_connector_webhook(_get_connector_or_404(connector_id, user), payload)
 
 
 @router.get("/{connector_id}/schema-mapper", response_model=ConnectorSchemaMapperStatus)
-def get_connector_mapper(connector_id: str, _: AuthUser = OwnerDependency) -> ConnectorSchemaMapperStatus:
-    return get_connector_schema_mapper_status(_get_connector_or_404(connector_id))
+def get_connector_mapper(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorSchemaMapperStatus:
+    return get_connector_schema_mapper_status(_get_connector_or_404(connector_id, user))
 
 
 @router.put("/{connector_id}/schema-mapper", response_model=ConnectorSchemaMapperStatus)
 def update_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperConfig, user: AuthUser = OwnerDependency) -> ConnectorSchemaMapperStatus:
-    connector = _get_connector_or_404(connector_id)
+    connector = _get_connector_or_404(connector_id, user)
     status = set_connector_schema_mapper(connector, payload)
     connector.updated_at = now_utc()
     _audit("connector.schema_mapper_updated", connector.id, {"mapper_enabled": status.mapper_enabled, "mapped_fields": list(payload.field_paths.keys())}, actor=user.email)
@@ -195,19 +263,20 @@ def update_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperCon
 
 
 @router.post("/{connector_id}/schema-mapper/preview", response_model=ConnectorSchemaMapperPreviewResponse)
-def preview_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperPreviewRequest, _: AuthUser = OwnerDependency) -> ConnectorSchemaMapperPreviewResponse:
-    return preview_connector_schema_mapping(_get_connector_or_404(connector_id), payload)
+def preview_connector_mapper(connector_id: str, payload: ConnectorSchemaMapperPreviewRequest, user: AuthUser = OwnerDependency) -> ConnectorSchemaMapperPreviewResponse:
+    return preview_connector_schema_mapping(_get_connector_or_404(connector_id, user), payload)
 
 
 @router.get("/{connector_id}", response_model=ConnectorPublic)
-def get_connector(connector_id: str, _: AuthUser = OwnerDependency) -> ConnectorPublic:
-    return _to_public(_get_connector_or_404(connector_id))
+def get_connector(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
+    return _to_public(_get_connector_or_404(connector_id, user))
 
 
 @router.patch("/{connector_id}", response_model=ConnectorPublic)
 def update_connector(connector_id: str, payload: ConnectorUpdate, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    _validate_scopes(payload)
-    connector = _get_connector_or_404(connector_id)
+    workspace_id = workspace_id_for_user(user)
+    _validate_scopes(payload, workspace_id)
+    connector = _get_connector_or_404(connector_id, user)
     previous_status = connector.status
     update = payload.model_dump(exclude_unset=True)
     for field_name, value in update.items():
@@ -231,7 +300,7 @@ def update_connector(connector_id: str, payload: ConnectorUpdate, user: AuthUser
 
 @router.post("/{connector_id}/disable", response_model=ConnectorPublic)
 def disable_connector(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id)
+    connector = _get_connector_or_404(connector_id, user)
     previous_status = connector.status
     connector.status = ConnectorStatus.DISABLED
     connector.health_status = ConnectorHealthStatus.DISABLED
@@ -248,7 +317,7 @@ def disable_connector(connector_id: str, user: AuthUser = OwnerDependency) -> Co
 
 @router.post("/{connector_id}/enable", response_model=ConnectorPublic)
 def enable_connector(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id)
+    connector = _get_connector_or_404(connector_id, user)
     previous_status = connector.status
     connector.status = ConnectorStatus.ENABLED
     connector.health_status = ConnectorHealthStatus.UNKNOWN
@@ -264,8 +333,8 @@ def enable_connector(connector_id: str, user: AuthUser = OwnerDependency) -> Con
 
 
 @router.get("/{connector_id}/credentials", response_model=ConnectorCredentialStatus)
-def get_connector_credentials(connector_id: str, _: AuthUser = OwnerDependency) -> ConnectorCredentialStatus:
-    return connector_credential_status(_get_connector_or_404(connector_id))
+def get_connector_credentials(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorCredentialStatus:
+    return connector_credential_status(_get_connector_or_404(connector_id, user))
 
 
 @router.post("/{connector_id}/secret/issue", response_model=ConnectorSecretIssueResponse)
@@ -274,7 +343,7 @@ def issue_connector_secret_route(
     payload: ConnectorSecretIssueRequest | None = None,
     user: AuthUser = OwnerDependency,
 ) -> ConnectorSecretIssueResponse:
-    connector = _get_connector_or_404(connector_id)
+    connector = _get_connector_or_404(connector_id, user)
     secret, secret_ref, secret_hint = issue_connector_secret(connector)
     _audit(
         "connector.secret_issued",
@@ -292,7 +361,7 @@ def rotate_connector_secret_route(
     payload: ConnectorSecretIssueRequest | None = None,
     user: AuthUser = OwnerDependency,
 ) -> ConnectorSecretIssueResponse:
-    connector = _get_connector_or_404(connector_id)
+    connector = _get_connector_or_404(connector_id, user)
     secret, secret_ref, secret_hint = issue_connector_secret(connector)
     _audit(
         "connector.secret_rotated",
@@ -306,7 +375,7 @@ def rotate_connector_secret_route(
 
 @router.post("/{connector_id}/secret/revoke", response_model=ConnectorPublic)
 def revoke_connector_secret_route(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id)
+    connector = _get_connector_or_404(connector_id, user)
     revoke_connector_secret(connector)
     _audit("connector.secret_revoked", connector.id, {"secret_configured": False}, actor=user.email)
     store.persist()
@@ -315,7 +384,7 @@ def revoke_connector_secret_route(connector_id: str, user: AuthUser = OwnerDepen
 
 @router.post("/{connector_id}/health/success", response_model=ConnectorPublic)
 def mark_connector_success(connector_id: str, user: AuthUser = OwnerDependency) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id)
+    connector = _get_connector_or_404(connector_id, user)
     record_connector_auth_success(connector)
     mark_connector_health_check(connector, healthy=True)
     _audit("connector.health_success", connector.id, _connector_details(connector), actor=user.email)
@@ -329,7 +398,7 @@ def mark_connector_failure(
     payload: ConnectorSecretIssueRequest | None = None,
     user: AuthUser = OwnerDependency,
 ) -> ConnectorPublic:
-    connector = _get_connector_or_404(connector_id)
+    connector = _get_connector_or_404(connector_id, user)
     reason = payload.note if payload and payload.note else "manual health failure"
     record_connector_auth_failure(connector, reason)
     mark_connector_health_check(connector, healthy=False, reason=reason)

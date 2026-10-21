@@ -11,11 +11,17 @@ from typing import Any, Protocol
 import httpx
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
+from .agent_task_repository import AgentTaskRepository
 from .agent_worker_branch_plan import _planned_branch_for_task, validate_branch_plan
-from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
+from .agent_worker_claims import (
+    claim_agent_task_for_worker,
+    claim_first_approved_agent_task_for_worker,
+    commit_agent_task_worker_outcome,
+)
 from .agent_worker_file_plan import validate_file_patch_plan
-from .models import ApprovalRequest, AuditEvent, FileChange
-from .store import store
+from .approval_decisions import agent_task_repository, approval_decision_repository
+from .approval_repository import ApprovalDecisionRepository
+from .models import ApprovalRequest, FileChange
 
 GITHUB_API_BASE_URL = "https://api.github.com"
 
@@ -172,32 +178,15 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _audit(event_type: str, entity_id: str, details: dict[str, Any], actor: str) -> AuditEvent:
-    event = AuditEvent(event_type=event_type, entity_id=entity_id, details=details, actor=actor)
-    store.audit_events.append(event)
-    return event
-
-
-def _release_task(task: AgentTask, lease_token: str | None, worker_id: str) -> None:
-    if lease_token and task.worker_lease_token != lease_token:
-        _audit(
-            "agent_worker.lease_release_skipped",
-            task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "current_lease_token": task.worker_lease_token},
-            actor=worker_id,
-        )
-        return
-    task.worker_lease_owner = None
-    task.worker_lease_expires_at = None
-    task.worker_lease_token = None
-    task.updated_at = _now()
-    _audit("agent_worker.task_released", task.id, {"worker_id": worker_id, "lease_token": lease_token}, actor=worker_id)
-
-
-def _linked_approval(task: AgentTask) -> ApprovalRequest | None:
+def _linked_approval(
+    task: AgentTask,
+    repository: ApprovalDecisionRepository | None = None,
+) -> ApprovalRequest | None:
     if not task.approval_request_id:
         return None
-    return store.approval_requests.get(task.approval_request_id)
+    if repository is not None:
+        return repository.get(task.approval_request_id)
+    return approval_decision_repository.get(task.approval_request_id)
 
 
 def _default_client() -> GitHubRestFileClient:
@@ -264,7 +253,6 @@ def _append_files_applied_event(
     task: AgentTask,
     approval: ApprovalRequest,
     worker_id: str,
-    lease_token: str | None,
     result: GitHubFileApplyResult,
 ) -> AgentTaskEvent:
     event = AgentTaskEvent(
@@ -275,7 +263,6 @@ def _append_files_applied_event(
         actor=worker_id,
         metadata={
             "worker_id": worker_id,
-            "lease_token": lease_token,
             "approval_request_id": approval.id,
             "repository": result.repository,
             "branch": result.branch,
@@ -288,7 +275,6 @@ def _append_files_applied_event(
             "operation_type": "github_file_application",
         },
     )
-    store.agent_task_events[event.id] = event
     return event
 
 
@@ -299,14 +285,23 @@ def run_agent_worker_github_file_application(
     worker_id: str = "agent-worker-github-files",
     lease_seconds: int = 300,
     client: GitHubFileClient | None = None,
+    task_repository: AgentTaskRepository | None = None,
+    approval_repository: ApprovalDecisionRepository | None = None,
 ) -> AgentWorkerGitHubFilesResult:
     if not task_id and not first_approved:
         return AgentWorkerGitHubFilesResult(success=False, worker_id=worker_id, reason="Provide task_id or set first_approved=true.")
 
+    active_task_repository = task_repository or agent_task_repository
+    active_approval_repository = approval_repository or approval_decision_repository
     claim = (
-        claim_first_approved_agent_task_for_worker(worker_id=worker_id, lease_seconds=lease_seconds)
+        claim_first_approved_agent_task_for_worker(
+            worker_id=worker_id, lease_seconds=lease_seconds, repository=active_task_repository
+        )
         if first_approved and not task_id
-        else claim_agent_task_for_worker(task_id=str(task_id), worker_id=worker_id, lease_seconds=lease_seconds)
+        else claim_agent_task_for_worker(
+            task_id=str(task_id), worker_id=worker_id, lease_seconds=lease_seconds,
+            repository=active_task_repository,
+        )
     )
     if not claim.success or claim.task is None:
         return AgentWorkerGitHubFilesResult(
@@ -321,12 +316,17 @@ def run_agent_worker_github_file_application(
     task = claim.task
     lease_token = claim.lease_token
     branch = _planned_branch_for_task(task)
-    approval = _linked_approval(task)
+    approval = _linked_approval(task, active_approval_repository)
     validation_error = validate_branch_plan(task) or validate_file_patch_plan(approval)
     if validation_error:
-        _audit("agent_worker.github_files_refused", task.id, {"worker_id": worker_id, "lease_token": lease_token, "reason": validation_error}, actor=worker_id)
-        _release_task(task, lease_token, worker_id)
-        store.persist()
+        try:
+            commit_agent_task_worker_outcome(
+                task, worker_id=worker_id, repository=active_task_repository,
+                audit_type="agent_worker.github_files_refused",
+                details={"reason": validation_error},
+            )
+        except Exception as error:  # noqa: BLE001 - do not mask an uncommitted lease release.
+            validation_error = f"{validation_error} Durable worker outcome could not be committed: {error}"
         return AgentWorkerGitHubFilesResult(
             success=False,
             task_id=task.id,
@@ -340,18 +340,19 @@ def run_agent_worker_github_file_application(
         )
 
     assert approval is not None
-    github = client or _default_client()
     try:
+        github = client or _default_client()
         applied = _apply_file_changes(task=task, approval=approval, branch=branch, client=github)
     except Exception as error:  # noqa: BLE001 - report worker failure cleanly.
-        _audit(
-            "agent_worker.github_files_failed",
-            task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "repository": task.repository, "branch": branch, "reason": str(error)},
-            actor=worker_id,
-        )
-        _release_task(task, lease_token, worker_id)
-        store.persist()
+        failure_reason = str(error)
+        try:
+            commit_agent_task_worker_outcome(
+                task, worker_id=worker_id, repository=active_task_repository,
+                audit_type="agent_worker.github_files_failed",
+                details={"repository": task.repository, "branch": branch, "reason": failure_reason},
+            )
+        except Exception as commit_error:  # noqa: BLE001 - preserve ambiguity after external writes.
+            failure_reason = f"{failure_reason} Durable worker outcome could not be committed: {commit_error}"
         return AgentWorkerGitHubFilesResult(
             success=False,
             task_id=task.id,
@@ -361,27 +362,41 @@ def run_agent_worker_github_file_application(
             repository=task.repository,
             branch=branch,
             final_status=task.status,
-            reason=str(error),
+            reason=failure_reason,
         )
 
-    event = _append_files_applied_event(task, approval, worker_id, lease_token, applied)
-    _audit(
-        "agent_worker.github_files_applied",
-        task.id,
-        {
-            "worker_id": worker_id,
-            "lease_token": lease_token,
-            "approval_request_id": approval.id,
-            "repository": applied.repository,
-            "branch": applied.branch,
-            "files_written": applied.files_written,
-            "files_deleted": applied.files_deleted,
-            "commits_created": applied.commits_created,
-        },
-        actor=worker_id,
-    )
-    _release_task(task, lease_token, worker_id)
-    store.persist()
+    event = _append_files_applied_event(task, approval, worker_id, applied)
+    try:
+        commit_agent_task_worker_outcome(
+            task, worker_id=worker_id, repository=active_task_repository,
+            audit_type="agent_worker.github_files_applied",
+            details={
+                "approval_request_id": approval.id,
+                "repository": applied.repository,
+                "branch": applied.branch,
+                "files_written": applied.files_written,
+                "files_deleted": applied.files_deleted,
+                "commits_created": applied.commits_created,
+            },
+            event=event,
+        )
+    except Exception as error:  # noqa: BLE001 - external writes may have happened; never report durable success.
+        return AgentWorkerGitHubFilesResult(
+            success=False,
+            task_id=task.id,
+            approval_request_id=approval.id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            repository=applied.repository,
+            branch=applied.branch,
+            files_written=applied.files_written,
+            files_deleted=applied.files_deleted,
+            commits_created=applied.commits_created,
+            items=applied.items,
+            event_id=event.id,
+            final_status=task.status,
+            reason=f"File changes may have been applied, but their durable outcome could not be committed: {error}",
+        )
 
     return AgentWorkerGitHubFilesResult(
         success=True,

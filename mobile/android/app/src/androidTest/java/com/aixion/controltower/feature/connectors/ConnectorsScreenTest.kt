@@ -1,9 +1,15 @@
 package com.aixion.controltower.feature.connectors
 
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeUp
 import com.aixion.controltower.core.api.dto.ConnectorCreateDto
 import com.aixion.controltower.core.api.dto.ConnectorDto
 import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperDto
@@ -11,10 +17,20 @@ import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import java.util.concurrent.CopyOnWriteArrayList
 
 class ConnectorsScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun firstConnectionDefaultsToAntigravityThenCodex() {
+        val codex = template().copy(id = "codex", provider_label = "CODEX")
+        val antigravity = template().copy(id = "antigravity", provider_label = "ANTIGRAVITY")
+
+        assertEquals("antigravity", preferredConnectorTemplateId(listOf(codex, antigravity)))
+        assertEquals("codex", preferredConnectorTemplateId(listOf(codex)))
+    }
 
     @Test
     fun rendersConnectorConsoleTemplateCredentialAndActions() {
@@ -32,21 +48,30 @@ class ConnectorsScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Connectors").assertExists()
-        composeRule.onNodeWithText("Bring-your-own-agent control from phone.").assertExists()
-        composeRule.onNodeWithText("Templates").assertExists()
-        composeRule.onNodeWithText("✓ OpenClaw").assertExists()
-        composeRule.onNodeWithText("OpenClaw connector").assertExists()
-        composeRule.onNodeWithText("Credential set").assertExists()
-        composeRule.onNodeWithText("https://aixion.example.com/connectors/connector_1/webhook").assertExists()
+        composeRule.onNodeWithText("Connect a platform").assertExists()
+        composeRule.onNodeWithText(
+            "Connect Antigravity, Codex, and other supported agents so approval requests can reach your phone."
+        ).assertExists()
+        composeRule.onNodeWithText("Choose an agent platform").assertExists()
+        composeRule.onNodeWithText("OpenClaw").assertExists()
         composeRule.onNodeWithText("One-time connector credential").assertExists()
         composeRule.onNodeWithText("aixion-secret-once").assertExists()
         composeRule.onNodeWithText("accepted=true, auth=true, scope=true").assertExists()
+        repeat(5) {
+            composeRule.onRoot().performTouchInput { swipeUp() }
+            composeRule.waitForIdle()
+        }
+        composeRule.onNodeWithText("OpenClaw connector").assertExists()
+        composeRule.onNodeWithText("HEALTHY").assertExists()
+        composeRule.onNodeWithText("https://aixion.example.com/connectors/connector_1/webhook").assertExists()
+        composeRule.onNodeWithText("Advanced settings").assertExists()
+        composeRule.onAllNodesWithText("Apply selected mapper").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Authentication failures: 0").assertCountEquals(0)
     }
 
     @Test
     fun connectorActionsCallExpectedCallbacks() {
-        val calls = mutableListOf<String>()
+        val calls = CopyOnWriteArrayList<String>()
         val connector = connector(secretConfigured = true)
 
         composeRule.setContent {
@@ -66,25 +91,30 @@ class ConnectorsScreenTest {
                 onPreviewMapper = { calls.add("preview:${it.id}") }
             )
         }
+        composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("Copy webhook").performClick()
-        composeRule.onNodeWithText("Disable").performClick()
-        composeRule.onNodeWithText("Rotate credential").performClick()
-        composeRule.onNodeWithText("Revoke credential").assertIsEnabled().performClick()
-        composeRule.onNodeWithText("Apply mapper").assertIsEnabled().performClick()
-        composeRule.onNodeWithText("Test selected template payload").assertIsEnabled().performClick()
+        composeRule.onNodeWithText("Copy webhook").performScrollTo().performClick()
+        composeRule.onAllNodesWithText("Create connection credential").assertCountEquals(0)
+        composeRule.onNodeWithText("Advanced settings").performScrollTo().performClick()
+        composeRule.onNodeWithText("Disable connection").performScrollTo().performClick()
+        composeRule.onNodeWithText("Rotate credential").performScrollTo().performClick()
+        composeRule.onNodeWithText("Revoke credential").assertIsEnabled().performScrollTo().performClick()
+        composeRule.onNodeWithText("Apply selected mapper").assertIsEnabled().performScrollTo().performClick()
+        composeRule.onNodeWithText("Test selected template payload").assertIsEnabled().performScrollTo().performClick()
 
-        assertEquals(
-            listOf(
-                "copy:Webhook URL",
-                "toggle:connector_1",
-                "secret:connector_1",
-                "revoke:connector_1",
-                "mapper:connector_1",
-                "preview:connector_1"
-            ),
-            calls
-        )
+        composeRule.runOnIdle {
+            assertEquals(
+                listOf(
+                    "copy:Webhook URL",
+                    "toggle:connector_1",
+                    "secret:connector_1",
+                    "revoke:connector_1",
+                    "mapper:connector_1",
+                    "preview:connector_1"
+                ),
+                calls.toList()
+            )
+        }
     }
 
     @Test
@@ -98,9 +128,9 @@ class ConnectorsScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Loading connector console...").assertExists()
+        composeRule.onNodeWithText("Loading connections...").assertExists()
         composeRule.onNodeWithText("Failed to load connectors").assertExists()
-        composeRule.onNodeWithText("Create connector from selected template").assertExists()
+        composeRule.onNodeWithText("Create connection").assertExists()
     }
 }
 

@@ -129,6 +129,25 @@ def test_connector_rejects_missing_project_scope() -> None:
     assert response.json()["detail"]["message"] == "Project scope not found"
 
 
+def test_connector_creation_resolves_project_from_app_repository_after_cache_clear(monkeypatch) -> None:
+    project = _project()
+    repository = app.state.project_repository
+    lookups: list[str] = []
+
+    class TrackingProjectRepository:
+        def get(self, project_id: str):
+            lookups.append(project_id)
+            return repository.get(project_id)
+
+    monkeypatch.setattr(app.state, "project_repository", TrackingProjectRepository())
+    store.projects.clear()
+
+    response = client.post("/connectors", json=_payload(project.id))
+
+    assert response.status_code == 200, response.text
+    assert project.id in lookups
+
+
 def test_connector_rejects_non_https_non_local_endpoint() -> None:
     project = _project()
     payload = _payload(project.id)

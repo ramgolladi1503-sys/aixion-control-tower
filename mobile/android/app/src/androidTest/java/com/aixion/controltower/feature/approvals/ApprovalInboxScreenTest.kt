@@ -3,10 +3,16 @@ package com.aixion.controltower.feature.approvals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
+import com.aixion.controltower.core.ui.ForegroundRefreshEffect
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -31,11 +37,11 @@ class ApprovalInboxScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Approval Inbox").assertExists()
-        composeRule.onNodeWithText("Review agent requests before code moves.").assertExists()
-        composeRule.onNodeWithText("Pending 2").assertExists()
-        composeRule.onNodeWithText("Blocked 1").assertExists()
-        composeRule.onNodeWithText("Approved 1").assertExists()
+        composeRule.onNodeWithText("Approvals").assertExists()
+        composeRule.onNodeWithText("Review requests from connected agents, then see every decision and its status here.").assertExists()
+        composeRule.onNodeWithText("PENDING 2").assertExists()
+        composeRule.onNodeWithText("BLOCKED 1").assertExists()
+        composeRule.onNodeWithText("APPROVED 1").assertExists()
         composeRule.onNodeWithText("Pending approval").assertExists()
         composeRule.onNodeWithText("Blocked approval").assertExists()
         composeRule.onNodeWithText("Approved approval").assertExists()
@@ -69,8 +75,65 @@ class ApprovalInboxScreenTest {
             ApprovalInboxContent(state = ApprovalsUiState(loading = true))
         }
 
-        composeRule.onNodeWithText("Loading approvals...").assertExists()
-        composeRule.onNodeWithText("Pending 0").assertExists()
+        composeRule.onNodeWithText("Loading approval decisions...").assertExists()
+        composeRule.onNodeWithText("PENDING 0").assertExists()
+    }
+
+    @Test
+    fun emptyInboxCanRefreshAndInvokesReload() {
+        var refreshRequested = false
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(loading = false),
+                onRetry = { refreshRequested = true }
+            )
+        }
+
+        composeRule.onNodeWithText("Refresh approvals").performClick()
+
+        assertEquals(true, refreshRequested)
+    }
+
+    @Test
+    fun unknownRiskRemainsVisibleWithDecisionsDisabled() {
+        val unrecognized = approval(
+            id = "approval_unknown_risk",
+            title = "Unrecognized risk request",
+            status = ApprovalStatus.REQUESTED
+        ).copy(risk = RiskLevel.UNKNOWN)
+
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(loading = false, approvals = listOf(unrecognized))
+            )
+        }
+
+        composeRule.onNodeWithText("UNSUPPORTED DATA · DECISIONS DISABLED").assertExists()
+        composeRule.onNodeWithText("Unrecognized risk request").assertExists()
+    }
+
+    @Test
+    fun foregroundRefreshRunsOnlyWhileScreenIsStarted() {
+        var refreshCount = 0
+        val lifecycleOwner = object : LifecycleOwner {
+            override val lifecycle = LifecycleRegistry(this)
+        }
+        composeRule.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides lifecycleOwner) {
+                ForegroundRefreshEffect(onRefresh = { refreshCount++; true }, intervalMillis = 25)
+            }
+        }
+
+        composeRule.runOnIdle { lifecycleOwner.lifecycle.currentState = Lifecycle.State.CREATED }
+        composeRule.runOnIdle { lifecycleOwner.lifecycle.currentState = Lifecycle.State.STARTED }
+        composeRule.waitUntil(timeoutMillis = 2_000) { refreshCount >= 2 }
+        composeRule.runOnIdle { lifecycleOwner.lifecycle.currentState = Lifecycle.State.CREATED }
+        // Recompose with a stopped screen and ensure the cancelled loop stays quiet.
+        composeRule.waitForIdle()
+        var countAfterStop = 0
+        composeRule.runOnIdle { countAfterStop = refreshCount }
+        Thread.sleep(100)
+        composeRule.runOnIdle { assertEquals(countAfterStop, refreshCount) }
     }
 }
 

@@ -5,7 +5,8 @@ enum class RiskLevel {
     MEDIUM,
     HIGH,
     CRITICAL,
-    BLOCKED
+    BLOCKED,
+    UNKNOWN
 }
 
 enum class ApprovalStatus {
@@ -26,7 +27,8 @@ enum class ApprovalStatus {
     APPLIED,
     TESTS_RUNNING,
     TESTS_PASSED,
-    TESTS_FAILED
+    TESTS_FAILED,
+    UNKNOWN
 }
 
 enum class ApprovalDashboardBucket {
@@ -96,9 +98,13 @@ data class ApprovalSummary(
     val sourceAgentId: String? = null,
     val sourceAgentName: String? = null,
     val sourceSessionId: String? = null,
+    val sourceInvocationId: String? = null,
     val sourceTaskUrl: String? = null,
+    val expiresAt: String? = null,
     val createdByUserId: String? = null,
-    val verifiedSource: Boolean = false
+    val verifiedSource: Boolean = false,
+    val projectId: String = "",
+    val riskReasons: List<String> = emptyList()
 ) {
     val sourceLabel: String
         get() = sourceAgentName?.takeIf { it.isNotBlank() } ?: sourceProvider
@@ -132,7 +138,8 @@ val ApprovalSummary.dashboardBucket: ApprovalDashboardBucket
         ApprovalStatus.MERGED -> ApprovalDashboardBucket.COMPLETED
         ApprovalStatus.DENIED,
         ApprovalStatus.EXPIRED,
-        ApprovalStatus.CANCELLED -> ApprovalDashboardBucket.HISTORY
+        ApprovalStatus.CANCELLED,
+        ApprovalStatus.UNKNOWN -> ApprovalDashboardBucket.HISTORY
         ApprovalStatus.PENDING_REVIEW,
         ApprovalStatus.REJECTED,
         ApprovalStatus.APPLIED,
@@ -142,7 +149,7 @@ val ApprovalSummary.dashboardBucket: ApprovalDashboardBucket
     }
 
 val ApprovalSummary.requiresHumanAction: Boolean
-    get() = dashboardBucket == ApprovalDashboardBucket.NEEDS_APPROVAL
+    get() = dashboardBucket == ApprovalDashboardBucket.NEEDS_APPROVAL && risk != RiskLevel.UNKNOWN
 
 val ApprovalSummary.isAwaitingGitHubExecution: Boolean
     get() = dashboardBucket == ApprovalDashboardBucket.APPROVED_WAITING
@@ -202,6 +209,7 @@ data class RuntimeReadinessSummary(
     val generatedAt: String?,
     val profile: String,
     val authEnabled: Boolean,
+    val databaseBackend: String,
     val dbReachable: Boolean,
     val migrationsApplied: Boolean,
     val expectedMigrationIds: List<String>,

@@ -65,7 +65,7 @@ Secret values are never returned. GitHub and FCM configuration are reported as b
   "errors": [],
   "warnings": [
     "GitHub token is not configured; GitHub execution will not be available.",
-    "FCM server key is not configured; push notifications will not be available."
+    "AIXION_FCM_PROJECT_ID is not configured; push notifications will not be available."
   ]
 }
 ```

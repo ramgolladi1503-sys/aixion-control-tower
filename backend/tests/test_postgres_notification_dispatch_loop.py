@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+import asyncio
+from threading import Event
+from types import SimpleNamespace
+
+import pytest
+from fastapi import FastAPI
+
+from app import main
+from app import postgres_notification_dispatcher as postgres_dispatcher
+from app.notification_outbox_repository import PostgresNotificationOutboxRepository
+
+
+class FakeRuntime:
+    def __init__(self) -> None:
+        self.repositories = SimpleNamespace(
+            notification_outbox=object.__new__(PostgresNotificationOutboxRepository),
+            approval_decisions=object(),
+            agent_tasks=object(),
+            agent_runs=object(),
+            projects=object(),
+            workspace_membership=object(),
+            external_agent_auth=object(),
+            audit_events=object(),
+            email_outbox=object(),
+        )
+        self.closed = False
+
+    def open(self, *, wait: bool = False) -> None:
+        assert wait is True
+
+    def probe(self) -> SimpleNamespace:
+        return SimpleNamespace(ready=True)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _bind_notification_runtime(application: FastAPI, repositories: SimpleNamespace) -> None:
+    application.state.notification_outbox_repository = repositories.notification_outbox
+    application.state.approval_decision_repository = repositories.approval_decisions
+    application.state.agent_task_repository = repositories.agent_tasks
+    application.state.agent_run_repository = repositories.agent_runs
+    application.state.project_repository = repositories.projects
+    application.state.workspace_membership_repository = repositories.workspace_membership
+    application.state.external_agent_auth_repository = repositories.external_agent_auth
+    application.state.audit_event_repository = repositories.audit_events
+
+
+def test_lifespan_rejects_postgres_notification_worker_without_runtime(monkeypatch) -> None:
+    async def exercise() -> None:
+        monkeypatch.setattr(
+            main,
+            "get_settings",
+            lambda: SimpleNamespace(
+                outbox_dispatch_mode="inline",
+                push_dispatch_enabled=False,
+                email_dispatch_enabled=False,
+                postgres_runtime_probe_enabled=False,
+                postgres_auth_rate_limits_enabled=False,
+                postgres_auth_enabled=False,
+            ),
+        )
+        monkeypatch.setattr(main, "reconcile_linked_approval_tasks", lambda **_kwargs: 0)
+        application = FastAPI()
+        application.state.notification_outbox_repository = object.__new__(
+            PostgresNotificationOutboxRepository
+        )
+        with pytest.raises(RuntimeError, match="lifespan-owned PostgreSQL runtime"):
+            async with main.lifespan(application):
+                pytest.fail("A standalone PostgreSQL push worker must not start")
+
+    asyncio.run(exercise())
+
+
+def test_lifespan_selects_postgres_dispatcher_only_for_coherent_runtime(monkeypatch) -> None:
+    async def exercise() -> None:
+        runtime = FakeRuntime()
+        settings = SimpleNamespace(
+            outbox_dispatch_mode="inline",
+            push_dispatch_enabled=True,
+            email_dispatch_enabled=True,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=True,
+        )
+        selected: list[object] = []
+        dispatched = asyncio.Event()
+
+        async def postgres_worker(repository) -> None:
+            selected.append(repository)
+            dispatched.set()
+            await asyncio.Event().wait()
+
+        async def email_worker(**_kwargs) -> None:
+            return None
+
+        monkeypatch.setattr(main, "get_settings", lambda: settings)
+        monkeypatch.setattr(main.PostgresRuntime, "from_environment", lambda: runtime)
+        monkeypatch.setattr(main, "reconcile_linked_approval_tasks", lambda **_kwargs: 0)
+        monkeypatch.setattr(main, "postgres_notification_dispatch_loop", postgres_worker)
+        monkeypatch.setattr(main, "email_dispatch_loop", email_worker)
+
+        application = FastAPI()
+        _bind_notification_runtime(application, runtime.repositories)
+        async with main.lifespan(application):
+            await asyncio.wait_for(dispatched.wait(), timeout=1)
+            assert selected == [runtime.repositories.notification_outbox]
+            assert application.state.postgres_repositories is runtime.repositories
+        assert runtime.closed is True
+
+    asyncio.run(exercise())
+
+
+def test_lifespan_refuses_mixed_notification_producer_repository(monkeypatch) -> None:
+    async def exercise() -> None:
+        runtime = FakeRuntime()
+        settings = SimpleNamespace(
+            outbox_dispatch_mode="inline",
+            push_dispatch_enabled=True,
+            email_dispatch_enabled=False,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=True,
+        )
+        monkeypatch.setattr(main, "get_settings", lambda: settings)
+        monkeypatch.setattr(main.PostgresRuntime, "from_environment", lambda: runtime)
+        monkeypatch.setattr(main, "reconcile_linked_approval_tasks", lambda **_kwargs: 0)
+        application = FastAPI()
+        _bind_notification_runtime(application, runtime.repositories)
+        application.state.approval_decision_repository = object()
+
+        with pytest.raises(RuntimeError, match="same application runtime"):
+            async with main.lifespan(application):
+                pytest.fail("Mixed SQLite/PostgreSQL notification authority must fail closed")
+        assert runtime.closed is True
+
+    asyncio.run(exercise())
+
+
+def test_scheduled_dispatch_mode_does_not_start_in_process_workers(monkeypatch) -> None:
+    async def exercise() -> None:
+        settings = SimpleNamespace(
+            outbox_dispatch_mode="scheduled",
+            push_dispatch_enabled=True,
+            email_dispatch_enabled=True,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=False,
+        )
+        started: list[str] = []
+
+        async def push_worker(*_args, **_kwargs) -> None:
+            started.append("push")
+            await asyncio.Event().wait()
+
+        async def email_worker(*_args, **_kwargs) -> None:
+            started.append("email")
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(main, "get_settings", lambda: settings)
+        monkeypatch.setattr(main, "reconcile_linked_approval_tasks", lambda **_kwargs: 0)
+        monkeypatch.setattr(main, "notification_dispatch_loop", push_worker)
+        monkeypatch.setattr(main, "email_dispatch_loop", email_worker)
+
+        async with main.lifespan(FastAPI()):
+            await asyncio.sleep(0)
+            assert started == []
+
+    asyncio.run(exercise())
+
+
+def test_lifespan_rejects_invalid_notification_repository_before_startup() -> None:
+    async def exercise() -> None:
+        application = FastAPI()
+        application.state.notification_outbox_repository = object()
+        try:
+            async with main.lifespan(application):
+                raise AssertionError("Invalid notification repository unexpectedly started")
+        except RuntimeError as error:
+            assert str(error) == "Application notification repository has an unsupported adapter"
+
+    asyncio.run(exercise())
+
+
+def test_postgres_dispatch_loop_drains_inflight_thread_on_cancellation(monkeypatch) -> None:
+    started = Event()
+    release = Event()
+    finished = Event()
+
+    def dispatch(_repository) -> None:
+        started.set()
+        release.wait(timeout=2)
+        finished.set()
+
+    monkeypatch.setattr(postgres_dispatcher, "dispatch_one_postgres_push", dispatch)
+    monkeypatch.setattr(
+        postgres_dispatcher,
+        "get_settings",
+        lambda: SimpleNamespace(push_dispatch_enabled=True, push_dispatch_poll_seconds=30),
+    )
+
+    async def exercise() -> None:
+        task = asyncio.create_task(postgres_dispatcher.postgres_notification_dispatch_loop(object()))
+        started_ready = await asyncio.to_thread(started.wait, 2)
+        assert started_ready
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("Cancelled PostgreSQL worker did not propagate cancellation")
+        assert finished.is_set()
+
+    asyncio.run(exercise())

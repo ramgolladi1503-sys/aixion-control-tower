@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from .models import ApprovalStatus, AuthUser, RiskLevel, now_utc
+from .approval_decisions import approval_decision_repository
+from .approval_integrity import compute_approval_payload_hash
+from .models import ApprovalRequest, ApprovalStatus, AuthUser, RiskLevel, now_utc
 from .store import store
 from .trust_crypto import issue_bearer_token, new_nonce, sha256_hex, sign_payload
 from .trust_flight_recorder import append_trust_event
@@ -27,6 +29,15 @@ from .trust_models import (
     TrustEventType,
 )
 from .trust_policy import evaluate_proposed_action, lease_receipt_payload
+from .workspace_access import (
+    agent_task_scope_is_consistent,
+    agent_task_workspace_id,
+    approval_scope_is_consistent,
+    approval_workspace_id,
+    capability_lease_scope_is_consistent,
+    proposed_action_scope_is_consistent,
+    reviewer_attestation_scope_is_consistent,
+)
 
 
 class TrustControlConflict(RuntimeError):
@@ -52,14 +63,23 @@ def _linked_task_for_approval(approval_request_id: str):
     )
 
 
-def _approval_reviewer_ids(approval_request_id: str, payload_hash: str) -> set[str]:
-    approval = store.approval_requests[approval_request_id]
+def _durable_approval(approval_request_id: str) -> ApprovalRequest:
+    approval = approval_decision_repository.get(approval_request_id)
+    if approval is None:
+        raise ValueError("Approval request not found.")
+    if not approval_scope_is_consistent(approval):
+        raise TrustControlConflict("Approval ownership scope is inconsistent.")
+    return approval
+
+
+def _approval_reviewer_ids(approval: ApprovalRequest, payload_hash: str) -> set[str]:
     reviewer_ids: set[str] = set()
     if approval.approved_by_user_id:
         reviewer_ids.add(approval.approved_by_user_id)
     for attestation in store.reviewer_attestations.values():
         if (
-            attestation.approval_request_id == approval_request_id
+            attestation.approval_request_id == approval.id
+            and reviewer_attestation_scope_is_consistent(attestation)
             and attestation.approval_payload_hash == payload_hash
             and attestation.decision == ReviewerAttestationDecision.APPROVE
         ):
@@ -70,6 +90,7 @@ def _approval_reviewer_ids(approval_request_id: str, payload_hash: str) -> set[s
 def _has_denial(approval_request_id: str, payload_hash: str) -> bool:
     return any(
         attestation.approval_request_id == approval_request_id
+        and reviewer_attestation_scope_is_consistent(attestation)
         and attestation.approval_payload_hash == payload_hash
         and attestation.decision == ReviewerAttestationDecision.DENY
         for attestation in store.reviewer_attestations.values()
@@ -81,11 +102,14 @@ def record_reviewer_attestation(
     *,
     user: AuthUser,
 ) -> ReviewerAttestation:
-    approval = store.approval_requests.get(payload.approval_request_id)
-    if approval is None:
-        raise ValueError("Approval request not found.")
+    approval = _durable_approval(payload.approval_request_id)
+    store.approval_requests[approval.id] = approval
+    if approval.status != ApprovalStatus.APPROVED:
+        raise TrustControlConflict("Reviewer attestations require an APPROVED request.")
     if not approval.approved_payload_hash:
         raise TrustControlConflict("Approval payload must be sealed before attestation.")
+    if approval.approved_payload_hash != compute_approval_payload_hash(approval):
+        raise TrustControlConflict("Approval payload fails its frozen hash check.")
     if approval.created_by_user_id == user.id:
         raise TrustControlConflict("The approval creator cannot attest their own request.")
 
@@ -114,6 +138,7 @@ def record_reviewer_attestation(
 
     attestation = ReviewerAttestation(
         approval_request_id=approval.id,
+        workspace_id=approval.workspace_id,
         approval_payload_hash=approval.approved_payload_hash,
         reviewer_user_id=user.id,
         reviewer_role=user.role,
@@ -127,6 +152,7 @@ def record_reviewer_attestation(
         entity_type="approval_request",
         entity_id=approval.id,
         actor=user.email,
+        workspace_id=approval.workspace_id,
         payload={
             "attestation_id": attestation.id,
             "decision": attestation.decision,
@@ -139,11 +165,19 @@ def record_reviewer_attestation(
     return attestation
 
 
-def _validate_scope_against_approval(payload: CapabilityLeaseCreate) -> None:
-    approval = store.approval_requests[payload.approval_request_id]
+def _validate_scope_against_approval(
+    payload: CapabilityLeaseCreate,
+    approval: ApprovalRequest,
+) -> None:
     task = _linked_task_for_approval(approval.id)
     if task is None:
         raise TrustControlConflict("Capability leases require a linked AgentTask.")
+    if not agent_task_scope_is_consistent(task) or (
+        agent_task_workspace_id(task) != approval_workspace_id(approval)
+    ):
+        raise TrustControlConflict("Linked AgentTask ownership scope is inconsistent.")
+    if payload.agent_id and task.external_agent_id not in {None, payload.agent_id}:
+        raise TrustControlConflict("Capability lease agent does not match the linked AgentTask.")
     if payload.scope.repository != task.repository:
         raise TrustControlConflict("Lease repository must match the approved AgentTask repository.")
     if payload.scope.branch != approval.target_branch or payload.scope.branch != task.branch_preference:
@@ -180,20 +214,26 @@ def issue_capability_lease(
     *,
     user: AuthUser,
 ) -> CapabilityLease:
-    approval = store.approval_requests.get(payload.approval_request_id)
-    if approval is None:
-        raise ValueError("Approval request not found.")
+    approval = _durable_approval(payload.approval_request_id)
+    store.approval_requests[approval.id] = approval
     if approval.status != ApprovalStatus.APPROVED:
         raise TrustControlConflict("Capability leases require an APPROVED request.")
-    if not approval.approved_payload_hash:
-        raise TrustControlConflict("Approved payload hash is required before lease issuance.")
-    if payload.agent_id and payload.agent_id not in store.external_agents:
-        raise ValueError("External agent not found.")
+    if (
+        not approval.approved_payload_hash
+        or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+    ):
+        raise TrustControlConflict("Approved payload is missing or fails its frozen hash check.")
+    if payload.agent_id:
+        agent = store.external_agents.get(payload.agent_id)
+        if agent is None:
+            raise ValueError("External agent not found.")
+        if agent.workspace_id != approval_workspace_id(approval):
+            raise TrustControlConflict("Capability lease agent belongs to another workspace.")
     if _has_denial(approval.id, approval.approved_payload_hash):
         raise TrustControlConflict("A reviewer denied this exact approval payload.")
 
-    _validate_scope_against_approval(payload)
-    reviewers = _approval_reviewer_ids(approval.id, approval.approved_payload_hash)
+    _validate_scope_against_approval(payload, approval)
+    reviewers = _approval_reviewer_ids(approval, approval.approved_payload_hash)
     if payload.prevent_self_approval and approval.created_by_user_id in reviewers:
         raise TrustControlConflict("Self-approved work cannot receive a capability lease.")
     if len(reviewers) < payload.required_reviewer_count:
@@ -207,6 +247,7 @@ def issue_capability_lease(
             lease
             for lease in store.capability_leases.values()
             if lease.approval_request_id == approval.id
+            and capability_lease_scope_is_consistent(lease)
             and lease.agent_id == payload.agent_id
             and lease.status == CapabilityLeaseStatus.ACTIVE
             and lease.expires_at > _utcnow()
@@ -228,6 +269,7 @@ def issue_capability_lease(
     }
     lease = CapabilityLease(
         approval_request_id=approval.id,
+        workspace_id=approval_workspace_id(approval),
         approved_payload_hash=approval.approved_payload_hash,
         agent_id=payload.agent_id,
         provider=payload.provider,
@@ -248,6 +290,7 @@ def issue_capability_lease(
         entity_type="capability_lease",
         entity_id=lease.id,
         actor=user.email,
+        workspace_id=approval.workspace_id,
         correlation_id=scope.metadata.get("correlation_id"),
         payload={
             "approval_request_id": approval.id,
@@ -307,6 +350,7 @@ def revoke_capability_lease(
         entity_id=lease.id,
         actor=user.email,
         payload={"reason": reason},
+        workspace_id=lease.workspace_id,
         persist=False,
     )
     store.persist()
@@ -315,6 +359,12 @@ def revoke_capability_lease(
 
 def evaluate_gateway_action(action: ProposedAction, *, actor: str) -> AgentGatewayResult:
     lease = store.capability_leases.get(action.lease_id or "")
+    if not proposed_action_scope_is_consistent(action):
+        raise TrustControlConflict("Proposed action ownership scope is inconsistent.")
+    if lease and (not capability_lease_scope_is_consistent(lease)):
+        raise TrustControlConflict("Capability lease ownership scope is inconsistent.")
+    if lease and lease.workspace_id != action.workspace_id:
+        raise TrustControlConflict("Capability lease belongs to another workspace.")
     if lease:
         refresh_lease_status(lease)
     store.proposed_actions[action.id] = action
@@ -323,6 +373,7 @@ def evaluate_gateway_action(action: ProposedAction, *, actor: str) -> AgentGatew
         entity_type="proposed_action",
         entity_id=action.id,
         actor=actor,
+        workspace_id=action.workspace_id,
         correlation_id=action.run_id or action.task_id,
         payload={
             "provider": action.provider,
@@ -345,6 +396,7 @@ def evaluate_gateway_action(action: ProposedAction, *, actor: str) -> AgentGatew
         entity_id=action.id,
         actor=actor,
         correlation_id=action.run_id or action.task_id,
+        workspace_id=action.workspace_id,
         payload={
             "decision_id": decision.id,
             "decision": decision.decision,
@@ -371,6 +423,8 @@ def consume_gateway_action(
     action = store.proposed_actions.get(action_id)
     if action is None:
         raise ValueError("Proposed action not found.")
+    if not proposed_action_scope_is_consistent(action):
+        raise TrustControlConflict("Proposed action ownership scope is inconsistent.")
     decision = next(
         (
             item
@@ -389,6 +443,8 @@ def consume_gateway_action(
     lease = store.capability_leases.get(action.lease_id or "")
     if lease is None:
         raise TrustControlConflict("Allowed action is missing its capability lease.")
+    if not capability_lease_scope_is_consistent(lease):
+        raise TrustControlConflict("Capability lease ownership scope is inconsistent.")
     refresh_lease_status(lease)
     if lease.status != CapabilityLeaseStatus.ACTIVE:
         raise TrustControlConflict("Capability lease is no longer active.")
@@ -429,6 +485,8 @@ def issue_credential_grant(
     lease = store.capability_leases.get(payload.lease_id)
     if lease is None:
         raise ValueError("Capability lease not found.")
+    if not capability_lease_scope_is_consistent(lease):
+        raise TrustControlConflict("Capability lease ownership scope is inconsistent.")
     refresh_lease_status(lease)
     if lease.status != CapabilityLeaseStatus.ACTIVE:
         raise TrustControlConflict("Credentials require an active capability lease.")
@@ -443,6 +501,7 @@ def issue_credential_grant(
     raw_token, token_hash = issue_bearer_token()
     grant = CredentialGrant(
         lease_id=lease.id,
+        workspace_id=lease.workspace_id,
         grant_type=payload.grant_type,
         audience=payload.audience,
         subject=payload.subject,
@@ -457,6 +516,7 @@ def issue_credential_grant(
         entity_type="credential_grant",
         entity_id=grant.id,
         actor=user.email,
+        workspace_id=lease.workspace_id,
         payload={
             "lease_id": lease.id,
             "grant_type": grant.grant_type,

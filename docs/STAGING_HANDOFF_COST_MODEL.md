@@ -1,0 +1,101 @@
+# Google Cloud Staging Handoff and Cost Model
+
+**Status:** Proposed architecture only; no Google Cloud resource, API, billing account, or deployment has been changed.
+**Prepared:** 2026-10-21
+**Pricing references last checked:** 2026-10-21 (official Google Cloud pricing pages)
+**Scope:** Draft input to Slice 7 in [PRE_BILLING_WORK_LOCK.md](PRE_BILLING_WORK_LOCK.md)
+
+## Current local artifact status — 2026-10-22
+
+The backend container now has a deny-by-default `backend/.dockerignore` that allows only package metadata and runtime source, excluding local environment files, virtual environments, SQLite state, tests, and Python caches. A regression test pins this context allowlist. Docker is not installed in the current local workspace, so the image build itself remains to be verified by the repository's Docker-enabled CI job. The production Compose configuration is not a GCP deployment manifest. A Cloud Run/Cloud SQL manifest is intentionally not marked deployable while the production startup guard rejects the incomplete PostgreSQL application runtime; do not deploy the current image as a staging API.
+
+## Recommendation
+
+Use Google Cloud for the first hosted staging environment, with **Mumbai (`asia-south1`) as the proposed region** for the India-first owner and phone. This is a proposal, not a confirmed project or data-residency decision. The project ID, billing account, owner, data region, and ceiling require review before the billing cut line.
+
+Keep staging small and disposable:
+
+| Component | Proposed staging shape | Cost and reliability notes |
+| --- | --- | --- |
+| HTTPS API | Cloud Run, request-based billing, minimum instances 0, maximum 1 until load evidence supports more | Scales to zero when idle. Set request timeout, concurrency, CPU/memory, and max instances explicitly. Never run correctness-critical periodic dispatch solely in a request-scaled process. |
+| PostgreSQL | Cloud SQL for PostgreSQL, single zone, encrypted connection, automated backups enabled, bounded storage | A shared-core `db-g1-small` is an inexpensive **staging smoke-test candidate only**. Google excludes shared-core types from the Cloud SQL SLA, so this is not a production database choice. Production needs a separately priced non-shared-core tier and recovery design. |
+| Approval workers | Cloud Run Jobs invoked on a schedule after the complete application PostgreSQL cutover | `python scripts/run_postgres_push_dispatch_once.py` validates startup settings and PostgreSQL schema, then dispatches at most one push item and exits. Keep an always-on worker out of the initial cost model. This command is not deployable for production while the production startup guard is active, and current notification producers still use SQLite. |
+| Images | Artifact Registry in the same region | Apply image retention and delete untagged build artifacts. |
+| Secrets | Secret Manager, least-privilege runtime service account, versioned secret rotation | Store database, email, and push credentials outside images and source control. Secret/API usage and replication settings must be included in the final estimate. |
+| Logs and metrics | Cloud Logging/Monitoring with explicit retention and alert limits | Set retention, log-volume alerts, and redaction before sending approval payloads. Avoid action arguments and credentials in logs. |
+| Push | Firebase Cloud Messaging | FCM is a wake-up signal only; approval state remains authoritative in PostgreSQL. Real device delivery and any associated project usage remain unverified. |
+
+Do not add a load balancer, Cloud NAT, Redis, multi-region database, or high-availability database to this first staging footprint unless a measured requirement justifies the recurring cost. Use the Cloud Run HTTPS endpoint directly and Cloud SQL's supported authenticated connector path; do not open PostgreSQL to `0.0.0.0/0`.
+
+## Indicative monthly cost envelope
+
+The following is a planning estimate, **not a quote or a billing cap**. The Cloud SQL page's displayed default price table has listed `db-g1-small` at **$0.035/hour**; 720 hours would be **$25.20/month for database compute alone** at that displayed rate. The page does not establish that as the `asia-south1` rate. This is a shared-core staging candidate only and is excluded from the Cloud SQL SLA. Storage, backups, network, logs, taxes, and regional price differences are extra. Treat the database cost as **unpriced for Mumbai** until a dated calculator export records the exact edition, tier, region, storage, backup retention, and network assumptions. [Cloud SQL pricing](https://cloud.google.com/sql/pricing)
+
+Google's current Cloud Run page lists Mumbai (`asia-south1`) as an available region, but prices depend on region and billing mode. The default USD request-billing table lists active CPU at **$0.000024/vCPU-second**, active memory at **$0.0000025/GiB-second**, and requests at **$0.40/million**; the page's request-based free tier is 180,000 vCPU-seconds, 360,000 GiB-seconds, and 2 million requests monthly, based on `us-central1` pricing and aggregated by billing account. These are reference rates, **not a Mumbai quote**. Model Cloud Run Jobs separately: the current page gives Jobs a different free-tier allowance and rate table from request-based services. Free tiers can be consumed by unrelated projects on the same billing account and must not be treated as guaranteed zero cost. [Cloud Run pricing](https://cloud.google.com/run/pricing), [Cloud Run billing settings](https://docs.cloud.google.com/run/docs/configuring/billing-settings)
+
+| Cost category | Planning treatment |
+| --- | --- |
+| Cloud SQL shared-core staging compute | The page's displayed default `db-g1-small` rate implies **$25.20/month** at 720 hours, but this is **not established as the Mumbai rate**. Keep the Mumbai line item unpriced until a calculator export is saved. |
+| Cloud SQL storage, backup, and network | Variable; set low initial storage, retain only required backups, and price them separately. Do not omit from final approval. |
+| Cloud Run API | Default published request-based reference rates: **$0.000024/vCPU-second active CPU**, **$0.0000025/GiB-second active memory**, **$0.40/million requests**. Regional rate, billed CPU/memory time, networking, and billing-account-wide free-tier availability require the Mumbai calculator estimate. |
+| Scheduled jobs | Cloud Run Jobs have a separate free tier and rate table. Price by invocation/runtime only after the bounded one-shot worker is deployable; the current lifespan loops are not costed as reliable scheduled jobs. |
+| Artifact Registry | First **0.5 GiB** storage is free per billing account; then **$0.000136986/GiB-hour** (about **$0.099/GiB-month** at 720 hours). Network transfer and optional scanning are separate. Co-locate with the runtime and expire old images. |
+| Cloud Logging | Standard log ingestion: first **50 GiB/project/month** free, then **$0.50/GiB**; retention beyond 30 days is **$0.01/GiB-month**. Vended network logs and other observability products have separate treatment. Redaction and volume limits remain required. |
+| Secret Manager | First **6 active secret versions** and **10,000 accesses/month** are free per billing account; beyond that, **$0.000082192/version-hour** and **$0.03/10,000 accesses**. Replication location and version lifecycle affect cost. |
+| Metrics, data transfer, DNS, taxes | Usage/configuration-dependent or not yet priced. Enter explicit quantities in the calculator; do not assume these are zero. |
+| Production-grade database | **Not estimated in this staging envelope.** A non-shared-core, possibly HA database has a materially different recurring cost and requires a separate production estimate. |
+
+### Proposed spend limit and enforcement boundary
+
+For the first, time-bounded staging exercise, propose a **$75 USD per calendar month project spend cap**, with notifications at 50%, 80%, and 100%. This number is a review proposal, not approved spending authority. It is intended to cover the shared-core staging database plus low-volume API and observability usage; the final estimate must be recalculated for Mumbai and actual retention/network assumptions before any resource is created.
+
+An alerts-only budget is **not** a spending ceiling: Google states that it does not automatically cap service usage. Google's currently documented spend-cap eligibility list names Cloud Run, Cloud Run functions, Gemini API, and Gemini Enterprise Agent Platform. It scopes a spend cap to one eligible service in one project. Cloud Run billing documentation says a Cloud Run cap automatically applies to all Cloud Run resource types, including Jobs. Cloud SQL, Artifact Registry, Secret Manager, Cloud Logging/Monitoring, network egress, and taxes are not in that eligibility list; do not count Cloud Run's cap as protection for those charges. [Eligible services and limitations](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps#eligible-services), [Cloud Run billing settings](https://docs.cloud.google.com/run/docs/configuring/billing-settings), [Google Cloud budgets](https://docs.cloud.google.com/billing/docs/how-to/budgets)
+
+Therefore, **$75 is not a hard project-wide ceiling** for the proposed topology. Even if a Cloud Run service cap is configured, the Cloud SQL instance and other supporting services can continue to incur charges. Before any billing/resource action, either (a) revise the topology to avoid uncapped recurring resources during the initial connector test, or (b) approve an explicit maximum exposure for uncapped services and rehearse an operator shutdown/teardown path that includes Cloud SQL, storage, backups, artifacts, logs, and network resources. Google notes that spend caps do not delete data/resources, in-flight use may finish, cost reporting can lag, and ongoing fixed costs can remain after a cap triggers; a spend cap is a control on eligible service usage, not a universal billing stop. [Spend-cap limitations](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps#limitations)
+
+The proposed operator response is: at 50%, review usage; at 80%, stop nonessential jobs and deployments; at 100%, suspend the staging service and execute the reviewed teardown of uncapped resources, including the database where safe, then investigate before re-enabling. Keep enough separate recovery access to tear down resources even if the application is unavailable. Residual storage, backup, artifact, and already-incurred usage can remain billable after compute is stopped, so the operator procedure must include those resources. This procedure is not verified until rehearsed in a separately authorized disposable project.
+
+## Project, identity, and permissions proposal
+
+- **Project:** a dedicated staging project, ID not yet selected or verified. Do not use a personal development project with unrelated workloads.
+- **Region:** `asia-south1` (Mumbai), subject to owner confirmation and service availability. Keep Cloud Run, Cloud SQL, Artifact Registry, and logs in the same region where supported.
+- **Human owner:** the account owner retains billing-account administration and project ownership; deployment identities receive only resource-specific roles.
+- **CI deploy identity:** Artifact Registry Writer for the target repository and Cloud Run Developer/Service Account User only for the staging service identity. Prefer Workload Identity Federation over a long-lived service-account key.
+- **Runtime identity:** Cloud Run service account with Cloud SQL Client, read access to named Secret Manager versions, and only required logging/monitoring permissions. No project Editor/Owner role.
+- **Migration identity:** separate, short-lived identity allowed to connect and apply versioned schema migrations; not available to the runtime service.
+- **Operations identity:** a named operator who can inspect billing, pause services, restore a database, and rotate secrets. Keep a second reviewed break-glass principal.
+- **APIs to consider after authorization:** Cloud Run, Cloud SQL Admin, Artifact Registry, Secret Manager, Cloud Logging, Cloud Monitoring, Cloud Scheduler, and the required Firebase/FCM APIs. Enable only the APIs required by the approved manifest.
+
+These role names are a least-privilege starting point; verify exact permissions against the chosen deployment workflow before granting them. Do not create service accounts, grant roles, enable APIs, or activate billing during this pre-billing phase.
+
+## Data, retention, and rollback constraints
+
+- Store account, workspace, connector, approval, decision, audit, and outbox state in PostgreSQL only after Slice 1's complete application-runtime gate passes. Never dual-write SQLite and PostgreSQL as competing authorities.
+- Keep staging data synthetic or explicitly approved test data. Do not import production or personal approval history in the first staging deployment.
+- Define database backup retention and demonstrate restore to an isolated instance before staging can be used for real approvals. A backup job without a restore drill is insufficient.
+- Redact hook tokens, passwords, raw push tokens, and tool argument payloads from logs. Keep only correlation IDs and approved operational metadata.
+- Rollback means stop API/worker traffic, preserve a final encrypted database backup and migration ledger, revert the container to the prior immutable image, and restore the previous schema only through a reviewed forward/backward migration plan. Never drop the database as a routine application rollback.
+- Retain audit and approval records according to the repository's retention policy; confirm deletion/export behavior and legal review before inviting external users.
+
+## Required pre-billing follow-up
+
+This document does not satisfy Slice 7's exit gate yet. Before the billing boundary, complete and review:
+
+1. Confirm the GCP project ID, project owner, billing account, region, data residency, and **$75/month proposed cap**.
+2. Produce a dated Google Pricing Calculator export for `asia-south1` including database compute/storage/backups, Cloud Run, jobs, logs/metrics, secrets, Artifact Registry, egress, and taxes.
+3. Confirm spend-cap eligibility for the selected billing account. Current documentation says Cloud Run spend caps cover all Cloud Run resource types, including Jobs, but only Cloud Run usage in one project. Cloud SQL and several supporting services remain uncapped; choose a topology and approve maximum exposure for those charges. Configure any eligible-service cap and test notification plus shutdown/teardown in a disposable project only after separate authorization.
+4. Finish PostgreSQL application routing, one-shot worker design, migration/rollback automation, backup/restore drill, health/readiness checks, retention configuration, and alerts.
+5. Review the exact manifest, IAM bindings, secrets, data flow, and teardown procedure. A reviewer must sign off before billing/API/resource actions.
+
+## Source pricing references
+
+- [Cloud SQL pricing](https://cloud.google.com/sql/pricing) — shared-core hourly table and SLA exclusion.
+- [Cloud SQL region availability](https://docs.cloud.google.com/sql/docs/postgres/region-availability-overview) — PostgreSQL is available in Mumbai; availability does not establish the selected SKU's regional price.
+- [Cloud Run pricing](https://cloud.google.com/run/pricing) and [billing settings](https://docs.cloud.google.com/run/docs/configuring/billing-settings) — request-based and Jobs pricing, free-tier terms, and spend-cap coverage for all Cloud Run resource types in a project.
+- [Artifact Registry pricing](https://cloud.google.com/artifact-registry/pricing) — storage allowance, overage rate, and data transfer/scanning categories.
+- [Cloud Logging pricing](https://cloud.google.com/logging) — ingestion, retention, and free allowance.
+- [Secret Manager pricing](https://cloud.google.com/secret-manager/pricing) — active versions and access-operation charges.
+- [Google Cloud budgets](https://docs.cloud.google.com/billing/docs/how-to/budgets) — alerts do not automatically stop usage.
+- [Spend-cap budgets](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps) — behavior and supported-service qualification.
+
+**Pricing-control recheck (2026-10-21):** reviewed Google's spend-cap eligibility, Cloud Run request/Jobs tables, Cloud SQL price and PostgreSQL region availability, Artifact Registry, Cloud Logging, Secret Manager, and backup-retention documentation. The published pages confirm cost categories and several default/reference rates, but do not provide a saved workload-specific Mumbai estimate. Cloud Run's request-based free allowance is based on `us-central1` rates and shared across projects on the billing account; Cloud Run rates depend on region and billing mode. The Cloud SQL shared-core `db-g1-small` displayed rate remains **not a Mumbai quote**. The proposed **$75/month** remains unapproved and is not a project-wide hard limit for this topology; Cloud SQL and several supporting charges are outside Cloud Run spend-cap coverage. A dated Mumbai Pricing Calculator export, confirmed billing owner/project, approved maximum exposure for uncapped services, and an uncapped-resource teardown rehearsal remain outstanding. No billing, API, IAM, or resource action was performed.

@@ -15,7 +15,7 @@ def setup_function() -> None:
 
 
 def _project() -> Project:
-    project = Project(name="Validation Planner", description="demo")
+    project = Project(name="Validation Planner", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     return project
 
@@ -31,6 +31,7 @@ def _approval(project: Project, test_plan: list[str] | None = None) -> ApprovalR
         test_plan=test_plan if test_plan is not None else ["python -m pytest", "ruff check backend"],
         rollback_plan="Revert generated branch.",
         risk=RiskAssessment(level=RiskLevel.LOW),
+        status="APPROVED",
     )
     store.approval_requests[approval.id] = approval
     return approval
@@ -88,7 +89,7 @@ def test_validation_plan_refuses_missing_approval() -> None:
     assert result.success is False
     assert result.reason == "Linked approval request not found."
     assert store.agent_task_events == {}
-    assert any(audit.event_type == "agent_worker.validation_plan_refused" for audit in store.audit_events)
+    assert any(audit.event_type == "agent_worker.task_claim_refused" for audit in store.audit_events)
 
 
 def test_validation_plan_refuses_empty_test_plan() -> None:

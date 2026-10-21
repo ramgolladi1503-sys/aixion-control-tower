@@ -18,8 +18,8 @@ def setup_function() -> None:
 
 def test_owner_can_list_users_sorted_by_email() -> None:
     owner = create_user("owner@example.com", PASSWORD, "Owner")
-    create_user("z-reviewer@example.com", PASSWORD, "Z Reviewer")
-    create_user("a-reviewer@example.com", PASSWORD, "A Reviewer")
+    create_user("z-reviewer@example.com", PASSWORD, "Z Reviewer", workspace_id=owner.workspace_id)
+    create_user("a-reviewer@example.com", PASSWORD, "A Reviewer", workspace_id=owner.workspace_id)
 
     users = list_users(auth_user(owner.id, owner.email, owner.role))
 
@@ -33,7 +33,7 @@ def test_owner_can_list_users_sorted_by_email() -> None:
 
 def test_owner_can_promote_reviewer_to_maintainer() -> None:
     owner = create_user("owner@example.com", PASSWORD, "Owner")
-    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer")
+    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer", workspace_id=owner.workspace_id)
 
     updated = update_user_role(
         reviewer.id,
@@ -50,7 +50,7 @@ def test_owner_can_promote_reviewer_to_maintainer() -> None:
 
 def test_role_update_is_idempotent_when_role_is_unchanged() -> None:
     owner = create_user("owner@example.com", PASSWORD, "Owner")
-    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer")
+    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer", workspace_id=owner.workspace_id)
 
     updated = update_user_role(
         reviewer.id,
@@ -84,6 +84,7 @@ def test_owner_can_demote_owner_when_another_active_owner_exists() -> None:
         PASSWORD,
         "Second Owner",
         role=UserRole.OWNER,
+        workspace_id=owner.workspace_id,
     )
 
     updated = update_user_role(

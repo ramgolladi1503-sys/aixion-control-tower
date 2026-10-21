@@ -5,6 +5,8 @@ import os
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.agent_task_repository import SQLiteAgentTaskRepository
+from app.approval_repository import SQLiteApprovalDecisionRepository
 from app.agent_worker_github_files import run_agent_worker_github_file_application
 from app.models import AgentProvider, ApprovalRequest, FileChange, Project, RiskAssessment, RiskLevel
 from app.store import store
@@ -54,7 +56,7 @@ def setup_function() -> None:
 
 
 def _project() -> Project:
-    project = Project(name="GitHub Files Worker", description="demo")
+    project = Project(name="GitHub Files Worker", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     return project
 
@@ -62,6 +64,7 @@ def _project() -> Project:
 def _approval(project: Project, files: list[FileChange] | None = None) -> ApprovalRequest:
     approval = ApprovalRequest(
         project_id=project.id,
+        workspace_id=project.workspace_id,
         title="Approved GitHub file changes",
         summary="Apply approved changes to a safe feature branch.",
         agent_name="github-files-worker",
@@ -72,6 +75,7 @@ def _approval(project: Project, files: list[FileChange] | None = None) -> Approv
         test_plan=["python -m pytest"],
         rollback_plan="Revert generated branch.",
         risk=RiskAssessment(level=RiskLevel.LOW),
+        status="APPROVED",
     )
     store.approval_requests[approval.id] = approval
     return approval
@@ -81,6 +85,7 @@ def _approved_task(approval: ApprovalRequest, *, branch_preference: str = "featu
     task = AgentTask(
         provider=AgentProvider.CODEX,
         project_id=approval.project_id,
+        workspace_id=approval.workspace_id,
         title="Apply files",
         goal="Apply approved files to GitHub branch.",
         repository="ramgolladi1503-sys/aixion-control-tower",
@@ -99,7 +104,11 @@ def test_github_files_worker_creates_file_on_existing_branch() -> None:
     task = _approved_task(approval)
     fake = FakeGitHubFileClient()
 
-    result = run_agent_worker_github_file_application(task_id=task.id, worker_id="files-worker", client=fake)
+    result = run_agent_worker_github_file_application(
+        task_id=task.id, worker_id="files-worker", client=fake,
+        task_repository=SQLiteAgentTaskRepository(store._connect),
+        approval_repository=SQLiteApprovalDecisionRepository(store._connect),
+    )
 
     assert result.success is True
     assert result.task_id == task.id

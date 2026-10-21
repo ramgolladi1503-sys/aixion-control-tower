@@ -90,6 +90,7 @@ def consume_effective_action(
         entity_type="proposed_action",
         entity_id=action.id,
         actor=actor,
+        workspace_id=action.workspace_id,
         correlation_id=action.run_id or action.task_id,
         payload={
             "lease_id": lease.id,

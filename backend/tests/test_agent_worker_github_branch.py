@@ -5,8 +5,9 @@ import os
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.agent_task_repository import SQLiteAgentTaskRepository
 from app.agent_worker_github_branch import GitHubBranchCreateResult, run_agent_worker_github_branch_creation
-from app.models import AgentProvider, Project
+from app.models import ApprovalRequest, ApprovalStatus, AgentProvider, Project, RiskAssessment, RiskLevel
 from app.store import store
 
 
@@ -43,17 +44,29 @@ def setup_function() -> None:
 
 
 def _approved_task(*, repository: str | None = "ramgolladi1503-sys/aixion-control-tower", branch_preference: str | None = "feature/github-branch-worker") -> AgentTask:
-    project = Project(name="GitHub Branch Worker", description="demo")
+    project = Project(name="GitHub Branch Worker", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
+    approval = ApprovalRequest(
+        project_id=project.id,
+        workspace_id=project.workspace_id,
+        title="GitHub branch authorization",
+        summary="Approval required before worker claims this task.",
+        target_branch=branch_preference or "feature/github-branch-worker",
+        files=[],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.APPROVED,
+    )
+    store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
         project_id=project.id,
+        workspace_id=project.workspace_id,
         title="Create GitHub branch",
         goal="Create a safe feature branch without file writes.",
         repository=repository,
         branch_preference=branch_preference,
         status=AgentTaskStatus.APPROVED,
-        approval_request_id="approval_github_branch",
+        approval_request_id=approval.id,
     )
     store.agent_tasks[task.id] = task
     store.persist()
@@ -64,7 +77,10 @@ def test_github_branch_worker_creates_safe_branch_only() -> None:
     task = _approved_task()
     fake = FakeGitHubBranchClient(source_sha="sha-main")
 
-    result = run_agent_worker_github_branch_creation(task_id=task.id, worker_id="branch-worker", client=fake)
+    result = run_agent_worker_github_branch_creation(
+        task_id=task.id, worker_id="branch-worker", client=fake,
+        task_repository=SQLiteAgentTaskRepository(store._connect),
+    )
 
     assert result.success is True
     assert result.task_id == task.id

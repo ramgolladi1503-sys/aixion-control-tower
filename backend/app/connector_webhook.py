@@ -17,6 +17,7 @@ from .agent_task_models import (
     AgentTaskRequestedAction,
     AgentTaskStatus,
 )
+from .agent_task_repository import AgentTaskRepositoryConflict
 from .connector_credentials import (
     hash_connector_secret,
     record_connector_auth_failure,
@@ -25,8 +26,16 @@ from .connector_credentials import (
 )
 from .connector_models import AgentConnector, ConnectorAuthType, ConnectorStatus
 from .connector_schema_mapper import normalize_connector_payload
+from .approval_decisions import agent_task_repository
 from .models import AgentAction, AgentProvider, AuditEvent, RiskLevel, now_utc
 from .store import store
+from .workspace_access import (
+    agent_task_scope_is_consistent,
+    agent_task_workspace_id,
+    connector_scope_is_consistent,
+    connector_workspace_id,
+    project_workspace_id,
+)
 
 CONNECTOR_RATE_LIMIT_WINDOW = timedelta(minutes=1)
 MAX_WEBHOOK_METADATA_KEYS = 50
@@ -270,39 +279,90 @@ def _safe_metadata(connector: AgentConnector, payload: ConnectorWebhookPayload) 
 
 
 def _create_task_from_connector(connector: AgentConnector, payload: ConnectorWebhookPayload) -> ConnectorWebhookResponse:
+    if not connector_scope_is_consistent(connector):
+        raise HTTPException(status_code=404, detail="Connector not found")
     _assert_connector_action(connector, AgentAction.CREATE_AGENT_TASK)
     if not payload.project_id:
         raise HTTPException(status_code=400, detail="project_id is required for CREATE_AGENT_TASK")
     if payload.project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
+    project = store.projects[payload.project_id]
+    if connector.workspace_id is not None and project_workspace_id(project.id) != connector.workspace_id:
+        raise HTTPException(status_code=404, detail="Project not found")
     if not payload.title or not payload.goal:
         raise HTTPException(status_code=400, detail="title and goal are required for CREATE_AGENT_TASK")
     _assert_connector_scope(connector, project_id=payload.project_id, repository=payload.repository)
-    task = AgentTask(provider=_provider_for_connector(connector), project_id=payload.project_id, title=payload.title.strip(), goal=payload.goal.strip(), context=payload.context, source_url=payload.source_url, source_session_id=payload.source_session_id, source_task_id=payload.source_task_id, requested_action=payload.requested_action, repository=payload.repository, branch_preference=payload.branch_preference, risk_hint=payload.risk_hint, requires_approval=payload.requires_approval, metadata=_safe_metadata(connector, payload), external_agent_id=connector.id, external_agent_name=connector.name)
-    store.agent_tasks[task.id] = task
+    task = AgentTask(provider=_provider_for_connector(connector), project_id=payload.project_id, title=payload.title.strip(), goal=payload.goal.strip(), context=payload.context, source_url=payload.source_url, source_session_id=payload.source_session_id, source_task_id=payload.source_task_id, requested_action=payload.requested_action, repository=payload.repository, branch_preference=payload.branch_preference, risk_hint=payload.risk_hint, requires_approval=payload.requires_approval, metadata=_safe_metadata(connector, payload), external_agent_id=connector.id, external_agent_name=connector.name, workspace_id=project.workspace_id)
     event = AgentTaskEvent(task_id=task.id, event_type=AgentTaskEventType.TASK_CREATED, message="AgentTask created by generic connector webhook.", status=task.status, actor=f"connector:{connector.id}", metadata={"connector_id": connector.id, "connector_webhook": True})
-    store.agent_task_events[event.id] = event
-    _audit("connector.webhook_task_created", task.id, {"connector_id": connector.id, "project_id": task.project_id, "repository": task.repository, "requested_action": task.requested_action}, actor=f"connector:{connector.id}")
+    audit_event = AuditEvent(
+        event_type="connector.webhook_task_created",
+        entity_id=task.id,
+        workspace_id=task.workspace_id,
+        actor=f"connector:{connector.id}",
+        details={"connector_id": connector.id, "project_id": task.project_id, "repository": task.repository, "requested_action": task.requested_action},
+    )
+    try:
+        agent_task_repository.create(task=task, event=event, audit=audit_event)
+    except (AgentTaskRepositoryConflict, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    store.project_agent_task_creation(task, event, audit_event)
     return ConnectorWebhookResponse(accepted=True, action=AgentAction.CREATE_AGENT_TASK, connector_id=connector.id, task_id=task.id, event_id=event.id, message="AgentTask created")
 
 
 def _append_task_event_from_connector(connector: AgentConnector, payload: ConnectorWebhookPayload) -> ConnectorWebhookResponse:
+    if not connector_scope_is_consistent(connector):
+        raise HTTPException(status_code=404, detail="Connector not found")
     _assert_connector_action(connector, AgentAction.APPEND_AGENT_TASK_EVENT)
     if not payload.task_id:
         raise HTTPException(status_code=400, detail="task_id is required for APPEND_AGENT_TASK_EVENT")
-    task = store.agent_tasks.get(payload.task_id)
+    task = agent_task_repository.get(payload.task_id)
     if not task:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+    if (
+        not agent_task_scope_is_consistent(task)
+        or agent_task_workspace_id(task) != connector_workspace_id(connector)
+    ):
         raise HTTPException(status_code=404, detail="Agent task not found")
     if task.external_agent_id != connector.id and task.metadata.get("connector_id") != connector.id:
         raise HTTPException(status_code=403, detail="Connector is not allowed for this task")
     _assert_connector_scope(connector, project_id=task.project_id, repository=task.repository)
+    updated_task = task.model_copy(deep=True)
     if payload.status is not None:
-        task.status = payload.status
-        task.updated_at = now_utc()
+        updated_task.status = payload.status
+        updated_task.updated_at = now_utc()
     event_create = AgentTaskEventCreate(event_type=payload.event_type, message=payload.message, status=payload.status, metadata=_safe_metadata(connector, payload))
-    event = AgentTaskEvent(task_id=task.id, actor=f"connector:{connector.id}", **event_create.model_dump())
-    store.agent_task_events[event.id] = event
-    _audit("connector.webhook_task_event_appended", task.id, {"connector_id": connector.id, "event_type": event.event_type, "status": event.status}, actor=f"connector:{connector.id}")
+    event_metadata = dict(event_create.metadata)
+    event_metadata.pop("notification_id", None)
+    event = AgentTaskEvent(
+        task_id=updated_task.id,
+        actor=f"connector:{connector.id}",
+        **event_create.model_dump(exclude={"metadata"}),
+        metadata=event_metadata,
+    )
+    audit_event = AuditEvent(
+        event_type="connector.webhook_task_event_appended",
+        entity_id=updated_task.id,
+        workspace_id=updated_task.workspace_id,
+        actor=f"connector:{connector.id}",
+        details={
+            "event_id": event.id,
+            "connector_id": connector.id,
+            "event_type": event.event_type,
+            "status": event.status,
+            "message": event.message,
+            "notification_id": None,
+        },
+    )
+    try:
+        agent_task_repository.commit_event(
+            expected=task,
+            updated=updated_task,
+            event=event,
+            audit=audit_event,
+        )
+    except (AgentTaskRepositoryConflict, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    store.project_agent_task_transition(updated_task, event, audit_event)
     return ConnectorWebhookResponse(accepted=True, action=AgentAction.APPEND_AGENT_TASK_EVENT, connector_id=connector.id, task_id=task.id, event_id=event.id, message="AgentTask event appended")
 
 
@@ -315,6 +375,8 @@ async def handle_connector_webhook(
     x_aixion_timestamp: str | None = Header(default=None),
     x_aixion_nonce: str | None = Header(default=None),
 ) -> ConnectorWebhookResponse:
+    if not connector_scope_is_consistent(connector):
+        raise HTTPException(status_code=404, detail="Connector not found")
     body = await request.body()
     _authenticate_connector(
         connector,

@@ -140,3 +140,18 @@ def test_create_agent_task_accepts_existing_project() -> None:
 
     assert response.status_code == 200
     assert response.json()["project_id"] == project.id
+
+
+def test_create_agent_task_resolves_project_after_compatibility_cache_clear() -> None:
+    project = Project(name="Durable Project Lookup", description="persisted project")
+    store.projects[project.id] = project
+    store.persist()
+    store.projects.clear()
+
+    response = client.post(
+        "/agent/tasks",
+        json={"project_id": project.id, "provider": "CURSOR", "title": "Task", "goal": "Use durable project"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["project_id"] == project.id

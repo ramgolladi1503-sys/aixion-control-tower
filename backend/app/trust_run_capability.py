@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .agent_run_models import AgentRun
 from .agent_run_trust import attach_capability_lease
+from .approval_decisions import approval_decision_repository
 from .models import AuthUser
 from .settings import get_settings
 from .store import store
@@ -40,7 +41,7 @@ def ensure_run_capability(
         return lease
 
     task = store.agent_tasks.get(run.task_id)
-    approval = store.approval_requests.get(run.approval_request_id or "")
+    approval = approval_decision_repository.get(run.approval_request_id or "")
     if task is None:
         raise RunCapabilityConflict("Run cannot receive a capability without its AgentTask.")
     if approval is None:

@@ -17,6 +17,22 @@ jobs:
   backend:
     name: Backend validation
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.11-alpine3.24
+        env:
+          POSTGRES_DB: aixion_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aixion_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      AIXION_TEST_POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/aixion_test
     defaults:
       run:
         working-directory: backend
@@ -69,7 +85,11 @@ jobs:
         run: ./gradlew assembleDebug
 
       - name: Build Android release variant
-        run: ./gradlew assembleRelease
+        # URL-shape compile check only; this is not a deployable API endpoint.
+        run: ./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/
+
+      - name: Verify release API URL guard
+        run: ./gradlew :app:verifyReleaseApiUrlGuard
 
   mission-control-container:
     name: Mission Control container validation
@@ -114,7 +134,7 @@ jobs:
         run: docker compose -f docker-compose.mission-control.yml down --volumes
 
   production-compose:
-    name: Production trust-plane container validation
+    name: Production startup guard (expected blocked)
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -125,39 +145,55 @@ jobs:
           cp .env.production.example .env.production
           cat >> .env.production <<'EOF'
           AIXION_LEASE_SIGNING_KEY=ci-only-signing-key-not-for-production
+          AIXION_FCM_PROJECT_ID=aixion-ci-project
           GITHUB_TOKEN=ci-only-placeholder
           FCM_SERVER_KEY=ci-only-placeholder
           AIXION_OWNER_TOKEN=ci-only-placeholder
           GRAFANA_ADMIN_PASSWORD=ci-only-placeholder
+          AIXION_METRICS_TOKEN=ci-only-prometheus-token-with-more-than-32-bytes
+          AIXION_METRICS_WORKSPACE_ID=ci-test-workspace
           EOF
           mkdir -p secrets
-          printf '%s' 'ci-only-placeholder' > secrets/aixion_metrics_token
+          printf '%s' 'ci-only-prometheus-token-with-more-than-32-bytes' > secrets/aixion_metrics_token
 
       - name: Validate production Compose contract
         run: |
           docker compose --env-file .env.production \
-            -f docker-compose.production.yml config
+            -f docker-compose.production.yml config --format json > /tmp/aixion-production-compose.json
+          python3 - <<'PY'
+          import json
 
-      - name: Start production-profile API
-        run: |
-          docker compose --env-file .env.production \
-            -f docker-compose.production.yml up \
-            --detach \
-            --build \
-            api
+          with open('/tmp/aixion-production-compose.json', encoding='utf-8') as source:
+              config = json.load(source)
+          services = config['services']
+          api_env = services['api'].get('environment', {})
+          scheduler_env = services['scheduler'].get('environment', {})
+          grafana_env = services['grafana'].get('environment', {})
+          assert 'AIXION_METRICS_TOKEN' in api_env
+          assert set(scheduler_env) == {'AIXION_API_BASE_URL', 'AIXION_OWNER_TOKEN'}
+          assert all(name.startswith('GF_') for name in grafana_env)
+          forbidden_scheduler = {'AIXION_POSTGRES_DSN', 'AIXION_METRICS_TOKEN', 'GITHUB_TOKEN'}
+          forbidden_grafana = {'AIXION_POSTGRES_DSN', 'AIXION_METRICS_TOKEN', 'GITHUB_TOKEN'}
+          assert forbidden_scheduler.isdisjoint(scheduler_env)
+          assert forbidden_grafana.isdisjoint(grafana_env)
+          for service in services.values():
+              environment = service.get('environment', {})
+              assert 'AIXION_DB_PATH' not in environment
+              assert 'aixion-runtime' not in str(service.get('volumes', []))
+          print('Production Compose environment boundaries are valid.')
+          PY
 
-      - name: Verify production-profile startup
+      - name: Verify production profile fails closed without PostgreSQL
         run: |
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8000/health; then
-              break
-            fi
-            sleep 2
-          done
-          curl --fail http://127.0.0.1:8000/health
-          docker compose --env-file .env.production \
-            -f docker-compose.production.yml \
-            ps --services --status running | grep -Fx api
+          set +e
+          output="$(docker compose --env-file .env.production \
+            -f docker-compose.production.yml run --build --rm --no-deps api 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -ne 0
+          printf '%s' "$output" | grep -F \
+            "implement and configure the PostgreSQL store before production startup"
 
       - name: Show production compose logs on failure
         if: failure()

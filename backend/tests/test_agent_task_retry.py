@@ -70,6 +70,7 @@ def _retry_event(task: AgentTask, retry_count: int) -> AgentTaskEvent:
         metadata={"operation_type": RETRY_REQUESTED_OPERATION, "retry_count": retry_count},
     )
     store.agent_task_events[event.id] = event
+    store.persist_records(inserts=[("agent_task_event", event.id, event)])
     return event
 
 

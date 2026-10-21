@@ -6,10 +6,21 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import require_maintainer, require_reviewer
+from .approval_decisions import approval_decision_repository
 from .mcp_child_router import MCPChildServerRouter
-from .mcp_gateway import MCPGatewayApprovalDecisionLayer, MCPGatewayDecision, MCPGatewayToolCall
+from .mcp_gateway import (
+    MCP_PENDING_FORWARD_OUTCOME_UNKNOWN,
+    MCPGatewayApprovalDecisionLayer,
+    MCPGatewayDecision,
+    MCPGatewayToolCall,
+)
 from .models import AuditEvent, AuthUser, MCPPendingRequest, MCPPendingStatus, now_utc
 from .store import store
+from .workspace_access import (
+    approval_scope_is_consistent,
+    project_workspace_id,
+    workspace_id_for_user,
+)
 
 router = APIRouter(prefix="/mcp-gateway", tags=["mcp-gateway"])
 ReviewerDependency = Depends(require_reviewer)
@@ -74,6 +85,29 @@ def _get_pending_or_404(pending_request_id: str) -> MCPPendingRequest:
     return pending
 
 
+def _pending_for_user(pending_request_id: str, user: AuthUser) -> MCPPendingRequest:
+    pending = _get_pending_or_404(pending_request_id)
+    workspace_id = workspace_id_for_user(user)
+    if not _pending_belongs_to_workspace(pending, workspace_id):
+        raise HTTPException(status_code=404, detail="MCP pending request not found")
+    return pending
+
+
+def _pending_belongs_to_workspace(
+    pending: MCPPendingRequest,
+    workspace_id: str | None,
+) -> bool:
+    project_workspace = project_workspace_id(pending.project_id)
+    if workspace_id is None:
+        return pending.workspace_id is None and project_workspace is None
+    if project_workspace != workspace_id:
+        return False
+    # A legacy pending row may inherit ownership from its parent project, but
+    # an explicit child scope that conflicts with that project is corrupt and
+    # must not be disclosed or mutated by either workspace.
+    return pending.workspace_id is None or pending.workspace_id == project_workspace
+
+
 def _active_lease_exists(pending: MCPPendingRequest) -> bool:
     return bool(
         pending.status == MCPPendingStatus.FORWARDING
@@ -126,8 +160,11 @@ def _pending_health_summary(requests: list[MCPPendingRequest]) -> MCPPendingHeal
     retryable = [
         pending
         for pending in requests
-        if pending.status in {MCPPendingStatus.WAITING_FOR_APPROVAL, MCPPendingStatus.DEAD_LETTER}
-        or _expired_lease_exists(pending)
+        if pending.status == MCPPendingStatus.WAITING_FOR_APPROVAL
+        or (
+            pending.status == MCPPendingStatus.DEAD_LETTER
+            and pending.last_error != MCP_PENDING_FORWARD_OUTCOME_UNKNOWN
+        )
     ]
     terminal_statuses = {
         MCPPendingStatus.FORWARDED,
@@ -155,8 +192,11 @@ def _pending_health_summary(requests: list[MCPPendingRequest]) -> MCPPendingHeal
 @router.post("/requests", response_model=MCPGatewayDecision)
 def submit_gateway_request(
     payload: GatewaySubmitRequest,
-    _: AuthUser = MaintainerDependency,
+    user: AuthUser = MaintainerDependency,
 ) -> MCPGatewayDecision:
+    workspace_id = workspace_id_for_user(user)
+    if workspace_id is not None and project_workspace_id(payload.project_id) != workspace_id:
+        raise HTTPException(status_code=404, detail="Project not found")
     return gateway_for_project(payload.project_id).submit_tool_call(payload.request)
 
 
@@ -165,9 +205,15 @@ def list_pending_gateway_requests(
     project_id: str | None = Query(default=None),
     status: MCPPendingStatus | None = Query(default=None),
     approval_request_id: str | None = Query(default=None),
-    _: AuthUser = ReviewerDependency,
+    user: AuthUser = ReviewerDependency,
 ) -> list[MCPPendingRequest]:
     requests = _pending_requests_for_project(project_id)
+    workspace_id = workspace_id_for_user(user)
+    requests = [
+        request
+        for request in requests
+        if _pending_belongs_to_workspace(request, workspace_id)
+    ]
     if status is not None:
         requests = [request for request in requests if request.status == status]
     if approval_request_id is not None:
@@ -178,19 +224,23 @@ def list_pending_gateway_requests(
 @router.get("/pending-requests/health", response_model=MCPPendingHealthSummary)
 def pending_gateway_health(
     project_id: str | None = Query(default=None),
-    _: AuthUser = ReviewerDependency,
+    user: AuthUser = ReviewerDependency,
 ) -> MCPPendingHealthSummary:
-    if project_id is not None and project_id not in store.projects:
+    workspace_id = workspace_id_for_user(user)
+    if workspace_id is None and project_id is not None and project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
-    return _pending_health_summary(_pending_requests_for_project(project_id))
+    return _pending_health_summary([
+        request for request in _pending_requests_for_project(project_id)
+        if _pending_belongs_to_workspace(request, workspace_id)
+    ])
 
 
 @router.get("/pending-requests/{pending_request_id}", response_model=MCPPendingRequest)
 def get_pending_gateway_request(
     pending_request_id: str,
-    _: AuthUser = ReviewerDependency,
+    user: AuthUser = ReviewerDependency,
 ) -> MCPPendingRequest:
-    return _get_pending_or_404(pending_request_id)
+    return _pending_for_user(pending_request_id, user)
 
 
 @router.post("/pending-requests/{pending_request_id}/retry", response_model=MCPPendingRequest)
@@ -199,9 +249,15 @@ def retry_pending_gateway_request(
     payload: PendingRetryRequest | None = None,
     user: AuthUser = MaintainerDependency,
 ) -> MCPPendingRequest:
-    pending = _get_pending_or_404(pending_request_id)
+    pending = _pending_for_user(pending_request_id, user)
     payload = payload or PendingRetryRequest()
     previous_status = pending.status
+
+    if pending.last_error == MCP_PENDING_FORWARD_OUTCOME_UNKNOWN:
+        raise HTTPException(
+            status_code=409,
+            detail="MCP forwarding outcome is unknown; create a new request instead of replaying this invocation",
+        )
 
     if previous_status in {
         MCPPendingStatus.FORWARDED,
@@ -214,16 +270,10 @@ def retry_pending_gateway_request(
         raise HTTPException(status_code=409, detail="MCP pending request has an active lease")
 
     if previous_status == MCPPendingStatus.FORWARDING:
-        _audit_pending_recovery(
-            MCP_PENDING_LEASE_RELEASED,
-            pending,
-            {
-                "reason": payload.reason,
-                "previous_status": previous_status,
-                "previous_lease_owner": pending.lease_owner,
-                "previous_lease_expires_at": pending.lease_expires_at.isoformat() if pending.lease_expires_at else None,
-            },
-            actor=user.email,
+        MCPGatewayApprovalDecisionLayer._mark_forward_outcome_unknown(pending)
+        raise HTTPException(
+            status_code=409,
+            detail="MCP forwarding lease expired with an unknown child-server outcome; create a new request instead of replaying",
         )
 
     pending.status = MCPPendingStatus.WAITING_FOR_APPROVAL
@@ -252,11 +302,17 @@ def retry_pending_gateway_request(
 @router.post("/approvals/{approval_request_id}/resolve", response_model=MCPGatewayDecision)
 def resolve_gateway_request(
     approval_request_id: str,
-    _: AuthUser = MaintainerDependency,
+    user: AuthUser = MaintainerDependency,
 ) -> MCPGatewayDecision:
-    approval = store.approval_requests.get(approval_request_id)
-    if not approval:
+    approval = approval_decision_repository.get(approval_request_id)
+    if not approval or not approval_scope_is_consistent(approval):
         raise HTTPException(status_code=404, detail="Approval request not found")
+    workspace_id = workspace_id_for_user(user)
+    if workspace_id is not None and project_workspace_id(approval.project_id) != workspace_id:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    # Refresh the compatibility view from the durable record before the gateway
+    # consumes the decision; another API process may have committed it.
+    store.approval_requests[approval_request_id] = approval
     gateway = gateway_for_project(approval.project_id)
     gateway.wait_handle(approval_request_id).notify_decision_changed()
     return gateway.resolve_after_side_channel_decision(approval_request_id)

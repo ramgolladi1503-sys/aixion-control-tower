@@ -22,6 +22,7 @@ data class RuntimeReadinessDto(
     val generated_at: String? = null,
     val profile: String,
     val auth_enabled: Boolean,
+    val database_backend: String = "unknown",
     val db_reachable: Boolean,
     val migrations_applied: Boolean,
     val expected_migration_ids: List<String> = emptyList(),

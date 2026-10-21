@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
-from .auth import require_owner
-from .models import AuditEvent, AuthUser, SessionToken, UserRole, now_utc
+from .auth import postgres_auth_repository, require_owner
+from .models import AuditEvent, AuthUser, SessionToken, User, UserRole, now_utc
 from .store import store
+from .workspace_access import workspace_id_for_user
+from .postgres_auth_repository import PostgresSessionAuthorizationError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -33,8 +35,8 @@ def session_is_active(session: SessionToken) -> bool:
     return not session.revoked and session.expires_at > now_utc()
 
 
-def to_session_response(session: SessionToken) -> SessionResponse:
-    user = store.users.get(session.user_id)
+def to_session_response(session: SessionToken, user: User | None = None) -> SessionResponse:
+    user = user or store.users.get(session.user_id)
     return SessionResponse(
         id=session.id,
         user_id=session.user_id,
@@ -63,17 +65,52 @@ def record_session_revocation(actor: AuthUser, target_user_id: str, target_email
 
 
 @router.get("/sessions", response_model=list[SessionResponse])
-def list_sessions(_: AuthUser = Depends(require_owner)) -> list[SessionResponse]:
+def list_sessions(
+    actor: AuthUser = Depends(require_owner), request: Request = None  # type: ignore[assignment]
+) -> list[SessionResponse]:
+    postgres_repository = postgres_auth_repository(request)
+    if postgres_repository is not None:
+        try:
+            return [
+                to_session_response(session, user)
+                for session, user in postgres_repository.list_sessions(actor.id)
+            ]
+        except PostgresSessionAuthorizationError as error:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    workspace_id = workspace_id_for_user(actor)
     return [
         to_session_response(session)
         for session in sorted(store.sessions.values(), key=lambda item: item.created_at, reverse=True)
+        if (account := store.users.get(session.user_id)) is not None
+        and (workspace_id is None or account.workspace_id == workspace_id)
     ]
 
 
 @router.post("/users/{user_id}/sessions/revoke", response_model=SessionRevokeResponse)
-def revoke_user_sessions(user_id: str, actor: AuthUser = Depends(require_owner)) -> SessionRevokeResponse:
+def revoke_user_sessions(
+    user_id: str,
+    actor: AuthUser = Depends(require_owner),
+    request: Request = None,  # type: ignore[assignment]
+) -> SessionRevokeResponse:
+    postgres_repository = postgres_auth_repository(request)
+    if postgres_repository is not None:
+        try:
+            result = postgres_repository.revoke_user_sessions(
+                actor_user_id=actor.id,
+                target_user_id=user_id,
+            )
+        except PostgresSessionAuthorizationError as error:
+            message = str(error)
+            code = status.HTTP_409_CONFLICT if "own sessions" in message.lower() else status.HTTP_404_NOT_FOUND if "unavailable" in message.lower() else status.HTTP_403_FORBIDDEN
+            raise HTTPException(status_code=code, detail=message) from error
+        return SessionRevokeResponse(
+            target_user_id=result.target.id,
+            target_email=result.target.email,
+            revoked_sessions_count=result.revoked_count,
+        )
     target = store.users.get(user_id)
-    if not target:
+    workspace_id = workspace_id_for_user(actor)
+    if not target or (workspace_id is not None and target.workspace_id != workspace_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
     if target.id == actor.id:

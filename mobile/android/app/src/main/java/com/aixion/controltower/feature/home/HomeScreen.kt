@@ -23,18 +23,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.ui.ForegroundRefreshEffect
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
-import com.aixion.controltower.core.ui.components.StatusCard
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
-import com.aixion.controltower.core.ui.theme.RiskBlocked
 import com.aixion.controltower.core.ui.theme.RiskCritical
 import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerAccent
 import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
@@ -43,26 +41,25 @@ import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel = viewModel(),
-    onApprovalSelected: (ApprovalSummary) -> Unit = {},
-    onOpenActionQueue: () -> Unit = {},
-    onOpenExecutionQueue: () -> Unit = {},
-    onOpenBlockedQueue: () -> Unit = {},
-    onOpenFailedTests: () -> Unit = {}
+    onApprovalSelected: (ApprovalSummary) -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
+    ForegroundRefreshEffect(onRefresh = viewModel::refreshInForeground)
     val heroTitle = when {
         state.loading -> "Loading command state"
         state.hasError -> "Backend sync failed"
+        state.unsupportedApprovals.isNotEmpty() -> "${state.unsupportedApprovals.size} approvals need an app update"
         state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"
         state.blockedCount > 0 -> "${state.blockedCount} blocked actions need attention"
         else -> "All clear"
     }
     val heroSubtitle = when {
-        state.loading -> "Syncing approvals, worker state, and execution queues."
+        state.loading -> "Syncing approval requests."
         state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then retry."
+        state.unsupportedApprovals.isNotEmpty() -> "The app cannot safely interpret some approval status or risk values. No decisions are enabled for them."
         state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, reject, or request revision."
         state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
-        else -> "No action required right now. Keep building, but keep the tower watching."
+        else -> "No approvals are waiting. Connect your agent and keep its computer running so work can resume after a phone decision."
     }
 
     LazyColumn(
@@ -87,11 +84,13 @@ fun HomeScreen(
                         StatusBadge(
                             label = when {
                                 state.hasError -> "BACKEND ERROR"
+                                state.unsupportedApprovals.isNotEmpty() -> "UNSUPPORTED APPROVAL"
                                 state.actionRequiredCount > 0 -> "APPROVAL QUEUE"
                                 else -> "COMMAND STATE"
                             },
                             color = when {
                                 state.hasError -> RiskCritical
+                                state.unsupportedApprovals.isNotEmpty() -> RiskCritical
                                 state.actionRequiredCount > 0 -> RiskMedium
                                 else -> RiskLow
                             }
@@ -128,48 +127,6 @@ fun HomeScreen(
             }
         }
 
-        item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatusCard(
-                    title = "Action",
-                    value = state.actionRequiredCount.toString(),
-                    subtitle = "tap to review queue",
-                    accent = TowerAccent,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenActionQueue
-                )
-                StatusCard(
-                    title = "Execution",
-                    value = state.githubExecutionCount.toString(),
-                    subtitle = "tap to see PR path",
-                    accent = RiskMedium,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenExecutionQueue
-                )
-            }
-        }
-
-        item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatusCard(
-                    title = "Blocked",
-                    value = state.blockedCount.toString(),
-                    subtitle = "tap for stopped work",
-                    accent = RiskBlocked,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenBlockedQueue
-                )
-                StatusCard(
-                    title = "Failed Tests",
-                    value = state.failedTestsCount.toString(),
-                    subtitle = "tap for failures",
-                    accent = RiskCritical,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenFailedTests
-                )
-            }
-        }
-
         if (state.hasError) {
             item {
                 EmptyHomePanel(
@@ -180,30 +137,38 @@ fun HomeScreen(
         } else if (state.actionRequiredApprovals.isNotEmpty()) {
             item {
                 TowerSectionHeader(
-                    title = "Needs Decision",
-                    subtitle = "Top pending requests. Tap the Action card above for the full review queue."
+                    title = "Needs your decision",
+                    subtitle = "Review the exact request before approving or rejecting it."
                 )
             }
             items(state.actionRequiredApprovals.take(2)) { approval ->
                 ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
-        } else {
+        } else if (state.unsupportedApprovals.isEmpty()) {
             item {
                 EmptyHomePanel(
                     title = "No approvals waiting",
-                    body = "The approval queue is clear. New AI/code actions will appear through the Action card when review is required."
+                    body = "The approval queue is clear. New requests will appear here when an agent needs your decision."
                 )
             }
         }
 
-        if (!state.hasError && state.githubExecutionApprovals.isNotEmpty()) {
+        if (!state.hasError && state.unsupportedApprovals.isNotEmpty()) {
             item {
-                TowerSectionHeader(
-                    title = "Awaiting GitHub Execution",
-                    subtitle = "Approved work that still needs branch, validation, or PR completion. Tap Execution above for this queue."
+                ErrorPanel(
+                    title = "Approval data is not recognized",
+                    body = "Update the app or backend before deciding. These requests remain visible but cannot be approved.",
+                    onRetry = viewModel::refresh,
+                    retryEnabled = !state.loading
                 )
             }
-            items(state.githubExecutionApprovals.take(2)) { approval ->
+            item {
+                TowerSectionHeader(
+                    title = "Unsupported approval data",
+                    subtitle = "Decision controls are disabled for unrecognized status or risk values."
+                )
+            }
+            items(state.unsupportedApprovals) { approval ->
                 ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
         }
@@ -238,11 +203,7 @@ private fun HomeHeader(loading: Boolean, hasError: Boolean) {
             )
         }
         StatusBadge(
-            label = when {
-                loading -> "SYNCING"
-                hasError -> "OFFLINE"
-                else -> "CONNECTED"
-            },
+            label = homeBackendStatusLabel(loading = loading, hasError = hasError),
             color = when {
                 loading -> RiskMedium
                 hasError -> RiskCritical
@@ -250,6 +211,12 @@ private fun HomeHeader(loading: Boolean, hasError: Boolean) {
             }
         )
     }
+}
+
+internal fun homeBackendStatusLabel(loading: Boolean, hasError: Boolean): String = when {
+    loading -> "SYNCING"
+    hasError -> "SYNC ERROR"
+    else -> "SYNCED"
 }
 
 @Composable

@@ -22,7 +22,7 @@ def auth_header(token: str) -> dict[str, str]:
 def test_owner_can_list_sessions(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
     owner = create_user("owner@example.com", PASSWORD, "Owner")
-    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer")
+    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer", workspace_id=owner.workspace_id)
     owner_auth = create_session(owner)
     create_session(reviewer)
 
@@ -37,8 +37,8 @@ def test_owner_can_list_sessions(monkeypatch) -> None:
 
 def test_non_owner_cannot_list_sessions(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
-    create_user("owner@example.com", PASSWORD, "Owner")
-    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer")
+    owner = create_user("owner@example.com", PASSWORD, "Owner")
+    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer", workspace_id=owner.workspace_id)
     reviewer_auth = create_session(reviewer)
 
     response = TestClient(app).get("/auth/sessions", headers=auth_header(reviewer_auth.access_token))
@@ -49,7 +49,7 @@ def test_non_owner_cannot_list_sessions(monkeypatch) -> None:
 def test_owner_can_revoke_target_user_sessions(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
     owner = create_user("owner@example.com", PASSWORD, "Owner")
-    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer")
+    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer", workspace_id=owner.workspace_id)
     owner_auth = create_session(owner)
     reviewer_auth = create_session(reviewer)
     create_session(reviewer)
@@ -82,9 +82,9 @@ def test_owner_cannot_revoke_own_sessions(monkeypatch) -> None:
 
 def test_non_owner_cannot_revoke_sessions(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
-    create_user("owner@example.com", PASSWORD, "Owner")
-    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer")
-    maintainer = create_user("maintainer@example.com", PASSWORD, "Maintainer", role=UserRole.MAINTAINER)
+    owner = create_user("owner@example.com", PASSWORD, "Owner")
+    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer", workspace_id=owner.workspace_id)
+    maintainer = create_user("maintainer@example.com", PASSWORD, "Maintainer", role=UserRole.MAINTAINER, workspace_id=owner.workspace_id)
     reviewer_auth = create_session(reviewer)
     create_session(maintainer)
 
@@ -113,7 +113,7 @@ def test_revoke_missing_user_returns_404(monkeypatch) -> None:
 def test_session_revocation_audit_event_exists(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
     owner = create_user("owner@example.com", PASSWORD, "Owner")
-    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer")
+    reviewer = create_user("reviewer@example.com", PASSWORD, "Reviewer", workspace_id=owner.workspace_id)
     owner_auth = create_session(owner)
     create_session(reviewer)
 

@@ -68,7 +68,7 @@ auth_enabled
 readiness_status
 db_reachable
 github_token_configured
-fcm_server_key_configured
+fcm_server_key_configured (legacy field; indicates FCM project ID presence)
 ```
 
 It includes migration data:

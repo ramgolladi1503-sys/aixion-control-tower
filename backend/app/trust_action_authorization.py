@@ -18,6 +18,12 @@ from .trust_crypto import sha256_hex, sign_payload, verify_payload_signature
 from .trust_decisions import latest_policy_decision
 from .trust_flight_recorder import append_trust_event
 from .trust_models import PolicyDecision, PolicyDecisionType, ProposedAction, TrustEventType
+from .workspace_access import (
+    action_authorization_scope_is_consistent,
+    agent_run_scope_is_consistent,
+    proposed_action_scope_is_consistent,
+    proposed_action_workspace_id,
+)
 
 
 class ActionAuthorizationConflict(RuntimeError):
@@ -50,6 +56,8 @@ def verify_action_authorization(
     action: ProposedAction,
 ) -> bool:
     return (
+        action_authorization_scope_is_consistent(authorization)
+        and
         authorization.action_id == action.id
         and authorization.action_payload_hash == action_payload_hash(action)
         and verify_payload_signature(
@@ -70,7 +78,7 @@ def _apply_durable_run_decision(
     if action is None or not action.run_id:
         return
     run = store.agent_runs.get(action.run_id)
-    if run is None:
+    if run is None or not agent_run_scope_is_consistent(run):
         return
     step_id = str(action.metadata.get("step_id") or "")
     step = store.agent_run_steps.get(step_id)
@@ -127,6 +135,11 @@ def record_action_authorization(
     action = store.proposed_actions.get(action_id)
     if action is None:
         raise ValueError("Proposed action not found.")
+    if not proposed_action_scope_is_consistent(action):
+        raise ValueError("Proposed action not found.")
+    stored_workspace_id = store.users.get(user.id).workspace_id if user.id in store.users else user.workspace_id
+    if stored_workspace_id is not None and proposed_action_workspace_id(action) != stored_workspace_id:
+        raise ValueError("Proposed action not found.")
     current = latest_policy_decision(action_id)
     if current is None:
         raise ActionAuthorizationConflict("Action has no policy decision.")
@@ -179,6 +192,7 @@ def record_action_authorization(
     payload_hash = action_payload_hash(action)
     authorization = ActionAuthorization(
         action_id=action.id,
+        workspace_id=action.workspace_id,
         action_payload_hash=payload_hash,
         policy_decision_id=current.id,
         reviewer_user_id=user.id,
@@ -224,6 +238,7 @@ def record_action_authorization(
         entity_type="proposed_action",
         entity_id=action.id,
         actor=user.email,
+        workspace_id=action.workspace_id,
         correlation_id=action.run_id or action.task_id,
         payload={
             "authorization_id": authorization.id,

@@ -71,7 +71,6 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             _state.value = current.copy(loading = true, sessionChecked = false, message = null)
             runCatching {
                 repository.login(current.email, current.password)
-                repository.currentUserLabel()
             }.onSuccess { label ->
                 _state.value = _state.value.copy(
                     loading = false,
@@ -82,6 +81,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     userLabel = label,
                     message = "Logged in."
                 )
+                syncPushRegistration()
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     loading = false,
@@ -214,6 +214,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     userLabel = label,
                     message = "Session verified."
                 )
+                syncPushRegistration()
             }.onFailure { error ->
                 repository.logout()
                 _state.value = _state.value.copy(
@@ -228,7 +229,30 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun logout() {
-        repository.logout()
-        _state.value = AuthUiState(sessionChecked = true, message = "Logged out.")
+        if (_state.value.loading) return
+        _state.value = _state.value.copy(loading = true, message = "Signing out…")
+        viewModelScope.launch {
+            val deviceCleanupSucceeded = try {
+                repository.logout()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            }
+            _state.value = AuthUiState(
+                sessionChecked = true,
+                message = if (deviceCleanupSucceeded) {
+                    "Logged out. This device was removed from approval alerts."
+                } else {
+                    "Logged out locally. Server device cleanup is pending; reconnect and sign in again to retry."
+                }
+            )
+        }
+    }
+
+    private fun syncPushRegistration() {
+        viewModelScope.launch {
+            repository.registerPushDeviceIfAllowed()
+        }
     }
 }

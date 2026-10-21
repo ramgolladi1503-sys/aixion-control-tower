@@ -86,6 +86,22 @@ def test_query_audit_events_filters_by_event_type_entity_actor_and_detail() -> N
     assert by_detail_value.json()[0]["entity_id"] == "approval_2"
 
 
+def test_audit_routes_read_durable_repository_when_process_cache_is_empty() -> None:
+    events = _seed_audit_events()
+    store.audit_events.clear()
+
+    response = client.get("/audit/events?entity_id=approval_1")
+    detail = client.get(f"/audit/events/{events[0].id}")
+    exported = client.get("/audit/export?entity_id=approval_1")
+
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()} == {event.id for event in events[:3]}
+    assert detail.status_code == 200
+    assert detail.json()["id"] == events[0].id
+    assert exported.status_code == 200
+    assert exported.json()["count"] == 3
+
+
 def test_query_audit_events_applies_limit_and_returns_newest_first() -> None:
     events = _seed_audit_events()
 
@@ -137,6 +153,38 @@ def test_export_audit_events_redacts_sensitive_detail_keys() -> None:
     assert exported_event["details"]["nested"]["api_secret"] == "[REDACTED]"
     assert exported_event["details"]["nested"]["safe"] == "visible"
     assert exported_event["details"]["safe_value"] == "kept"
+
+
+def test_audit_read_endpoints_redact_sensitive_detail_keys() -> None:
+    event = AuditEvent(
+        event_type="agent.registered",
+        actor="owner@example.com",
+        entity_id="agent_sensitive_read",
+        details={
+            "agent_token": "raw-agent-token",
+            "nested": [{"api_secret": "raw-secret", "safe": "visible"}],
+            "safe_value": "kept",
+        },
+    )
+    store.audit_events.append(event)
+    store.persist()
+
+    list_response = client.get("/audit/events?entity_id=agent_sensitive_read")
+    detail_response = client.get(f"/audit/events/{event.id}")
+
+    assert list_response.status_code == 200
+    listed_event = list_response.json()[0]
+    assert listed_event["details"]["agent_token"] == "[REDACTED]"
+    assert listed_event["details"]["nested"][0]["api_secret"] == "[REDACTED]"
+    assert listed_event["details"]["nested"][0]["safe"] == "visible"
+    assert listed_event["details"]["safe_value"] == "kept"
+
+    assert detail_response.status_code == 200
+    detailed_event = detail_response.json()
+    assert detailed_event["details"]["agent_token"] == "[REDACTED]"
+    assert detailed_event["details"]["nested"][0]["api_secret"] == "[REDACTED]"
+    assert detailed_event["details"]["nested"][0]["safe"] == "visible"
+    assert detailed_event["details"]["safe_value"] == "kept"
 
 
 def test_export_audit_events_filters_by_created_window() -> None:

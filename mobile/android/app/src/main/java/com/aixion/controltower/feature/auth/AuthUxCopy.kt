@@ -32,10 +32,9 @@ object AuthUxCopy {
 
     fun primaryLoginLabel(state: AuthUiState): String {
         return when {
-            state.loading -> "Working..."
-            state.verificationRequired -> "Verify first"
-            state.emailVerified -> "Login now"
-            else -> "Login"
+            state.loading -> "Please wait..."
+            state.verificationRequired -> "Verify email first"
+            else -> "Log in"
         }
     }
 

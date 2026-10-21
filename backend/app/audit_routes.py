@@ -3,10 +3,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from .auth import require_maintainer, require_owner, require_reviewer
+from .application_repository_access import (
+    audit_event_repository_for_request,
+    workspace_id_for_request,
+)
+from .audit_repository import AuditEventRepository, SQLiteAuditEventRepository
 from .models import AuditEvent, AuthUser, now_utc
 from .recovery_routes import (
     RecoverySnapshot,
@@ -16,6 +21,7 @@ from .recovery_routes import (
     validate_recovery_snapshot,
 )
 from .store import store
+from .workspace_access import workspace_id_for_user
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 ReviewerDependency = Depends(require_reviewer)
@@ -34,6 +40,7 @@ SENSITIVE_DETAIL_KEY_MARKERS = (
     "credential",
     "serverkey",
 )
+_local_audit_repository = SQLiteAuditEventRepository(store._connect)
 
 
 class AuditRetentionPolicy(BaseModel):
@@ -82,12 +89,27 @@ def _redact_details(value: Any) -> Any:
     return value
 
 
-def _redact_audit_event(event: AuditEvent) -> AuditEvent:
+def redact_audit_event(event: AuditEvent) -> AuditEvent:
     return event.model_copy(update={"details": _redact_details(event.details)})
 
 
+def _audit_repository_for_route(request: Request | None) -> AuditEventRepository:
+    if request is None:
+        return _local_audit_repository
+    return audit_event_repository_for_request(request)
+
+
+def _workspace_for_route(user: AuthUser, request: Request | None) -> str | None:
+    if request is None:
+        return workspace_id_for_user(user)
+    return workspace_id_for_request(user, request)
+
+
 def _filter_audit_events(
+    repository: AuditEventRepository,
     *,
+    limit: int = 1_000,
+    workspace_id: str | None = None,
     event_type: str | None = None,
     entity_id: str | None = None,
     actor: str | None = None,
@@ -96,22 +118,32 @@ def _filter_audit_events(
     created_after: datetime | None = None,
     created_before: datetime | None = None,
 ) -> list[AuditEvent]:
-    events = list(store.audit_events)
-    if event_type is not None:
-        events = [event for event in events if event.event_type == event_type]
-    if entity_id is not None:
-        events = [event for event in events if event.entity_id == entity_id]
-    if actor is not None:
-        events = [event for event in events if event.actor == actor]
-    if detail_key is not None:
-        events = [event for event in events if detail_key in event.details]
-    if detail_key is not None and detail_value is not None:
-        events = [event for event in events if str(event.details.get(detail_key)) == detail_value]
-    if created_after is not None:
-        events = [event for event in events if event.created_at >= created_after]
-    if created_before is not None:
-        events = [event for event in events if event.created_at <= created_before]
-    return sorted(events, key=lambda event: event.created_at, reverse=True)
+    if workspace_id is None:
+        # PostgreSQL audit access is always tenant-scoped. Local unauthenticated
+        # demo mode may have no workspace and retains its SQLite-only behavior.
+        events = repository.list_for_workspace(
+            "",
+            event_type=event_type,
+            entity_id=entity_id,
+            actor=actor,
+            detail_key=detail_key,
+            detail_value=detail_value,
+            created_after=created_after,
+            created_before=created_before,
+            limit=limit,
+        )
+        return events
+    return repository.list_for_workspace(
+        workspace_id,
+        event_type=event_type,
+        entity_id=entity_id,
+        actor=actor,
+        detail_key=detail_key,
+        detail_value=detail_value,
+        created_after=created_after,
+        created_before=created_before,
+        limit=limit,
+    )
 
 
 def _filter_summary(
@@ -141,25 +173,31 @@ def _filter_summary(
 
 @router.get("/events", response_model=list[AuditEvent])
 def query_audit_events(
+    request: Request,
     event_type: str | None = Query(default=None),
     entity_id: str | None = Query(default=None),
     actor: str | None = Query(default=None),
     detail_key: str | None = Query(default=None),
     detail_value: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
-    _: AuthUser = ReviewerDependency,
+    user: AuthUser = ReviewerDependency,
 ) -> list[AuditEvent]:
-    return _filter_audit_events(
+    events = _filter_audit_events(
+        _audit_repository_for_route(request),
+        limit=limit,
+        workspace_id=_workspace_for_route(user, request),
         event_type=event_type,
         entity_id=entity_id,
         actor=actor,
         detail_key=detail_key,
         detail_value=detail_value,
     )[:limit]
+    return [redact_audit_event(event) for event in events]
 
 
 @router.get("/export", response_model=AuditExportResponse)
 def export_audit_events(
+    request: Request,
     event_type: str | None = Query(default=None),
     entity_id: str | None = Query(default=None),
     actor: str | None = Query(default=None),
@@ -168,9 +206,12 @@ def export_audit_events(
     created_after: datetime | None = Query(default=None),
     created_before: datetime | None = Query(default=None),
     limit: int = Query(default=1_000, ge=1, le=AUDIT_EXPORT_MAX_LIMIT),
-    _: AuthUser = MaintainerDependency,
+    user: AuthUser = MaintainerDependency,
 ) -> AuditExportResponse:
     events = _filter_audit_events(
+        _audit_repository_for_route(request),
+        limit=limit + 1,
+        workspace_id=_workspace_for_route(user, request),
         event_type=event_type,
         entity_id=entity_id,
         actor=actor,
@@ -179,7 +220,7 @@ def export_audit_events(
         created_after=created_after,
         created_before=created_before,
     )
-    exported_events = [_redact_audit_event(event) for event in events[:limit]]
+    exported_events = [redact_audit_event(event) for event in events[:limit]]
     return AuditExportResponse(
         count=len(exported_events),
         limit=limit,
@@ -205,12 +246,20 @@ def get_audit_retention_policy(_: AuthUser = MaintainerDependency) -> AuditReten
 @router.get("/events/{audit_event_id}", response_model=AuditEvent)
 def get_audit_event(
     audit_event_id: str,
-    _: AuthUser = ReviewerDependency,
+    request: Request,
+    user: AuthUser = ReviewerDependency,
 ) -> AuditEvent:
-    event = next((item for item in store.audit_events if item.id == audit_event_id), None)
+    workspace_id = _workspace_for_route(user, request)
+    repository = _audit_repository_for_route(request)
+    if workspace_id is None and not isinstance(repository, SQLiteAuditEventRepository):
+        raise HTTPException(status_code=404, detail="Audit event not found")
+    event = repository.get_for_workspace(
+        audit_event_id,
+        workspace_id or "",
+    )
     if event is None:
         raise HTTPException(status_code=404, detail="Audit event not found")
-    return event
+    return redact_audit_event(event)
 
 
 @router.get("/recovery/export", response_model=RecoverySnapshot)

@@ -23,6 +23,7 @@ class BackendReleaseValidationSummary(BaseModel):
     profile: str
     auth_enabled: bool
     readiness_status: str
+    database_backend: str
     db_reachable: bool
     migrations_applied: bool
     expected_migration_ids: list[str] = Field(default_factory=list)
@@ -73,6 +74,7 @@ def build_backend_release_validation_summary() -> BackendReleaseValidationSummar
         profile=settings.profile,
         auth_enabled=settings.auth_enabled,
         readiness_status=readiness.status,
+        database_backend=readiness.database_backend,
         db_reachable=readiness.db_reachable,
         migrations_applied=readiness.migrations_applied,
         expected_migration_ids=readiness.expected_migration_ids,
@@ -122,9 +124,10 @@ Release decision: **{summary.decision}**
 - Profile: `{summary.profile}`
 - Auth enabled: `{summary.auth_enabled}`
 - Readiness status: `{summary.readiness_status}`
+- Database backend: `{summary.database_backend}`
 - Database reachable: `{summary.db_reachable}`
 - GitHub token configured: `{summary.github_token_configured}`
-- FCM server key configured: `{summary.fcm_server_key_configured}`
+- FCM project ID configured: `{summary.fcm_server_key_configured}`
 
 ## Database migrations
 

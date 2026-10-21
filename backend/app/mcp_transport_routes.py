@@ -10,6 +10,7 @@ from .mcp_gateway import MCPGatewayDecision, MCPGatewayToolCall
 from .mcp_gateway_routes import gateway_for_project
 from .models import AuthUser, MCPChildServer
 from .store import store
+from .workspace_access import project_workspace_id, workspace_id_for_user
 
 router = APIRouter(prefix="/mcp", tags=["mcp-transport"])
 MaintainerDependency = Depends(require_maintainer)
@@ -262,9 +263,12 @@ def _gateway_decision_to_mcp_result(decision: MCPGatewayDecision) -> dict[str, A
 def handle_mcp_jsonrpc(
     project_id: str,
     payload: MCPJsonRpcRequest,
-    _: AuthUser = MaintainerDependency,
+    user: AuthUser = MaintainerDependency,
 ) -> MCPJsonRpcResponse:
     if project_id not in store.projects:
+        raise HTTPException(status_code=404, detail="Project not found")
+    workspace_id = workspace_id_for_user(user)
+    if workspace_id is not None and project_workspace_id(project_id) != workspace_id:
         raise HTTPException(status_code=404, detail="Project not found")
     if payload.jsonrpc != "2.0":
         return _error_response(payload.id, code=-32600, message="Only JSON-RPC 2.0 is supported")

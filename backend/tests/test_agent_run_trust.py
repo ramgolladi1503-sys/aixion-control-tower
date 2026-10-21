@@ -17,6 +17,7 @@ from app.agent_run_trust import (
     consume_run_step_actions,
 )
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.approval_integrity import compute_approval_payload_hash
 from app.models import (
     AgentProvider,
     ApprovalRequest,
@@ -80,8 +81,8 @@ def _run_and_lease(mode: CapabilityLeaseMode = CapabilityLeaseMode.BOUNDED):
         status=ApprovalStatus.APPROVED,
         created_by_user_id="creator",
         approved_by_user_id="reviewer",
-        approved_payload_hash="approved-run-trust-hash",
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
@@ -94,6 +95,7 @@ def _run_and_lease(mode: CapabilityLeaseMode = CapabilityLeaseMode.BOUNDED):
         status=AgentTaskStatus.APPROVED,
     )
     store.agent_tasks[task.id] = task
+    store.persist()
     run = create_agent_run(AgentRunCreate(task_id=task.id), actor="owner@example.com")
     lease = issue_capability_lease(
         CapabilityLeaseCreate(
@@ -165,6 +167,23 @@ def test_bounded_lease_allows_exact_run_side_effect(monkeypatch) -> None:
     consume_run_step_actions(actions, branch_step, actor="owner@example.com")
     assert lease.consumed_runtime_seconds == 2
     assert actions[0].id in store.action_consumptions
+
+
+def test_run_trust_reads_durable_approval_without_compatibility_cache(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_TRUST_ENFORCEMENT", "true")
+    run, lease = _run_and_lease()
+    store.approval_requests.pop(run.approval_request_id)
+    branch_step = _step(run, AgentRunStepType.CREATE_BRANCH)
+
+    actions = authorize_run_step(
+        run,
+        branch_step,
+        actor="owner@example.com",
+        timeout_seconds=120,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].lease_id == lease.id
 
 
 def test_strict_lease_waits_for_exact_human_action_decision(monkeypatch) -> None:

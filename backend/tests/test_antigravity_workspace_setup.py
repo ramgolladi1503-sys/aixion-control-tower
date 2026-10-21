@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import stat
+
+import pytest
+
+SETUP_PATH = Path(__file__).parents[2] / "integrations" / "antigravity" / "setup_workspace.py"
+SPEC = importlib.util.spec_from_file_location("aixion_antigravity_setup", SETUP_PATH)
+assert SPEC and SPEC.loader
+setup = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(setup)
+HOOK_PATH = SETUP_PATH.with_name("aixion_pre_tool_hook.py")
+
+
+def test_install_preserves_existing_hooks_and_writes_private_workspace_config(tmp_path: Path) -> None:
+    workspace = tmp_path / "my project"
+    workspace.mkdir()
+    agents_dir = workspace / ".agents"
+    agents_dir.mkdir()
+    hooks_path = agents_dir / "hooks.json"
+    hooks_path.write_text(json.dumps({"existing-linter": {"PostToolUse": []}}))
+    hooks_path.chmod(0o640)
+
+    config_path, returned_hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="http://127.0.0.1:8000/",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=tmp_path / "home",
+        hook_script=HOOK_PATH,
+        python="/usr/bin/python3",
+    )
+
+    hooks = json.loads(returned_hooks_path.read_text())
+    assert hooks["existing-linter"] == {"PostToolUse": []}
+    hook = hooks[setup.HOOK_NAME]["PreToolUse"][0]
+    assert hook["matcher"] == "*"
+    assert hook["hooks"][0]["timeout"] == 960
+    assert str(HOOK_PATH) in hook["hooks"][0]["command"]
+    assert "--config" in hook["hooks"][0]["command"]
+    assert "agent_token" not in config_path.read_text()
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(config_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(hooks_path.stat().st_mode) == 0o640
+
+
+def test_install_is_idempotent_and_remove_preserves_unrelated_hooks(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    kwargs = dict(
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=tmp_path / "home",
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    config_path, hooks_path = setup.install_workspace(workspace, **kwargs)
+    assert setup.install_workspace(workspace, **kwargs) == (config_path, hooks_path)
+
+    hooks = json.loads(hooks_path.read_text())
+    hooks["other"] = {"Stop": []}
+    hooks_path.write_text(json.dumps(hooks))
+    removed_hook, removed_config = setup.remove_workspace(
+        workspace, home=tmp_path / "home", hook_script=HOOK_PATH, python="python3"
+    )
+    assert (removed_hook, removed_config) == (True, True)
+    assert json.loads(hooks_path.read_text()) == {"other": {"Stop": []}}
+    assert not config_path.exists()
+
+
+def test_remove_validates_managed_config_before_changing_hook(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    kwargs = dict(
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=tmp_path / "home",
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    config_path, hooks_path = setup.install_workspace(workspace, **kwargs)
+    config_path.write_text("not valid json")
+    original_hooks = hooks_path.read_bytes()
+
+    with pytest.raises(setup.SetupError, match="safely read"):
+        setup.remove_workspace(
+            workspace,
+            home=kwargs["home"],
+            hook_script=HOOK_PATH,
+            python="python3",
+        )
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert config_path.read_text() == "not valid json"
+
+
+def test_remove_rejects_symlinked_home_without_mutating_managed_files(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+    )
+    original_hooks = hooks_path.read_bytes()
+    home_alias = tmp_path / "home-alias"
+    home_alias.symlink_to(home, target_is_directory=True)
+
+    with pytest.raises(setup.SetupError, match="Home config root must be a real directory"):
+        setup.remove_workspace(workspace, home=home_alias, hook_script=HOOK_PATH)
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert config_path.is_file()
+
+
+def test_installer_rejects_insecure_remote_url_and_existing_hook_collision(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    with pytest.raises(setup.SetupError, match="HTTPS"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="http://control.example.test",
+            agent_id="agent-1",
+            project_id="project-1",
+            home=home,
+            hook_script=HOOK_PATH,
+        )
+
+    agents = workspace / ".agents"
+    agents.mkdir()
+    (agents / "hooks.json").write_text(json.dumps({setup.HOOK_NAME: {"enabled": False}}))
+    with pytest.raises(setup.SetupError, match="already exists"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://control.example.test",
+            agent_id="agent-1",
+            project_id="project-1",
+            home=home,
+            hook_script=HOOK_PATH,
+        )
+
+
+def test_installer_refuses_symlinked_hooks_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agents = workspace / ".agents"
+    agents.mkdir()
+    target = tmp_path / "target.json"
+    target.write_text("{}")
+    (agents / "hooks.json").symlink_to(target)
+
+    with pytest.raises(setup.SetupError, match="non-regular"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://control.example.test",
+            agent_id="agent-1",
+            project_id="project-1",
+            home=tmp_path / "home",
+            hook_script=HOOK_PATH,
+        )
+
+
+def test_installer_refuses_symlinked_config_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (home / ".config").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(setup.SetupError, match="real directory"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://control.example.test",
+            agent_id="agent-1",
+            project_id="project-1",
+            home=home,
+            hook_script=HOOK_PATH,
+        )

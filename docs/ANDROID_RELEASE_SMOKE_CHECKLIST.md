@@ -44,13 +44,21 @@ Stop if any backend command fails.
 
 ## 2. Android validation commands
 
+Use JDK 17 for the Gradle commands in this checklist. On macOS, if needed:
+
+```bash
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+
 From repository root:
 
 ```bash
 cd mobile/android
 ./gradlew testDebugUnitTest
 ./gradlew assembleDebug
-./gradlew assembleRelease
+./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/
+./gradlew :app:verifyReleaseApiUrlGuard
 ```
 
 Focused Android guards:
@@ -67,9 +75,13 @@ Expected result:
 Android JVM tests pass.
 Debug build passes.
 Release variant compiles.
+Release API URL guard accepts the compile-only URL and rejects unsafe URL cases.
 ```
 
-This proves the release variant compiles. It does not prove signed APK readiness.
+The `aixionlab.com` URL is used only for release URL-shape compilation. It is
+the Aixion Lab website, not a Control Tower API endpoint. This build does not
+prove a usable backend connection or signed APK readiness. Use the actual
+HTTPS staging or production URL for a device-installable release artifact.
 
 ## 3. Start auth-enabled demo backend
 
@@ -97,10 +109,14 @@ cd mobile/android
 Physical-phone network proof:
 
 ```text
-Open http://YOUR_LAN_IP:8000/health from the phone browser before debugging the app.
+For a debug APK, open http://YOUR_LAN_IP:8000/health from the phone browser before debugging the app.
+For a release APK, use the configured HTTPS backend URL and open its /health endpoint.
 ```
 
 If `/health` fails from the phone, the app will fail too. Fix network first.
+
+Do not build or distribute a release APK with the HTTP/LAN URL. Release
+variants require an explicit HTTPS API base URL.
 
 ## 4. Android manual smoke path
 
@@ -130,10 +146,18 @@ Unauthenticated user cannot silently enter Home, Approval Inbox, Work Orders, MC
 Expected result:
 
 ```text
-First user becomes OWNER.
+Registration without an invite creates an OWNER account and a workspace owned by that user.
 Session is active.
 Protected screens become available.
 ```
+
+### 4.2a Separate account and invited reviewer
+
+- [ ] Register a second account without an invite.
+- [ ] Confirm it becomes OWNER in a different workspace.
+- [ ] From the first account, create an invite for a reviewer email.
+- [ ] Register that reviewer with the matching invite.
+- [ ] Confirm the reviewer joins only the first account's workspace and receives the invited role.
 
 ### 4.3 Protected screen load
 
@@ -239,7 +263,8 @@ As OWNER:
 - [ ] Owner invite-management panel loads.
 - [ ] Owner session/access-management panel loads.
 - [ ] Owner can create invite.
-- [ ] Second user can register only with a valid invite code after bootstrap.
+- [ ] A new owner can register without an invite into a separate workspace.
+- [ ] A reviewer joining an existing account must use that owner's valid invite code.
 - [ ] Owner can view session metadata.
 - [ ] Owner can expire another user's sessions.
 - [ ] Owner cannot expire their own sessions through owner access-management endpoint.

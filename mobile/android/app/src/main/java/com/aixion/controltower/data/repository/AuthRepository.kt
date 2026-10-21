@@ -1,6 +1,7 @@
 package com.aixion.controltower.data.repository
 
 import android.content.Context
+import android.util.Log
 import com.aixion.controltower.core.api.ControlTowerApi
 import com.aixion.controltower.core.api.dto.AccountDeletionRequestDto
 import com.aixion.controltower.core.api.dto.AccountDeletionResponseDto
@@ -11,14 +12,56 @@ import com.aixion.controltower.core.api.dto.ResendVerificationRequestDto
 import com.aixion.controltower.core.api.dto.VerifyEmailRequestDto
 import com.aixion.controltower.core.api.dto.VerifyEmailResponseDto
 import com.aixion.controltower.core.auth.AuthSession
+import com.aixion.controltower.notifications.PushDeviceRegistrationRepository
+import com.aixion.controltower.notifications.PushRegistrationResult
+import kotlinx.coroutines.CancellationException
+
+internal suspend fun <T> establishAuthenticatedSession(
+    token: String,
+    saveToken: (String) -> Unit,
+    validateSession: suspend () -> T,
+    clearToken: () -> Unit
+): T {
+    try {
+        saveToken(token)
+        return validateSession()
+    } catch (failure: Throwable) {
+        try {
+            clearToken()
+        } catch (cleanupFailure: Throwable) {
+            failure.addSuppressed(cleanupFailure)
+        }
+        throw failure
+    }
+}
 
 class AuthRepository(
     private val api: ControlTowerApi,
     private val context: Context
 ) {
-    suspend fun login(email: String, password: String) {
+    private val pushRegistrationRepository = PushDeviceRegistrationRepository(context)
+
+    suspend fun login(email: String, password: String): String {
         val response = api.login(LoginRequestDto(email = email.trim(), password = password))
-        AuthSession.saveAccessToken(context, response.access_token)
+        val label = establishAuthenticatedSession(
+            token = response.access_token,
+            saveToken = { AuthSession.saveAccessToken(context, it) },
+            validateSession = {
+                val user = api.me()
+                listOf(user.display_name, user.email, user.role)
+                    .filter { it.isNotBlank() }
+                    .joinToString(" • ")
+            },
+            clearToken = { AuthSession.clear(context) }
+        )
+        try {
+            pushRegistrationRepository.retryPendingUnregistrations()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w("AuthRepository", "Post-login push cleanup could not complete.", error)
+        }
+        return label
     }
 
     suspend fun register(email: String, password: String, displayName: String, inviteCode: String = ""): RegistrationResponseDto {
@@ -47,6 +90,9 @@ class AuthRepository(
             .joinToString(" • ")
     }
 
+    internal suspend fun registerPushDeviceIfAllowed(): PushRegistrationResult =
+        pushRegistrationRepository.registerCurrentDevice()
+
     suspend fun requestPrivacyAccountRemoval(reason: String): AccountDeletionResponseDto {
         val response = api.requestAccountDeletion(AccountDeletionRequestDto(reason = reason.trim()))
         AuthSession.clear(context)
@@ -55,7 +101,11 @@ class AuthRepository(
 
     fun hasSavedToken(): Boolean = AuthSession.getAccessToken(context).isNotBlank()
 
-    fun logout() {
-        AuthSession.clear(context)
+    suspend fun logout(): Boolean {
+        return try {
+            pushRegistrationRepository.unregisterCurrentDevice()
+        } finally {
+            AuthSession.clear(context)
+        }
     }
 }

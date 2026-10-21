@@ -6,6 +6,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
+from app import main
 from app.main import app
 from app.models import Project
 from app.store import store
@@ -64,6 +65,7 @@ def _approval_payload(project: Project) -> dict:
 def test_create_agent_task_approval_links_task_moves_to_waiting_and_notifies() -> None:
     project = _project()
     task = _task(project)
+    store.projects.clear()
 
     response = client.post(f"/agent/tasks/{task['id']}/approval", json=_approval_payload(project))
 
@@ -81,7 +83,8 @@ def test_create_agent_task_approval_links_task_moves_to_waiting_and_notifies() -
     assert approval["source_task_url"] == "https://chat.openai.com/demo-task"
     assert notification.entity_type == "agent_task"
     assert notification.entity_id == task["id"]
-    assert notification.title == "Agent task approval needed: Prepare implementation plan"
+    assert notification.approval_request_id == approval["id"]
+    assert notification.title == "Approval needed: Prepare implementation plan"
     assert notification.user_id == task["created_by_user_id"]
     assert any(event.event_type == "agent_task.approval_created" for event in store.audit_events)
     assert any(event.details.get("notification_id") == notification_id for event in store.audit_events)
@@ -104,6 +107,7 @@ def test_linked_approval_approve_updates_agent_task_status_and_notifies() -> Non
     assert updated_task["status"] == "APPROVED"
     assert notification.entity_type == "agent_task"
     assert notification.entity_id == task["id"]
+    assert notification.approval_request_id == approval["id"]
     assert notification.title == "Agent task approved: Prepare implementation plan"
     assert any(event.event_type == "agent_task.approval_decision_propagated" for event in store.audit_events)
     assert any(event.details.get("notification_id") == notification_id for event in store.audit_events)
@@ -126,7 +130,46 @@ def test_linked_approval_deny_updates_agent_task_status_and_notifies() -> None:
     assert updated_task["status"] == "DENIED"
     assert notification.entity_type == "agent_task"
     assert notification.entity_id == task["id"]
+    assert notification.approval_request_id == approval["id"]
     assert notification.title == "Agent task denied: Prepare implementation plan"
+
+
+def test_decision_propagation_uses_committed_task_without_cache(monkeypatch) -> None:
+    project = _project()
+    task = _task(project)
+    approval = client.post(
+        f"/agent/tasks/{task['id']}/approval", json=_approval_payload(project)
+    ).json()
+    original_propagation = main.propagate_approval_decision_to_agent_task
+
+    def propagate_without_compatibility_task_cache(
+        approval_request, previous_status, actor, committed=None, **repository_kwargs
+    ):
+        store.agent_tasks.pop(task["id"], None)
+        return original_propagation(
+            approval_request,
+            previous_status,
+            actor,
+            committed=committed,
+            **repository_kwargs,
+        )
+
+    monkeypatch.setattr(
+        main,
+        "propagate_approval_decision_to_agent_task",
+        propagate_without_compatibility_task_cache,
+    )
+    decision = client.post(
+        f"/approvals/{approval['id']}/deny",
+        json={"decision": "deny", "reason": "cache projection absent"},
+    )
+
+    assert decision.status_code == 200, decision.text
+    assert store.agent_tasks[task["id"]].status == "DENIED"
+    assert any(
+        event.task_id == task["id"] and event.event_type.value == "DENIED"
+        for event in store.agent_task_events.values()
+    )
 
 
 def test_agent_task_approval_rejects_duplicate_link() -> None:

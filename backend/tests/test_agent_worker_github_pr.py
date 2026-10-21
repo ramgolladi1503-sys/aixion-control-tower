@@ -5,7 +5,9 @@ import os
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.agent_task_repository import SQLiteAgentTaskRepository
 from app.agent_worker_github_pr import GitHubPullRequestCreateResult, run_agent_worker_github_pr_creation
+from app.approval_repository import SQLiteApprovalDecisionRepository
 from app.models import AgentProvider, ApprovalRequest, FileChange, Project, RiskAssessment, RiskLevel
 from app.store import store
 
@@ -50,7 +52,7 @@ def setup_function() -> None:
 
 
 def _project() -> Project:
-    project = Project(name="GitHub PR Worker", description="demo")
+    project = Project(name="GitHub PR Worker", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     return project
 
@@ -58,6 +60,7 @@ def _project() -> Project:
 def _approval(project: Project) -> ApprovalRequest:
     approval = ApprovalRequest(
         project_id=project.id,
+        workspace_id=project.workspace_id,
         title="Approved worker PR",
         summary="Open a pull request for approved worker output.",
         agent_name="github-pr-worker",
@@ -66,6 +69,7 @@ def _approval(project: Project) -> ApprovalRequest:
         test_plan=["python -m pytest"],
         rollback_plan="Close PR or revert branch.",
         risk=RiskAssessment(level=RiskLevel.LOW),
+        status="APPROVED",
     )
     store.approval_requests[approval.id] = approval
     return approval
@@ -75,6 +79,7 @@ def _approved_task(approval: ApprovalRequest, *, branch_preference: str = "featu
     task = AgentTask(
         provider=AgentProvider.CODEX,
         project_id=approval.project_id,
+        workspace_id=approval.workspace_id,
         title="Open worker PR",
         goal="Open a human-review pull request.",
         repository="ramgolladi1503-sys/aixion-control-tower",
@@ -93,7 +98,11 @@ def test_github_pr_worker_opens_review_pr_and_marks_ready_for_pr() -> None:
     task = _approved_task(approval)
     fake = FakeGitHubPullRequestClient()
 
-    result = run_agent_worker_github_pr_creation(task_id=task.id, worker_id="pr-worker", client=fake)
+    result = run_agent_worker_github_pr_creation(
+        task_id=task.id, worker_id="pr-worker", client=fake,
+        task_repository=SQLiteAgentTaskRepository(store._connect),
+        approval_repository=SQLiteApprovalDecisionRepository(store._connect),
+    )
 
     assert result.success is True
     assert result.task_id == task.id
