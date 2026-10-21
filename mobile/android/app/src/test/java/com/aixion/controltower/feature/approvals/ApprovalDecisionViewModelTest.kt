@@ -93,6 +93,136 @@ class ApprovalDecisionViewModelTest {
         }
     }
 
+    @Test
+    fun reconciliationShowingStillPendingDoesNotResubmitDecision() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                decideResult = { _, _ -> throw IOException("decision response lost") }
+                getResult = { id, callNumber ->
+                    if (callNumber == 1) throw IOException("automatic status check failed")
+                    approvalDto(id, "REQUESTED")
+                }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+            assertTrue(viewModel.state.value.decisionNeedsReconciliation)
+
+            viewModel.reconcileDecisionStatus()
+            runCurrent()
+
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
+            assertEquals(1, api.decisionCalls)
+            assertFalse(viewModel.state.value.decisionNeedsReconciliation)
+            assertEquals(ApprovalStatus.REQUESTED, viewModel.state.value.selectedApproval?.status)
+            assertEquals(REQUEST_ID, viewModel.state.value.lastActionApprovalId)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun reconciliationShowingConflictingTerminalStateDoesNotResubmitDecision() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                decideResult = { _, _ -> throw IOException("decision response lost") }
+                getResult = { id, callNumber ->
+                    if (callNumber == 1) throw IOException("automatic status check failed")
+                    approvalDto(id, "DENIED")
+                }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+            viewModel.reconcileDecisionStatus()
+            runCurrent()
+
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
+            assertEquals(1, api.decisionCalls)
+            assertFalse(viewModel.state.value.decisionNeedsReconciliation)
+            assertEquals(ApprovalStatus.DENIED, viewModel.state.value.selectedApproval?.status)
+            assertTrue(viewModel.state.value.lastActionMessage.orEmpty().contains("No decision retry was sent."))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun repeatedReconciliationFailuresKeepDecisionUnknownAndBlocked() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                decideResult = { _, _ -> throw IOException("decision response lost") }
+                getResult = { _, _ -> throw IOException("status endpoint unavailable") }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+            assertTrue(viewModel.state.value.decisionNeedsReconciliation)
+
+            viewModel.reconcileDecisionStatus()
+            runCurrent()
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
+            assertEquals(1, api.decisionCalls)
+            assertTrue(viewModel.state.value.decisionNeedsReconciliation)
+            assertFalse(canStartApprovalDecision(viewModel.state.value))
+            assertEquals(REQUEST_ID, viewModel.state.value.lastActionApprovalId)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun mismatchedDecisionResponseRequiresSameRequestStatusAndNeverRetries() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                decideResult = { id, _ -> approvalDto(id, "DENIED") }
+                getResult = { id, callNumber ->
+                    if (callNumber == 1) throw IOException("automatic status check failed")
+                    approvalDto(id, "DENIED")
+                }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+            assertTrue(viewModel.state.value.decisionNeedsReconciliation)
+
+            viewModel.reconcileDecisionStatus()
+            runCurrent()
+
+            assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
+            assertEquals(1, api.decisionCalls)
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertFalse(viewModel.state.value.decisionNeedsReconciliation)
+            assertEquals(ApprovalStatus.DENIED, viewModel.state.value.selectedApproval?.status)
+            assertEquals(REQUEST_ID, viewModel.state.value.lastActionApprovalId)
+            assertTrue(viewModel.state.value.lastActionMessage.orEmpty().contains("No decision retry was sent."))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun newViewModel(api: ControlTowerApi): ApprovalsViewModel {
         val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
         return ApprovalsViewModel(application, ApprovalRepository(api))
