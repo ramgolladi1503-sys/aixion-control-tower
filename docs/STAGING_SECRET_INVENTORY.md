@@ -24,9 +24,18 @@ This inventory separates protected values from non-secret configuration. Exact S
 
 Project IDs, project numbers, region, Cloud SQL instance connection name, service account email addresses, Artifact Registry image digest, schedule, timezone, SMTP host/port/sender, metrics workspace ID, and Firebase project ID are configuration or identifiers. They still require owner review and should not be treated as authorization or proof of ownership. Secret resource names are identifiers only; secret payload values must remain in the selected secret manager.
 
-## Current worker-code limitation
+## Current worker-code status
 
-Both one-shot dispatcher scripts currently call the application-wide `validate_startup_environment()`. The production settings path currently fails closed because complete PostgreSQL application binding is not implemented, and it also requires API-wide configuration such as email, push, metrics, and GitHub settings. Therefore the scoped push/email secrets described here cannot yet be used to launch these jobs with `AIXION_PROFILE=production`. Do not work around this by setting a demo/local profile or sharing every secret with both jobs. Refactor and test a worker-specific production validation path after the Slice 1 PostgreSQL/runtime design is complete. These manifests stay marked **DO NOT APPLY** until then.
+The push and email one-shot dispatchers now use a strict worker-scoped
+`validate_outbox_worker_environment()` path. Each requires the production profile
+and scheduled mode, rejects an explicitly configured SQLite path, and validates
+PostgreSQL plus only the selected worker's provider settings. The API-wide
+`validate_startup_environment()` remains unchanged and continues to fail closed
+until complete PostgreSQL application binding exists. This removes the prior
+requirement to give each job unrelated API secrets, but does not make the jobs
+deployable: producer/dispatcher consistency and the whole-app PostgreSQL runtime
+remain open Slice 1 gates. Keep these manifests marked **DO NOT APPLY**. Do not use
+a demo/local profile or share every secret with both jobs.
 
 ## Review before staging
 
