@@ -79,8 +79,20 @@ ReviewerDependency = Depends(require_reviewer)
 MaintainerDependency = Depends(require_maintainer)
 
 
-def audit(event_type: str, entity_id: str, details: dict, actor: str = "system") -> AuditEvent:
-    event = AuditEvent(event_type=event_type, entity_id=entity_id, details=details, actor=actor)
+def audit(
+    event_type: str,
+    entity_id: str,
+    details: dict,
+    actor: str = "system",
+    workspace_id: str | None = None,
+) -> AuditEvent:
+    event = AuditEvent(
+        event_type=event_type,
+        entity_id=entity_id,
+        workspace_id=workspace_id,
+        details=details,
+        actor=actor,
+    )
     store.audit_events.append(event)
     return event
 
@@ -308,6 +320,7 @@ def propagate_approval_decision_to_agent_task(
                 "notification_id": notification.id,
             },
             actor=actor,
+            workspace_id=task.workspace_id,
         )
 
     if task_status == AgentTaskStatus.APPROVED:

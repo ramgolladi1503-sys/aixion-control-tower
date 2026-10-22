@@ -7,6 +7,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app import main
+from app.agent_task_routes import audit
 from app.main import app
 from app.models import Project
 from app.store import store
@@ -16,6 +17,19 @@ client = TestClient(app)
 
 def setup_function() -> None:
     store.reset()
+
+
+def test_agent_task_audit_helper_records_workspace_scope() -> None:
+    event = audit(
+        "agent_task.approval_decision_propagated",
+        "task_scoped",
+        {"approval_request_id": "approval_scoped"},
+        actor="reviewer@example.com",
+        workspace_id="workspace_scoped",
+    )
+
+    assert event.workspace_id == "workspace_scoped"
+    assert store.audit_events[-1] == event
 
 
 def _project() -> Project:
