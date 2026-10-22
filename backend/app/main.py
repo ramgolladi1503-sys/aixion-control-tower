@@ -587,6 +587,8 @@ def seed_demo_data(_: AuthUser = MaintainerDependency) -> dict[str, int]:
 
     This endpoint is intentionally explicit and auditable. It does not wipe existing data.
     """
+    if get_settings().is_production:
+        raise HTTPException(status_code=404, detail="Demo seeding is unavailable")
     if store.projects:
         return counts()
 
