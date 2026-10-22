@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -56,7 +57,13 @@ def postgres_idea_work_order_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterato
             conn.execute("INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
                          (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))))
         repositories = ApplicationRepositories.from_connector(connect)
+        monkeypatch.setattr(
+            "app.application_repository_access.get_settings",
+            lambda: SimpleNamespace(postgres_auth_enabled=True),
+        )
         for name, value in {
+            "postgres_runtime": SimpleNamespace(repositories=repositories),
+            "postgres_repositories": repositories,
             "project_repository": repositories.projects,
             "idea_repository": repositories.ideas,
             "work_order_repository": repositories.work_orders,

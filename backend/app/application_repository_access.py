@@ -12,11 +12,11 @@ from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDec
 from .project_repository import ProjectRepository
 from .connector_repository import ConnectorRepository, PostgresConnectorRepository
 from .postgres_external_agent_auth_repository import PostgresExternalAgentAuthRepository
-from .idea_repository import IdeaRepository
+from .idea_repository import IdeaRepository, PostgresIdeaRepository
 from .settings import get_settings
 from .workspace_access import workspace_id_for_user as resolve_workspace_id_for_user
 from .workspace_membership_repository import WorkspaceMembershipRepository
-from .work_order_repository import WorkOrderRepository
+from .work_order_repository import PostgresWorkOrderRepository, WorkOrderRepository
 from .models import AuthUser
 from .mcp_child_server_repository import MCPChildServerRepository
 from .test_run_repository import PostgresTestRunRepository, TestRunRepository
@@ -184,9 +184,21 @@ def connector_repository_for_request(request: _RequestState | None) -> Connector
 
 
 def idea_repository_for_request(request: _RequestState | None) -> IdeaRepository:
-    """Return the idea adapter explicitly bound to this FastAPI application."""
+    """Return the idea adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        runtime = getattr(state, "postgres_runtime", None)
+        repository = getattr(repositories, "ideas", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(repository, PostgresIdeaRepository)
+        ):
+            raise RuntimeError("PostgreSQL idea repository is unavailable or mismatched")
+        return repository
     repository = getattr(state, "idea_repository", None)
     if repository is None:
         raise RuntimeError("Application idea repository is unavailable")
@@ -194,9 +206,23 @@ def idea_repository_for_request(request: _RequestState | None) -> IdeaRepository
 
 
 def work_order_repository_for_request(request: _RequestState | None) -> WorkOrderRepository:
-    """Return the WorkOrder adapter bound to this FastAPI application."""
+    """Return the WorkOrder adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        runtime = getattr(state, "postgres_runtime", None)
+        repository = getattr(repositories, "work_orders", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(repository, PostgresWorkOrderRepository)
+        ):
+            raise RuntimeError(
+                "PostgreSQL work-order repository is unavailable or mismatched"
+            )
+        return repository
     repository = getattr(state, "work_order_repository", None)
     if repository is None:
         raise RuntimeError("Application WorkOrder repository is unavailable")

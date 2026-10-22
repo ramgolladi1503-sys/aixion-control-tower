@@ -17,6 +17,8 @@ from app.models import AuthUser, User, UserRole
 from app.application_repositories import ApplicationRepositories
 from app.agent_task_repository import PostgresAgentTaskRepository
 from app.agent_run_repository import PostgresAgentRunRepository
+from app.idea_repository import PostgresIdeaRepository
+from app.work_order_repository import PostgresWorkOrderRepository
 from app.approval_repository import PostgresApprovalDecisionRepository
 from app.test_run_repository import PostgresTestRunRepository
 from app.workspace_membership_repository import WorkspaceMembershipSnapshot
@@ -277,6 +279,97 @@ def test_project_repository_access_returns_app_binding() -> None:
 def test_project_repository_access_fails_closed_without_binding(test_request: object) -> None:
     with pytest.raises(RuntimeError, match="project repository is unavailable"):
         project_repository_for_request(test_request)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("accessor", "repository_name", "repository_type", "binding_name"),
+    [
+        (
+            repository_access.idea_repository_for_request,
+            "ideas",
+            PostgresIdeaRepository,
+            "idea_repository",
+        ),
+        (
+            repository_access.work_order_repository_for_request,
+            "work_orders",
+            PostgresWorkOrderRepository,
+            "work_order_repository",
+        ),
+    ],
+)
+def test_idea_and_work_order_accessors_use_matching_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    accessor,
+    repository_name: str,
+    repository_type,
+    binding_name: str,
+) -> None:
+    repository = repository_type(lambda: None)  # type: ignore[arg-type]
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, repository_name, repository)
+    runtime = SimpleNamespace(repositories=repositories)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=runtime,
+                postgres_repositories=repositories,
+                **{binding_name: object()},
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert accessor(request) is repository
+
+
+@pytest.mark.parametrize(
+    ("accessor", "repository_name", "repository_type", "binding_name"),
+    [
+        (
+            repository_access.idea_repository_for_request,
+            "ideas",
+            PostgresIdeaRepository,
+            "idea_repository",
+        ),
+        (
+            repository_access.work_order_repository_for_request,
+            "work_orders",
+            PostgresWorkOrderRepository,
+            "work_order_repository",
+        ),
+    ],
+)
+def test_idea_and_work_order_accessors_reject_mismatched_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    accessor,
+    repository_name: str,
+    repository_type,
+    binding_name: str,
+) -> None:
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, repository_name, repository_type(lambda: None))  # type: ignore[arg-type]
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=object()),
+                postgres_repositories=repositories,
+                **{binding_name: object()},
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable or mismatched"):
+        accessor(request)
 
 
 def test_test_run_repository_uses_matching_postgres_runtime_bundle(
