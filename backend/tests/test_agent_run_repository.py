@@ -50,7 +50,7 @@ from app.agent_run_supervisor import (
     recover_stale_leases,
     resume_agent_run,
 )
-from app.agent_run_state_machine import transition_run
+from app.agent_run_state_machine import transition_run, transition_step
 from app.application_repositories import ApplicationRepositories
 
 
@@ -248,6 +248,253 @@ def postgres_agent_run_repository() -> Iterator[tuple[PostgresAgentRunRepository
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def _seed_postgres_running_step(
+    repository: PostgresAgentRunRepository,
+    connect: Callable[[], Connection],
+) -> tuple[AgentRun, AgentRunStep]:
+    suffix = uuid.uuid4().hex
+    workspace = Workspace(
+        id=f"workspace_completion_{suffix}",
+        name="Completion workspace",
+        owner_user_id=f"owner_completion_{suffix}",
+    )
+    project = Project(
+        id=f"project_completion_{suffix}",
+        name="Completion project",
+        workspace_id=workspace.id,
+    )
+    approval = ApprovalRequest(
+        id=f"approval_completion_{suffix}",
+        project_id=project.id,
+        workspace_id=workspace.id,
+        title="Approved completion test",
+        summary="Exercise lease-fenced completion.",
+        target_branch="feature/completion",
+        files=[FileChange(path="README.md", diff="+approved\n")],
+        test_plan=["pytest"],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.APPROVED,
+    )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
+    task = AgentTask(
+        id=f"task_completion_{suffix}",
+        project_id=project.id,
+        workspace_id=workspace.id,
+        approval_request_id=approval.id,
+        title="Approved completion task",
+        goal="Test durable lease fencing",
+        repository="owner/repository",
+        branch_preference="feature/completion",
+        status=AgentTaskStatus.APPROVED,
+    )
+    run = AgentRun(
+        id=f"run_completion_{suffix}",
+        task_id=task.id,
+        project_id=project.id,
+        workspace_id=workspace.id,
+        approval_request_id=approval.id,
+    )
+    step = AgentRunStep(
+        id=f"step_completion_{suffix}",
+        run_id=run.id,
+        task_id=task.id,
+        sequence=0,
+        step_type=AgentRunStepType.VALIDATE_SCOPE,
+        status=AgentRunStepStatus.READY,
+        idempotency_key=f"{run.id}:0",
+    )
+    run.current_step_id = step.id
+    created_event = AgentRunEvent(
+        run_id=run.id,
+        task_id=task.id,
+        correlation_id=run.correlation_id,
+        event_type=AgentRunEventType.RUN_CREATED,
+    )
+    created_audit = AuditEvent(
+        event_type="agent_run.created",
+        entity_id=run.id,
+        workspace_id=workspace.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+            (workspace.id, Jsonb(workspace.model_dump(mode="json"))),
+        )
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+        conn.execute(
+            "INSERT INTO approval_requests(approval_id,project_id,workspace_id,work_order_id,"
+            "source_agent_id,status,expires_at,created_at,updated_at,version,payload) "
+            "VALUES(%s,%s,%s,NULL,NULL,%s,%s,%s,%s,0,%s)",
+            (
+                approval.id, project.id, workspace.id, approval.status.value,
+                approval.expires_at, approval.created_at, approval.updated_at,
+                Jsonb(approval.model_dump(mode="json")),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO agent_tasks(task_id,project_id,workspace_id,external_agent_id,"
+            "approval_request_id,status,updated_at,payload) VALUES(%s,%s,%s,NULL,%s,%s,%s,%s)",
+            (
+                task.id, project.id, workspace.id, approval.id, task.status.value,
+                task.updated_at, Jsonb(task.model_dump(mode="json")),
+            ),
+        )
+    repository.create(run=run, steps=[step], events=[created_event], audit=created_audit)
+
+    lease_now = datetime.now(timezone.utc)
+    leased, lease_event, lease_audit = repository.acquire_lease(
+        run_id=run.id,
+        worker_id="completion-worker",
+        lease_seconds=60,
+        now=lease_now,
+    )
+    assert lease_event is not None and lease_audit is not None
+    expected_steps = repository.list_steps_for_run(run.id)
+    running_run = leased.model_copy(deep=True)
+    transition_run(running_run, AgentRunStatus.RUNNING)
+    running_step = expected_steps[0].model_copy(deep=True)
+    transition_step(running_step, AgentRunStepStatus.RUNNING)
+    running_step.lease_owner = leased.lease_owner
+    running_step.lease_token = leased.lease_token
+    running_step.lease_expires_at = leased.lease_expires_at
+    started_event = AgentRunEvent(
+        run_id=run.id,
+        task_id=task.id,
+        step_id=step.id,
+        correlation_id=run.correlation_id,
+        event_type=AgentRunEventType.STEP_STARTED,
+        previous_status=AgentRunStepStatus.READY.value,
+        new_status=AgentRunStepStatus.RUNNING.value,
+        actor="completion-worker",
+    )
+    started_audit = AuditEvent(
+        event_type="agent_run.step_started",
+        entity_id=run.id,
+        workspace_id=workspace.id,
+        actor="completion-worker",
+        details={"step_id": step.id, "event_ids": [started_event.id]},
+    )
+    repository.commit_control_transition(
+        expected_run=leased,
+        updated_run=running_run,
+        expected_steps=expected_steps,
+        updated_steps=[running_step],
+        events=[started_event],
+        audits=[started_audit],
+    )
+    return running_run, running_step
+
+
+def _commit_test_step_success(
+    repository: PostgresAgentRunRepository,
+    run: AgentRun,
+    step: AgentRunStep,
+    *,
+    now: datetime,
+) -> None:
+    updated_run = run.model_copy(deep=True)
+    transition_run(updated_run, AgentRunStatus.SUCCEEDED)
+    updated_step = step.model_copy(deep=True)
+    transition_step(updated_step, AgentRunStepStatus.SUCCEEDED)
+    event = AgentRunEvent(
+        run_id=run.id,
+        task_id=run.task_id,
+        step_id=step.id,
+        correlation_id=run.correlation_id,
+        event_type=AgentRunEventType.STEP_SUCCEEDED,
+        previous_status=step.status.value,
+        new_status=AgentRunStepStatus.SUCCEEDED.value,
+        actor="completion-worker",
+    )
+    audit = AuditEvent(
+        event_type="agent_run.step_completed",
+        entity_id=run.id,
+        workspace_id=run.workspace_id,
+        actor="completion-worker",
+        details={"step_id": step.id, "event_ids": [event.id]},
+    )
+    repository.commit_step_completion(
+        expected_run=run,
+        updated_run=updated_run,
+        expected_steps=[step],
+        updated_steps=[updated_step],
+        events=[event],
+        audit=audit,
+        now=now,
+    )
+
+
+def test_postgres_step_completion_accepts_active_matching_lease(
+    postgres_agent_run_repository,
+) -> None:
+    repository, connect = postgres_agent_run_repository
+    run, step = _seed_postgres_running_step(repository, connect)
+
+    _commit_test_step_success(repository, run, step, now=datetime.now(timezone.utc))
+
+    completed = repository.get(run.id)
+    assert completed is not None and completed.status == AgentRunStatus.SUCCEEDED
+    assert repository.list_steps_for_run(run.id)[0].status == AgentRunStepStatus.SUCCEEDED
+    assert any(
+        event.event_type == AgentRunEventType.STEP_SUCCEEDED
+        for event in repository.list_events_for_run(run.id)
+    )
+
+
+def test_postgres_step_completion_rejects_expired_lease_without_writes(
+    postgres_agent_run_repository,
+) -> None:
+    repository, connect = postgres_agent_run_repository
+    run, step = _seed_postgres_running_step(repository, connect)
+    assert run.lease_expires_at is not None
+
+    with pytest.raises(AgentRunRepositoryConflict, match="lease expired"):
+        _commit_test_step_success(repository, run, step, now=run.lease_expires_at)
+
+    assert repository.get(run.id) == run
+    assert repository.list_steps_for_run(run.id) == [step]
+    assert not any(
+        event.event_type == AgentRunEventType.STEP_SUCCEEDED
+        for event in repository.list_events_for_run(run.id)
+    )
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_run.step_completed'",
+            (run.id,),
+        ).fetchone()[0] == 0
+
+
+def test_postgres_step_completion_rejects_superseded_lease_snapshot(
+    postgres_agent_run_repository,
+) -> None:
+    repository, connect = postgres_agent_run_repository
+    run, step = _seed_postgres_running_step(repository, connect)
+    assert run.lease_expires_at is not None
+    takeover_time = run.lease_expires_at + timedelta(seconds=1)
+    superseding_run, _event, _audit = repository.acquire_lease(
+        run_id=run.id,
+        worker_id="replacement-worker",
+        lease_seconds=60,
+        now=takeover_time,
+    )
+
+    with pytest.raises(AgentRunRepositoryConflict, match="changed before step completion"):
+        _commit_test_step_success(repository, run, step, now=datetime.now(timezone.utc))
+
+    persisted = repository.get(run.id)
+    assert persisted == superseding_run
+    assert persisted is not None and persisted.lease_owner == "replacement-worker"
+    assert repository.list_steps_for_run(run.id) == [step]
+    assert not any(
+        event.event_type == AgentRunEventType.STEP_SUCCEEDED
+        for event in repository.list_events_for_run(run.id)
+    )
 
 
 def test_postgres_agent_run_create_is_workspace_scoped_and_durable(

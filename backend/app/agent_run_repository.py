@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import secrets
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 import psycopg
@@ -16,6 +16,7 @@ from .agent_run_models import (
     AgentRunEventType,
     AgentRunStatus,
     AgentRunStep,
+    AgentRunStepStatus,
 )
 from .agent_run_state_machine import can_transition_run, can_transition_step
 from .agent_task_models import AgentTask, AgentTaskStatus
@@ -93,6 +94,7 @@ class AgentRunRepository(Protocol):
         updated_steps: list[AgentRunStep],
         events: list[AgentRunEvent],
         audit: AuditEvent,
+        now: datetime,
     ) -> None: ...
 
     def recover_expired_lease(
@@ -303,14 +305,25 @@ def _validate_step_completion(
     updated_steps: list[AgentRunStep],
     events: list[AgentRunEvent],
     audit: AuditEvent,
+    now: datetime,
 ) -> None:
     expected_by_id = {step.id: step for step in expected_steps}
     updated_by_id = {step.id: step for step in updated_steps}
+    completion_step = expected_by_id.get(str(audit.details.get("step_id", "")))
+    if expected_run.lease_expires_at is None or expected_run.lease_expires_at <= now:
+        raise AgentRunRepositoryConflict("AgentRun lease expired before step completion")
     if (
         expected_run.id != updated_run.id
         or expected_run.task_id != updated_run.task_id
         or expected_run.workspace_id != updated_run.workspace_id
         or not expected_run.lease_token
+        or not expected_run.lease_owner
+        or completion_step is None
+        or completion_step.id != expected_run.current_step_id
+        or completion_step.status != AgentRunStepStatus.RUNNING
+        or completion_step.lease_owner != expected_run.lease_owner
+        or completion_step.lease_token != expected_run.lease_token
+        or completion_step.lease_expires_at != expected_run.lease_expires_at
         or updated_run.lease_token is not None
         or updated_run.lease_owner is not None
         or updated_run.lease_expires_at is not None
@@ -1114,6 +1127,7 @@ class SQLiteAgentRunRepository:
         updated_steps: list[AgentRunStep],
         events: list[AgentRunEvent],
         audit: AuditEvent,
+        now: datetime,
     ) -> None:
         _validate_step_completion(
             expected_run=expected_run,
@@ -1122,10 +1136,21 @@ class SQLiteAgentRunRepository:
             updated_steps=updated_steps,
             events=events,
             audit=audit,
+            now=now,
         )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
+                checked_at = max(now, datetime.now(timezone.utc))
+                _validate_step_completion(
+                    expected_run=expected_run,
+                    updated_run=updated_run,
+                    expected_steps=expected_steps,
+                    updated_steps=updated_steps,
+                    events=events,
+                    audit=audit,
+                    now=checked_at,
+                )
                 run_row = conn.execute(
                     "SELECT entity_id,payload FROM kv_store "
                     "WHERE entity_type='agent_run' AND entity_id=?",
@@ -2278,6 +2303,7 @@ class PostgresAgentRunRepository:
         updated_steps: list[AgentRunStep],
         events: list[AgentRunEvent],
         audit: AuditEvent,
+        now: datetime,
     ) -> None:
         _validate_step_completion(
             expected_run=expected_run,
@@ -2286,6 +2312,7 @@ class PostgresAgentRunRepository:
             updated_steps=updated_steps,
             events=events,
             audit=audit,
+            now=now,
         )
         if not expected_run.workspace_id:
             raise AgentRunRepositoryConflict("PostgreSQL step completion requires workspace scope")
@@ -2306,6 +2333,10 @@ class PostgresAgentRunRepository:
             )
             if durable_run != expected_run:
                 raise AgentRunRepositoryConflict("AgentRun changed before step completion")
+
+            checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+            if expected_run.lease_expires_at is None or expected_run.lease_expires_at <= checked_at:
+                raise AgentRunRepositoryConflict("AgentRun lease expired before step completion")
 
             step_rows: dict[str, tuple[AgentRunStep, str]] = {}
             for expected_step in expected_steps:
@@ -2332,7 +2363,8 @@ class PostgresAgentRunRepository:
 
             changed = conn.execute(
                 "UPDATE agent_runs SET status=%s,current_step_id=%s,lease_owner=%s,lease_token=%s,"
-                "lease_expires_at=%s,updated_at=%s,payload=%s WHERE run_id=%s AND workspace_id=%s",
+                "lease_expires_at=%s,updated_at=%s,payload=%s WHERE run_id=%s AND workspace_id=%s "
+                "AND lease_owner=%s AND lease_token=%s AND lease_expires_at>clock_timestamp()",
                 (
                     updated_run.status.value,
                     updated_run.current_step_id,
@@ -2343,6 +2375,8 @@ class PostgresAgentRunRepository:
                     Jsonb(updated_run.model_dump(mode="json")),
                     updated_run.id,
                     updated_run.workspace_id,
+                    expected_run.lease_owner,
+                    expected_run.lease_token,
                 ),
             )
             if changed.rowcount != 1:

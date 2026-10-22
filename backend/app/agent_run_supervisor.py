@@ -891,6 +891,7 @@ def execute_next_step(
             updated_steps=changed_steps,
             events=completion_events,
             audit=completion_audit,
+            now=_now(),
         )
     except Exception as error:
         restore_completion_checkpoint()
