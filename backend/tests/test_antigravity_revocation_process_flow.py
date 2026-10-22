@@ -159,9 +159,14 @@ def test_antigravity_waiting_hook_fails_closed_after_credential_revocation(
                 "args": {"CommandLine": "printf revocation-regression"},
             },
         }
-        assert hook_process.stdin is not None
-        hook_process.stdin.write(json.dumps(hook_input) + "\n")
-        hook_process.stdin.close()
+        hook_stdin = hook_process.stdin
+        assert hook_stdin is not None
+        hook_stdin.write(json.dumps(hook_input) + "\n")
+        hook_stdin.close()
+        # communicate() flushes stdin when it is set, even after close().
+        # Clear the reference after delivering EOF so output collection works
+        # on Python versions that reject flushing a closed stream.
+        hook_process.stdin = None
 
         deadline = time.monotonic() + 15
         approval = None

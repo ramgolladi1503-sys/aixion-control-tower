@@ -867,9 +867,14 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
             stderr=subprocess.PIPE,
             text=True,
         )
-        assert hook_process.stdin is not None
-        hook_process.stdin.write(json.dumps(hook_payload) + "\n")
-        hook_process.stdin.close()
+        hook_stdin = hook_process.stdin
+        assert hook_stdin is not None
+        hook_stdin.write(json.dumps(hook_payload) + "\n")
+        hook_stdin.close()
+        # communicate() flushes stdin when it is set, even after close().
+        # Clear the reference after delivering EOF so output collection works
+        # on Python versions that reject flushing a closed stream.
+        hook_process.stdin = None
 
         approval: dict | None = None
         deadline = time.monotonic() + 10

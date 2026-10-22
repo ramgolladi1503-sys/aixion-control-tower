@@ -161,6 +161,9 @@ def test_real_codex_permission_hook_allows_only_after_durable_phone_decision(
         assert hook_process.stdin is not None
         hook_process.stdin.write(json.dumps(permission_request) + "\n")
         hook_process.stdin.close()
+        # communicate() flushes stdin before collecting output. Clear the
+        # reference after sending EOF so it only drains stdout/stderr.
+        hook_process.stdin = None
 
         approval: dict | None = None
         deadline = time.monotonic() + 15
