@@ -11,11 +11,13 @@ from threading import Barrier
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app.agent_auth_repository import AgentAuthenticationResult
 from app.agent_auth_repository import SQLiteExternalAgentAuthRepository
+from app.agent_auth import revoke_external_agent_token
 from app.agent_credential_models import AgentCredentialRecord
 from app.models import (
     AgentAuthType,
@@ -29,6 +31,7 @@ from app.models import (
 )
 from app.postgres_database import run_postgres_migrations
 from app.postgres_external_agent_auth_repository import (
+    PostgresExternalAgentConflictError,
     PostgresExternalAgentAuthRepository,
 )
 from app.database_migrations import run_migrations
@@ -138,6 +141,27 @@ def _registration_audit_event(agent: ExternalAgent) -> AuditEvent:
     )
 
 
+def test_stale_external_agent_token_revoke_maps_to_conflict() -> None:
+    agent, credential, _ = _agent_and_credential("workspace-a", "owner-a")
+
+    class StaleRepository:
+        def update(self, **kwargs) -> None:
+            assert kwargs["expected_agent"] != kwargs["agent"]
+            assert kwargs["expected_credential"] != kwargs["credential"]
+            raise PostgresExternalAgentConflictError("snapshot changed")
+
+    with pytest.raises(HTTPException) as error:
+        revoke_external_agent_token(
+            agent,
+            credential=credential,
+            repository=StaleRepository(),
+            actor="owner@example.test",
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "Agent credentials changed; reload and retry"
+
+
 def _create_agent(
     repository: PostgresExternalAgentAuthRepository,
     agent: ExternalAgent,
@@ -173,6 +197,67 @@ def test_create_commits_agent_credential_and_registration_audit_together(agent_r
             (audit_event.id,),
         ).fetchone()
     assert row == (workspace_id, "external_agent", agent.id, "agent.registered", audit_event.actor)
+
+
+@pytest.mark.parametrize("event_type", ["agent.token_rotated", "agent.token_revoked"])
+def test_token_mutation_rejects_stale_snapshot_after_authentication(
+    agent_repository, event_type: str
+) -> None:
+    repository, connect, workspace_id, owner_id = agent_repository
+    agent, credential, raw_token = _agent_and_credential(workspace_id, owner_id)
+    _create_agent(repository, agent, credential)
+    expected_agent = agent.model_copy(deep=True)
+    expected_credential = credential.model_copy(deep=True)
+
+    authenticated_at = now_utc()
+    result = repository.authenticate_and_consume(
+        agent_id=agent.id,
+        token=raw_token,
+        occurred_at=authenticated_at,
+        window_seconds=60,
+        require_workspace=True,
+    )
+    assert result.reason is None
+
+    changed_agent = agent.model_copy(deep=True)
+    changed_credential = credential.model_copy(deep=True)
+    changed_agent.updated_at = authenticated_at + timedelta(seconds=1)
+    changed_credential.updated_at = authenticated_at + timedelta(seconds=1)
+    if event_type == "agent.token_rotated":
+        changed_agent.secret_hash = hashlib.sha256(b"replacement-token").hexdigest()
+        changed_credential.token_rotated_at = changed_agent.updated_at
+    else:
+        changed_agent.secret_hash = None
+        changed_credential.token_revoked_at = changed_agent.updated_at
+    event = AuditEvent(
+        event_type=event_type,
+        actor="owner@example.test",
+        entity_id=agent.id,
+        workspace_id=workspace_id,
+        details={},
+        created_at=changed_agent.updated_at,
+    )
+
+    with pytest.raises(PostgresExternalAgentConflictError, match="changed"):
+        repository.update(
+            agent=changed_agent,
+            credential=changed_credential,
+            audit_event=event,
+            expected_agent=expected_agent,
+            expected_credential=expected_credential,
+        )
+
+    current = repository.get(agent.id)
+    assert current is not None
+    current_agent, current_credential = current
+    assert current_agent.secret_hash == agent.secret_hash
+    assert current_credential.last_used_at == authenticated_at
+    assert current_credential.token_revoked_at is None
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s AND event_type=%s",
+            (agent.id, event_type),
+        ).fetchone()[0] == 0
 
 
 def test_create_rejects_registration_audit_with_mismatched_agent_details(agent_repository) -> None:

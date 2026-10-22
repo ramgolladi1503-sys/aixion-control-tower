@@ -20,6 +20,10 @@ class PostgresExternalAgentIntegrityError(RuntimeError):
     """A normalized external-agent row disagrees with its JSON payload."""
 
 
+class PostgresExternalAgentConflictError(RuntimeError):
+    """A token mutation was based on an external-agent snapshot that is stale."""
+
+
 @dataclass(frozen=True)
 class PostgresExternalAgentAuthRepository:
     """Workspace-scoped external-agent persistence and atomic token accounting."""
@@ -205,6 +209,8 @@ class PostgresExternalAgentAuthRepository:
         agent: ExternalAgent,
         credential: AgentCredentialRecord,
         audit_event: AuditEvent | None = None,
+        expected_agent: ExternalAgent | None = None,
+        expected_credential: AgentCredentialRecord | None = None,
     ) -> None:
         if (
             not agent.workspace_id
@@ -222,8 +228,43 @@ class PostgresExternalAgentAuthRepository:
             )
         ):
             raise ValueError("External-agent update fields are invalid")
+        if audit_event is not None and (
+            expected_agent is None
+            or expected_credential is None
+            or expected_agent.id != agent.id
+            or expected_agent.workspace_id != agent.workspace_id
+            or expected_credential.agent_id != agent.id
+        ):
+            raise ValueError("Audited external-agent updates require their original snapshots")
 
         with self._connect() as conn:
+            if audit_event is not None:
+                current_agent_row = conn.execute(
+                    "SELECT payload,agent_id,workspace_id,provider,auth_type,enabled,secret_hash "
+                    "FROM external_agents WHERE agent_id=%s AND workspace_id=%s FOR UPDATE",
+                    (agent.id, agent.workspace_id),
+                ).fetchone()
+                current_credential_row = conn.execute(
+                    "SELECT payload,credential_id,agent_id,workspace_id,token_expires_at,"
+                    "token_revoked_at,token_rotated_at,last_used_at,failed_auth_count,"
+                    "rate_limit_per_minute,rate_limit_window_started_at,rate_limit_request_count,"
+                    "created_at,updated_at FROM external_agent_credentials "
+                    "WHERE agent_id=%s AND workspace_id=%s FOR UPDATE",
+                    (agent.id, agent.workspace_id),
+                ).fetchone()
+                if current_agent_row is None or current_credential_row is None:
+                    raise PostgresExternalAgentConflictError(
+                        "External agent or credential no longer exists"
+                    )
+                current_agent = self._agent_from_row(current_agent_row)
+                current_credential = self._credential_from_row(current_credential_row)
+                if (
+                    current_agent != expected_agent
+                    or current_credential != expected_credential
+                ):
+                    raise PostgresExternalAgentConflictError(
+                        "External-agent credentials changed; reload and retry"
+                    )
             agent_result = conn.execute(
                 "UPDATE external_agents SET created_by_user_id=%s,provider=%s,auth_type=%s,"
                 "enabled=%s,secret_hash=%s,payload=%s WHERE agent_id=%s AND workspace_id=%s",

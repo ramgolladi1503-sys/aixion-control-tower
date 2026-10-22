@@ -13,6 +13,7 @@ from .agent_credential_models import (
     AgentCreateWithCredentialPolicy,
 )
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
+from .postgres_external_agent_auth_repository import PostgresExternalAgentConflictError
 from .agent_token_lifetime import effective_agent_token_expiry, resolve_agent_token_expiry
 from .approval_decisions import project_repository
 from .application_repository_access import (
@@ -223,6 +224,8 @@ def rotate_external_agent_token(
         raise HTTPException(status_code=422, detail=str(error)) from error
     raw_token, secret_hash = _issue_agent_token()
     credential = credential or _credential_for(agent)
+    expected_agent = agent.model_copy(deep=True)
+    expected_credential = credential.model_copy(deep=True)
     agent.secret_hash = secret_hash
     agent.updated_at = now
     credential.token_expires_at = resolved_expiry
@@ -242,7 +245,19 @@ def rotate_external_agent_token(
         created_at=now,
     )
     if repository is not None and not is_sqlite_external_agent_auth_repository(repository):
-        repository.update(agent=agent, credential=credential, audit_event=event)
+        try:
+            repository.update(
+                agent=agent,
+                credential=credential,
+                audit_event=event,
+                expected_agent=expected_agent,
+                expected_credential=expected_credential,
+            )
+        except PostgresExternalAgentConflictError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Agent credentials changed; reload and retry",
+            ) from error
     elif repository is not None:
         store.external_agents[agent.id] = agent
         store.external_agent_credentials[agent.id] = credential
@@ -259,6 +274,8 @@ def revoke_external_agent_token(
         raise HTTPException(status_code=400, detail="Manual agents do not have revokable tokens")
     now = now_utc()
     credential = credential or _credential_for(agent)
+    expected_agent = agent.model_copy(deep=True)
+    expected_credential = credential.model_copy(deep=True)
     agent.secret_hash = None
     agent.updated_at = now
     credential.token_revoked_at = now
@@ -269,7 +286,19 @@ def revoke_external_agent_token(
         details={"token_revoked_at": credential.token_revoked_at}, created_at=now,
     )
     if repository is not None and not is_sqlite_external_agent_auth_repository(repository):
-        repository.update(agent=agent, credential=credential, audit_event=event)
+        try:
+            repository.update(
+                agent=agent,
+                credential=credential,
+                audit_event=event,
+                expected_agent=expected_agent,
+                expected_credential=expected_credential,
+            )
+        except PostgresExternalAgentConflictError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Agent credentials changed; reload and retry",
+            ) from error
     elif repository is not None:
         store.external_agents[agent.id] = agent
         store.external_agent_credentials[agent.id] = credential
