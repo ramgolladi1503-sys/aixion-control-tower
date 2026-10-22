@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -27,6 +28,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -170,6 +174,8 @@ internal fun AuthFormContent(
     onResendVerification: () -> Unit
 ) {
     var registrationExpanded by rememberSaveable { mutableStateOf(false) }
+    // Keep the opt-in reveal only for this composition; recreation starts masked.
+    var passwordVisible by remember { mutableStateOf(false) }
     val verificationStarted = state.verificationRequired || state.emailVerified || state.devVerificationCode != null
 
     LaunchedEffect(verificationStarted) {
@@ -218,7 +224,26 @@ internal fun AuthFormContent(
                 },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                visualTransformation = PasswordVisualTransformation()
+                visualTransformation = if (passwordVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    TextButton(
+                        onClick = { passwordVisible = !passwordVisible },
+                        enabled = !state.loading,
+                        modifier = Modifier.semantics {
+                            contentDescription = if (passwordVisible) {
+                                "Hide password"
+                            } else {
+                                "Show password"
+                            }
+                        }
+                    ) {
+                        Text(if (passwordVisible) "Hide" else "Show")
+                    }
+                }
             )
 
             if (registrationExpanded && !verificationStarted) {

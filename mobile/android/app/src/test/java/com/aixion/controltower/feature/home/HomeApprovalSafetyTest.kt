@@ -4,7 +4,10 @@ import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
+import java.time.Instant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeApprovalSafetyTest {
@@ -36,6 +39,26 @@ class HomeApprovalSafetyTest {
         )
 
         assertEquals(2, state.pendingCount)
+    }
+
+    @Test
+    fun failedRefreshPreservesLastSuccessfulSyncAndCachedRecords() {
+        val syncedAt = Instant.parse("2026-10-22T05:30:00Z")
+        val existingApproval = approval("existing", ApprovalStatus.REQUESTED, RiskLevel.LOW)
+        val beforeFailure = HomeUiState(
+            loading = false,
+            projects = emptyList(),
+            approvals = listOf(existingApproval),
+            lastSuccessfulSyncAt = syncedAt
+        )
+
+        val afterFailure = homeRefreshFailureState(beforeFailure, "Network unavailable")
+
+        assertFalse(afterFailure.loading)
+        assertFalse(afterFailure.refreshing)
+        assertTrue(afterFailure.hasError)
+        assertEquals(syncedAt, afterFailure.lastSuccessfulSyncAt)
+        assertEquals(listOf(existingApproval), afterFailure.approvals)
     }
 }
 

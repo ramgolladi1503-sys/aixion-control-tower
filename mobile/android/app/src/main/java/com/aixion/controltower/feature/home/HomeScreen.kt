@@ -38,6 +38,9 @@ import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
+import java.text.DateFormat
+import java.time.Instant
+import java.util.Date
 
 @Composable
 fun HomeScreen(
@@ -47,22 +50,6 @@ fun HomeScreen(
 ) {
     val state by viewModel.state.collectAsState()
     ForegroundRefreshEffect(onRefresh = viewModel::refreshInForeground)
-    val heroTitle = when {
-        state.loading -> "Loading command state"
-        state.hasError -> "Backend sync failed"
-        state.unsupportedApprovals.isNotEmpty() -> "${state.unsupportedApprovals.size} approvals need an app update"
-        state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"
-        state.blockedCount > 0 -> "${state.blockedCount} blocked actions need attention"
-        else -> "All clear"
-    }
-    val heroSubtitle = when {
-        state.loading -> "Syncing approval requests."
-        state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then retry."
-        state.unsupportedApprovals.isNotEmpty() -> "The app cannot safely interpret some approval status or risk values. No decisions are enabled for them."
-        state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, reject, or request revision."
-        state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
-        else -> "No approvals are waiting. Connect your agent and keep its computer running so work can resume after a phone decision."
-    }
 
     LazyColumn(
         modifier = Modifier
@@ -72,7 +59,13 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            HomeHeader(loading = state.loading, hasError = state.hasError)
+            HomeHeader(
+                loading = state.loading,
+                refreshing = state.refreshing,
+                hasError = state.hasError,
+                hasSuccessfulSync = state.hasSuccessfulSync,
+                lastSuccessfulSyncAt = state.lastSuccessfulSyncAt
+            )
         }
 
         item {
@@ -86,20 +79,23 @@ fun HomeScreen(
                         StatusBadge(
                             label = when {
                                 state.hasError -> "BACKEND ERROR"
+                                !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "NOT VERIFIED"
                                 state.unsupportedApprovals.isNotEmpty() -> "UNSUPPORTED APPROVAL"
                                 state.actionRequiredCount > 0 -> "APPROVAL QUEUE"
+                                state.refreshing -> "SYNCING"
                                 else -> "COMMAND STATE"
                             },
                             color = when {
                                 state.hasError -> RiskCritical
                                 state.unsupportedApprovals.isNotEmpty() -> RiskCritical
                                 state.actionRequiredCount > 0 -> RiskMedium
+                                state.refreshing -> RiskMedium
                                 else -> RiskLow
                             }
                         )
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         Text(
-                            text = heroTitle,
+                            text = homeHeroTitle(state),
                             color = TowerTextPrimary,
                             fontSize = 28.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -107,7 +103,7 @@ fun HomeScreen(
                         )
                         Spacer(modifier = Modifier.height(TowerSpacing.sm))
                         Text(
-                            text = heroSubtitle,
+                            text = homeHeroSubtitle(state),
                             color = TowerTextMuted,
                             fontSize = 14.sp,
                             lineHeight = 20.sp
@@ -158,7 +154,7 @@ fun HomeScreen(
                     body = "This is intentional. Authenticated product screens now wait for real backend data instead of silently showing demo data. Use Retry after the backend is reachable."
                 )
             }
-        } else if (state.actionRequiredApprovals.isNotEmpty()) {
+        } else if (!state.refreshing && state.hasSuccessfulSync && state.actionRequiredApprovals.isNotEmpty()) {
             item {
                 TowerSectionHeader(
                     title = "Needs your decision",
@@ -168,7 +164,7 @@ fun HomeScreen(
             items(state.actionRequiredApprovals.take(2)) { approval ->
                 ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
-        } else if (state.unsupportedApprovals.isEmpty()) {
+        } else if (!state.refreshing && state.hasSuccessfulSync && state.unsupportedApprovals.isEmpty()) {
             item {
                 EmptyHomePanel(
                     title = "No approvals waiting",
@@ -177,7 +173,7 @@ fun HomeScreen(
             }
         }
 
-        if (!state.hasError && state.unsupportedApprovals.isNotEmpty()) {
+        if (!state.hasError && !state.refreshing && state.hasSuccessfulSync && state.unsupportedApprovals.isNotEmpty()) {
             item {
                 ErrorPanel(
                     title = "Approval data is not recognized",
@@ -204,43 +200,59 @@ fun HomeScreen(
 }
 
 @Composable
-private fun HomeHeader(loading: Boolean, hasError: Boolean) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column {
-            Text(
-                text = "AIXION",
-                color = TowerTextPrimary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 2.2.sp
-            )
-            Text(
-                text = "CONTROL TOWER",
-                color = TowerTextMuted,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 1.8.sp
+private fun HomeHeader(
+    loading: Boolean,
+    refreshing: Boolean,
+    hasError: Boolean,
+    hasSuccessfulSync: Boolean,
+    lastSuccessfulSyncAt: Instant?
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text(
+                    text = "AIXION",
+                    color = TowerTextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 2.2.sp
+                )
+                Text(
+                    text = "CONTROL TOWER",
+                    color = TowerTextMuted,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 1.8.sp
+                )
+            }
+            StatusBadge(
+                label = homeBackendStatusLabel(
+                    loading = loading,
+                    refreshing = refreshing,
+                    hasError = hasError,
+                    hasSuccessfulSync = hasSuccessfulSync
+                ),
+                color = when {
+                    hasError -> RiskCritical
+                    loading || refreshing || !hasSuccessfulSync -> RiskMedium
+                    else -> RiskLow
+                }
             )
         }
-        StatusBadge(
-            label = homeBackendStatusLabel(loading = loading, hasError = hasError),
-            color = when {
-                loading -> RiskMedium
-                hasError -> RiskCritical
-                else -> RiskLow
-            }
-        )
+        lastSuccessfulSyncAt?.let { syncedAt ->
+            Text(
+                text = "Last successful sync · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(syncedAt))}",
+                color = TowerTextMuted,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                modifier = Modifier.padding(top = TowerSpacing.sm)
+            )
+        }
     }
-}
-
-internal fun homeBackendStatusLabel(loading: Boolean, hasError: Boolean): String = when {
-    loading -> "SYNCING"
-    hasError -> "SYNC ERROR"
-    else -> "SYNCED"
 }
 
 @Composable
