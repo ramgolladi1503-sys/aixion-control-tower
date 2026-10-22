@@ -235,15 +235,26 @@ async def email_dispatch_loop(
     if not settings.email_dispatch_enabled:
         return
     while True:
-        try:
-            if postgres_repository is None:
-                await asyncio.to_thread(dispatch_one_due_email)
-            else:
-                await asyncio.to_thread(
+        if postgres_repository is None:
+            dispatch_task = asyncio.create_task(asyncio.to_thread(dispatch_one_due_email))
+        else:
+            dispatch_task = asyncio.create_task(
+                asyncio.to_thread(
                     dispatch_one_due_email_postgres,
                     repository=postgres_repository,
                 )
+            )
+        try:
+            await asyncio.shield(dispatch_task)
         except asyncio.CancelledError:
+            # Cancelling asyncio.to_thread does not stop its worker thread.
+            # Drain it before lifespan closes the shared PostgreSQL pool.
+            try:
+                await dispatch_task
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Email outbox dispatch iteration failed during shutdown"
+                )
             raise
         except Exception:
             # Do not log recipient, verification code, SMTP response, or secrets.

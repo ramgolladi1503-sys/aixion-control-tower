@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -58,3 +59,42 @@ def test_disabled_email_loop_returns_without_dispatch(monkeypatch: pytest.Monkey
     )
 
     asyncio.run(email_delivery.email_dispatch_loop(postgres_repository=object()))
+
+
+def test_email_dispatch_loop_drains_inflight_thread_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = Event()
+    release = Event()
+    finished = Event()
+
+    def dispatch(*, repository: object) -> None:
+        assert repository is not None
+        started.set()
+        release.wait(timeout=2)
+        finished.set()
+
+    monkeypatch.setattr(email_delivery, "dispatch_one_due_email_postgres", dispatch)
+    monkeypatch.setattr(
+        email_delivery,
+        "get_settings",
+        lambda: SimpleNamespace(email_dispatch_enabled=True, email_dispatch_poll_seconds=30),
+    )
+
+    async def exercise() -> None:
+        task = asyncio.create_task(email_delivery.email_dispatch_loop(postgres_repository=object()))
+        started_ready = await asyncio.to_thread(started.wait, 2)
+        assert started_ready
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("Cancelled email worker did not propagate cancellation")
+        assert finished.is_set()
+
+    asyncio.run(exercise())
