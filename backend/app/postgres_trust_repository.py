@@ -11,12 +11,13 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from .agent_run_models import AgentRun, AgentRunStep
+from .agent_task_models import AgentTask
 from .trust_action_authorization_models import (
     ActionAuthorization,
     ActionAuthorizationDecision,
 )
 from .trust_crypto import sha256_hex, verify_payload_signature
-from .models import AgentProvider
+from .models import AgentProvider, RiskLevel
 from .trust_models import (
     ActionConsumption,
     CapabilityLease,
@@ -28,6 +29,7 @@ from .trust_models import (
     ReviewerAttestation,
     TrustEventType,
     FlightRecorderVerification,
+    ExceptionQueueItem,
 )
 from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .trust_policy import (
@@ -277,6 +279,140 @@ class PostgresTrustRepository:
             push_queue_depth=push_queue_depth,
             verification=verification,
         )
+
+    def list_exception_queue(
+        self,
+        conn: Connection,
+        *,
+        workspace_id: str,
+    ) -> list[ExceptionQueueItem]:
+        """Read exception rows from one workspace-scoped PostgreSQL snapshot.
+
+        Callers provide a read-only transaction. Both run exceptions and
+        non-ALLOW action decisions are joined and checked against their stored
+        payloads so a stale or cross-workspace JSON record cannot be surfaced.
+        """
+        self._require_scope(workspace_id)
+        if conn.autocommit:
+            raise ValueError("Exception queue reads require a transaction")
+
+        items: list[ExceptionQueueItem] = []
+        run_rows = conn.execute(
+            "SELECT run.run_id,run.workspace_id,run.task_id,run.project_id,"
+            "run.status,run.updated_at,run.payload,task.task_id,task.workspace_id,"
+            "task.project_id,task.payload FROM agent_runs AS run "
+            "JOIN agent_tasks AS task ON task.task_id=run.task_id "
+            "AND task.workspace_id=run.workspace_id "
+            "WHERE run.workspace_id=%s AND run.status IN ('NEEDS_HUMAN','BLOCKED','FAILED')",
+            (workspace_id,),
+        ).fetchall()
+        for row in run_rows:
+            try:
+                run = AgentRun.model_validate(row[6])
+                task = AgentTask.model_validate(row[10])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored exception run or task payload is invalid"
+                ) from error
+            if (
+                run.id != row[0]
+                or run.workspace_id != row[1]
+                or run.task_id != row[2]
+                or run.project_id != row[3]
+                or run.status.value != row[4]
+                or run.updated_at != row[5]
+                or task.id != row[7]
+                or task.workspace_id != row[8]
+                or task.project_id != row[9]
+                or task.id != run.task_id
+                or task.workspace_id != workspace_id
+                or task.project_id != run.project_id
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored exception run or task scope is inconsistent"
+                )
+            items.append(
+                ExceptionQueueItem(
+                    id=f"run:{run.id}",
+                    category=run.status.value,
+                    severity=(
+                        RiskLevel.CRITICAL
+                        if run.status.value == "BLOCKED"
+                        else RiskLevel.HIGH
+                    ),
+                    title=f"Agent run {run.status.value.replace('_', ' ').lower()}",
+                    summary=run.last_error or run.objective or "Operator review is required.",
+                    run_id=run.id,
+                    task_id=run.task_id,
+                    created_at=run.updated_at,
+                )
+            )
+
+        action_rows = conn.execute(
+            "SELECT action.action_id,action.workspace_id,action.lease_id,"
+            "action.project_id,action.task_id,action.run_id,action.created_at,"
+            "action.payload,decision.decision_id,decision.lease_id,decision.decision,"
+            "decision.evaluated_at,decision.payload FROM proposed_actions AS action "
+            "JOIN LATERAL (SELECT policy.decision_id,policy.lease_id,policy.decision,"
+            "policy.evaluated_at,policy.payload FROM policy_decisions AS policy "
+            "WHERE policy.action_id=action.action_id "
+            "AND policy.workspace_id=action.workspace_id "
+            "ORDER BY policy.evaluated_at DESC,policy.decision_id DESC LIMIT 1) AS decision ON TRUE "
+            "WHERE action.workspace_id=%s AND decision.decision<>'ALLOW'",
+            (workspace_id,),
+        ).fetchall()
+        for row in action_rows:
+            try:
+                action = ProposedAction.model_validate(row[7])
+                decision = PolicyDecision.model_validate(row[12])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored exception action or decision payload is invalid"
+                ) from error
+            mismatches = [
+                label
+                for label, matches in (
+                    ("action_id", action.id == row[0]),
+                    ("action_workspace", action.workspace_id == row[1]),
+                    ("action_lease", action.lease_id == row[2]),
+                    ("action_project", action.project_id == row[3]),
+                    ("action_task", action.task_id == row[4]),
+                    ("action_run", action.run_id == row[5]),
+                    ("action_created_at", action.created_at == row[6]),
+                    ("decision_id", decision.id == row[8]),
+                    ("decision_action", decision.proposed_action_id == action.id),
+                    ("decision_lease", decision.lease_id == row[9]),
+                    ("decision_type", decision.decision.value == row[10]),
+                    ("decision_time", decision.evaluated_at == row[11]),
+                )
+                if not matches
+            ]
+            if action.workspace_id != workspace_id:
+                mismatches.append("action_workspace_scope")
+            if mismatches:
+                raise PostgresTrustRepositoryError(
+                    "Stored exception action or decision scope is inconsistent: "
+                    + ",".join(mismatches)
+                )
+            items.append(
+                ExceptionQueueItem(
+                    id=f"action:{action.id}",
+                    category=decision.decision.value,
+                    severity=decision.risk_level,
+                    title=(
+                        "Agent action blocked"
+                        if decision.decision == PolicyDecisionType.BLOCK
+                        else "Agent action needs exact approval"
+                    ),
+                    summary=" ".join(decision.reasons),
+                    run_id=action.run_id,
+                    task_id=action.task_id,
+                    action_id=action.id,
+                    lease_id=action.lease_id,
+                    created_at=decision.evaluated_at,
+                )
+            )
+        return sorted(items, key=lambda item: item.created_at, reverse=True)
 
     @staticmethod
     def _insert(

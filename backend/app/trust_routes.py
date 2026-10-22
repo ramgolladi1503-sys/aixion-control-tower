@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import timedelta
 
+import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from .agent_auth import assert_agent_can, require_external_agent
@@ -72,7 +73,10 @@ from .trust_service import (
     revoke_capability_lease,
 )
 from .trust_crypto import issue_bearer_token
-from .postgres_trust_repository import PostgresTrustRepositoryConflict
+from .postgres_trust_repository import (
+    PostgresTrustRepositoryConflict,
+    PostgresTrustRepositoryError,
+)
 from .workspace_access import (
     approval_scope_is_consistent,
     approval_workspace_id,
@@ -992,10 +996,41 @@ def list_exceptions(
     request: Request = None,  # type: ignore[assignment]
 ) -> list[ExceptionQueueItem]:
     if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
-        raise HTTPException(
-            status_code=503,
-            detail="Trust exception queue is unavailable until its action and AgentRun inputs use the selected PostgreSQL runtime",
-        )
+        runtime = _postgres_attestation_runtime(request)
+        repositories = getattr(request.app.state, "postgres_repositories", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or getattr(request.app.state, "agent_task_repository", None)
+            is not getattr(repositories, "agent_tasks", None)
+            or getattr(request.app.state, "agent_run_repository", None)
+            is not getattr(repositories, "agent_runs", None)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Trust exception queue requires the complete app-bound PostgreSQL runtime",
+            )
+        workspace_id = workspace_id_for_request(user, request)
+        if not workspace_id:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Trust exception queue requires a resolved workspace",
+            )
+        try:
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    conn.execute(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                    )
+                    return repositories.trust.list_exception_queue(
+                        conn,
+                        workspace_id=workspace_id,
+                    )
+        except (psycopg.Error, PostgresTrustRepositoryError, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL trust exception queue is unavailable",
+            ) from error
     return build_exception_queue(workspace_id_for_user(user))
 
 

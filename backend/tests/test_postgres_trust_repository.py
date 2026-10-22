@@ -1881,10 +1881,134 @@ def test_postgres_runtime_disables_sqlite_backed_trust_reports(
     _repository, _connect, _workspace_id, _approval_id, request, user, _payload = (
         _postgres_lease_issue_context(trust_repository, monkeypatch)
     )
-    for endpoint in (list_scorecards, list_exceptions):
-        with pytest.raises(HTTPException) as unavailable:
-            endpoint(user=user, request=request)
-        assert unavailable.value.status_code == 503
+    repositories = request.app.state.postgres_repositories
+    request.app.state.postgres_runtime.repositories = repositories
+    def runtime_connect():
+        connection = _connect()
+        connection.commit()
+        return connection
+
+    request.app.state.postgres_runtime.connect = runtime_connect
+    request.app.state.agent_task_repository = repositories.agent_tasks
+    request.app.state.agent_run_repository = repositories.agent_runs
+    with pytest.raises(HTTPException) as unavailable:
+        list_scorecards(user=user, request=request)
+    assert unavailable.value.status_code == 503
+    assert list_exceptions(user=user, request=request) == []
+
+
+def test_postgres_exception_queue_reads_workspace_scoped_durable_actions(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, connect, workspace_id, _approval_id, request, user, _payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    repositories = request.app.state.postgres_repositories
+    request.app.state.postgres_runtime.repositories = repositories
+    def runtime_connect():
+        connection = connect()
+        connection.commit()
+        return connection
+
+    request.app.state.postgres_runtime.connect = runtime_connect
+    request.app.state.agent_task_repository = repositories.agent_tasks
+    request.app.state.agent_run_repository = repositories.agent_runs
+    trust = repositories.trust
+    action = ProposedAction(
+        id=f"action_{uuid.uuid4().hex}",
+        provider=AgentProvider.CODEX,
+        agent_id="codex-installation-1",
+        project_id=None,
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        command="rm -rf build",
+    )
+    decision = PolicyDecision(
+        proposed_action_id=action.id,
+        decision=PolicyDecisionType.BLOCK,
+        risk_level=RiskLevel.HIGH,
+        reasons=["Command is outside the approved capability."],
+    )
+    with connect() as conn:
+        with conn.transaction():
+            trust.insert_proposed_action(conn, action)
+            trust.insert_policy_decision(conn, decision, workspace_id=workspace_id)
+
+    task = repositories.agent_tasks.list(workspace_id=workspace_id)[0]
+    run = AgentRun(
+        task_id=task.id,
+        workspace_id=workspace_id,
+        project_id=task.project_id,
+        status=AgentRunStatus.BLOCKED,
+        objective="Run requiring operator review",
+        last_error="Policy blocked the operation",
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO agent_runs(run_id,task_id,project_id,workspace_id,approval_id,status,"
+            "current_step_id,lease_owner,lease_token,lease_expires_at,updated_at,payload) "
+            "VALUES(%s,%s,%s,%s,NULL,%s,NULL,NULL,NULL,NULL,%s,%s)",
+            (
+                run.id,
+                run.task_id,
+                run.project_id,
+                run.workspace_id,
+                run.status.value,
+                run.updated_at,
+                Jsonb(run.model_dump(mode="json")),
+            ),
+        )
+
+    before_sqlite_actions = set(store.proposed_actions)
+    before_sqlite_decisions = set(store.policy_decisions)
+    items = list_exceptions(user=user, request=request)
+
+    assert {item.id for item in items} == {f"action:{action.id}", f"run:{run.id}"}
+    action_item = next(item for item in items if item.id == f"action:{action.id}")
+    run_item = next(item for item in items if item.id == f"run:{run.id}")
+    assert action_item.category == "BLOCK"
+    assert action_item.severity == RiskLevel.HIGH
+    assert action_item.summary == "Command is outside the approved capability."
+    assert run_item.category == "BLOCKED"
+    assert run_item.severity == RiskLevel.CRITICAL
+    assert run_item.summary == "Policy blocked the operation"
+    assert set(store.proposed_actions) == before_sqlite_actions
+    assert set(store.policy_decisions) == before_sqlite_decisions
+
+    # Rows can be internally consistent with their payloads yet still bind a
+    # run to a different project than its task. Such a record must fail closed.
+    other_project = Project(name="Different project", workspace_id=workspace_id)
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (
+                other_project.id,
+                workspace_id,
+                Jsonb(other_project.model_dump(mode="json")),
+            ),
+        )
+        mismatched_run = run.model_copy(update={"project_id": other_project.id})
+        conn.execute(
+            "UPDATE agent_runs SET project_id=%s,payload=%s WHERE run_id=%s",
+            (
+                mismatched_run.project_id,
+                Jsonb(mismatched_run.model_dump(mode="json")),
+                run.id,
+            ),
+        )
+    with pytest.raises(HTTPException) as corrupt_record:
+        list_exceptions(user=user, request=request)
+    assert corrupt_record.value.status_code == 503
+
+    # A mismatched app binding must never silently fall through to the SQLite
+    # reporting builder, even when durable PostgreSQL rows exist.
+    bound = request.app.state.agent_run_repository
+    request.app.state.agent_run_repository = object()
+    with pytest.raises(HTTPException) as unavailable:
+        list_exceptions(user=user, request=request)
+    assert unavailable.value.status_code == 503
+    request.app.state.agent_run_repository = bound
 
 
 def test_postgres_concurrent_identical_lease_issues_resolve_once(
