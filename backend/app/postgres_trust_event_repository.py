@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
 from psycopg import Connection
 from psycopg.types.json import Jsonb
 
-from .trust_crypto import sha256_hex
+from .trust_crypto import canonical_json, sha256_hex
 from .trust_models import FlightRecorderVerification, TrustEvent, TrustEventType
 
 
@@ -133,7 +134,10 @@ class PostgresTrustEventRepository:
             actor=actor,
             workspace_id=workspace_id,
             correlation_id=correlation_id,
-            payload=payload or {},
+            # Hash the same JSON-compatible payload that is persisted. Without
+            # normalization, values such as datetime hash as Python strings but
+            # round-trip through JSON as ISO strings, invalidating the next link.
+            payload=json.loads(canonical_json(payload or {})),
             previous_hash=previous_hash,
             event_hash="pending",
         )

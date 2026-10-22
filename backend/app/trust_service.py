@@ -7,9 +7,10 @@ import psycopg
 from pydantic import ValidationError
 from psycopg import Connection
 
+from .agent_task_models import AgentTask
 from .approval_decisions import approval_decision_repository
 from .approval_integrity import compute_approval_payload_hash
-from .models import ApprovalRequest, ApprovalStatus, AuthUser, RiskLevel, now_utc
+from .models import ApprovalRequest, ApprovalStatus, AuthUser, ExternalAgent, RiskLevel, now_utc
 from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .postgres_trust_repository import PostgresTrustRepository
 from .store import store
@@ -334,14 +335,31 @@ def record_reviewer_attestation_postgres(
 def _validate_scope_against_approval(
     payload: CapabilityLeaseCreate,
     approval: ApprovalRequest,
+    *,
+    linked_task: AgentTask | None = None,
 ) -> None:
-    task = _linked_task_for_approval(approval.id)
+    task = linked_task if linked_task is not None else _linked_task_for_approval(approval.id)
     if task is None:
         raise TrustControlConflict("Capability leases require a linked AgentTask.")
-    if not agent_task_scope_is_consistent(task) or (
-        agent_task_workspace_id(task) != approval_workspace_id(approval)
-    ):
-        raise TrustControlConflict("Linked AgentTask ownership scope is inconsistent.")
+    if linked_task is None:
+        if not agent_task_scope_is_consistent(task) or (
+            agent_task_workspace_id(task) != approval_workspace_id(approval)
+        ):
+            raise TrustControlConflict(
+                "Linked AgentTask ownership scope is inconsistent."
+            )
+    else:
+        # The caller has already loaded both records through the same locked
+        # PostgreSQL transaction, so do not consult the SQLite module adapters.
+        if (
+            not task.project_id
+            or task.project_id != approval.project_id
+            or not task.workspace_id
+            or task.workspace_id != approval.workspace_id
+        ):
+            raise TrustControlConflict(
+                "Linked AgentTask ownership scope is inconsistent."
+            )
     if payload.agent_id and task.external_agent_id not in {None, payload.agent_id}:
         raise TrustControlConflict("Capability lease agent does not match the linked AgentTask.")
     if payload.scope.repository != task.repository:
@@ -373,6 +391,225 @@ def _validate_scope_against_approval(
         )
     if payload.scope.allow_auto_merge:
         raise TrustControlConflict("Auto-merge cannot be granted by a capability lease.")
+
+
+def issue_capability_lease_postgres(
+    payload: CapabilityLeaseCreate,
+    *,
+    user: AuthUser,
+    workspace_id: str,
+    connect: Callable[[], Connection],
+    trust_repository: PostgresTrustRepository,
+    trust_event_repository: PostgresTrustEventRepository,
+) -> CapabilityLease:
+    """Issue a lease from one locked PostgreSQL approval scope transaction."""
+    if not workspace_id:
+        raise ValueError("Capability lease workspace is required.")
+
+    now = _utcnow()
+    fingerprint = sha256_hex(payload.model_dump(mode="json"))
+    try:
+        with connect() as conn:
+            with conn.transaction():
+                approval_row = conn.execute(
+                    "SELECT approval.payload,approval.approval_id,approval.workspace_id,"
+                    "approval.project_id,project.workspace_id,approval.status "
+                    "FROM approval_requests AS approval JOIN projects AS project "
+                    "ON project.project_id=approval.project_id AND "
+                    "project.workspace_id=approval.workspace_id "
+                    "WHERE approval.approval_id=%s AND approval.workspace_id=%s "
+                    "FOR UPDATE OF approval",
+                    (payload.approval_request_id, workspace_id),
+                ).fetchone()
+                if approval_row is None:
+                    raise ValueError("Approval request not found.")
+                try:
+                    approval = ApprovalRequest.model_validate(approval_row[0])
+                except ValidationError as error:
+                    raise RuntimeError("Stored approval payload is invalid.") from error
+                if (
+                    approval.id != approval_row[1]
+                    or approval.workspace_id != approval_row[2]
+                    or approval.project_id != approval_row[3]
+                    or approval_row[4] != workspace_id
+                    or approval.status.value != approval_row[5]
+                ):
+                    raise TrustControlConflict(
+                        "Approval ownership scope is inconsistent."
+                    )
+                if approval.status != ApprovalStatus.APPROVED:
+                    raise TrustControlConflict(
+                        "Capability leases require an APPROVED request."
+                    )
+                if (
+                    not approval.approved_payload_hash
+                    or approval.approved_payload_hash
+                    != compute_approval_payload_hash(approval)
+                ):
+                    raise TrustControlConflict(
+                        "Approved payload is missing or fails its frozen hash check."
+                    )
+
+                task_rows = conn.execute(
+                    "SELECT task_id,workspace_id,project_id,payload FROM agent_tasks "
+                    "WHERE approval_request_id=%s ORDER BY task_id LIMIT 2 FOR SHARE",
+                    (approval.id,),
+                ).fetchall()
+                if len(task_rows) != 1:
+                    raise TrustControlConflict(
+                        "Capability leases require exactly one linked AgentTask."
+                    )
+                task_row = task_rows[0]
+                try:
+                    task = AgentTask.model_validate(task_row[3])
+                except ValidationError as error:
+                    raise RuntimeError("Stored AgentTask payload is invalid.") from error
+                if (
+                    task.id != task_row[0]
+                    or task.workspace_id != task_row[1]
+                    or task.project_id != task_row[2]
+                    or task.approval_request_id != approval.id
+                ):
+                    raise TrustControlConflict(
+                        "Linked AgentTask ownership scope is inconsistent."
+                    )
+
+                if payload.agent_id:
+                    agent_row = conn.execute(
+                        "SELECT agent_id,workspace_id,payload FROM external_agents "
+                        "WHERE agent_id=%s FOR SHARE",
+                        (payload.agent_id,),
+                    ).fetchone()
+                    if agent_row is None:
+                        raise ValueError("External agent not found.")
+                    try:
+                        agent = ExternalAgent.model_validate(agent_row[2])
+                    except ValidationError as error:
+                        raise RuntimeError(
+                            "Stored external-agent payload is invalid."
+                        ) from error
+                    if (
+                        agent.id != agent_row[0]
+                        or agent.workspace_id != agent_row[1]
+                        or agent.workspace_id != workspace_id
+                    ):
+                        raise TrustControlConflict(
+                            "Capability lease agent belongs to another workspace."
+                        )
+
+                _validate_scope_against_approval(
+                    payload, approval, linked_task=task
+                )
+                attestations = trust_repository.list_reviewer_attestations(
+                    conn,
+                    workspace_id=workspace_id,
+                    approval_request_id=approval.id,
+                    approval_payload_hash=approval.approved_payload_hash,
+                )
+                reviewer_ids = (
+                    {approval.approved_by_user_id}
+                    if approval.approved_by_user_id
+                    else set()
+                )
+                for attestation in attestations:
+                    material = {
+                        "approval_request_id": attestation.approval_request_id,
+                        "approval_payload_hash": attestation.approval_payload_hash,
+                        "reviewer_user_id": attestation.reviewer_user_id,
+                        "reviewer_role": attestation.reviewer_role,
+                        "decision": attestation.decision,
+                        "reason": attestation.reason,
+                    }
+                    if not verify_payload_signature(material, attestation.signature):
+                        raise TrustControlConflict(
+                            "Reviewer attestation signature is invalid."
+                        )
+                    if attestation.decision == ReviewerAttestationDecision.DENY:
+                        raise TrustControlConflict(
+                            "A reviewer denied this exact approval payload."
+                        )
+                    if attestation.decision == ReviewerAttestationDecision.APPROVE:
+                        reviewer_ids.add(attestation.reviewer_user_id)
+                if (
+                    payload.prevent_self_approval
+                    and approval.created_by_user_id in reviewer_ids
+                ):
+                    raise TrustControlConflict(
+                        "Self-approved work cannot receive a capability lease."
+                    )
+                if len(reviewer_ids) < payload.required_reviewer_count:
+                    raise TrustControlConflict(
+                        f"Lease requires {payload.required_reviewer_count} distinct reviewers; "
+                        f"only {len(reviewer_ids)} are recorded."
+                    )
+
+                active = trust_repository.active_capability_lease_for_approval(
+                    conn,
+                    approval_id=approval.id,
+                    workspace_id=workspace_id,
+                    for_update=True,
+                )
+                if active is not None and active.expires_at > now:
+                    if active.scope.metadata.get("request_fingerprint") == fingerprint:
+                        return active
+                    raise TrustControlConflict(
+                        "An active lease already exists for this approval and agent."
+                    )
+                if active is not None:
+                    trust_repository.expire_active_capability_lease(
+                        conn,
+                        lease=active,
+                        now=now,
+                        trust_event_repository=trust_event_repository,
+                    )
+
+                scope = payload.scope.model_copy(deep=True)
+                scope.metadata = {
+                    **scope.metadata,
+                    "request_fingerprint": fingerprint,
+                }
+                lease = CapabilityLease(
+                    approval_request_id=approval.id,
+                    workspace_id=workspace_id,
+                    approved_payload_hash=approval.approved_payload_hash,
+                    agent_id=payload.agent_id,
+                    provider=payload.provider,
+                    mode=payload.mode,
+                    scope=scope,
+                    issued_by_user_id=user.id,
+                    required_reviewer_count=payload.required_reviewer_count,
+                    prevent_self_approval=payload.prevent_self_approval,
+                    issued_at=now,
+                    expires_at=now + timedelta(seconds=payload.expires_in_seconds),
+                    receipt_nonce=new_nonce(),
+                    receipt_signature="pending",
+                )
+                lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
+                trust_repository.insert_capability_lease(conn, lease)
+                trust_event_repository.append_in_transaction(
+                    conn,
+                    TrustEventType.LEASE_ISSUED,
+                    entity_type="capability_lease",
+                    entity_id=lease.id,
+                    actor=user.email,
+                    workspace_id=workspace_id,
+                    correlation_id=scope.metadata.get("correlation_id"),
+                    payload={
+                        "approval_request_id": approval.id,
+                        "provider": lease.provider,
+                        "agent_id": lease.agent_id,
+                        "mode": lease.mode,
+                        "repository": scope.repository,
+                        "branch": scope.branch,
+                        "expires_at": lease.expires_at,
+                        "required_reviewer_count": lease.required_reviewer_count,
+                    },
+                )
+                return lease
+    except psycopg.errors.UniqueViolation as error:
+        raise TrustControlConflict(
+            "Capability lease conflicted with another durable write."
+        ) from error
 
 
 def issue_capability_lease(

@@ -14,12 +14,15 @@ from fastapi import HTTPException
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
+from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.application_repositories import ApplicationRepositories
+from app.approval_integrity import compute_approval_payload_hash
 from app.models import (
     AgentProvider,
     ApprovalRequest,
     ApprovalStatus,
     AuthUser,
+    FileChange,
     Project,
     RiskAssessment,
     RiskLevel,
@@ -42,6 +45,7 @@ from app.trust_crypto import sign_payload
 from app.trust_policy import lease_receipt_payload
 from app.trust_routes import (
     consume_manual_action,
+    create_lease,
     decide_exact_action,
     evaluate_manual_action,
     get_exact_action_decision,
@@ -60,6 +64,7 @@ from app.trust_models import (
     CredentialGrant,
     CredentialGrantType,
     CapabilityLeaseStatus,
+    CapabilityLeaseCreate,
     PolicyDecision,
     PolicyDecisionType,
     ProposedAction,
@@ -67,6 +72,98 @@ from app.trust_models import (
     ReviewerAttestationDecision,
     TrustEventType,
 )
+
+
+def _postgres_lease_issue_context(trust_repository, monkeypatch):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(row[0]).model_copy(
+            update={
+                "created_by_user_id": f"creator_{uuid.uuid4().hex}",
+                "approved_by_user_id": user_id,
+                "files": [
+                    FileChange(
+                        path="src/approved.py",
+                        change_type="modify",
+                        diff="+approved = True",
+                    )
+                ],
+                "test_plan": ["python -m pytest tests/test_approved.py"],
+            }
+        )
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        task = AgentTask(
+            provider=AgentProvider.CODEX,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            title="Approved task",
+            goal="Change one approved file",
+            repository="owner/repo",
+            branch_preference="feature/trust-test",
+            approval_request_id=approval_id,
+            status=AgentTaskStatus.APPROVED,
+        )
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval_id),
+        )
+        conn.execute(
+            "INSERT INTO agent_tasks(task_id,project_id,workspace_id,external_agent_id,"
+            "approval_request_id,status,updated_at,payload) VALUES(%s,%s,%s,NULL,%s,%s,%s,%s)",
+            (
+                task.id,
+                project_id,
+                workspace_id,
+                approval_id,
+                task.status.value,
+                task.updated_at,
+                Jsonb(task.model_dump(mode="json")),
+            ),
+        )
+    repositories = ApplicationRepositories.from_connector(connect)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_repositories=repositories,
+        approval_decision_repository=repositories.approval_decisions,
+        workspace_membership_repository=repositories.workspace_membership,
+        project_repository=repositories.projects,
+        agent_task_repository=repositories.agent_tasks,
+        external_agent_auth_repository=repositories.external_agent_auth,
+        trust_repository=repositories.trust,
+        trust_event_repository=repositories.trust_events,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    user = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="Trust route maintainer",
+        role=UserRole.MAINTAINER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    payload = CapabilityLeaseCreate(
+        approval_request_id=approval_id,
+        provider=AgentProvider.CODEX,
+        mode=CapabilityLeaseMode.BOUNDED,
+        scope=CapabilityScope(
+            repository="owner/repo",
+            branch="feature/trust-test",
+            allowed_actions=[CapabilityActionType.MODIFY_FILES],
+            allowed_path_prefixes=["src/approved.py"],
+            allowed_commands=["python -m pytest tests/test_approved.py"],
+            max_runtime_seconds=120,
+            max_cost_usd=1.0,
+        ),
+    )
+    return repository, connect, workspace_id, approval_id, request, user, payload
 
 
 @pytest.fixture
@@ -1109,3 +1206,226 @@ def test_postgres_consumption_rolls_back_budget_and_record_if_event_append_fails
         assert repository.get_action_consumption(conn, action.id, workspace_id) is None
         assert conn.execute("SELECT count(*) FROM action_consumptions").fetchone() == (0,)
         assert conn.execute("SELECT count(*) FROM trust_events").fetchone() == (0,)
+
+
+def test_postgres_lease_issue_route_is_atomic_idempotent_and_not_projected(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    first = create_lease(payload, user, request)
+    retry = create_lease(payload, user, request)
+
+    assert first.id == retry.id
+    assert "workspace_id" not in first.model_dump()
+    assert first.id not in store.capability_leases
+    assert PostgresTrustEventRepository(connect).verify().valid is True
+    with connect() as conn:
+        durable = repository.get_capability_lease(conn, first.id, workspace_id)
+        assert durable is not None
+        assert durable.scope.metadata["request_fingerprint"]
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND "
+            "event_type=%s AND entity_id=%s",
+            (workspace_id, TrustEventType.LEASE_ISSUED.value, first.id),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_concurrent_identical_lease_issues_resolve_once(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, _approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(lambda _index: create_lease(payload, user, request), range(2))
+        )
+    assert results[0].id == results[1].id
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM capability_leases WHERE workspace_id=%s AND status='ACTIVE'",
+            (workspace_id,),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_lease_issue_rejects_conflicting_active_scope(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, connect, workspace_id, _approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    create_lease(payload, user, request)
+    conflicting = payload.model_copy(
+        update={
+            "scope": payload.scope.model_copy(update={"max_cost_usd": 0.5})
+        }
+    )
+    with pytest.raises(HTTPException) as error:
+        create_lease(conflicting, user, request)
+    assert error.value.status_code == 409
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM capability_leases WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE event_type=%s",
+            (TrustEventType.LEASE_ISSUED.value,),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_lease_issue_partial_repository_binding_fails_closed(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, _connect, _workspace_id, _approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    request.app.state.project_repository = object()
+    with pytest.raises(HTTPException) as error:
+        create_lease(payload, user, request)
+    assert error.value.status_code == 409
+
+
+def test_postgres_lease_issue_denied_by_exact_hash_attestation(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(row[0])
+        denial = ReviewerAttestation(
+            approval_request_id=approval_id,
+            workspace_id=workspace_id,
+            approval_payload_hash=approval.approved_payload_hash,
+            reviewer_user_id=user.id,
+            reviewer_role=user.role,
+            decision=ReviewerAttestationDecision.DENY,
+            reason="The requested action is not acceptable.",
+            signature="pending",
+        )
+        material = {
+            "approval_request_id": denial.approval_request_id,
+            "approval_payload_hash": denial.approval_payload_hash,
+            "reviewer_user_id": denial.reviewer_user_id,
+            "reviewer_role": denial.reviewer_role,
+            "decision": denial.decision,
+            "reason": denial.reason,
+        }
+        denial.signature = sign_payload(material)
+        repository.insert_reviewer_attestation(conn, denial)
+
+    with pytest.raises(HTTPException) as error:
+        create_lease(payload, user, request)
+    assert error.value.status_code == 409
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM capability_leases WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE event_type=%s",
+            (TrustEventType.LEASE_ISSUED.value,),
+        ).fetchone()[0] == 0
+
+
+def test_postgres_expired_active_lease_is_expired_before_replacement(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, _approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    first = create_lease(payload, user, request)
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM capability_leases WHERE lease_id=%s",
+            (first.id,),
+        ).fetchone()
+        expired_at = now_utc() - timedelta(seconds=1)
+        expired = CapabilityLease.model_validate(row[0]).model_copy(
+            update={"expires_at": expired_at}
+        )
+        conn.execute(
+            "UPDATE capability_leases SET expires_at=%s,payload=%s WHERE lease_id=%s",
+            (expired_at, Jsonb(expired.model_dump(mode="json")), first.id),
+        )
+
+    replacement = create_lease(payload, user, request)
+    assert replacement.id != first.id
+    with connect() as conn:
+        prior = repository.get_capability_lease(conn, first.id, workspace_id)
+        assert prior is not None and prior.status == CapabilityLeaseStatus.EXPIRED
+        assert conn.execute(
+            "SELECT count(*) FROM capability_leases WHERE workspace_id=%s AND status='ACTIVE'",
+            (workspace_id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE event_type=%s",
+            (TrustEventType.LEASE_EXPIRED.value,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE event_type=%s",
+            (TrustEventType.LEASE_ISSUED.value,),
+        ).fetchone()[0] == 2
+    assert PostgresTrustEventRepository(connect).verify().valid is True
+
+
+def test_postgres_lease_issue_rejects_scope_outside_approved_payload(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, connect, workspace_id, _approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    invalid = payload.model_copy(
+        update={
+            "scope": payload.scope.model_copy(
+                update={"allowed_path_prefixes": ["src/not-approved.py"]}
+            )
+        }
+    )
+    with pytest.raises(HTTPException) as error:
+        create_lease(invalid, user, request)
+    assert error.value.status_code == 409
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM capability_leases WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0
+
+
+def test_postgres_lease_issue_rolls_back_when_trust_event_append_fails(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, connect, workspace_id, _approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+
+    def fail_event(*_args, **_kwargs):
+        raise RuntimeError("injected trust ledger failure")
+
+    monkeypatch.setattr(
+        PostgresTrustEventRepository, "append_in_transaction", fail_event
+    )
+    with pytest.raises(RuntimeError, match="injected trust ledger failure"):
+        create_lease(payload, user, request)
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM capability_leases WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0

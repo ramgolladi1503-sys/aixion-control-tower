@@ -64,6 +64,7 @@ from .trust_service import (
     TrustControlConflict,
     evaluate_gateway_action,
     issue_capability_lease,
+    issue_capability_lease_postgres,
     issue_credential_grant,
     record_reviewer_attestation_postgres,
     record_reviewer_attestation,
@@ -116,8 +117,23 @@ def _postgres_attestation_runtime(request: Request | None):
 
 
 def _postgres_lease_runtime(request: Request | None):
-    """Select durable lease writes only when their trust and event authorities agree."""
-    return _postgres_attestation_runtime(request)
+    """Select lease writes only when every required authority shares one runtime."""
+    runtime = _postgres_attestation_runtime(request)
+    if runtime is None or request is None:
+        return None
+    repositories = request.app.state.postgres_repositories
+    bindings = (
+        ("project_repository", "projects"),
+        ("agent_task_repository", "agent_tasks"),
+        ("external_agent_auth_repository", "external_agent_auth"),
+    )
+    if any(
+        getattr(request.app.state, state_name, None)
+        is not getattr(repositories, repository_name, None)
+        for state_name, repository_name in bindings
+    ):
+        return None
+    return runtime
 
 
 def _postgres_trust_runtime(request: Request | None):
@@ -265,12 +281,34 @@ def list_attestations(
 def create_lease(
     payload: CapabilityLeaseCreate,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> CapabilityLeasePublic:
-    workspace_id = workspace_id_for_user(user)
-    _approval_for_user(payload.approval_request_id, workspace_id)
     try:
+        runtime = _postgres_lease_runtime(request)
+        if runtime is not None:
+            workspace_id = workspace_id_for_request(user, request)
+            if workspace_id is None:
+                raise HTTPException(status_code=403, detail="Workspace membership is required")
+            repositories = request.app.state.postgres_repositories
+            return _public(
+                issue_capability_lease_postgres(
+                    payload,
+                    user=user,
+                    workspace_id=workspace_id,
+                    connect=runtime.connect,
+                    trust_repository=repositories.trust,
+                    trust_event_repository=repositories.trust_events,
+                )
+            )
+        if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL lease issuance requires the complete durable approval, task, project, and trust repository bundle",
+            )
+        workspace_id = workspace_id_for_user(user)
+        _approval_for_user(payload.approval_request_id, workspace_id)
         return _public(issue_capability_lease(payload, user=user))
-    except (ValueError, TrustControlConflict) as error:
+    except (ValueError, TrustControlConflict, PostgresTrustRepositoryConflict) as error:
         raise _trust_error(error) from error
 
 

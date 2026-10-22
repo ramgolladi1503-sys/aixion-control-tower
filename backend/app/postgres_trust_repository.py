@@ -255,6 +255,111 @@ class PostgresTrustRepository:
             record=record,
         )
 
+    def active_capability_lease_for_approval(
+        self,
+        conn: Connection,
+        *,
+        approval_id: str,
+        workspace_id: str,
+        for_update: bool = False,
+    ) -> CapabilityLease | None:
+        """Read and optionally lock the single active lease for an approval."""
+        self._require_scope(workspace_id)
+        rows = conn.execute(
+            "SELECT lease_id,approval_id,workspace_id,issued_by_user_id,status,expires_at,"
+            "consumed_pull_requests,consumed_retries,consumed_runtime_seconds,"
+            "consumed_cost_usd,created_at,updated_at,payload FROM capability_leases "
+            "WHERE approval_id=%s AND workspace_id=%s AND status=%s "
+            "ORDER BY lease_id LIMIT 2" + (" FOR UPDATE" if for_update else ""),
+            (approval_id, workspace_id, CapabilityLeaseStatus.ACTIVE.value),
+        ).fetchall()
+        if len(rows) > 1:
+            raise PostgresTrustRepositoryError(
+                "Approval has multiple active capability leases"
+            )
+        if not rows:
+            return None
+        row = rows[0]
+        try:
+            lease = CapabilityLease.model_validate(row[12])
+        except Exception as error:
+            raise PostgresTrustRepositoryError(
+                "Stored capability lease payload is invalid"
+            ) from error
+        indexed = (
+            lease.id,
+            lease.approval_request_id,
+            lease.workspace_id,
+            lease.issued_by_user_id,
+            lease.status.value,
+            lease.expires_at,
+            lease.consumed_pull_requests,
+            lease.consumed_retries,
+            lease.consumed_runtime_seconds,
+            Decimal(str(lease.consumed_cost_usd)),
+            lease.created_at,
+            lease.updated_at,
+        )
+        actual = tuple(row[:12])
+        if indexed != actual:
+            raise PostgresTrustRepositoryError(
+                "Capability lease payload does not match its indexed columns"
+            )
+        if lease.approval_request_id != approval_id or lease.workspace_id != workspace_id:
+            raise PostgresTrustRepositoryError(
+                "Capability lease is outside the requested approval scope"
+            )
+        return lease
+
+    def expire_active_capability_lease(
+        self,
+        conn: Connection,
+        *,
+        lease: CapabilityLease,
+        now: datetime,
+        trust_event_repository: PostgresTrustEventRepository,
+    ) -> CapabilityLease:
+        """Expire a locked active lease and append its event in the same transaction."""
+        if (
+            not lease.workspace_id
+            or lease.status != CapabilityLeaseStatus.ACTIVE
+            or lease.expires_at > now
+        ):
+            raise PostgresTrustRepositoryConflict(
+                "Only an elapsed active capability lease can be expired."
+            )
+        updated = lease.model_copy(
+            update={"status": CapabilityLeaseStatus.EXPIRED, "updated_at": now}
+        )
+        changed = conn.execute(
+            "UPDATE capability_leases SET status=%s,updated_at=%s,payload=%s "
+            "WHERE lease_id=%s AND workspace_id=%s AND status=%s AND expires_at<=%s",
+            (
+                updated.status.value,
+                updated.updated_at,
+                Jsonb(_model_payload(updated)),
+                lease.id,
+                lease.workspace_id,
+                CapabilityLeaseStatus.ACTIVE.value,
+                now,
+            ),
+        )
+        if changed.rowcount != 1:
+            raise PostgresTrustRepositoryConflict(
+                "Capability lease changed while it was being expired."
+            )
+        trust_event_repository.append_in_transaction(
+            conn,
+            TrustEventType.LEASE_EXPIRED,
+            entity_type="capability_lease",
+            entity_id=lease.id,
+            actor="system",
+            workspace_id=lease.workspace_id,
+            correlation_id=lease.scope.metadata.get("correlation_id"),
+            payload={"expires_at": lease.expires_at},
+        )
+        return updated
+
     def get_capability_lease(
         self,
         conn: Connection,
