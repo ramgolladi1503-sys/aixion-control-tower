@@ -97,14 +97,19 @@ adequacy, cloud cost, or actual delivery. `terraform fmt -check` and the organiz
 normal IaC review are still required once Terraform is installed; do not initialize
 or apply Terraform during this pre-billing phase.
 
-**Known code blocker:** both dispatcher scripts call the API-wide production startup
-validator. That currently rejects production while the whole application remains
-SQLite-backed and also requires settings outside each dispatcher's scoped secrets.
-Do not bypass this with a local/demo profile or by distributing all secrets to both
-jobs. A worker-specific production validation path and its tests must land after the
-Slice 1 runtime design before these job templates can be considered deployable.
+**Worker validation status (2026-10-22):** both dispatcher scripts now use a
+strict worker-scoped production validator. It requires the production profile and
+scheduled mode, rejects an explicit SQLite database path, and validates PostgreSQL
+plus only the provider configuration for the selected job. The API-wide production
+startup validator remains unchanged and continues to reject startup until the whole
+application is PostgreSQL-authoritative. Local worker settings and dispatch tests
+passed; this does not make the jobs deployable because outbox producers and the
+complete application runtime remain on split SQLite/PostgreSQL authority. Keep the
+templates blocked, do not use a local/demo profile, and do not distribute all API
+secrets to both jobs.
 
 Google references: [Cloud Run Jobs YAML](https://docs.cloud.google.com/run/docs/reference/yaml/v1#job),
+[Cloud Run Job secrets](https://docs.cloud.google.com/run/docs/configuring/jobs/secrets),
 [create Cloud Run Jobs](https://docs.cloud.google.com/run/docs/create-jobs),
 [schedule Cloud Run Jobs with Cloud Scheduler](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule),
 [Cloud Scheduler delivery and retry semantics](https://docs.cloud.google.com/scheduler/docs/overview),
