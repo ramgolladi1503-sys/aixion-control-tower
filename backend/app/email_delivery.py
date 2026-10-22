@@ -259,6 +259,13 @@ async def email_dispatch_loop(
     settings = get_settings()
     if not settings.email_dispatch_enabled:
         return
+    if settings.postgres_auth_enabled and postgres_repository is None:
+        logging.getLogger(__name__).error(
+            "PostgreSQL email outbox repository is required in PostgreSQL auth mode"
+        )
+        raise RuntimeError(
+            "PostgreSQL email outbox repository is required in PostgreSQL auth mode"
+        )
     while True:
         if postgres_repository is None:
             dispatch_task = asyncio.create_task(asyncio.to_thread(dispatch_one_due_email))

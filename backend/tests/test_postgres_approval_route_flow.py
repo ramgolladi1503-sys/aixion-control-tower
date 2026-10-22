@@ -275,6 +275,7 @@ def _retry_antigravity_hook_in_fresh_process(
             request_agent_id: str,
             request_token: str,
             body: dict | None = None,
+            **_kwargs: object,
         ) -> dict:
             if request_agent_id != agent_id or request_token != agent_token:
                 raise antigravity_hook.GateError("Unexpected connector identity")
@@ -817,6 +818,7 @@ def test_postgres_hook_denies_lost_consume_response_and_same_invocation_retry(
         request_agent_id: str,
         request_token: str,
         body: dict | None = None,
+        **_kwargs: object,
     ) -> dict:
         assert request_agent_id == agent.id
         assert request_token == agent_token

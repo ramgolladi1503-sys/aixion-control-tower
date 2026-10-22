@@ -473,9 +473,10 @@ def test_blocked_antigravity_invocation_survives_sqlite_api_restart(
             request_agent_id: str,
             request_token: str,
             body: dict[str, Any] | None = None,
+            **kwargs: Any,
         ) -> dict[str, Any]:
             response = real_request(
-                method, url, request_agent_id, request_token, body
+                method, url, request_agent_id, request_token, body, **kwargs
             )
             path = urlparse(url).path
             if method == "POST" and path == "/agents/approvals":

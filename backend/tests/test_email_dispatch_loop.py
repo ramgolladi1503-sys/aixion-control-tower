@@ -24,7 +24,11 @@ def test_email_loop_uses_only_the_explicitly_selected_dispatcher(
     monkeypatch.setattr(
         email_delivery,
         "get_settings",
-        lambda: SimpleNamespace(email_dispatch_enabled=True, email_dispatch_poll_seconds=1),
+        lambda: SimpleNamespace(
+            email_dispatch_enabled=True,
+            email_dispatch_poll_seconds=1,
+            postgres_auth_enabled=False,
+        ),
     )
     calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
 
@@ -55,10 +59,36 @@ def test_disabled_email_loop_returns_without_dispatch(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         email_delivery,
         "get_settings",
-        lambda: SimpleNamespace(email_dispatch_enabled=False, email_dispatch_poll_seconds=1),
+        lambda: SimpleNamespace(
+            email_dispatch_enabled=False,
+            email_dispatch_poll_seconds=1,
+            postgres_auth_enabled=True,
+        ),
     )
 
     asyncio.run(email_delivery.email_dispatch_loop(postgres_repository=object()))
+
+
+def test_postgres_auth_email_loop_fails_closed_without_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        email_delivery,
+        "get_settings",
+        lambda: SimpleNamespace(
+            email_dispatch_enabled=True,
+            email_dispatch_poll_seconds=1,
+            postgres_auth_enabled=True,
+        ),
+    )
+
+    def unexpected_dispatch(*args, **kwargs):
+        raise AssertionError("email dispatch must not fall back to SQLite")
+
+    monkeypatch.setattr(email_delivery.asyncio, "to_thread", unexpected_dispatch)
+
+    with pytest.raises(RuntimeError, match="PostgreSQL email outbox repository is required"):
+        asyncio.run(email_delivery.email_dispatch_loop())
 
 
 def test_email_dispatch_loop_drains_inflight_thread_on_cancellation(
@@ -79,7 +109,11 @@ def test_email_dispatch_loop_drains_inflight_thread_on_cancellation(
     monkeypatch.setattr(
         email_delivery,
         "get_settings",
-        lambda: SimpleNamespace(email_dispatch_enabled=True, email_dispatch_poll_seconds=30),
+        lambda: SimpleNamespace(
+            email_dispatch_enabled=True,
+            email_dispatch_poll_seconds=30,
+            postgres_auth_enabled=True,
+        ),
     )
     original_drain = email_delivery._drain_email_dispatch_task
 

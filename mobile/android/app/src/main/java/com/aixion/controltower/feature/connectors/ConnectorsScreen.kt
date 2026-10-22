@@ -47,6 +47,7 @@ fun ConnectorsContent(
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item { ConnectorsHero() }
+        item { SetupJourneyPanel() }
         item { NativeAgentAccessPanel(onOpenAgentAccess = onOpenAgentAccess) }
     }
 }
@@ -57,27 +58,22 @@ private fun ConnectorsHero() {
     TowerHeroPanel {
         Row(verticalAlignment = Alignment.Top) {
             Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = "PLATFORM SETUP", color = palette.positive)
+                StatusBadge(label = "ONE-TIME SETUP", color = palette.brand)
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
-                    "Connect a platform",
+                    "Approve desktop work from your phone",
                     color = palette.ink,
-                    fontSize = 28.sp,
+                    fontSize = 25.sp,
                     fontWeight = FontWeight.SemiBold,
-                    lineHeight = 34.sp
+                    lineHeight = 31.sp
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    "Set up the coding agent running on your computer. The computer and the same agent session must stay on while a request is waiting. Antigravity is the first supported target; Codex phone approval is not verified yet.",
+                    "Connect the coding agent on your computer. Keep that computer and the same agent session running while an approval is waiting.",
                     color = palette.inkMuted,
                     fontSize = 14.sp,
                     lineHeight = 21.sp
                 )
-                Spacer(modifier = Modifier.height(TowerSpacing.lg))
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatusBadge(label = "ANTIGRAVITY SETUP", color = palette.brand)
-                    StatusBadge(label = "CODEX FLOW UNVERIFIED", color = palette.caution)
-                }
             }
             Spacer(modifier = Modifier.padding(horizontal = TowerSpacing.xs))
             ForgedLogoMark(size = 44.dp, color = palette.ink.copy(alpha = 0.78f))
@@ -86,13 +82,44 @@ private fun ConnectorsHero() {
 }
 
 @Composable
+private fun SetupJourneyPanel() {
+    val palette = LocalTowerPalette.current
+    TowerPanel {
+        Text("How phone approvals work", color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        SetupStep(number = "1", title = "Set up the agent", detail = "Install its Control Tower hook on the computer running your project.")
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        SetupStep(number = "2", title = "Keep the session running", detail = "The computer must stay online so the same agent task can resume.")
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        SetupStep(number = "3", title = "Decide from your phone", detail = "Review the exact request, then approve or deny it in the app.")
+    }
+}
+
+@Composable
+private fun SetupStep(number: String, title: String, detail: String) {
+    val palette = LocalTowerPalette.current
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+        verticalAlignment = Alignment.Top
+    ) {
+        StatusBadge(label = number, color = palette.brand)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, lineHeight = 20.sp)
+            Text(detail, color = palette.inkMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        }
+    }
+}
+
+@Composable
 private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        Text("Antigravity approval setup", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        StatusBadge(label = "FIRST SUPPORTED", color = palette.brand)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text("Antigravity", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            "Connect the local Antigravity hook and its agent credentials. Keep the computer and the same agent session running while you wait for a phone decision.",
+            "Set up the hook and connector credentials on the computer running Antigravity.",
             color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
@@ -104,17 +131,19 @@ private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
     }
 
     TowerPanel {
-        Text("Codex permission setup", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        StatusBadge(label = "PHONE FLOW NOT VERIFIED", color = palette.caution)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text("Codex", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            "A local PermissionRequest hook can be configured. Same-invocation phone approve/deny has not been verified yet.",
+            "Setup is available, but returning a phone decision to the same Codex task has not been verified.",
             color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         OutlinedButton(onClick = { onOpenAgentAccess("CODEX") }, modifier = Modifier.fillMaxWidth()) {
-            Text("Open platform setup")
+            Text("View Codex setup")
         }
     }
 }

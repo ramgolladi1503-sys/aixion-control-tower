@@ -19,14 +19,20 @@ class ConnectorsScreenTest {
             ConnectorsContent()
         }
 
-        composeRule.onNodeWithText("Connect a platform").assertExists()
+        composeRule.onNodeWithText("Approve desktop work from your phone").assertExists()
         composeRule.onNodeWithText(
-            "Set up the coding agent running on your computer. The computer and the same agent session must stay on while a request is waiting. Antigravity is the first supported target; Codex phone approval is not verified yet."
+            "Connect the coding agent on your computer. Keep that computer and the same agent session running while an approval is waiting."
         ).assertExists()
-        composeRule.onNodeWithText("Antigravity approval setup").assertExists()
+        composeRule.onNodeWithText("How phone approvals work").assertExists()
+        composeRule.onNodeWithText("Set up the agent").assertExists()
+        composeRule.onNodeWithText("Keep the session running").assertExists()
+        composeRule.onNodeWithText("Decide from your phone").assertExists()
+        composeRule.onNodeWithText("FIRST SUPPORTED").assertExists()
+        composeRule.onNodeWithText("Antigravity").assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
-        composeRule.onNodeWithText("Codex permission setup").assertExists()
-        composeRule.onNodeWithText("Open platform setup").assertExists()
+        composeRule.onNodeWithText("PHONE FLOW NOT VERIFIED").assertExists()
+        composeRule.onNodeWithText("Codex").assertExists()
+        composeRule.onNodeWithText("View Codex setup").assertExists()
 
         composeRule.onAllNodesWithText("Other integrations and webhooks").assertCountEquals(0)
         composeRule.onAllNodesWithText("Webhook task intake").assertCountEquals(0)
@@ -42,7 +48,7 @@ class ConnectorsScreenTest {
         }
 
         composeRule.onNodeWithText("Set up Antigravity").performClick()
-        composeRule.onNodeWithText("Open platform setup").performClick()
+        composeRule.onNodeWithText("View Codex setup").performClick()
 
         composeRule.runOnIdle {
             assertEquals(listOf("ANTIGRAVITY", "CODEX"), navigationRequests)
@@ -55,9 +61,10 @@ class ConnectorsScreenTest {
             ConnectorsContent()
         }
 
-        composeRule.onNodeWithText("CODEX FLOW UNVERIFIED").assertExists()
+        composeRule.onNodeWithText("PHONE FLOW NOT VERIFIED").assertExists()
         composeRule.onNodeWithText(
-            "A local PermissionRequest hook can be configured. Same-invocation phone approve/deny has not been verified yet."
+            "Setup is available, but returning a phone decision to the same Codex task has not been verified."
         ).assertExists()
+        composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
     }
 }
