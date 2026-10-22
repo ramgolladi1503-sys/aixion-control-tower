@@ -236,7 +236,11 @@ fun ApprovalInboxContent(
         }
 
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+            ) {
                 ApprovalInboxSection.entries.forEach { section ->
                     FilterChip(
                         selected = selectedSection == section,

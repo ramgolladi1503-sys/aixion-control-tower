@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from threading import Event
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import main, postgres_notification_dispatcher
-from app.settings import get_settings
 from app.store import store
 
 pytest_plugins = ("test_postgres_lifespan_approval_inbox",)
@@ -42,16 +42,42 @@ def test_lifespan_approval_notification_is_dispatched_from_postgres_outbox(
     before_devices = set(store.device_registrations)
     before_audits = {event.id for event in store.audit_events}
     sender_calls: list[dict[str, object]] = []
-    dispatch_settings = replace(get_settings(), push_dispatch_enabled=True)
+    dispatch_settings = replace(
+        main.get_settings(),
+        outbox_dispatch_mode="inline",
+        push_dispatch_enabled=True,
+        push_dispatch_poll_seconds=30,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: dispatch_settings)
     monkeypatch.setattr(
         postgres_notification_dispatcher,
         "get_settings",
         lambda: dispatch_settings,
     )
+    dispatch_started = Event()
+    release_dispatch = Event()
+    dispatch_finished = Event()
+    dispatched_repositories: list[object] = []
+    dispatch_one = postgres_notification_dispatcher.dispatch_one_postgres_push
 
     def fake_sender(**kwargs: object) -> None:
         sender_calls.append(kwargs)
         return None
+
+    def gated_dispatch(repository) -> str | None:
+        dispatched_repositories.append(repository)
+        dispatch_started.set()
+        if not release_dispatch.wait(timeout=10):
+            raise TimeoutError("test did not release the PostgreSQL dispatcher")
+        result = dispatch_one(repository, sender=fake_sender)
+        dispatch_finished.set()
+        return result
+
+    monkeypatch.setattr(
+        postgres_notification_dispatcher,
+        "dispatch_one_postgres_push",
+        gated_dispatch,
+    )
 
     headers = {
         "X-Aixion-Agent-Id": agent.id,
@@ -62,6 +88,18 @@ def test_lifespan_approval_notification_is_dispatched_from_postgres_outbox(
         repositories = runtime.repositories
         assert client.app.state.postgres_repositories is repositories
         assert client.app.state.notification_outbox_repository is repositories.notification_outbox
+        assert dispatch_started.wait(timeout=5), "lifespan did not start PostgreSQL push dispatch"
+
+        device_response = client.post(
+            "/notifications/devices",
+            json={
+                "token": "fake-device-token-for-postgres-dispatch",
+                "platform": "android",
+                "app_version": "integration-test",
+            },
+        )
+        assert device_response.status_code == 200, device_response.text
+        assert device_response.json()["workspace_id"] == workspace.id
 
         created = client.post("/agents/approvals", headers=headers, json=_approval_payload(project.id))
         assert created.status_code == 200, created.text
@@ -79,17 +117,6 @@ def test_lifespan_approval_notification_is_dispatched_from_postgres_outbox(
         assert notification.workspace_id == workspace.id
         assert notification.push_status == "PENDING"
 
-        device_response = client.post(
-            "/notifications/devices",
-            json={
-                "token": "fake-device-token-for-postgres-dispatch",
-                "platform": "android",
-                "app_version": "integration-test",
-            },
-        )
-        assert device_response.status_code == 200, device_response.text
-        assert device_response.json()["workspace_id"] == workspace.id
-
         with connect() as connection:
             assert connection.execute(
                 "SELECT status,workspace_id FROM approval_requests WHERE approval_id=%s",
@@ -105,11 +132,9 @@ def test_lifespan_approval_notification_is_dispatched_from_postgres_outbox(
                 (notification.id,),
             ).fetchone() == ("PENDING", workspace.id, approval["id"])
 
-        delivered_id = postgres_notification_dispatcher.dispatch_one_postgres_push(
-            client.app.state.notification_outbox_repository,
-            sender=fake_sender,
-        )
-        assert delivered_id == notification.id
+        release_dispatch.set()
+        assert dispatch_finished.wait(timeout=10), "lifespan dispatcher did not finish the delivery"
+        assert dispatched_repositories == [client.app.state.notification_outbox_repository]
         assert len(sender_calls) == 1
         assert sender_calls[0]["token"] == "fake-device-token-for-postgres-dispatch"
         assert sender_calls[0]["data"] == {
@@ -126,6 +151,7 @@ def test_lifespan_approval_notification_is_dispatched_from_postgres_outbox(
         assert dispatched[0].id == notification.id
         assert dispatched[0].push_status == "SENT"
         assert dispatched[0].push_attempts == 1
+    release_dispatch.set()
 
     assert set(store.approval_requests) == before_approvals
     assert set(store.notifications) == before_notifications
@@ -160,21 +186,49 @@ def test_lifespan_notification_insert_failure_rolls_back_and_sends_nothing(
         )
 
     sender_calls: list[dict[str, object]] = []
+    dispatch_settings = replace(
+        main.get_settings(),
+        outbox_dispatch_mode="inline",
+        push_dispatch_enabled=True,
+        push_dispatch_poll_seconds=30,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: dispatch_settings)
     monkeypatch.setattr(
         postgres_notification_dispatcher,
         "get_settings",
-        lambda: replace(get_settings(), push_dispatch_enabled=True),
+        lambda: dispatch_settings,
     )
+    dispatch_started = Event()
+    release_dispatch = Event()
+    dispatch_finished = Event()
+    dispatched_repositories: list[object] = []
+    dispatch_one = postgres_notification_dispatcher.dispatch_one_postgres_push
 
     def fake_sender(**kwargs: object) -> None:
         sender_calls.append(kwargs)
         return None
+
+    def gated_dispatch(repository) -> str | None:
+        dispatched_repositories.append(repository)
+        dispatch_started.set()
+        if not release_dispatch.wait(timeout=10):
+            raise TimeoutError("test did not release the PostgreSQL dispatcher")
+        result = dispatch_one(repository, sender=fake_sender)
+        dispatch_finished.set()
+        return result
+
+    monkeypatch.setattr(
+        postgres_notification_dispatcher,
+        "dispatch_one_postgres_push",
+        gated_dispatch,
+    )
 
     headers = {
         "X-Aixion-Agent-Id": agent.id,
         "X-Aixion-Agent-Token": agent_token,
     }
     with TestClient(main.app, raise_server_exceptions=False) as client:
+        assert dispatch_started.wait(timeout=5), "lifespan did not start PostgreSQL push dispatch"
         runtime = client.app.state.postgres_runtime
         repository = runtime.repositories.notification_outbox
         response = client.post(
@@ -199,9 +253,9 @@ def test_lifespan_notification_insert_failure_rolls_back_and_sends_nothing(
                 (workspace.id,),
             ).fetchone()[0] == 0
 
-        assert postgres_notification_dispatcher.dispatch_one_postgres_push(
-            repository,
-            sender=fake_sender,
-        ) is None
+        release_dispatch.set()
+        assert dispatch_finished.wait(timeout=10), "lifespan dispatcher did not finish its poll"
+        assert dispatched_repositories == [repository]
         assert sender_calls == []
+    release_dispatch.set()
 

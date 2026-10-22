@@ -787,12 +787,14 @@ def test_installed_antigravity_command_runs_same_invocation_approval_flow(
 def test_antigravity_hook_process_relaunch_recovers_exact_approved_invocation(
     tmp_path: Path,
 ) -> None:
-    """A new hook process can recover an exact request; changed/replayed calls fail closed."""
+    """A relaunched hook recovers an exact pending request and receives its decision."""
     db_path = tmp_path / "hook-process-relaunch.sqlite3"
     db_path.parent.chmod(0o700)
     server = _start_sqlite_approval_api(db_path)
     waiting_process: subprocess.Popen[str] | None = None
+    recovered_process: subprocess.Popen[str] | None = None
     changed_process: subprocess.Popen[str] | None = None
+    stale_process: subprocess.Popen[str] | None = None
 
     session_id = "hook-process-relaunch-session"
     invocation_payload = {
@@ -859,27 +861,34 @@ def test_antigravity_hook_process_relaunch_recovers_exact_approved_invocation(
         waiting_process.communicate(timeout=5)
         waiting_process = None
 
+        # Relaunch the identical provider callback while the approval remains
+        # pending and its 30-second invocation lease is live. The new process
+        # must reattach to the existing durable request rather than create one.
+        recovered_process = _launch_hook_process(invocation_payload, environment)
+        recovered_approvals = _wait_for_antigravity_approvals(
+            db_path,
+            agent_id=agent_body["agent"]["id"],
+            session_id=session_id,
+            count=1,
+        )
+        assert len(recovered_approvals) == 1
+        assert recovered_approvals[0]["id"] == approval_id
+        assert recovered_approvals[0]["source_invocation_id"] == invocation_id
+        assert recovered_approvals[0]["status"] == "PENDING_REVIEW"
+        assert recovered_process.poll() is None, "recovered hook exited before a decision"
+
         with httpx.Client(timeout=10) as client:
             decision_response = client.post(
                 f"{server[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "approve during hook restart"},
+                json={"decision": "approve", "reason": "approve after hook relaunch"},
             )
         assert decision_response.status_code == 200, decision_response.text
         assert decision_response.json()["status"] == "APPROVED"
 
-        # Relaunch with the exact provider payload. A fresh interpreter must
-        # resolve the same durable approval and claim its delivery once.
-        recovered = subprocess.run(
-            [sys.executable, str(HOOK_PATH)],
-            input=json.dumps(invocation_payload),
-            capture_output=True,
-            text=True,
-            env=environment,
-            timeout=20,
-            check=False,
-        )
-        assert recovered.returncode == 0, recovered.stderr
-        assert json.loads(recovered.stdout) == {
+        recovered_stdout, recovered_stderr = recovered_process.communicate(timeout=20)
+        assert recovered_process.returncode == 0, recovered_stderr
+        recovered_process = None
+        assert json.loads(recovered_stdout) == {
             "decision": "allow",
             "reason": "Approved from Aixion Control Tower",
         }
@@ -920,7 +929,30 @@ def test_antigravity_hook_process_relaunch_recovers_exact_approved_invocation(
         changed_process.communicate(timeout=5)
         changed_process = None
 
+        # Force only this test-owned invocation lease into the past, then
+        # relaunch its exact callback. The hook must fail closed when its next
+        # heartbeat discovers that the lease expired.
         with sqlite3.connect(db_path) as connection:
+            connection.execute(
+                "UPDATE approval_invocation_leases SET expires_at=? WHERE approval_id=?",
+                ("2000-01-01T00:00:00+00:00", changed_approval["id"]),
+            )
+            connection.commit()
+        stale_process = _launch_hook_process(changed_payload, environment)
+        stale_stdout, stale_stderr = stale_process.communicate(timeout=25)
+        assert stale_process.returncode == 0, stale_stderr
+        stale_result = json.loads(stale_stdout)
+        assert stale_result["decision"] == "deny"
+        assert stale_result["reason"] == "Connector liveness could not be confirmed"
+        stale_process = None
+
+        with sqlite3.connect(db_path) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM kv_store WHERE entity_type='approval_request' "
+                "AND json_extract(payload,'$.id')=? "
+                "AND json_extract(payload,'$.source_invocation_id')=?",
+                (approval_id, invocation_id),
+            ).fetchone()[0] == 1
             assert connection.execute(
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
                 (approval_id,),
@@ -929,14 +961,19 @@ def test_antigravity_hook_process_relaunch_recovers_exact_approved_invocation(
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
                 (changed_approval["id"],),
             ).fetchone()[0] == 0
-            assert connection.execute(
-                "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
-                "AND json_extract(payload,'$.event_type')='approval.created_by_agent' "
-                "AND json_extract(payload,'$.entity_id')=?",
-                (approval_id,),
-            ).fetchone()[0] == 1
+            for event_type in (
+                "approval.created_by_agent",
+                "approval.decision",
+                "approval.delivery_claimed",
+            ):
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
+                    "AND json_extract(payload,'$.event_type')=? "
+                    "AND json_extract(payload,'$.entity_id')=?",
+                    (event_type, approval_id),
+                ).fetchone()[0] == 1
     finally:
-        for process in (waiting_process, changed_process):
+        for process in (waiting_process, recovered_process, changed_process, stale_process):
             if process is not None and process.poll() is None:
                 process.kill()
                 process.communicate(timeout=5)

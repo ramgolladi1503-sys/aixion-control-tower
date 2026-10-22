@@ -15,7 +15,13 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -33,6 +39,7 @@ import com.aixion.controltower.core.ui.ForegroundRefreshEffect
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import kotlin.math.roundToInt
@@ -72,6 +79,32 @@ class ApprovalInboxScreenTest {
         composeRule.onNodeWithText("Review request").assert(
             SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button)
         )
+    }
+
+    @Test
+    fun inboxSectionsWrapWithinNarrowLargeTextLayout() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
+                    ApprovalInboxContent(state = ApprovalsUiState(loading = false))
+                }
+            }
+        }
+
+        val reviewSection = composeRule.onNodeWithText("Needs review")
+        val historySection = composeRule.onNodeWithText("History")
+        reviewSection.assertExists()
+        historySection.assertExists()
+        composeRule.runOnIdle {
+            assertTrue(
+                "Needs review tab should remain within the narrow viewport",
+                reviewSection.fetchSemanticsNode().boundsInRoot.right <= 240f
+            )
+            assertTrue(
+                "History tab should remain within the narrow viewport",
+                historySection.fetchSemanticsNode().boundsInRoot.right <= 240f
+            )
+        }
     }
 
     @Test
