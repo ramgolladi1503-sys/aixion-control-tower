@@ -16,6 +16,7 @@ from psycopg.types.json import Jsonb
 
 from app import main
 from app.agent_run_models import (
+    AgentRunEvent,
     AgentRunEventType,
     AgentRunStatus,
     AgentRunStepStatus,
@@ -468,6 +469,34 @@ def _seed_postgres_verify_result_ready(
                     workspace.id,
                 ),
             )
+            if step.sequence < verify_step.sequence:
+                success_event = AgentRunEvent(
+                    run_id=run_id,
+                    task_id=task_id,
+                    step_id=step.id,
+                    correlation_id=run.correlation_id,
+                    event_type=AgentRunEventType.STEP_SUCCEEDED,
+                    previous_status=AgentRunStepStatus.RUNNING.value,
+                    new_status=AgentRunStepStatus.SUCCEEDED.value,
+                    message="Fixture step completed with durable evidence.",
+                    actor="postgres-agent-run-fixture",
+                    attempt_number=step.attempt_count,
+                    output_evidence_hash=step.evidence_hash,
+                    created_at=now + timedelta(seconds=step.sequence + 1),
+                )
+                conn.execute(
+                    "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,"
+                    "created_at,event_type,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        success_event.id,
+                        run_id,
+                        task_id,
+                        workspace.id,
+                        success_event.created_at,
+                        success_event.event_type.value,
+                        Jsonb(success_event.model_dump(mode="json")),
+                    ),
+                )
 
         if include_evidence:
             pr_worker = f"mission-control:{run_id}:pr"
@@ -504,6 +533,41 @@ def _seed_postgres_verify_result_ready(
                         Jsonb(event.model_dump(mode="json")),
                     ),
                 )
+    return run_id
+
+
+def _advance_postgres_agent_run_to_seal(
+    *,
+    connect: Callable[[], Connection],
+    workspace: Workspace,
+    task_id: str,
+    repositories: ApplicationRepositories,
+    client: TestClient,
+) -> str:
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+    )
+    assert response.status_code == 200, response.text
+    verified = next(
+        step
+        for step in response.json()["steps"]
+        if step["step_type"] == AgentRunStepType.VERIFY_RESULT.value
+    )
+    seal = next(
+        step
+        for step in response.json()["steps"]
+        if step["step_type"] == AgentRunStepType.SEAL_EVIDENCE.value
+    )
+    assert verified["status"] == AgentRunStepStatus.SUCCEEDED.value
+    assert seal["status"] == AgentRunStepStatus.READY.value
     return run_id
 
 
@@ -569,7 +633,7 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
         json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
     )
     assert rejected.status_code == 409
-    assert "read-only VALIDATE_SCOPE and VERIFY_RESULT steps" in rejected.json()["detail"]
+    assert "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps" in rejected.json()["detail"]
     assert repositories.agent_runs.get(run_id) == durable_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
 
@@ -628,12 +692,21 @@ def test_postgres_agent_run_verifies_run_bound_durable_evidence_once(
             == 1
         )
 
+    sealed = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+    assert sealed.status_code == 200, sealed.text
+    assert sealed.json()["run"]["status"] == AgentRunStatus.SUCCEEDED.value
+    sealed_run = repositories.agent_runs.get(run_id)
+    assert sealed_run is not None
+
     replay = client.post(
         f"/agent/runs/{run_id}/execute-next",
-        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
     )
     assert replay.status_code == 409
-    assert repositories.agent_runs.get(run_id) == durable_run
+    assert repositories.agent_runs.get(run_id) == sealed_run
     with connect() as conn:
         assert (
             conn.execute(
@@ -641,7 +714,273 @@ def test_postgres_agent_run_verifies_run_bound_durable_evidence_once(
                 "AND event_type='agent_run.step_completed'",
                 (workspace.id, run_id),
             ).fetchone()[0]
+            == 2
+        )
+
+
+def test_postgres_agent_run_seals_durable_evidence_and_rejects_replay(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    seal = next(
+        item
+        for item in body["steps"]
+        if item["step_type"] == AgentRunStepType.SEAL_EVIDENCE.value
+    )
+    assert body["run"]["status"] == AgentRunStatus.SUCCEEDED.value
+    assert seal["status"] == AgentRunStepStatus.SUCCEEDED.value
+    assert seal["decision"] == VerificationDecision.PASS.value
+    final_hash = seal["evidence"]["final_evidence_hash"]
+    assert final_hash == canonical_evidence_hash(
+        {key: value for key, value in seal["evidence"].items() if key != "final_evidence_hash"}
+    )
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None
+    assert durable_run.status == AgentRunStatus.SUCCEEDED
+    assert durable_run.final_evidence_hash == final_hash
+    durable_events = repositories.agent_runs.list_events_for_run(run_id)
+    assert any(
+        event.event_type == AgentRunEventType.STEP_SUCCEEDED
+        and event.step_id == seal["id"]
+        and event.output_evidence_hash == seal["evidence_hash"]
+        for event in durable_events
+    )
+    with connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+                "AND event_type='agent_run.step_completed'",
+                (workspace.id, run_id),
+            ).fetchone()[0]
+            == 2
+        )
+
+    replay = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+    assert replay.status_code == 409
+    assert repositories.agent_runs.get(run_id) == durable_run
+
+
+def test_postgres_agent_run_serializes_concurrent_seal_requests(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    barrier = Barrier(2)
+
+    def seal() -> int:
+        barrier.wait()
+        return client.post(
+            f"/agent/runs/{run_id}/execute-next",
+            json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(lambda _index: seal(), (1, 2)))
+
+    assert sorted(statuses) == [200, 409]
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.status == AgentRunStatus.SUCCEEDED
+    seal_step = next(
+        step
+        for step in repositories.agent_runs.list_steps_for_run(run_id)
+        if step.step_type == AgentRunStepType.SEAL_EVIDENCE
+    )
+    assert seal_step.status == AgentRunStepStatus.SUCCEEDED
+    with connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
+                "AND event_type='STEP_SUCCEEDED' AND payload->>'step_id'=%s",
+                (run_id, seal_step.id),
+            ).fetchone()[0]
             == 1
+        )
+
+
+def test_postgres_agent_run_rejects_noncanonical_seal_step_plan(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    durable_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    changed = durable_steps[1]
+    changed.step_type = AgentRunStepType.APPLY_CHANGES
+    changed.idempotency_key = f"{run_id}:{changed.sequence}:APPLY_CHANGES"
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_run_steps SET payload=%s WHERE step_id=%s AND run_id=%s",
+            (
+                Jsonb(changed.model_dump(mode="json")),
+                changed.id,
+                run_id,
+            ),
+        )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    assert "canonical step plan" in response.json()["detail"]
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.lease_token is None
+    assert repositories.agent_runs.list_steps_for_run(run_id) == [
+        item.model_copy(deep=True) if item.id != changed.id else changed
+        for item in durable_steps
+    ]
+
+
+def test_postgres_agent_run_rejects_incomplete_prior_step_before_sealing(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    durable_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    changed = durable_steps[-2]
+    changed.status = AgentRunStepStatus.READY
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_run_steps SET status=%s,payload=%s WHERE step_id=%s AND run_id=%s",
+            (
+                changed.status.value,
+                Jsonb(changed.model_dump(mode="json")),
+                changed.id,
+                run_id,
+            ),
+        )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    assert "every prior step succeeded" in response.json()["detail"]
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.lease_token is None
+    assert repositories.agent_runs.list_steps_for_run(run_id)[-2].status == AgentRunStepStatus.READY
+
+
+def test_postgres_agent_run_seal_audit_failure_rolls_back_completion_and_preserves_lease(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    with connect() as conn:
+        conn.execute(
+            "CREATE FUNCTION reject_seal_evidence_audit() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ BEGIN "
+            "IF NEW.event_type='agent_run.step_completed' "
+            "AND NEW.details->>'step_type'='SEAL_EVIDENCE' THEN "
+            "RAISE EXCEPTION 'injected seal evidence audit failure'; "
+            "END IF; RETURN NEW; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_seal_evidence_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_seal_evidence_audit()"
+        )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    assert "completion could not be committed" in response.json()["detail"]
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.lease_token is not None
+    assert durable_run.final_evidence_hash is None
+    seal = next(
+        step
+        for step in repositories.agent_runs.list_steps_for_run(run_id)
+        if step.step_type == AgentRunStepType.SEAL_EVIDENCE
+    )
+    assert seal.status == AgentRunStepStatus.RUNNING
+    with connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
+                "AND event_type='STEP_SUCCEEDED' AND payload->>'step_id'=%s",
+                (run_id, seal.id),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+                "AND event_type='agent_run.step_completed' "
+                "AND details->>'step_id'=%s",
+                (workspace.id, run_id, seal.id),
+            ).fetchone()[0]
+            == 0
         )
 
 
@@ -967,8 +1306,9 @@ def test_postgres_agent_run_verify_result_rolls_back_completion_when_audit_fails
     with connect() as conn:
         assert (
             conn.execute(
-                "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='STEP_SUCCEEDED'",
-                (run_id,),
+                "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
+                "AND event_type='STEP_SUCCEEDED' AND payload->>'step_id'=%s",
+                (run_id, verify_step.id),
             ).fetchone()[0]
             == 0
         )

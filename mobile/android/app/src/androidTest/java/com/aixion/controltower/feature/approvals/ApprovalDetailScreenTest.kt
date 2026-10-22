@@ -194,6 +194,32 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun decisionContextStacksLabelsAndValuesAtLargeFontScale() {
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(390.dp).height(1_200.dp)) {
+                    ApprovalDetailContent(
+                        approval(ApprovalStatus.REQUESTED),
+                        null,
+                        {},
+                        {},
+                        {}
+                    )
+                }
+            }
+        }
+
+        val projectLabel = composeRule.onNodeWithText("Project", useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val projectValue = composeRule.onNodeWithText("Production workspace", useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "At 200% font scale, decision-critical values should follow their labels vertically",
+            projectLabel.bottom < projectValue.top
+        )
+    }
+
+    @Test
     fun pendingApprovalWithoutExpiryDisablesEveryDecision() {
         composeRule.setContent {
             ApprovalDetailContent(

@@ -3,6 +3,7 @@ package com.aixion.controltower.feature.approvals
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -32,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -439,28 +441,53 @@ private fun ApprovalHeroPanel(
 @Composable
 private fun DecisionContextLine(label: String, value: String) {
     val palette = LocalTowerPalette.current
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
-        verticalAlignment = Alignment.Top
-    ) {
-        Text(
-            label,
-            color = palette.inkMuted,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            lineHeight = 20.sp,
-            modifier = Modifier.width(96.dp)
-        )
-        Text(
-            value,
-            color = palette.ink,
-            fontSize = 14.sp,
-            lineHeight = 20.sp,
-            modifier = Modifier.weight(1f)
-        )
+    val fontScale = LocalDensity.current.fontScale
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val stackLabelAndValue = shouldStackDecisionContext(maxWidth, fontScale)
+        if (stackLabelAndValue) {
+            Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
+                Text(
+                    label,
+                    color = palette.inkMuted,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 20.sp
+                )
+                Text(
+                    value,
+                    color = palette.ink,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                verticalAlignment = Alignment.Top
+            ) {
+                Text(
+                    label,
+                    color = palette.inkMuted,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.width(96.dp)
+                )
+                Text(
+                    value,
+                    color = palette.ink,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
     }
 }
+
+internal fun shouldStackDecisionContext(maxWidth: androidx.compose.ui.unit.Dp, fontScale: Float): Boolean =
+    maxWidth < 360.dp || fontScale >= 1.5f
 
 @Composable
 private fun DetailPanel(title: String, body: String, modifier: Modifier = Modifier) {

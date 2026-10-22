@@ -16,6 +16,7 @@ from .application_repository_access import (
     workspace_id_for_request,
 )
 from .agent_run_models import (
+    DEFAULT_AGENT_RUN_STEPS,
     AgentRun,
     AgentRunCapabilityLeaseRequest,
     AgentRunControlRequest,
@@ -651,24 +652,45 @@ def execute_run_next_step(
         )
         if current_step is None:
             raise HTTPException(status_code=409, detail="Run has no current step")
-        postgres_read_only_step = current_step.step_type in {
+        postgres_supported_step = current_step.step_type in {
             AgentRunStepType.VALIDATE_SCOPE,
             AgentRunStepType.VERIFY_RESULT,
+            AgentRunStepType.SEAL_EVIDENCE,
         }
-        if isinstance(run_repository, PostgresAgentRunRepository) and not postgres_read_only_step:
+        if isinstance(run_repository, PostgresAgentRunRepository) and not postgres_supported_step:
             raise HTTPException(
                 status_code=409,
                 detail=(
                     "PostgreSQL AgentRun execution currently supports only the "
-                    "read-only VALIDATE_SCOPE and VERIFY_RESULT steps."
+                    "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps."
                 ),
             )
+        if (
+            isinstance(run_repository, PostgresAgentRunRepository)
+            and current_step.step_type == AgentRunStepType.SEAL_EVIDENCE
+        ):
+            durable_steps = run_repository.list_steps_for_run(run.id)
+            if (
+                [step.step_type for step in durable_steps] != list(DEFAULT_AGENT_RUN_STEPS)
+                or durable_steps[-1].id != current_step.id
+                or any(
+                    step.status != AgentRunStepStatus.SUCCEEDED for step in durable_steps[:-1]
+                )
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "PostgreSQL SEAL_EVIDENCE requires the canonical step plan "
+                        "with every prior step succeeded."
+                    ),
+                )
         try:
-            postgres_read_only = (
-                isinstance(run_repository, PostgresAgentRunRepository) and postgres_read_only_step
+            postgres_governed_step = (
+                isinstance(run_repository, PostgresAgentRunRepository)
+                and postgres_supported_step
             )
             trust_actions = []
-            if not postgres_read_only:
+            if not postgres_governed_step:
                 ensure_run_capability(run, user=user)
                 trust_actions = authorize_run_step(
                     run,

@@ -570,16 +570,17 @@ def execute_next_step(
         run_steps = active_run_repository.list_steps_for_run(run_id)
         run_events = active_run_repository.list_events_for_run(run_id)
         store.project_agent_run_snapshot(run, run_steps, run_events)
-    postgres_read_only_execution = isinstance(active_run_repository, PostgresAgentRunRepository)
-    if postgres_read_only_execution:
+    postgres_repository_execution = isinstance(active_run_repository, PostgresAgentRunRepository)
+    if postgres_repository_execution:
         current_step = store.agent_run_steps.get(run.current_step_id or "")
         if current_step is None or current_step.step_type not in {
             AgentRunStepType.VALIDATE_SCOPE,
             AgentRunStepType.VERIFY_RESULT,
+            AgentRunStepType.SEAL_EVIDENCE,
         }:
             raise AgentRunConflict(
                 "PostgreSQL AgentRun execution currently supports only the "
-                "read-only VALIDATE_SCOPE and VERIFY_RESULT steps."
+                "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps."
             )
         if current_step.step_type == AgentRunStepType.VERIFY_RESULT and (
             not isinstance(task_repository, PostgresAgentTaskRepository)
@@ -589,11 +590,25 @@ def execute_next_step(
                 "PostgreSQL VERIFY_RESULT requires repository-bound task and approval reads."
             )
         if current_step.step_type == AgentRunStepType.VERIFY_RESULT and [
-            step.step_type for step in _run_steps(run.id)
+            step.step_type for step in active_run_repository.list_steps_for_run(run.id)
         ] != list(DEFAULT_AGENT_RUN_STEPS):
             raise AgentRunConflict(
                 "PostgreSQL VERIFY_RESULT requires the complete canonical AgentRun step plan."
             )
+        if current_step.step_type == AgentRunStepType.SEAL_EVIDENCE:
+            durable_steps = active_run_repository.list_steps_for_run(run.id)
+            if (
+                [item.step_type for item in durable_steps] != list(DEFAULT_AGENT_RUN_STEPS)
+                or durable_steps[-1].id != current_step.id
+                or any(
+                    item.status != AgentRunStepStatus.SUCCEEDED
+                    for item in durable_steps[:-1]
+                )
+            ):
+                raise AgentRunConflict(
+                    "PostgreSQL SEAL_EVIDENCE requires the canonical step plan "
+                    "with every prior step succeeded."
+                )
     if run.status in {
         AgentRunStatus.BLOCKED,
         AgentRunStatus.SUCCEEDED,
@@ -613,7 +628,7 @@ def execute_next_step(
         lease_seconds=lease_seconds,
         run_repository=active_run_repository,
     )
-    if postgres_read_only_execution:
+    if postgres_repository_execution:
         # Lease acquisition may have waited behind another process. Refresh the
         # durable run and step snapshot before deciding what code may execute.
         durable_run = active_run_repository.get(run_id)
@@ -641,9 +656,10 @@ def execute_next_step(
                 reason="No step is ready because retry backoff has not elapsed.",
             )
         raise AgentRunConflict("No executable step is ready.")
-    if postgres_read_only_execution and step.step_type not in {
+    if postgres_repository_execution and step.step_type not in {
         AgentRunStepType.VALIDATE_SCOPE,
         AgentRunStepType.VERIFY_RESULT,
+        AgentRunStepType.SEAL_EVIDENCE,
     }:
         release_run_lease(
             run,
@@ -653,17 +669,18 @@ def execute_next_step(
         )
         raise AgentRunConflict(
             "PostgreSQL AgentRun execution currently supports only the "
-            "read-only VALIDATE_SCOPE and VERIFY_RESULT steps."
+            "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps."
         )
 
     if (
-        postgres_read_only_execution
+        postgres_repository_execution
         and step.step_type == AgentRunStepType.VERIFY_RESULT
         and (
-            [item.step_type for item in _run_steps(run.id)] != list(DEFAULT_AGENT_RUN_STEPS)
+            [item.step_type for item in active_run_repository.list_steps_for_run(run.id)]
+            != list(DEFAULT_AGENT_RUN_STEPS)
             or any(
                 item.sequence < step.sequence and item.status != AgentRunStepStatus.SUCCEEDED
-                for item in _run_steps(run.id)
+                for item in active_run_repository.list_steps_for_run(run.id)
             )
         )
     ):
@@ -676,6 +693,26 @@ def execute_next_step(
         raise AgentRunConflict(
             "PostgreSQL VERIFY_RESULT requires every preceding AgentRun step to have succeeded."
         )
+
+    if postgres_repository_execution and step.step_type == AgentRunStepType.SEAL_EVIDENCE:
+        durable_steps = active_run_repository.list_steps_for_run(run.id)
+        if (
+            [item.step_type for item in durable_steps] != list(DEFAULT_AGENT_RUN_STEPS)
+            or durable_steps[-1].id != step.id
+            or any(
+                item.status != AgentRunStepStatus.SUCCEEDED for item in durable_steps[:-1]
+            )
+        ):
+            release_run_lease(
+                run,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                run_repository=active_run_repository,
+            )
+            raise AgentRunConflict(
+                "PostgreSQL SEAL_EVIDENCE requires the canonical step plan "
+                "with every prior step succeeded."
+            )
 
     durable_run_after_ready = active_run_repository.get(run.id)
     durable_steps_after_ready = active_run_repository.list_steps_for_run(run.id)
@@ -1102,6 +1139,132 @@ def _verify_postgres_agent_run_result(
     return result.model_copy(update={"output_reference": pr_url if success else None})
 
 
+def _seal_postgres_agent_run_evidence(
+    *,
+    run: AgentRun,
+    step: AgentRunStep,
+    repository: PostgresAgentRunRepository,
+) -> AgentRunStepExecutionResult:
+    """Seal a canonical run from a consistent PostgreSQL step and event snapshot."""
+    durable_run = repository.get(run.id)
+    durable_steps = repository.list_steps_for_run(run.id)
+    durable_events = repository.list_events_for_run(run.id)
+    if durable_run != run:
+        return classify_execution_result(
+            success=False,
+            reason="PostgreSQL AgentRun changed while evidence was being sealed.",
+            evidence={"run_id": run.id, "snapshot_consistent": False},
+        )
+    if (
+        [item.step_type for item in durable_steps] != list(DEFAULT_AGENT_RUN_STEPS)
+        or [item.sequence for item in durable_steps] != list(range(len(DEFAULT_AGENT_RUN_STEPS)))
+        or durable_steps[-1].id != step.id
+        or durable_steps[-1] != step
+    ):
+        return classify_execution_result(
+            success=False,
+            reason="PostgreSQL evidence does not match the canonical AgentRun step plan.",
+            evidence={"run_id": run.id, "canonical_step_plan": False},
+        )
+
+    prior_steps = durable_steps[:-1]
+    event_step_ids = {item.id for item in durable_steps}
+    event_manifest: list[dict[str, object]] = []
+    for event in durable_events:
+        if (
+            event.run_id != run.id
+            or event.task_id != run.task_id
+            or event.correlation_id != run.correlation_id
+            or (event.step_id is not None and event.step_id not in event_step_ids)
+        ):
+            return classify_execution_result(
+                success=False,
+                reason="PostgreSQL AgentRun event scope is inconsistent with the run.",
+                evidence={"run_id": run.id, "event_scope_consistent": False},
+            )
+        event_manifest.append(
+            {
+                "event_id": event.id,
+                "event_type": event.event_type.value,
+                "step_id": event.step_id,
+                "previous_status": event.previous_status,
+                "new_status": event.new_status,
+                "actor": event.actor,
+                "attempt_number": event.attempt_number,
+                "input_evidence_hash": event.input_evidence_hash,
+                "output_evidence_hash": event.output_evidence_hash,
+                "metadata_hash": canonical_evidence_hash(event.metadata),
+                "reason_hash": canonical_evidence_hash({"reason": event.reason}),
+                "created_at": event.created_at.isoformat(),
+            }
+        )
+
+    for prior_step in prior_steps:
+        if (
+            prior_step.status != AgentRunStepStatus.SUCCEEDED
+            or prior_step.decision != VerificationDecision.PASS
+            or not prior_step.evidence_hash
+            or prior_step.evidence_hash != canonical_evidence_hash(prior_step.evidence)
+        ):
+            return classify_execution_result(
+                success=False,
+                reason="A prior PostgreSQL AgentRun step is incomplete or its evidence hash is invalid.",
+                evidence={
+                    "run_id": run.id,
+                    "failed_step_id": prior_step.id,
+                    "prior_steps_valid": False,
+                },
+            )
+        matching_success_events = [
+            event
+            for event in durable_events
+            if event.step_id == prior_step.id
+            and event.event_type == AgentRunEventType.STEP_SUCCEEDED
+            and event.attempt_number == prior_step.attempt_count
+            and event.output_evidence_hash == prior_step.evidence_hash
+        ]
+        if len(matching_success_events) != 1:
+            return classify_execution_result(
+                success=False,
+                reason="A prior PostgreSQL AgentRun step lacks one matching durable success event.",
+                evidence={
+                    "run_id": run.id,
+                    "failed_step_id": prior_step.id,
+                    "matching_success_event_count": len(matching_success_events),
+                },
+            )
+
+    evidence_payload: dict[str, object] = {
+        "run_id": durable_run.id,
+        "workspace_id": durable_run.workspace_id,
+        "project_id": durable_run.project_id,
+        "task_id": durable_run.task_id,
+        "approval_request_id": durable_run.approval_request_id,
+        "correlation_id": durable_run.correlation_id,
+        "steps": [
+            {
+                "step_id": item.id,
+                "sequence": item.sequence,
+                "step_type": item.step_type.value,
+                "status": item.status.value,
+                "decision": item.decision.value if item.decision else None,
+                "attempt_count": item.attempt_count,
+                "evidence_hash": item.evidence_hash,
+                "output_reference": item.output_reference,
+            }
+            for item in prior_steps
+        ],
+        "events": event_manifest,
+    }
+    final_hash = canonical_evidence_hash(evidence_payload)
+    run.final_evidence_hash = final_hash
+    return classify_execution_result(
+        success=True,
+        reason="Mission Control evidence chain sealed from PostgreSQL records.",
+        evidence={**evidence_payload, "final_evidence_hash": final_hash},
+    )
+
+
 class DefaultAgentRunStepExecutor:
     """Adapter from durable Mission Control steps to the existing safe GitHub worker path."""
 
@@ -1303,6 +1466,12 @@ class DefaultAgentRunStepExecutor:
             )
 
         if step.step_type == AgentRunStepType.SEAL_EVIDENCE:
+            if isinstance(self.run_repository, PostgresAgentRunRepository):
+                return _seal_postgres_agent_run_evidence(
+                    run=run,
+                    step=step,
+                    repository=self.run_repository,
+                )
             steps = (
                 self.run_repository.list_steps_for_run(run.id)
                 if self.run_repository is not None
