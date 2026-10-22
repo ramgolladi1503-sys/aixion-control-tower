@@ -383,6 +383,9 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithText("Approved").assertCountEquals(2)
         composeRule.onNodeWithText("Denied").assertExists()
         composeRule.onNodeWithText("Delivery not confirmed").assertExists()
+        composeRule.onNodeWithText(
+            "There is no confirmation that the connector received this decision or that the agent executed or resumed."
+        ).assertExists()
         composeRule.onNodeWithText("Connector claim recorded").assertExists()
         composeRule.onNodeWithText("Claim response ambiguous").assertExists()
         composeRule.onNodeWithText(

@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -25,11 +27,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -174,6 +182,7 @@ internal fun AuthFormContent(
     var registrationExpanded by rememberSaveable { mutableStateOf(false) }
     // Keep the opt-in reveal only for this composition; recreation starts masked.
     var passwordVisible by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
     val verificationStarted = state.verificationRequired || state.emailVerified || state.devVerificationCode != null
 
     LaunchedEffect(verificationStarted) {
@@ -209,7 +218,14 @@ internal fun AuthFormContent(
                 onValueChange = onEmailChange,
                 label = { Text("Email address") },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Email,
+                    imeAction = ImeAction.Next
+                ),
+                keyboardActions = KeyboardActions(
+                    onNext = { focusManager.moveFocus(FocusDirection.Down) }
+                )
             )
             OutlinedTextField(
                 value = state.password,
@@ -222,6 +238,19 @@ internal fun AuthFormContent(
                 },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Password,
+                    imeAction = ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(
+                    onDone = {
+                        if (registrationExpanded && !verificationStarted) {
+                            if (AuthUxCopy.canAttemptRegister(state)) onRegister()
+                        } else if (AuthUxCopy.canAttemptLogin(state)) {
+                            onLogin()
+                        }
+                    }
+                ),
                 visualTransformation = if (passwordVisible) {
                     VisualTransformation.None
                 } else {
@@ -278,7 +307,14 @@ internal fun AuthFormContent(
                 }
             }
 
-            state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
+            state.message?.let {
+                Text(
+                    text = it,
+                    color = palette.brand,
+                    fontSize = 14.sp,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                )
+            }
 
             if (verificationStarted) {
                 TowerPanel(elevated = false) {

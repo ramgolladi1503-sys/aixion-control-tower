@@ -480,7 +480,7 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
         val (deliveryLabel, deliveryExplanation, deliveryColor) = when (event.deliveryStatus) {
             ApprovalDeliveryStatus.NOT_CONFIRMED -> Triple(
                 "Delivery not confirmed",
-                "There is no confirmation that the connector received this decision.",
+                "There is no confirmation that the connector received this decision or that the agent executed or resumed.",
                 palette.caution
             )
             ApprovalDeliveryStatus.CLAIM_RECORDED -> Triple(
@@ -515,11 +515,6 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
             VerifiedRequestSnapshot(snapshot)
         }
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(
-            "Decision and delivery are separate records. Agent execution is not confirmed here.",
-            color = palette.inkMuted,
-            style = MaterialTheme.typography.bodyLarge
-        )
     }
 }
 

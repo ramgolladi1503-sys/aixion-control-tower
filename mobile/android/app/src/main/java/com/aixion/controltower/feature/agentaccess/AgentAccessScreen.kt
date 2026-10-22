@@ -364,7 +364,7 @@ private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRota
 }
 
 @Composable
-private fun OneTimeTokenPanel(
+internal fun OneTimeTokenPanel(
     token: String,
     provider: String,
     agentName: String,
@@ -379,13 +379,17 @@ private fun OneTimeTokenPanel(
         StatusBadge(label = "ONE-TIME SECRET", color = RiskMedium)
         Spacer(Modifier.height(TowerSpacing.sm))
         Text("Save this $providerName token in macOS Keychain now", color = TowerTextPrimary, fontWeight = FontWeight.SemiBold)
-        Text("It is held only in screen memory and is cleared when you hide it or leave the app.", color = TowerTextMuted, fontSize = 12.sp)
+        Text(
+            "It is held only in screen memory and is cleared when you hide it or leave the app.",
+            color = TowerTextMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
         Spacer(Modifier.height(TowerSpacing.sm))
-        Text("Agent: $agentName", color = TowerTextMuted, fontSize = 12.sp)
-        Text("Agent ID: $agentId", color = TowerTextMuted, fontSize = 12.sp)
-        Text("Project ID: $projectId", color = TowerTextMuted, fontSize = 12.sp)
+        Text("Agent: $agentName", color = TowerTextMuted, style = MaterialTheme.typography.bodyMedium)
+        Text("Agent ID: $agentId", color = TowerTextMuted, style = MaterialTheme.typography.bodyMedium)
+        Text("Project ID: $projectId", color = TowerTextMuted, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(TowerSpacing.sm))
-        Text(token, color = TowerTextPrimary, fontSize = 12.sp, lineHeight = 18.sp)
+        Text(token, color = TowerTextPrimary, style = TowerCodeTextStyle)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onCopy) { Text("Copy sensitive token") }
             TextButton(onClick = onHide) { Text("Hide now") }
@@ -393,29 +397,25 @@ private fun OneTimeTokenPanel(
         Text(
             "On the Mac, run: security add-generic-password -U -s com.aixion.controltower.agent -a $agentId -w\nThe command prompts for the token; do not put it in command arguments or shell history.",
             color = TowerTextMuted,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
             "Next, install the $providerName hook only in the project you want to protect. Use the Control Tower API URL reachable from your Mac and that project's absolute folder path. The installer writes project-scoped settings and preserves other hooks.",
             color = TowerTextMuted,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         Text(
             "python3 /ABSOLUTE/PATH/integrations/$hookDirectory/setup_workspace.py \\\n  --workspace \"/ABSOLUTE/PATH/TO/PROJECT\" \\\n  --api-base-url \"https://CONTROL-TOWER-URL\" \\\n  --agent-id \"$agentId\" \\\n  --project-id \"$projectId\"",
             color = TowerTextPrimary,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
+            style = TowerCodeTextStyle
         )
         if (provider == "CODEX") {
             Spacer(Modifier.height(TowerSpacing.sm))
             Text(
                 "Open that project in Codex and review/trust the PermissionRequest hook when prompted. It covers local permission prompts only; verify the same paused Codex action continues after approval.",
                 color = TowerTextMuted,
-                fontSize = 11.sp,
-                lineHeight = 16.sp
+                style = MaterialTheme.typography.bodyMedium
             )
         }
     }

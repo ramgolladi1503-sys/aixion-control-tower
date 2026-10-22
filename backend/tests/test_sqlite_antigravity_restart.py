@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import multiprocessing
 import os
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -18,6 +20,7 @@ from urllib.parse import urlparse
 
 import httpx
 import pytest
+from integrations.antigravity import setup_workspace
 
 HOOK_PATH = (
     Path(__file__).parents[2]
@@ -567,6 +570,205 @@ def test_blocked_antigravity_invocation_survives_sqlite_api_restart(
     finally:
         if hook_thread is not None and hook_thread.is_alive():
             hook_thread.join(timeout=5)
+        for server in reversed(servers):
+            if server[0].is_alive():
+                _stop_sqlite_approval_api(server)
+
+
+@pytest.mark.parametrize(
+    ("decision_value", "expected_decision", "expected_claims"),
+    [("approve", "allow", 1), ("deny", "deny", 0)],
+)
+def test_installed_antigravity_command_runs_same_invocation_approval_flow(
+    tmp_path: Path,
+    decision_value: str,
+    expected_decision: str,
+    expected_claims: int,
+) -> None:
+    """Run the exact installer-generated command, not an imported hook function."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    db_path = tmp_path / f"installed-hook-{decision_value}.sqlite3"
+    db_path.parent.chmod(0o700)
+    servers: list[
+        tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]
+    ] = []
+
+    def start_server():
+        handle = _start_sqlite_approval_api(db_path)
+        servers.append(handle)
+        return handle
+
+    try:
+        server = start_server()
+        with httpx.Client(timeout=10) as client:
+            project_response = client.post(
+                f"{server[2]}/projects",
+                json={"name": "Installed Antigravity hook project"},
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
+            agent_response = client.post(
+                f"{server[2]}/agents",
+                json={
+                    "provider": "ANTIGRAVITY",
+                    "display_name": "Installed Antigravity integration test",
+                    "auth_type": "API_KEY",
+                    "allowed_project_ids": [project_id],
+                    "allowed_actions": [
+                        "CREATE_APPROVAL",
+                        "READ_APPROVAL_DECISION",
+                        "CONSUME_APPROVAL_DECISION",
+                        "REPORT_APPROVAL_DELIVERY_FAILURE",
+                        "EXPIRE_OWN_APPROVAL",
+                    ],
+                    "enabled": True,
+                },
+            )
+            assert agent_response.status_code == 200, agent_response.text
+            agent_body = agent_response.json()
+
+        home = tmp_path / "isolated home"
+        workspace = tmp_path / "workspace with spaces"
+        home.mkdir(mode=0o700)
+        workspace.mkdir(mode=0o700)
+        config_path, hooks_path = setup_workspace.install_workspace(
+            workspace,
+            api_base_url=server[2],
+            agent_id=agent_body["agent"]["id"],
+            project_id=project_id,
+            home=home,
+            hook_script=HOOK_PATH,
+            python=sys.executable,
+        )
+        hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+        command = hooks[setup_workspace.HOOK_NAME]["PreToolUse"][0]["hooks"][0][
+            "command"
+        ]
+        command_args = shlex.split(command)
+        assert command_args == [
+            sys.executable,
+            str(HOOK_PATH.resolve()),
+            "--config",
+            str(config_path),
+        ]
+
+        # Antigravity PreToolUse fields as exercised by the documented hook fixture.
+        invocation_payload = {
+            "conversationId": f"installed-hook-{decision_value}",
+            "stepIdx": 17,
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "echo installed-hook-round-trip"},
+            },
+        }
+        session_id = invocation_payload["conversationId"]
+        expected_invocation_id = "antigravity:v1:" + hashlib.sha256(
+            json.dumps(
+                [
+                    session_id,
+                    invocation_payload["stepIdx"],
+                    invocation_payload["toolCall"]["name"],
+                    invocation_payload["toolCall"]["args"],
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        environment = _sanitized_test_environment(db_path)
+        environment.update(
+            {
+                "HOME": str(home),
+                "AIXION_AGENT_TOKEN": agent_body["agent_token"],
+                "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+                "AIXION_APPROVAL_TIMEOUT_SECONDS": "20",
+            }
+        )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(
+                subprocess.run,
+                command,
+                shell=True,
+                executable="/bin/sh",
+                input=json.dumps(invocation_payload),
+                text=True,
+                capture_output=True,
+                timeout=25,
+                cwd=workspace,
+                env=environment,
+                check=False,
+            )
+            approvals = _wait_for_antigravity_approvals(
+                db_path,
+                agent_id=agent_body["agent"]["id"],
+                session_id=session_id,
+                count=1,
+            )
+            assert approvals[0]["source_invocation_id"] == expected_invocation_id
+            approval_id = approvals[0]["id"]
+            with httpx.Client(timeout=10) as client:
+                decision_response = client.post(
+                    f"{server[2]}/approvals/{approval_id}/decision",
+                    json={
+                        "decision": decision_value,
+                        "reason": "installer-to-hook integration test",
+                    },
+                )
+            assert decision_response.status_code == 200, decision_response.text
+            assert decision_response.json()["status"] == (
+                "APPROVED" if decision_value == "approve" else "DENIED"
+            )
+            first_result = first.result(timeout=25)
+            assert first_result.returncode == 0, first_result.stderr
+            first_output = json.loads(first_result.stdout)
+            assert first_output["decision"] == expected_decision
+
+            # Re-running the same installed callback must not create another approval
+            # or claim an already claimed allow decision a second time.
+            replay_result = subprocess.run(
+                command,
+                shell=True,
+                executable="/bin/sh",
+                input=json.dumps(invocation_payload),
+                text=True,
+                capture_output=True,
+                timeout=25,
+                cwd=workspace,
+                env=environment,
+                check=False,
+            )
+            assert replay_result.returncode == 0, replay_result.stderr
+            replay_output = json.loads(replay_result.stdout)
+            assert replay_output["decision"] == "deny"
+
+        with sqlite3.connect(db_path) as connection:
+            persisted = connection.execute(
+                "SELECT entity_id,json_extract(payload,'$.status'),"
+                "json_extract(payload,'$.source_invocation_id') FROM kv_store "
+                "WHERE entity_type='approval_request' "
+                "AND json_extract(payload,'$.source_agent_id')=? "
+                "AND json_extract(payload,'$.source_invocation_id')=?",
+                (agent_body["agent"]["id"], expected_invocation_id),
+            ).fetchall()
+            assert persisted == [
+                (
+                    approval_id,
+                    "APPROVED" if decision_value == "approve" else "DENIED",
+                    expected_invocation_id,
+                )
+            ]
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (approval_id,),
+            ).fetchone()[0] == expected_claims
+            assert connection.execute(
+                "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
+                "AND json_extract(payload,'$.event_type')='approval.created_by_agent' "
+                "AND json_extract(payload,'$.entity_id')=?",
+                (approval_id,),
+            ).fetchone()[0] == 1
+    finally:
         for server in reversed(servers):
             if server[0].is_alive():
                 _stop_sqlite_approval_api(server)
