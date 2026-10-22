@@ -65,7 +65,10 @@ class ConnectorsScreenTest {
             composeRule.waitForIdle()
         }
         composeRule.onNodeWithText("OpenClaw connector").assertExists()
-        composeRule.onNodeWithText("HEALTHY").assertExists()
+        composeRule.onNodeWithText("RECORDED OK").assertExists()
+        composeRule.onNodeWithText(
+            "Agent online status is not available. This shows only recorded authentication or check results."
+        ).assertExists()
         composeRule.onNodeWithText("https://aixion.example.com/connectors/connector_1/webhook").assertExists()
         composeRule.onNodeWithText("Advanced settings").assertExists()
         composeRule.onAllNodesWithText("Apply selected mapper").assertCountEquals(0)

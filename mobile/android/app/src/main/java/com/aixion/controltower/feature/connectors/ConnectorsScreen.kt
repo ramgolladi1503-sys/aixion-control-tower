@@ -342,7 +342,13 @@ private fun ConnectorCard(
             Text(connector.name, color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 23.sp)
             Text(connector.provider_label, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
             StatusBadge(connector.status, if (connector.status == "ENABLED") RiskLow else RiskBlocked)
-            StatusBadge(connector.health_status, if (connector.health_status == "HEALTHY") RiskLow else RiskMedium)
+            StatusBadge(connector.healthStatusLabel(), if (connector.health_status == "HEALTHY") RiskLow else RiskMedium)
+            Text(
+                "Agent online status is not available. This shows only recorded authentication or check results.",
+                color = TowerTextMuted,
+                fontSize = 13.sp,
+                lineHeight = 19.sp
+            )
         }
 
         Spacer(modifier = Modifier.height(TowerSpacing.md))
@@ -435,9 +441,20 @@ private fun ConnectorDto.setupGuidance(): ConnectorSetupGuidance {
             healthy = true
         )
         else -> ConnectorSetupGuidance(
-            stage = "Recently used",
-            nextAction = "The last authenticated webhook request was accepted. This does not prove the integration is currently online. Review task and approval status in the app.",
+            stage = "Activity recorded",
+            nextAction = "An authenticated request was accepted at ${last_used_at}. This does not prove the agent is currently online. Review task and approval status in the app.",
             healthy = true
         )
     }
+}
+
+private fun ConnectorDto.healthStatusLabel(): String = when (health_status) {
+    "HEALTHY" -> when {
+        !last_used_at.isNullOrBlank() -> "AUTH OK"
+        !last_health_check_at.isNullOrBlank() -> "CHECK OK"
+        else -> "RECORDED OK"
+    }
+    "DEGRADED", "FAILING" -> "AUTH ISSUE"
+    "DISABLED" -> "DISABLED"
+    else -> "NOT CHECKED"
 }
