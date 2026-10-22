@@ -591,10 +591,13 @@ def get_agent_task_retry_summary(
     user: AuthUser = ReviewerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> AgentTaskRetrySummary:
-    task = _task_for_user(
-        task_id, user, _task_repository_for_route(http_request), http_request
+    task_repository = _task_repository_for_route(http_request)
+    task = _task_for_user(task_id, user, task_repository, http_request)
+    return retry_summary(
+        task,
+        max_retries=max_retries,
+        repository=task_repository,
     )
-    return retry_summary(task, max_retries=max_retries)
 
 
 @router.post("/{task_id}/retry", response_model=AgentTaskEvent)
@@ -606,7 +609,11 @@ def retry_agent_task(
 ) -> AgentTaskEvent:
     task_repository = _task_repository_for_route(http_request)
     expected_task = _task_for_user(task_id, user, task_repository, http_request)
-    summary = retry_summary(expected_task, max_retries=payload.max_retries)
+    summary = retry_summary(
+        expected_task,
+        max_retries=payload.max_retries,
+        repository=task_repository,
+    )
     if not summary.retry_allowed:
         raise HTTPException(status_code=409, detail=summary.reason)
     updated_task = expected_task.model_copy(deep=True)

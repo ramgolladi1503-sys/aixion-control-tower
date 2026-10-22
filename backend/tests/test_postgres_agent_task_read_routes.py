@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from app import approval_recovery, main
 from app.approval_decisions import agent_task_repository as sqlite_agent_task_repository
+from app.agent_task_models import AgentTaskStatus
 from app.agent_task_routes import MaintainerDependency, ReviewerDependency
 from app.approval_recovery import reconcile_linked_approval_tasks
 from app.application_repositories import ApplicationRepositories
@@ -552,6 +553,88 @@ def test_postgres_cancel_route_atomically_cancels_task_approval_audits_and_notif
     assert set(store.approval_requests) == before_approval_ids
     assert {event.id for event in store.audit_events} == before_audit_ids
     assert set(store.notifications) == before_notification_ids
+
+
+def test_postgres_retry_summary_and_transition_use_durable_retry_history(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    _bind_postgres_agent_task_runtime(connect, monkeypatch)
+    client = TestClient(main.app)
+    task, _approval_id = _create_postgres_task_with_pending_approval(client, project)
+    task_id = task["id"]
+
+    def mark_task_failed() -> None:
+        # Seed the worker's terminal task state directly; this test focuses on
+        # route retry-history reads and the repository's existing retry CAS.
+        with connect() as conn:
+            conn.execute(
+                "UPDATE agent_tasks SET status=%s, payload=jsonb_set(payload, '{status}', %s::jsonb) "
+                "WHERE task_id=%s AND workspace_id=%s",
+                (AgentTaskStatus.FAILED.value, '"FAILED"', task_id, workspace.id),
+            )
+
+    before_task_ids = set(store.agent_tasks)
+    before_event_ids = set(store.agent_task_events)
+    before_audit_ids = {event.id for event in store.audit_events}
+
+    mark_task_failed()
+    first_retry = client.post(
+        f"/agent/tasks/{task_id}/retry",
+        json={"reason": "first durable retry", "max_retries": 3},
+    )
+    assert first_retry.status_code == 200, first_retry.text
+    assert first_retry.json()["metadata"]["previous_retry_count"] == 0
+    assert first_retry.json()["metadata"]["retry_count"] == 1
+
+    mark_task_failed()
+    summary = client.get(f"/agent/tasks/{task_id}/retry", params={"max_retries": 3})
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["retry_count"] == 1
+    assert summary.json()["retry_allowed"] is True
+
+    second_retry = client.post(
+        f"/agent/tasks/{task_id}/retry",
+        json={"reason": "second durable retry", "max_retries": 3},
+    )
+    assert second_retry.status_code == 200, second_retry.text
+    assert second_retry.json()["metadata"]["previous_retry_count"] == 1
+    assert second_retry.json()["metadata"]["retry_count"] == 2
+
+    mark_task_failed()
+    limited_summary = client.get(
+        f"/agent/tasks/{task_id}/retry", params={"max_retries": 2}
+    )
+    assert limited_summary.status_code == 200, limited_summary.text
+    assert limited_summary.json()["retry_count"] == 2
+    assert limited_summary.json()["retry_allowed"] is False
+
+    with connect() as conn:
+        audit_count_before_denial = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type='agent_task.retry_requested'",
+            (workspace.id, task_id),
+        ).fetchone()[0]
+    denied = client.post(
+        f"/agent/tasks/{task_id}/retry",
+        json={"reason": "must honor durable limit", "max_retries": 2},
+    )
+    assert denied.status_code == 409
+    assert denied.json()["detail"] == "Retry limit reached: 2 >= 2."
+
+    task_repository = main.app.state.agent_task_repository
+    assert task_repository.count_retries(task_id) == 2
+    assert task_repository.get(task_id).status == AgentTaskStatus.FAILED
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type='agent_task.retry_requested'",
+            (workspace.id, task_id),
+        ).fetchone()[0] == audit_count_before_denial
+    assert set(store.agent_tasks) == before_task_ids
+    assert set(store.agent_task_events) == before_event_ids
+    assert {event.id for event in store.audit_events} == before_audit_ids
 
 
 def test_postgres_cancel_route_rolls_back_all_records_when_notification_insert_fails(

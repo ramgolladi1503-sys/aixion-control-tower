@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from .approval_decisions import agent_task_repository
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from .agent_task_repository import AgentTaskRepository
 from .models import AuditEvent, now_utc
 from .agent_task_repository import RETRY_REQUESTED_OPERATION
 
@@ -23,12 +24,26 @@ class AgentTaskRetrySummary(BaseModel):
     reason: str
 
 
-def count_retry_requests(task_id: str) -> int:
-    return agent_task_repository.count_retries(task_id)
+def count_retry_requests(
+    task_id: str,
+    *,
+    repository: AgentTaskRepository | None = None,
+) -> int:
+    # Request routes always pass their selected repository. The module-level
+    # adapter remains only for direct local/test callers that have no request.
+    selected_repository = (
+        agent_task_repository if repository is None else repository
+    )
+    return selected_repository.count_retries(task_id)
 
 
-def retry_summary(task: AgentTask, *, max_retries: int = DEFAULT_MAX_RETRIES) -> AgentTaskRetrySummary:
-    retry_count = count_retry_requests(task.id)
+def retry_summary(
+    task: AgentTask,
+    *,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    repository: AgentTaskRepository | None = None,
+) -> AgentTaskRetrySummary:
+    retry_count = count_retry_requests(task.id, repository=repository)
     if task.status != AgentTaskStatus.FAILED:
         return AgentTaskRetrySummary(
             task_id=task.id,
