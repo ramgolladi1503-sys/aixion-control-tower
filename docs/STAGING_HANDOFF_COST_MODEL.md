@@ -63,12 +63,32 @@ Google's current Cloud Run page lists Mumbai (`asia-south1`) as an available reg
 | Cloud SQL shared-core staging compute | The page's displayed default `db-g1-small` rate implies **$25.20/month** at 720 hours, but this is **not established as the Mumbai rate**. Keep the Mumbai line item unpriced until a calculator export is saved. |
 | Cloud SQL storage, backup, and network | Variable; set low initial storage, retain only required backups, and price them separately. Do not omit from final approval. |
 | Cloud Run API | Default published request-based reference rates: **$0.000024/vCPU-second active CPU**, **$0.0000025/GiB-second active memory**, **$0.40/million requests**. Regional rate, billed CPU/memory time, networking, and billing-account-wide free-tier availability require the Mumbai calculator estimate. |
-| Scheduled jobs | Cloud Run Jobs have a separate free tier and rate table. Price by invocation/runtime only after the bounded one-shot worker is deployable; the current lifespan loops are not costed as reliable scheduled jobs. |
+| Cloud Run Jobs | Cloud Run Jobs have a separate free tier and rate table. Price by invocation/runtime only after the bounded one-shot worker is deployable; the current lifespan loops are not costed as reliable scheduled jobs. |
+| Cloud Scheduler | **UNPRICED** until the owner-approved schedule count, region, and applicable pricing are entered in the dated calculator export. Two proposed schedules exist; do not treat them as zero-cost. |
 | Artifact Registry | First **0.5 GiB** storage is free per billing account; then **$0.000136986/GiB-hour** (about **$0.099/GiB-month** at 720 hours). Network transfer and optional scanning are separate. Co-locate with the runtime and expire old images. |
 | Cloud Logging | Standard log ingestion: first **50 GiB/project/month** free, then **$0.50/GiB**; retention beyond 30 days is **$0.01/GiB-month**. Vended network logs and other observability products have separate treatment. Redaction and volume limits remain required. |
+| Cloud Monitoring | **UNPRICED** until the owner-approved metric volume, alert policies, and retention are included in the calculator export. Monitoring usage must not be assumed to be covered by Cloud Logging allowances. |
 | Secret Manager | First **6 active secret versions** and **10,000 accesses/month** are free per billing account; beyond that, **$0.000082192/version-hour** and **$0.03/10,000 accesses**. Replication location and version lifecycle affect cost. |
+| Firebase Cloud Messaging | **UNPRICED / confirm in calculator and target-project pricing terms.** Include expected sends and any related Firebase/Google Cloud usage; do not assume zero cost based on the push API being a wake-up signal. |
 | Metrics, data transfer, DNS, taxes | Usage/configuration-dependent or not yet priced. Enter explicit quantities in the calculator; do not assume these are zero. |
 | Production-grade database | **Not estimated in this staging envelope.** A non-shared-core, possibly HA database has a materially different recurring cost and requires a separate production estimate. |
+
+### Offline topology-to-cost coverage check
+
+Run `python backend/scripts/validate_staging_cost_coverage.py` from the repository
+root. The check reads the Cloud Run API and Job manifests, Cloud Scheduler
+Terraform declarations, and the structured cost-category table above. It fails
+if a currently detected managed service lacks its mapped row, if a required
+manifest is malformed/missing, or if a detected service has no reviewed mapping.
+New managed services require an explicit mapping and cost row in the same change.
+
+This is a documentation completeness check, not a price calculator or a Terraform
+evaluator. It cannot discover a billable product that is mentioned only in
+unstructured prose, resolve Terraform variables/effective resources, or establish
+whether a marked `UNPRICED` service is affordable. The component table and
+validator mappings therefore remain a human-reviewed topology inventory. A
+passing result means only that the detected services have explicit cost-model
+rows; owner inputs and a dated regional calculator export remain required.
 
 ### Workload inputs for the dated calculator estimate
 
