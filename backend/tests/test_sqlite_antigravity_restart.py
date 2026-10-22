@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import multiprocessing
 import os
 import socket
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -164,6 +167,54 @@ def _stop_sqlite_approval_api(
         process.join(timeout=5)
     assert not process.is_alive(), "test-owned SQLite API subprocess was not reaped"
     assert process.exitcode == 0
+
+
+def _launch_hook_process(payload: dict[str, Any], environment: dict[str, str]) -> subprocess.Popen[str]:
+    """Launch a fresh hook interpreter with one provider payload on stdin."""
+    read_fd, write_fd = os.pipe()
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(HOOK_PATH)],
+            stdin=read_fd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+        )
+    finally:
+        os.close(read_fd)
+    try:
+        os.write(write_fd, json.dumps(payload).encode("utf-8"))
+    finally:
+        os.close(write_fd)
+    return process
+
+
+def _read_antigravity_approvals(
+    db_path: Path, *, agent_id: str, session_id: str
+) -> list[dict[str, Any]]:
+    with sqlite3.connect(db_path) as connection:
+        rows = connection.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' "
+            "AND json_extract(payload,'$.source_agent_id')=? "
+            "AND json_extract(payload,'$.source_session_id')=?",
+            (agent_id, session_id),
+        ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+def _wait_for_antigravity_approvals(
+    db_path: Path, *, agent_id: str, session_id: str, count: int
+) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        approvals = _read_antigravity_approvals(
+            db_path, agent_id=agent_id, session_id=session_id
+        )
+        if len(approvals) >= count:
+            return approvals
+        time.sleep(0.05)
+    pytest.fail(f"hook did not persist {count} approval request(s) before the deadline")
 
 
 def _hook_module():
@@ -505,3 +556,162 @@ def test_blocked_antigravity_invocation_survives_sqlite_api_restart(
         for server in reversed(servers):
             if server[0].is_alive():
                 _stop_sqlite_approval_api(server)
+
+
+def test_antigravity_hook_process_relaunch_recovers_exact_approved_invocation(
+    tmp_path: Path,
+) -> None:
+    """A new hook process can recover an exact request; changed/replayed calls fail closed."""
+    db_path = tmp_path / "hook-process-relaunch.sqlite3"
+    db_path.parent.chmod(0o700)
+    server = _start_sqlite_approval_api(db_path)
+    waiting_process: subprocess.Popen[str] | None = None
+    changed_process: subprocess.Popen[str] | None = None
+
+    session_id = "hook-process-relaunch-session"
+    invocation_payload = {
+        "conversationId": session_id,
+        "stepIdx": 12,
+        "toolCall": {
+            "name": "run_command",
+            "args": {"CommandLine": "echo relaunch-exact-invocation"},
+        },
+    }
+
+    try:
+        with httpx.Client(timeout=10) as client:
+            project_response = client.post(
+                f"{server[2]}/projects", json={"name": "Hook process relaunch project"}
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
+            agent_response = client.post(
+                f"{server[2]}/agents",
+                json={
+                    "provider": "ANTIGRAVITY",
+                    "display_name": "Hook process relaunch test",
+                    "auth_type": "API_KEY",
+                    "allowed_project_ids": [project_id],
+                    "allowed_actions": [
+                        "CREATE_APPROVAL",
+                        "READ_APPROVAL_DECISION",
+                        "CONSUME_APPROVAL_DECISION",
+                        "REPORT_APPROVAL_DELIVERY_FAILURE",
+                        "EXPIRE_OWN_APPROVAL",
+                    ],
+                    "enabled": True,
+                },
+            )
+            assert agent_response.status_code == 200, agent_response.text
+            agent_body = agent_response.json()
+
+        environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "AIXION_API_BASE_URL": server[2],
+            "AIXION_AGENT_ID": agent_body["agent"]["id"],
+            "AIXION_AGENT_TOKEN": agent_body["agent_token"],
+            "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+            "AIXION_PROJECT_ID": project_id,
+            "AIXION_APPROVAL_TIMEOUT_SECONDS": "30",
+        }
+
+        # The first connector process reaches a durable pending request, then
+        # terminates before receiving a decision, as can happen on the host.
+        waiting_process = _launch_hook_process(invocation_payload, environment)
+        first_approvals = _wait_for_antigravity_approvals(
+            db_path,
+            agent_id=agent_body["agent"]["id"],
+            session_id=session_id,
+            count=1,
+        )
+        assert len(first_approvals) == 1
+        approval_id = first_approvals[0]["id"]
+        invocation_id = first_approvals[0]["source_invocation_id"]
+        assert first_approvals[0]["status"] == "PENDING_REVIEW"
+        waiting_process.kill()
+        waiting_process.communicate(timeout=5)
+        waiting_process = None
+
+        with httpx.Client(timeout=10) as client:
+            decision_response = client.post(
+                f"{server[2]}/approvals/{approval_id}/decision",
+                json={"decision": "approve", "reason": "approve during hook restart"},
+            )
+        assert decision_response.status_code == 200, decision_response.text
+        assert decision_response.json()["status"] == "APPROVED"
+
+        # Relaunch with the exact provider payload. A fresh interpreter must
+        # resolve the same durable approval and claim its delivery once.
+        recovered = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=json.dumps(invocation_payload),
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=20,
+            check=False,
+        )
+        assert recovered.returncode == 0, recovered.stderr
+        assert json.loads(recovered.stdout) == {
+            "decision": "allow",
+            "reason": "Approved from Aixion Control Tower",
+        }
+
+        # Re-delivery after the at-most-once claim cannot authorize the tool a
+        # second time, even though the invocation identity matches exactly.
+        replayed = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=json.dumps(invocation_payload),
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=20,
+            check=False,
+        )
+        assert replayed.returncode == 0, replayed.stderr
+        replayed_result = json.loads(replayed.stdout)
+        assert replayed_result["decision"] == "deny"
+        assert "could not be claimed safely" in replayed_result["reason"]
+
+        # A changed argument has a different deterministic invocation key and
+        # remains pending; the earlier approval cannot authorize it.
+        changed_payload = json.loads(json.dumps(invocation_payload))
+        changed_payload["toolCall"]["args"]["CommandLine"] = "echo changed-invocation"
+        changed_process = _launch_hook_process(changed_payload, environment)
+        approvals = _wait_for_antigravity_approvals(
+            db_path,
+            agent_id=agent_body["agent"]["id"],
+            session_id=session_id,
+            count=2,
+        )
+        changed_approval = next(
+            item for item in approvals if item["source_invocation_id"] != invocation_id
+        )
+        assert changed_approval["id"] != approval_id
+        assert changed_approval["status"] == "PENDING_REVIEW"
+        changed_process.kill()
+        changed_process.communicate(timeout=5)
+        changed_process = None
+
+        with sqlite3.connect(db_path) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (approval_id,),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (changed_approval["id"],),
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
+                "AND json_extract(payload,'$.event_type')='approval.created_by_agent' "
+                "AND json_extract(payload,'$.entity_id')=?",
+                (approval_id,),
+            ).fetchone()[0] == 1
+    finally:
+        for process in (waiting_process, changed_process):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        _stop_sqlite_approval_api(server)
