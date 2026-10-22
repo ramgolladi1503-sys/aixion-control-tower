@@ -35,6 +35,36 @@ internal suspend fun <T> establishAuthenticatedSession(
     }
 }
 
+internal suspend fun logoutWithCleanup(
+    unregisterPushDevice: suspend () -> Boolean,
+    revokeServerSession: suspend () -> Unit,
+    clearLocalSession: () -> Unit,
+    onFailure: (stage: String, error: Exception) -> Unit
+): Boolean {
+    var cleanupSucceeded = true
+    try {
+        try {
+            if (!unregisterPushDevice()) cleanupSucceeded = false
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            cleanupSucceeded = false
+            onFailure("push-device-unregister", error)
+        }
+        try {
+            revokeServerSession()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            cleanupSucceeded = false
+            onFailure("server-session-revocation", error)
+        }
+    } finally {
+        clearLocalSession()
+    }
+    return cleanupSucceeded
+}
+
 class AuthRepository(
     private val api: ControlTowerApi,
     private val context: Context
@@ -102,10 +132,13 @@ class AuthRepository(
     fun hasSavedToken(): Boolean = AuthSession.getAccessToken(context).isNotBlank()
 
     suspend fun logout(): Boolean {
-        return try {
-            pushRegistrationRepository.unregisterCurrentDevice()
-        } finally {
-            AuthSession.clear(context)
-        }
+        return logoutWithCleanup(
+            unregisterPushDevice = { pushRegistrationRepository.unregisterCurrentDevice() },
+            revokeServerSession = { api.logout() },
+            clearLocalSession = { AuthSession.clear(context) },
+            onFailure = { stage, error ->
+                Log.w("AuthRepository", "Logout cleanup stage failed: $stage", error)
+            }
+        )
     }
 }

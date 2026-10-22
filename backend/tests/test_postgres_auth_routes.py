@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -158,6 +159,45 @@ with TestClient(main.app) as client:
         check=False,
     )
     assert observed_in_child.returncode == 0, observed_in_child.stderr
+
+
+def test_postgres_logout_revokes_only_current_session_with_durable_audit(
+    postgres_auth_runtime: tuple[PostgresAuthRepository, Callable[[], Connection], str, str],
+) -> None:
+    repository, connect, _, _ = postgres_auth_runtime
+    client = TestClient(app)
+    email = f"logout-{uuid.uuid4().hex}@example.com"
+    password = "Logout-Local-Postgres-Password-842!"
+    user, current_token = _register_and_login(client, email, password)
+    sibling_login = client.post("/auth/login", json={"email": email, "password": password})
+    assert sibling_login.status_code == 200, sibling_login.text
+    sibling_token = sibling_login.json()["access_token"]
+
+    response = client.post(
+        "/auth/logout",
+        headers={"Authorization": f"Bearer {current_token}"},
+    )
+
+    assert response.status_code == 204
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {current_token}"}).status_code == 401
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {sibling_token}"}).status_code == 200
+    current_hash = hashlib.sha256(current_token.encode()).hexdigest()
+    sibling_hash = hashlib.sha256(sibling_token.encode()).hexdigest()
+    assert repository.authenticate_session(current_hash) is None
+    assert repository.authenticate_session(sibling_hash) is not None
+    with connect() as conn:
+        events = conn.execute(
+            "SELECT event_type,actor,entity_id,workspace_id,details FROM audit_events "
+            "WHERE workspace_id=%s AND event_type='auth.session_revoked'",
+            (user["workspace_id"],),
+        ).fetchall()
+    assert len(events) == 1
+    event_type, actor, session_id, workspace_id, details = events[0]
+    assert event_type == "auth.session_revoked"
+    assert actor == email
+    assert workspace_id == user["workspace_id"]
+    assert details["session_id"] == session_id
+    assert details["reason"] == "user_logout"
 
 
 def test_postgres_auth_rejects_session_without_durable_membership(

@@ -242,9 +242,9 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             _state.value = AuthUiState(
                 sessionChecked = true,
                 message = if (deviceCleanupSucceeded) {
-                    "Logged out. This device was removed from approval alerts."
+                    "Logged out. This device was removed from approval alerts and its server session was revoked."
                 } else {
-                    "Logged out locally. Server device cleanup is pending; reconnect and sign in again to retry."
+                    "Logged out locally. Server sign-out or approval-alert cleanup could not be confirmed."
                 }
             )
         }

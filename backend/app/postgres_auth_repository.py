@@ -897,6 +897,48 @@ class PostgresAuthRepository:
             return None
         return AuthenticatedSession(user=user, session=session)
 
+    def revoke_current_session(self, *, actor_user_id: str, token_hash: str) -> bool:
+        """Revoke only the authenticated session and append its audit event atomically."""
+        if not _TOKEN_HASH_PATTERN.fullmatch(token_hash):
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT session.payload,session.session_id,session.user_id,session.token_hash,"
+                "session.expires_at,session.revoked,account.payload,account.user_id,account.workspace_id,"
+                "account.email,account.normalized_email,account.role,account.disabled,account.email_verified "
+                "FROM sessions AS session JOIN users AS account ON account.user_id=session.user_id "
+                "WHERE session.token_hash=%s FOR UPDATE OF session",
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                return False
+            session = SessionToken.model_validate(row[0])
+            user = User.model_validate(row[6])
+            self._validate_session_row(session, row[1:6])
+            self._validate_user_row(user, row[7:14])
+            if session.user_id != actor_user_id or user.id != actor_user_id:
+                raise PostgresSessionAuthorizationError("Session does not belong to the authenticated user")
+            if session.revoked:
+                return False
+
+            revoked = session.model_copy(update={"revoked": True})
+            updated = conn.execute(
+                "UPDATE sessions SET revoked=TRUE,payload=%s "
+                "WHERE session_id=%s AND user_id=%s AND revoked=FALSE",
+                (Jsonb(revoked.model_dump(mode="json")), session.id, actor_user_id),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("Authenticated session changed while it was being revoked")
+            event = AuditEvent(
+                event_type="auth.session_revoked",
+                actor=user.email,
+                entity_id=session.id,
+                workspace_id=user.workspace_id,
+                details={"session_id": session.id, "reason": "user_logout"},
+            )
+            self._insert_auth_audit(conn, event, entity_type="auth_session")
+            return True
+
     def list_sessions(self, actor_user_id: str) -> list[tuple[SessionToken, User]]:
         with self._connect() as conn:
             actor_row = conn.execute(

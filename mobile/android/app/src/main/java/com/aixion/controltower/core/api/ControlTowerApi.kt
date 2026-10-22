@@ -76,6 +76,9 @@ interface ControlTowerApi {
     @POST("auth/login")
     suspend fun login(@Body payload: LoginRequestDto): AuthResponseDto
 
+    @POST("auth/logout")
+    suspend fun logout()
+
     @GET("auth/me")
     suspend fun me(): AuthUserDto
 

@@ -59,6 +59,7 @@ open class BaseFakeControlTowerApi : ControlTowerApi {
     override suspend fun verifyEmail(payload: VerifyEmailRequestDto): VerifyEmailResponseDto = unsupported()
     override suspend fun resendVerification(payload: ResendVerificationRequestDto): RegistrationResponseDto = unsupported()
     override suspend fun login(payload: LoginRequestDto): AuthResponseDto = unsupported()
+    override suspend fun logout() = Unit
     override suspend fun me(): AuthUserDto = unsupported()
     override suspend fun registerNotificationDevice(payload: DeviceRegistrationRequestDto): DeviceRegistrationDto = unsupported()
     override suspend fun unregisterNotificationDevice(deviceId: String) = Unit

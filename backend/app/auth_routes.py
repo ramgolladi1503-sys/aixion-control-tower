@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from .application_repository_access import application_repositories_for_request
@@ -14,7 +14,9 @@ from .auth import (
     ResendVerificationRequest,
     VerifyEmailRequest,
     VerifyEmailResponse,
+    _hash_token,
     _to_auth_user,
+    auth_enabled,
     authenticate_user,
     create_registration_response,
     create_session,
@@ -288,6 +290,37 @@ def login(payload: LoginRequest, request: Request) -> AuthResponse:
 @router.get("/me", response_model=AuthUser)
 def me(user: AuthUser = Depends(require_user)) -> AuthUser:
     return user
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    request: Request,
+    actor: AuthUser = Depends(require_user),
+) -> Response:
+    """Revoke the current bearer session; never revoke sibling device sessions."""
+    if not auth_enabled():
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    authorization = request.headers.get("authorization", "")
+    scheme, _, raw_token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not raw_token.strip():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
+    token_hash = _hash_token(raw_token.strip())
+    postgres_repository = postgres_auth_repository(request)
+    if postgres_repository is not None:
+        try:
+            postgres_repository.revoke_current_session(
+                actor_user_id=actor.id,
+                token_hash=token_hash,
+            )
+        except PermissionError as error:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired session",
+            ) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    store.revoke_session(actor_user_id=actor.id, token_hash=token_hash)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/account-deletion-request", response_model=AccountDeletionRequestResponse)

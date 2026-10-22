@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import os
 import sqlite3
 import stat
@@ -32,6 +33,7 @@ from .models import (
     User,
     WorkOrder,
     Workspace,
+    now_utc,
 )
 from .settings import validate_startup_environment
 from .trust_action_authorization_models import ActionAuthorization
@@ -104,6 +106,40 @@ class SQLiteBackedStore:
         """Serialize a read-modify-persist sequence inside the API process."""
         with self._lock:
             yield
+
+    def revoke_session(self, *, actor_user_id: str, token_hash: str) -> bool:
+        """Revoke one SQLite-backed bearer session and persist its audit event."""
+        with self.atomic():
+            session = next(
+                (
+                    item
+                    for item in self.sessions.values()
+                    if hmac.compare_digest(item.token_hash, token_hash)
+                    and item.user_id == actor_user_id
+                ),
+                None,
+            )
+            if session is None or session.revoked or session.expires_at <= now_utc():
+                return False
+            user = self.users.get(actor_user_id)
+            if user is None or user.disabled or not user.email_verified:
+                return False
+            session.revoked = True
+            self.audit_events.append(
+                AuditEvent(
+                    event_type="auth.session_revoked",
+                    actor=user.email,
+                    entity_id=session.id,
+                    workspace_id=user.workspace_id,
+                    details={"session_id": session.id, "reason": "user_logout"},
+                )
+            )
+            try:
+                self.persist()
+            except Exception:
+                self.load()
+                raise
+            return True
 
     def project_agent_task_creation(
         self,

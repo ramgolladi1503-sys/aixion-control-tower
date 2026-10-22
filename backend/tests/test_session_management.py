@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from app.auth import create_session, create_user
+from app.auth import _hash_token, create_session, create_user
 from app.main import app
 from app.models import UserRole
 from app.store import store
@@ -127,3 +127,30 @@ def test_session_revocation_audit_event_exists(monkeypatch) -> None:
     assert store.audit_events[-1].actor == "owner@example.com"
     assert store.audit_events[-1].entity_id == reviewer.id
     assert store.audit_events[-1].details["revoked_sessions_count"] == 1
+
+
+def test_logout_revokes_only_current_session_and_audits(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
+    user = create_user("logout@example.com", PASSWORD, "Logout User")
+    current = create_session(user)
+    sibling = create_session(user)
+
+    response = TestClient(app).post(
+        "/auth/logout",
+        headers=auth_header(current.access_token),
+    )
+
+    assert response.status_code == 204
+    store.load()
+    sessions = {session.token_hash: session for session in store.sessions.values()}
+    assert sessions[_hash_token(current.access_token)].revoked
+    assert not sessions[_hash_token(sibling.access_token)].revoked
+    client = TestClient(app)
+    assert client.get("/auth/me", headers=auth_header(current.access_token)).status_code == 401
+    assert client.get("/auth/me", headers=auth_header(sibling.access_token)).status_code == 200
+    event = store.audit_events[-1]
+    assert event.event_type == "auth.session_revoked"
+    assert event.actor == user.email
+    assert event.workspace_id == user.workspace_id
+    assert event.entity_id == sessions[_hash_token(current.access_token)].id
+    assert event.details == {"session_id": event.entity_id, "reason": "user_logout"}
