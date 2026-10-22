@@ -155,11 +155,19 @@ def _emit(value: dict[str, str]) -> None:
     sys.stdout.flush()
 
 
+def _reject_nonstandard_json_constant(value: str) -> None:
+    """Reject JavaScript-style numeric constants accepted by Python's JSON parser."""
+    raise ValueError(f"Non-standard JSON constant: {value}")
+
+
 def _read_input() -> dict[str, Any]:
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
         raise GateError("Hook input exceeds the configured size limit")
-    value = json.loads(raw)
+    try:
+        value = json.loads(raw, parse_constant=_reject_nonstandard_json_constant)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        raise GateError("Hook input is invalid JSON") from exc
     if not isinstance(value, dict):
         raise GateError("Hook input must be a JSON object")
     return value
@@ -261,8 +269,8 @@ def _request(
             raise GateError(f"Control Tower returned HTTP {response.status}")
         content = response.body
         try:
-            result = json.loads(content)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            result = json.loads(content, parse_constant=_reject_nonstandard_json_constant)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             raise AmbiguousRequestError("Control Tower returned invalid response data") from exc
         if not isinstance(result, dict):
             raise AmbiguousRequestError("Unexpected Control Tower response")

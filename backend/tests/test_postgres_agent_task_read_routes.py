@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from types import SimpleNamespace
 
 import psycopg
@@ -19,6 +20,8 @@ from app.approval_recovery import reconcile_linked_approval_tasks
 from app.application_repositories import ApplicationRepositories
 from app.models import AuthUser, Project, User, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
+from app.postgres_runtime import PostgresRuntime
+from app.settings import get_settings
 from app.store import store
 
 
@@ -896,3 +899,110 @@ def test_postgres_agent_task_event_route_rolls_back_all_records_when_notificatio
     assert set(store.agent_task_events) == before_event_ids
     assert {audit.id for audit in store.audit_events} == before_audit_ids
     assert set(store.notifications) == before_notification_ids
+
+
+def test_postgres_agent_task_event_route_uses_lifespan_runtime_and_survives_restart(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    settings = replace(
+        get_settings(),
+        profile="test",
+        auth_enabled=True,
+        postgres_auth_enabled=True,
+        postgres_runtime_probe_enabled=False,
+        postgres_auth_rate_limits_enabled=False,
+        outbox_dispatch_mode="scheduled",
+        push_dispatch_enabled=False,
+        email_dispatch_enabled=False,
+    )
+    runtimes: list[PostgresRuntime] = []
+
+    def create_runtime() -> PostgresRuntime:
+        runtime = PostgresRuntime(
+            _dsn="isolated-test-schema",
+            profile="test",
+            settings=settings,
+            _connector=lambda *_args, **_kwargs: connect(),
+        )
+        runtimes.append(runtime)
+        return runtime
+
+    # The base route fixture prepares the isolated schema, user overrides, and
+    # local repository bundle. Clear only the temporary bindings it installed
+    # so the application's real lifespan can supply the runtime repositories.
+    for state_name in main._POSTGRES_APP_STATE_BINDINGS:
+        monkeypatch.setattr(main.app.state, state_name, None, raising=False)
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main.PostgresRuntime, "from_environment", create_runtime)
+    before_tasks = set(store.agent_tasks)
+    before_events = set(store.agent_task_events)
+    before_audits = {event.id for event in store.audit_events}
+    before_notifications = set(store.notifications)
+
+    with TestClient(main.app) as client:
+        runtime = client.app.state.postgres_runtime
+        repositories = runtime.repositories
+        assert client.app.state.postgres_repositories is repositories
+        assert client.app.state.agent_task_repository is repositories.agent_tasks
+        assert client.app.state.audit_event_repository is repositories.audit_events
+
+        created = client.post(
+            "/agent/tasks",
+            json={
+                "provider": "MANUAL",
+                "project_id": project.id,
+                "title": "Lifespan-bound PostgreSQL event",
+                "goal": "Persist task events through the application-owned runtime",
+                "requested_action": "OTHER",
+                "requires_approval": False,
+            },
+        )
+        assert created.status_code == 200, created.text
+        task = created.json()
+        response = client.post(
+            f"/agent/tasks/{task['id']}/events",
+            json={
+                "event_type": "RESULT_READY",
+                "message": "Lifespan-bound result is ready.",
+                "status": "DONE",
+            },
+        )
+        assert response.status_code == 200, response.text
+        event = response.json()
+        event_id = event["id"]
+
+    assert len(runtimes) == 1
+    assert main.app.state.postgres_runtime is None
+    assert main.app.state.postgres_repositories is None
+    with TestClient(main.app) as restarted_client:
+        restarted_runtime = restarted_client.app.state.postgres_runtime
+        assert restarted_runtime is not runtimes[0]
+        assert restarted_client.app.state.agent_task_repository is (
+            restarted_runtime.repositories.agent_tasks
+        )
+        durable_task = restarted_client.get(f"/agent/tasks/{task['id']}")
+        durable_events = restarted_client.get(f"/agent/tasks/{task['id']}/events")
+        assert durable_task.status_code == 200, durable_task.text
+        assert durable_task.json()["status"] == "DONE"
+        assert durable_events.status_code == 200, durable_events.text
+        persisted_events = durable_events.json()
+        assert len(persisted_events) == 2
+        assert persisted_events[0]["event_type"] == "TASK_CREATED"
+        assert persisted_events[1]["id"] == event_id
+
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_type='agent_task' "
+            "AND entity_id=%s AND event_type='agent_task.event_recorded' AND details->>'event_id'=%s",
+            (workspace.id, task["id"], event_id),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE workspace_id=%s AND task_id=%s AND entity_type='agent_task'",
+            (workspace.id, task["id"]),
+        ).fetchone()[0] == 1
+    assert set(store.agent_tasks) == before_tasks
+    assert set(store.agent_task_events) == before_events
+    assert {event.id for event in store.audit_events} == before_audits
+    assert set(store.notifications) == before_notifications

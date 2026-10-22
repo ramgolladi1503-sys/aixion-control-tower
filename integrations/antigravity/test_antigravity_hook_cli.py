@@ -68,6 +68,32 @@ def test_main_emits_fail_closed_deny_for_malformed_or_missing_input(
     assert captured.out.endswith('"}\n')
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_main_denies_nonstandard_json_numbers_before_approval_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    constant: str,
+) -> None:
+    raw_input = (
+        '{"toolCall":{"name":"run_command","args":{"value":'
+        f"{constant}" + "}}}"
+    ).encode()
+    requests: list[str] = []
+    monkeypatch.setattr(hook.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw_input)))
+
+    def unexpected_request(method: str, *_args: object, **_kwargs: object) -> dict:
+        requests.append(method)
+        raise AssertionError("Invalid hook input must not reach the approval API")
+
+    monkeypatch.setattr(hook, "_request", unexpected_request)
+
+    assert hook.main([]) == 0
+
+    captured = capsys.readouterr()
+    assert requests == []
+    assert json.loads(captured.out)["decision"] == "deny"
+
+
 def _hook_payload() -> dict:
     return {
         "toolCall": {"name": "run_command", "args": {"command": "printf hello"}},
@@ -146,6 +172,34 @@ def test_run_consumes_the_approved_invocation_before_returning_allow(
     assert result == {"decision": "allow", "reason": "Approved from Aixion Control Tower"}
     assert [method for method, _url, _body in calls] == ["POST", "GET", "POST"]
     assert calls[-1][1].endswith("/agents/approvals/approval_0123456789ab/consume")
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_run_denies_nonstandard_json_api_response_without_consuming(
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+) -> None:
+    requests: list[tuple[str, str]] = []
+
+    def deadline_request(
+        method: str,
+        url: str,
+        *_args: object,
+        **_kwargs: object,
+    ) -> SimpleNamespace:
+        requests.append((method, url))
+        return SimpleNamespace(status=201, headers={}, body=f'{{"id":{constant}}}'.encode())
+
+    monkeypatch.setattr(hook, "deadline_request", deadline_request)
+    monkeypatch.setattr(hook.time, "sleep", lambda _seconds: None)
+
+    result = hook.run(_hook_payload(), _test_environment())
+
+    assert result["decision"] == "deny"
+    assert result["reason"] == "Control Tower approval creation remained ambiguous"
+    assert len(requests) == hook.MAX_CREATE_ATTEMPTS
+    assert all(method == "POST" for method, _url in requests)
+    assert not any(url.endswith("/consume") for _method, url in requests)
 
 
 def test_run_denial_never_consumes_or_allows_the_invocation(
