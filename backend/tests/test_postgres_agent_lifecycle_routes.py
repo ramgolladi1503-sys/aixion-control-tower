@@ -49,7 +49,7 @@ def test_external_agent_repository_requires_active_postgres_runtime(
     )
 
     state.postgres_runtime = None
-    with pytest.raises(RuntimeError, match="not bound to the active runtime"):
+    with pytest.raises(RuntimeError, match="runtime is unavailable or mismatched"):
         application_repository_access.external_agent_auth_repository_for_request(request)
 
 
@@ -71,7 +71,7 @@ def test_external_agent_repository_rejects_mixed_postgres_runtime_bundle(
         lambda: SimpleNamespace(postgres_auth_enabled=True),
     )
 
-    with pytest.raises(RuntimeError, match="not bound to the active runtime"):
+    with pytest.raises(RuntimeError, match="runtime is unavailable or mismatched"):
         application_repository_access.external_agent_auth_repository_for_request(request)
 
 

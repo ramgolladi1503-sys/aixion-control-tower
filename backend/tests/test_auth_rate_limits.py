@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.auth_rate_limits import consume_auth_rate_limit
 from app.auth_routes import _limit
+from app.application_repositories import ApplicationRepositories
 from app.main import app
 from app.store import store
 
@@ -125,6 +126,8 @@ def test_auth_route_uses_rate_limit_repository_from_lifespan_bundle(
             return None
 
     repository = FakeRepository()
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "auth_rate_limits", repository)
     monkeypatch.setattr(
         "app.auth_routes.get_settings",
         lambda: SimpleNamespace(
@@ -136,7 +139,8 @@ def test_auth_route_uses_rate_limit_repository_from_lifespan_bundle(
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
-                postgres_repositories=SimpleNamespace(auth_rate_limits=repository),
+                postgres_runtime=SimpleNamespace(repositories=repositories),
+                postgres_repositories=repositories,
             ),
         ),
     )

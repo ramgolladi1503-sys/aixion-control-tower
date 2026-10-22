@@ -155,10 +155,13 @@ def test_agent_run_repository_rejects_mismatched_postgres_runtime(
 
 
 def test_application_repository_access_returns_lifespan_bundle() -> None:
-    bundle = object()
+    bundle = object.__new__(ApplicationRepositories)
     request = SimpleNamespace(
         app=SimpleNamespace(
-            state=SimpleNamespace(postgres_repositories=bundle),
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=bundle),
+                postgres_repositories=bundle,
+            ),
         ),
     )
 
@@ -177,6 +180,32 @@ def test_application_repository_access_returns_lifespan_bundle() -> None:
 def test_application_repository_access_fails_closed_without_bundle(test_request: object) -> None:
     with pytest.raises(RuntimeError, match="repository runtime is unavailable"):
         application_repositories_for_request(test_request)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        SimpleNamespace(
+            postgres_repositories=object.__new__(ApplicationRepositories),
+            postgres_runtime=None,
+        ),
+        SimpleNamespace(
+            postgres_repositories=object.__new__(ApplicationRepositories),
+            postgres_runtime=SimpleNamespace(repositories=object()),
+        ),
+        SimpleNamespace(
+            postgres_repositories=object(),
+            postgres_runtime=SimpleNamespace(repositories=object()),
+        ),
+    ],
+)
+def test_application_repository_access_rejects_missing_or_mismatched_runtime(
+    state: object,
+) -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    with pytest.raises(RuntimeError, match="repository runtime is unavailable"):
+        application_repositories_for_request(request)
 
 
 def test_approval_decision_repository_access_returns_app_binding() -> None:
@@ -493,10 +522,13 @@ def test_workspace_membership_repository_uses_postgres_auth_bundle(
 ) -> None:
     postgres_repository = object()
     sqlite_repository = object()
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "workspace_membership", postgres_repository)
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
-                postgres_repositories=SimpleNamespace(workspace_membership=postgres_repository),
+                postgres_runtime=SimpleNamespace(repositories=repositories),
+                postgres_repositories=repositories,
                 workspace_membership_repository=sqlite_repository,
             ),
         ),
@@ -576,12 +608,13 @@ def test_workspace_membership_resolution_uses_postgres_snapshot(
         def snapshot(self, **kwargs):
             raise AssertionError("SQLite membership must not be read for PostgreSQL auth")
 
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "workspace_membership", PostgresMembership())
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
-                postgres_repositories=SimpleNamespace(
-                    workspace_membership=PostgresMembership(),
-                ),
+                postgres_runtime=SimpleNamespace(repositories=repositories),
+                postgres_repositories=repositories,
                 workspace_membership_repository=SQLiteMembership(),
             ),
         ),

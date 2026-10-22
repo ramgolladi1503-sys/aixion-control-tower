@@ -125,7 +125,7 @@ def test_connector_management_fails_closed_without_or_with_mismatched_postgres_b
     request.app.state.postgres_runtime = SimpleNamespace(
         repositories=request.app.state.postgres_repositories
     )
-    with pytest.raises(RuntimeError, match="connector repository bundle is unavailable or mismatched"):
+    with pytest.raises(RuntimeError, match="runtime is unavailable or mismatched"):
         repository_access.connector_repository_for_request(request)
 
 

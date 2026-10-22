@@ -32,14 +32,22 @@ class _RequestState(Protocol):
 def application_repositories_for_request(request: _RequestState | None) -> ApplicationRepositories:
     """Return the lifespan-owned PostgreSQL bundle or fail closed.
 
-    This helper deliberately has no SQLite fallback. Callers must choose their
-    local/test adapter explicitly before asking for the PostgreSQL bundle.
+    This helper deliberately has no SQLite fallback. The bundle must be the
+    exact bundle owned by the active lifespan runtime; callers must choose
+    their local/test adapter explicitly before asking for PostgreSQL state.
     """
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
     repositories = getattr(state, "postgres_repositories", None)
-    if repositories is None:
-        raise RuntimeError("PostgreSQL application repository runtime is unavailable")
+    runtime = getattr(state, "postgres_runtime", None)
+    if (
+        not isinstance(repositories, ApplicationRepositories)
+        or runtime is None
+        or getattr(runtime, "repositories", None) is not repositories
+    ):
+        raise RuntimeError(
+            "PostgreSQL application repository runtime is unavailable or mismatched"
+        )
     return repositories
 
 
