@@ -409,6 +409,7 @@ class SQLiteBackedStore:
             for suffix in ("-wal", "-shm", "-journal")
         ]
         for path, create in paths:
+            is_transient_sidecar = path != self.db_path
             if create and not os.path.lexists(path):
                 try:
                     descriptor = os.open(
@@ -422,11 +423,25 @@ class SQLiteBackedStore:
                     os.close(descriptor)
             if not os.path.lexists(path):
                 continue
-            metadata = path.lstat()
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                # SQLite removes journals and WAL sidecars as transactions
+                # finish. Another connection can remove one after lexists()
+                # succeeds but before lstat() runs; there is then no file left
+                # to validate or chmod. Keep missing main database failures
+                # visible because the database path itself is not transient.
+                if is_transient_sidecar:
+                    continue
+                raise
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
                 raise PermissionError("SQLite database files must be regular files owned by the API user")
             if stat.S_IMODE(metadata.st_mode) & 0o077:
-                os.chmod(path, 0o600)
+                try:
+                    os.chmod(path, 0o600)
+                except FileNotFoundError:
+                    if not is_transient_sidecar:
+                        raise
 
     def _init_db(self) -> None:
         with self._lock, self._connect() as conn:

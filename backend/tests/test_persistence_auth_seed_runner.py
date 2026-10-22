@@ -91,6 +91,37 @@ def test_sqlite_store_restricts_existing_database_sidecars(tmp_path, monkeypatch
     assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
 
 
+def test_sqlite_store_tolerates_journal_removed_between_existence_and_stat(
+    tmp_path, monkeypatch
+) -> None:
+    from pathlib import Path
+
+    db_path = tmp_path / "racing.sqlite3"
+    monkeypatch.setenv("AIXION_DB_PATH", str(db_path))
+    local_store = SQLiteBackedStore()
+    journal_path = db_path.with_name(db_path.name + "-journal")
+    journal_path.write_text("transient journal")
+    journal_path.chmod(0o644)
+
+    original_lstat = Path.lstat
+    removed_race = False
+
+    def lstat_with_journal_race(path: Path):
+        nonlocal removed_race
+        if path == journal_path and not removed_race:
+            removed_race = True
+            journal_path.unlink()
+            raise FileNotFoundError(path)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_journal_race)
+
+    local_store._secure_database_files(create_main=False)
+
+    assert removed_race
+    assert stat.S_IMODE(original_lstat(db_path).st_mode) == 0o600
+
+
 def test_sqlite_store_rejects_symlink_database_path(tmp_path, monkeypatch) -> None:
     target = tmp_path / "target.sqlite3"
     target.write_bytes(b"")

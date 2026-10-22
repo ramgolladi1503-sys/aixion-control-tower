@@ -4,13 +4,20 @@
 
 - The phone's Connect workflow now supports choosing Antigravity or Codex, creating and listing only that provider's approval connector, validating registration responses against the exact provider/project/action scope, and showing provider-specific local hook setup commands. Codex setup says to review the local `PermissionRequest` hook trust prompt and states that same-invocation continuation still needs verification.
 - Added policy tests for Codex's least-privilege request and rejection of provider/project/enablement/action mismatches. `ANDROID_HOME=/Users/madhuram/Library/Android/sdk ./gradlew testDebugUnitTest` passed (`BUILD SUCCESSFUL`, 25 tasks). No new config keys or migrations.
-- ADB currently returns no attached devices, so device UI validation is unavailable. Prior exact-head CI on `c92d5b6` is green but predates these changes. Re-run exact-head GitHub CI after pushing. This setup work does not prove native Codex pause/resume, physical approval, or any remaining pre-billing slice exit gate.
+- ADB currently returns no attached devices, so device UI validation is unavailable. Exact-head Android CI and debug APK build passed on `b31a9dc`, which includes the connector code. This setup work does not prove native Codex pause/resume, physical approval, or any remaining pre-billing slice exit gate.
 
 ### Android release endpoint fail-closed recheck — 2026-10-22
 
 - On the current checkout, `ANDROID_HOME=/Users/madhuram/Library/Android/sdk ./gradlew verifyReleaseApiUrlGuard` passed: the accepted HTTPS host was allowed and all 12 unsafe URL cases were rejected.
 - `ANDROID_HOME=/Users/madhuram/Library/Android/sdk ./gradlew assembleRelease -PAIXION_API_BASE_URL=http://10.0.2.2:8000/` failed at `:app:preReleaseBuild` with the expected HTTPS/public-host validation error, before release compilation. This confirms the unsafe API URL cannot enter a release build through that task path. It does not validate a signed release artifact or production endpoint.
 - No source behavior, config, credentials, schema, or rollout changed. The SDK path was supplied only to the Gradle process; `local.properties` was not created.
+
+### SQLite transient journal race found by GitHub Backend CI — 2026-10-22
+
+- Backend CI on `b31a9dc` exposed a race in `_secure_database_files`: concurrent SQLite watchdog recovery connections could remove a transient `-journal` sidecar after `lexists()` but before `lstat()`, raising `FileNotFoundError` and failing the watchdog concurrency test.
+- The security check now tolerates `FileNotFoundError` only for transient `-wal`, `-shm`, and `-journal` sidecars, including a sidecar disappearing during chmod. The main database path still fails closed. Added a deterministic regression that removes a journal between existence and metadata checks.
+- Focused persistence/supervisor tests passed **31 tests**. Full backend suite passed **1,167 tests, 289 skipped, 6 warnings** using a fresh `/tmp` SQLite database; PostgreSQL-dependent skips remain unverified locally. Ruff, Python compilation, and `git diff --check` passed. Run with `backend/.venv/bin/python -c 'import os; import app.store; os.environ.pop("AIXION_DB_PATH", None); import pytest; raise SystemExit(pytest.main(["-q"]))'` after setting `AIXION_DB_PATH` to a disposable database for the process startup.
+- No configuration key or schema migration was added; no deployment or cloud action occurred. The fix is not yet on GitHub and needs exact-head CI after push.
 
 ### Current AST persistence inventory refresh — 2026-10-22
 
