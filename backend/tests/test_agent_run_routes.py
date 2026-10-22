@@ -4,6 +4,7 @@ import os
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.agent_run_models import (
@@ -117,13 +118,49 @@ def test_create_list_detail_summary_and_metrics_routes() -> None:
     assert durable_summary.status_code == 200
     assert durable_summary.json()["total"] == 1
     assert durable_summary.json()["queue_depth"] == 7
-
     paused = client.post(f"/agent/runs/{run_id}/pause", json={"reason": "route test"})
     assert paused.status_code == 200 and paused.json()["run"]["status"] == "PAUSED"
     resumed = client.post(f"/agent/runs/{run_id}/resume", json={"reason": "route test"})
     assert resumed.status_code == 200 and resumed.json()["run"]["status"] == "SCHEDULED"
     cancelled = client.post(f"/agent/runs/{run_id}/cancel", json={"reason": "route test"})
     assert cancelled.status_code == 200 and cancelled.json()["run"]["status"] == "CANCELLED"
+
+
+@pytest.mark.parametrize(
+    ("postgres_runtime", "postgres_run_repository", "notification_repository"),
+    [
+        (object(), None, None),
+        (None, object(), None),
+        (None, None, object()),
+    ],
+)
+def test_metrics_fail_closed_when_postgres_authority_is_selected(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_runtime: object | None,
+    postgres_run_repository: object | None,
+    notification_repository: object | None,
+) -> None:
+    if postgres_runtime is not None:
+        monkeypatch.setattr(app.state, "postgres_runtime", postgres_runtime, raising=False)
+    if postgres_run_repository is not None:
+        monkeypatch.setattr(
+            app.state,
+            "agent_run_repository",
+            postgres_run_repository,
+        )
+    if notification_repository is not None:
+        monkeypatch.setattr(
+            app.state,
+            "notification_outbox_repository",
+            notification_repository,
+            raising=False,
+        )
+
+    response = client.get("/agent/runs/metrics")
+
+    assert response.status_code == 503
+    assert "same durable runtime" in response.json()["detail"]
+    assert "aixion_agent_runs_total" not in response.text
 
 
 def test_fault_admin_routes_are_explicit_and_disableable() -> None:

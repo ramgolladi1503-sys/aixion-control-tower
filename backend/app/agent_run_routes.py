@@ -8,7 +8,6 @@ from .agent_run_faults import default_fault_reason
 from .agent_run_metrics import (
     build_agent_run_summary,
     prometheus_agent_run_metrics,
-    prometheus_postgres_notification_metrics,
 )
 from .application_repository_access import (
     agent_task_repository_for_request,
@@ -364,16 +363,28 @@ def get_run_metrics(
         if user.id == METRICS_SCRAPER_USER_ID
         else workspace_id_for_user(user)
     )
-    content = prometheus_agent_run_metrics(workspace_id)
     notification_repository = (
         getattr(http_request.app.state, "notification_outbox_repository", None)
         if http_request is not None
         else None
     )
-    if notification_repository is not None:
-        content += prometheus_postgres_notification_metrics(
-            notification_repository, workspace_id
-        )
+    if http_request is not None:
+        run_repository = agent_run_repository_for_request(http_request)
+        postgres_runtime = getattr(http_request.app.state, "postgres_runtime", None)
+        if (
+            postgres_runtime is not None
+            or not isinstance(run_repository, SQLiteAgentRunRepository)
+            or notification_repository is not None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Agent-run metrics are unavailable while PostgreSQL is selected "
+                    "until run, trust, and notification metric families use the "
+                    "same durable runtime."
+                ),
+            )
+    content = prometheus_agent_run_metrics(workspace_id)
     return Response(
         content=content,
         media_type="text/plain; version=0.0.4",

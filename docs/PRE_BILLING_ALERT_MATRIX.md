@@ -24,6 +24,11 @@ currently has split SQLite/PostgreSQL route and worker authority; production
 startup remains disabled. Do not configure staging alert policies against
 these application metrics until their producers, readers, workers, and scrape
 authentication are bound to the selected durable runtime and verified there.
+The `/agent/runs/metrics` endpoint now returns HTTP 503 if a PostgreSQL runtime,
+non-SQLite AgentRun repository, or separately bound notification repository is
+selected. This prevents stale process-local run/trust metrics from appearing
+alongside PostgreSQL state; it does not make those metric families PostgreSQL
+backed or satisfy the monitoring gate.
 
 ## Proposed staging alert definitions
 
