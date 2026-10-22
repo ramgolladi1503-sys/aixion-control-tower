@@ -23,6 +23,8 @@ from app.mcp_child_server_repository import PostgresMCPChildServerRepository
 from app.approval_repository import PostgresApprovalDecisionRepository
 from app.test_run_repository import PostgresTestRunRepository
 from app.workspace_membership_repository import WorkspaceMembershipSnapshot
+from app.project_repository import PostgresProjectRepository
+from app.workspace_membership_repository import PostgresWorkspaceMembershipRepository
 
 
 def test_agent_task_repository_access_returns_app_binding() -> None:
@@ -311,6 +313,70 @@ def test_project_repository_access_fails_closed_without_binding(test_request: ob
         project_repository_for_request(test_request)  # type: ignore[arg-type]
 
 
+def test_project_repository_uses_matching_postgres_runtime_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PostgresProjectRepository(lambda: None)  # type: ignore[arg-type]
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "projects", repository)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=repositories),
+                postgres_repositories=repositories,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert project_repository_for_request(request) is repository
+
+
+@pytest.mark.parametrize(
+    ("accessor", "repository_name", "error_message"),
+    [
+        (
+            project_repository_for_request,
+            "projects",
+            "PostgreSQL project repository is unavailable or mismatched",
+        ),
+        (
+            workspace_membership_repository_for_request,
+            "workspace_membership",
+            "PostgreSQL workspace-membership repository is unavailable or mismatched",
+        ),
+    ],
+)
+def test_workspace_and_project_selectors_reject_wrong_postgres_adapter_types(
+    monkeypatch: pytest.MonkeyPatch,
+    accessor,
+    repository_name: str,
+    error_message: str,
+) -> None:
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, repository_name, object())
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=repositories),
+                postgres_repositories=repositories,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match=error_message):
+        accessor(request)
+
+
 @pytest.mark.parametrize(
     ("accessor", "repository_name", "repository_type", "binding_name"),
     [
@@ -520,7 +586,7 @@ def test_workspace_membership_repository_access_returns_app_binding() -> None:
 def test_workspace_membership_repository_uses_postgres_auth_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    postgres_repository = object()
+    postgres_repository = PostgresWorkspaceMembershipRepository(lambda: None)  # type: ignore[arg-type]
     sqlite_repository = object()
     repositories = object.__new__(ApplicationRepositories)
     object.__setattr__(repositories, "workspace_membership", postgres_repository)
@@ -588,7 +654,10 @@ def test_workspace_membership_resolution_uses_postgres_snapshot(
     workspace_id = "pg-workspace"
     user_id = "pg-user"
 
-    class PostgresMembership:
+    class PostgresMembership(PostgresWorkspaceMembershipRepository):
+        def __init__(self) -> None:
+            pass
+
         def snapshot(self, *, user_id: str, claimed_workspace_id: str | None):
             assert user_id == "pg-user"
             assert claimed_workspace_id == workspace_id

@@ -11,13 +11,16 @@ from .agent_run_repository import AgentRunRepository, PostgresAgentRunRepository
 from .agent_auth_repository import ExternalAgentAuthenticationRepository
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
 from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
-from .project_repository import ProjectRepository
+from .project_repository import PostgresProjectRepository, ProjectRepository
 from .connector_repository import ConnectorRepository, PostgresConnectorRepository
 from .postgres_external_agent_auth_repository import PostgresExternalAgentAuthRepository
 from .idea_repository import IdeaRepository, PostgresIdeaRepository
 from .settings import get_settings
 from .workspace_access import workspace_id_for_user as resolve_workspace_id_for_user
-from .workspace_membership_repository import WorkspaceMembershipRepository
+from .workspace_membership_repository import (
+    PostgresWorkspaceMembershipRepository,
+    WorkspaceMembershipRepository,
+)
 from .work_order_repository import PostgresWorkOrderRepository, WorkOrderRepository
 from .models import AuthUser
 from .mcp_child_server_repository import (
@@ -152,7 +155,11 @@ def project_repository_for_request(request: _RequestState | None) -> ProjectRepo
     explicitly app-bound adapter.
     """
     if getattr(get_settings(), "postgres_auth_enabled", False):
-        return application_repositories_for_request(request).projects
+        repositories = application_repositories_for_request(request)
+        repository = getattr(repositories, "projects", None)
+        if not isinstance(repository, PostgresProjectRepository):
+            raise RuntimeError("PostgreSQL project repository is unavailable or mismatched")
+        return repository
 
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
@@ -335,7 +342,13 @@ def workspace_membership_repository_for_request(
 ) -> WorkspaceMembershipRepository:
     """Return membership reads from the active authentication authority."""
     if getattr(get_settings(), "postgres_auth_enabled", False):
-        return application_repositories_for_request(request).workspace_membership
+        repositories = application_repositories_for_request(request)
+        repository = getattr(repositories, "workspace_membership", None)
+        if not isinstance(repository, PostgresWorkspaceMembershipRepository):
+            raise RuntimeError(
+                "PostgreSQL workspace-membership repository is unavailable or mismatched"
+            )
+        return repository
 
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
