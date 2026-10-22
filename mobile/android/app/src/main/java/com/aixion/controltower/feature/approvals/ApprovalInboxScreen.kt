@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -16,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -29,6 +31,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.model.ApprovalHistoryEvent
+import com.aixion.controltower.core.model.ApprovalHistoryRequestSnapshot
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.ForegroundRefreshEffect
 import com.aixion.controltower.core.ui.components.ApprovalCard
@@ -37,6 +41,10 @@ import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 internal enum class ApprovalInboxSection {
     NEEDS_REVIEW,
@@ -47,7 +55,7 @@ internal enum class ApprovalHistoryFilter {
     ALL,
     APPROVED,
     REJECTED,
-    EXPIRED
+    REVISION_REQUESTED
 }
 
 internal fun orderApprovalsForInbox(approvals: List<ApprovalSummary>): List<ApprovalSummary> =
@@ -75,36 +83,38 @@ internal fun isUnsupportedInboxApproval(approval: ApprovalSummary): Boolean =
 
 internal fun filterApprovalsForInbox(
     approvals: List<ApprovalSummary>,
-    section: ApprovalInboxSection,
-    historyFilter: ApprovalHistoryFilter = ApprovalHistoryFilter.ALL
+    section: ApprovalInboxSection
 ): List<ApprovalSummary> {
     val supported = approvals.filterNot(::isUnsupportedInboxApproval)
     val selected = when (section) {
         ApprovalInboxSection.NEEDS_REVIEW -> supported.filter {
             it.status == ApprovalStatus.PENDING_REVIEW ||
                 it.status == ApprovalStatus.REQUESTED
-        }.filterNot { approval ->
-            approval.risk == RiskLevel.BLOCKED
-        }
+        }.filterNot { approval -> approval.risk == RiskLevel.BLOCKED }
 
-        ApprovalInboxSection.HISTORY -> supported.filter { approval ->
-            when (historyFilter) {
-                ApprovalHistoryFilter.ALL -> approval.status !in setOf(
-                    ApprovalStatus.PENDING_REVIEW,
-                    ApprovalStatus.REQUESTED
-                )
-
-                ApprovalHistoryFilter.APPROVED -> approval.status == ApprovalStatus.APPROVED
-
-                ApprovalHistoryFilter.REJECTED ->
-                    approval.status == ApprovalStatus.DENIED ||
-                        approval.status == ApprovalStatus.REJECTED
-
-                ApprovalHistoryFilter.EXPIRED -> approval.status == ApprovalStatus.EXPIRED
-            }
-        }
+        // Mutable approval records are never a source of decision history.
+        ApprovalInboxSection.HISTORY -> emptyList()
     }
     return orderApprovalsForInbox(selected)
+}
+
+internal fun decisionHistoryLabel(decision: String): String = when (decision.trim().lowercase()) {
+    "approve", "approved" -> "Approved"
+    "reject", "rejected", "deny", "denied" -> "Denied"
+    "revise", "revision_requested" -> "Revision requested"
+    else -> "Decision recorded"
+}
+
+internal fun filterApprovalHistory(
+    events: List<ApprovalHistoryEvent>,
+    filter: ApprovalHistoryFilter = ApprovalHistoryFilter.ALL
+): List<ApprovalHistoryEvent> = events.filter { event ->
+    when (filter) {
+        ApprovalHistoryFilter.ALL -> true
+        ApprovalHistoryFilter.APPROVED -> decisionHistoryLabel(event.decision) == "Approved"
+        ApprovalHistoryFilter.REJECTED -> decisionHistoryLabel(event.decision) == "Denied"
+        ApprovalHistoryFilter.REVISION_REQUESTED -> decisionHistoryLabel(event.decision) == "Revision requested"
+    }
 }
 
 @Composable
@@ -117,6 +127,8 @@ fun ApprovalInboxScreen(
     ApprovalInboxContent(
         state = state,
         onRetry = viewModel::refresh,
+        onHistorySelected = { viewModel.loadApprovalHistory() },
+        onHistoryRetry = { viewModel.loadApprovalHistory(forceRefresh = true) },
         onApprovalSelected = { approval ->
             viewModel.selectApproval(approval)
             onApprovalSelected(approval)
@@ -128,6 +140,8 @@ fun ApprovalInboxScreen(
 fun ApprovalInboxContent(
     state: ApprovalsUiState,
     onRetry: () -> Unit = {},
+    onHistorySelected: () -> Unit = {},
+    onHistoryRetry: () -> Unit = {},
     onApprovalSelected: (ApprovalSummary) -> Unit = {}
 ) {
     val palette = LocalTowerPalette.current
@@ -136,15 +150,14 @@ fun ApprovalInboxContent(
         ApprovalInboxSection.NEEDS_REVIEW
     ).size
     val blocked = state.approvals.filter { it.status == ApprovalStatus.BLOCKED }
-    val approved = state.approvals.filter { it.status == ApprovalStatus.APPROVED }
     val unsupported = state.approvals.filter(::isUnsupportedInboxApproval)
     var selectedSection by remember { mutableStateOf(ApprovalInboxSection.NEEDS_REVIEW) }
     var selectedHistoryFilter by remember { mutableStateOf(ApprovalHistoryFilter.ALL) }
     val visibleApprovals = filterApprovalsForInbox(
         approvals = state.approvals,
-        section = selectedSection,
-        historyFilter = selectedHistoryFilter
+        section = selectedSection
     )
+    val visibleHistory = filterApprovalHistory(state.approvalHistory, selectedHistoryFilter)
 
     LazyColumn(
         modifier = Modifier
@@ -154,35 +167,27 @@ fun ApprovalInboxContent(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text("Approvals", color = palette.ink, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text("Approvals", color = palette.ink, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onRetry, enabled = !state.loading && !state.refreshing) {
+                    Text(if (state.refreshing) "Refreshing…" else "Refresh")
+                }
+            }
             Text(
                 text = when {
-                    state.loading && state.approvals.isEmpty() -> "Loading approval decisions..."
-                    state.refreshing -> "Refreshing approvals. Showing the last synced data; opening requests is paused until sync completes."
-                    state.hasError -> "Backend approval sync failed. No mock approvals are shown."
-                    else -> "Review requests from connected agents and check their current status here."
+                    state.loading && state.approvals.isEmpty() -> "Loading requests…"
+                    state.refreshing -> "Refreshing. Requests are read-only until sync completes."
+                    state.hasError -> "Approval sync unavailable."
+                    else -> "Review pending requests or browse recorded decisions."
                 },
                 color = palette.inkMuted,
                 fontSize = 14.sp,
                 lineHeight = 20.sp
             )
-            Spacer(modifier = Modifier.height(TowerSpacing.sm))
-            Button(onClick = onRetry, enabled = !state.loading && !state.refreshing) {
-                Text(if (state.loading) "Refreshing approvals..." else "Refresh approvals")
-            }
-        }
-
-        item {
-            TowerPanel(elevated = true) {
-                Text("Decision gate", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(
-                    text = "External agents can submit work, but they do not approve it. This queue is where the operator decides whether work may continue, must stop, or needs revision.",
-                    color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 21.sp
-                )
-            }
         }
 
         state.errorMessage?.let { message ->
@@ -210,11 +215,10 @@ fun ApprovalInboxContent(
             }
         }
 
-        if (!state.hasError) item {
+        if (!state.hasError && selectedSection == ApprovalInboxSection.NEEDS_REVIEW) item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatusBadge("Needs review $pendingCount", palette.caution, fontSize = 14.sp, uppercase = false)
                 StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = 14.sp, uppercase = false)
-                StatusBadge("Approved ${approved.size}", palette.positive, fontSize = 14.sp, uppercase = false)
             }
         }
 
@@ -223,7 +227,10 @@ fun ApprovalInboxContent(
                 ApprovalInboxSection.entries.forEach { section ->
                     FilterChip(
                         selected = selectedSection == section,
-                        onClick = { selectedSection = section },
+                        onClick = {
+                            selectedSection = section
+                            if (section == ApprovalInboxSection.HISTORY) onHistorySelected()
+                        },
                         label = {
                             Text(
                                 when (section) {
@@ -240,7 +247,7 @@ fun ApprovalInboxContent(
         if (selectedSection == ApprovalInboxSection.HISTORY) {
             item {
                 Text(
-                    "History uses the current approval status. The original decision, reviewer, time, and delivery outcome are not available in this list yet.",
+                    "Immutable reviewer decisions for recent requests. Decision records do not confirm delivery to the agent or execution.",
                     color = palette.inkMuted,
                     fontSize = 14.sp,
                     lineHeight = 21.sp
@@ -261,12 +268,36 @@ fun ApprovalInboxContent(
                                         ApprovalHistoryFilter.ALL -> "All"
                                         ApprovalHistoryFilter.APPROVED -> "Approved"
                                         ApprovalHistoryFilter.REJECTED -> "Rejected"
-                                        ApprovalHistoryFilter.EXPIRED -> "Expired"
+                                        ApprovalHistoryFilter.REVISION_REQUESTED -> "Revision requested"
                                     }
                                 )
                             }
                         )
                     }
+                }
+            }
+            if (state.historyLoading) {
+                item { Text("Loading decision history…", color = palette.inkMuted, fontSize = 14.sp) }
+            }
+            state.historyErrorMessage?.let { message ->
+                item {
+                    TowerPanel(elevated = true) {
+                        Text("Decision history unavailable", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text(message, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
+                        TextButton(onClick = onHistoryRetry, enabled = !state.historyLoading) {
+                            Text(if (state.historyLoading) "Retrying…" else "Retry history")
+                        }
+                    }
+                }
+            }
+            if (state.historyLoaded && state.historyHasMore) {
+                item {
+                    Text(
+                        "Showing the latest ${state.historyLimit} decisions. Older entries are not loaded in this view yet.",
+                        color = palette.inkMuted,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
+                    )
                 }
             }
         }
@@ -295,65 +326,34 @@ fun ApprovalInboxContent(
             it.status == ApprovalStatus.BLOCKED && it.risk != RiskLevel.BLOCKED
         }
         val disabledApprovals = (unsupported + blockedRisk + blockedStatus).distinctBy { it.id }
-        if (!state.hasError && (unsupported.isNotEmpty() || blockedRisk.isNotEmpty() || blockedStatus.isNotEmpty())) {
+        if (!state.hasError && selectedSection == ApprovalInboxSection.NEEDS_REVIEW && !state.loading && !state.refreshing && visibleApprovals.isEmpty()) {
             item {
                 TowerPanel(elevated = true) {
-                    StatusBadge(
-                        if (unsupported.isNotEmpty()) "Unsupported data · decisions disabled"
-                        else "Policy blocked · decisions disabled",
-                        palette.danger,
-                        fontSize = 14.sp,
-                        uppercase = false
-                    )
-                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
-                        text = buildList {
-                            if (unsupported.isNotEmpty()) {
-                                add("${unsupported.size} approval(s) contain an unrecognized status or risk value.")
-                            }
-                            if (blockedRisk.isNotEmpty()) {
-                                add("${blockedRisk.size} approval(s) are blocked by risk policy and cannot be decided from mobile.")
-                            }
-                            if (blockedStatus.isNotEmpty()) {
-                                add("${blockedStatus.size} approval(s) have a blocked server status and are read-only.")
-                            }
-                            add("These requests remain visible below for review; update the app or backend if the data is unsupported.")
-                        }.joinToString(" "),
+                        text = "No requests need review",
+                        color = palette.ink,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "New requests will appear here when an agent needs your decision.",
                         color = palette.inkMuted,
                         fontSize = 14.sp,
                         lineHeight = 21.sp
                     )
                 }
             }
-            items(disabledApprovals) { approval ->
-                ApprovalCard(
-                    approval = approval,
-                    onClick = if (canSelectApprovalFromInbox(state)) {
-                        { onApprovalSelected(approval) }
-                    } else {
-                        null
-                    }
-                )
-            }
         }
 
-        if (!state.hasError && !state.loading && !state.refreshing && visibleApprovals.isEmpty()) {
+        if (selectedSection == ApprovalInboxSection.HISTORY &&
+            !state.historyLoading && state.historyErrorMessage == null &&
+            state.historyLoaded && visibleHistory.isEmpty()
+        ) {
             item {
                 TowerPanel(elevated = true) {
+                    Text("No decisions recorded", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Text(
-                        text = when (selectedSection) {
-                            ApprovalInboxSection.NEEDS_REVIEW -> "No requests need review"
-                            ApprovalInboxSection.HISTORY -> "No requests match this filter"
-                        },
-                        color = palette.ink,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = when (selectedSection) {
-                            ApprovalInboxSection.NEEDS_REVIEW -> "New requests will appear here when an agent needs your decision."
-                            ApprovalInboxSection.HISTORY -> "Try another status filter to see more requests."
-                        },
+                        "Recorded approve, deny, and revision decisions will appear here.",
                         color = palette.inkMuted,
                         fontSize = 14.sp,
                         lineHeight = 21.sp
@@ -374,5 +374,136 @@ fun ApprovalInboxContent(
                 )
             }
         }
+
+        if (!state.hasError && selectedSection == ApprovalInboxSection.NEEDS_REVIEW &&
+            (unsupported.isNotEmpty() || blockedRisk.isNotEmpty() || blockedStatus.isNotEmpty())
+        ) {
+            item {
+                TowerPanel(elevated = true) {
+                    StatusBadge(
+                        if (unsupported.isNotEmpty()) "Unsupported data · decisions disabled"
+                        else "Policy blocked · decisions disabled",
+                        palette.danger,
+                        fontSize = 14.sp,
+                        uppercase = false
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(
+                        text = buildList {
+                            if (unsupported.isNotEmpty()) add("${unsupported.size} approval(s) contain an unrecognized status or risk value.")
+                            if (blockedRisk.isNotEmpty()) add("${blockedRisk.size} approval(s) are blocked by risk policy and cannot be decided from mobile.")
+                            if (blockedStatus.isNotEmpty()) add("${blockedStatus.size} approval(s) have a blocked server status and are read-only.")
+                            add("These requests remain visible below for review; update the app or backend if the data is unsupported.")
+                        }.joinToString(" "),
+                        color = palette.inkMuted,
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp
+                    )
+                }
+            }
+            items(disabledApprovals) { approval ->
+                ApprovalCard(
+                    approval = approval,
+                    onClick = if (canSelectApprovalFromInbox(state)) {
+                        { onApprovalSelected(approval) }
+                    } else {
+                        null
+                    }
+                )
+            }
+        }
+
+        if (selectedSection == ApprovalInboxSection.HISTORY && state.historyErrorMessage == null) {
+            items(visibleHistory, key = { it.eventId }) { event ->
+                ApprovalDecisionHistoryCard(event)
+            }
+        }
     }
+}
+
+@Composable
+private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(elevated = true) {
+        StatusBadge(
+            event.decision.let(::decisionHistoryLabel),
+            color = when (event.decision.trim().lowercase()) {
+                "approve", "approved" -> palette.positive
+                "reject", "rejected", "deny", "denied" -> palette.danger
+                else -> palette.caution
+            },
+            fontSize = 14.sp,
+            uppercase = false
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, fontSize = 13.sp)
+        Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, fontSize = 13.sp)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text("Reason", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text(event.reason ?: "No reason was provided.", color = palette.inkMuted, fontSize = 14.sp, lineHeight = 20.sp)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        val snapshot = event.requestSnapshot.takeIf { event.requestSnapshotVerified }
+        if (snapshot == null) {
+            Text("Request details unavailable", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "This older or unverifiable record is shown without request details.",
+                color = palette.inkMuted,
+                fontSize = 13.sp,
+                lineHeight = 19.sp
+            )
+        } else {
+            VerifiedRequestSnapshot(snapshot)
+        }
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            "Decision record only. Delivery to the agent and execution are not confirmed here.",
+            color = palette.inkMuted,
+            fontSize = 12.sp,
+            lineHeight = 18.sp
+        )
+    }
+}
+
+@Composable
+private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
+    val palette = LocalTowerPalette.current
+    Text("Verified request", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    Text(snapshot.title?.takeIf(String::isNotBlank) ?: "Untitled request", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    Text(snapshot.summary?.takeIf(String::isNotBlank) ?: "Request summary unavailable", color = palette.inkMuted, fontSize = 14.sp, lineHeight = 20.sp)
+    val provider = listOfNotNull(
+        snapshot.sourceAgentName?.takeIf(String::isNotBlank) ?: snapshot.agentName?.takeIf(String::isNotBlank),
+        snapshot.sourceProvider?.takeIf(String::isNotBlank)
+    ).distinct().joinToString(" · ")
+    if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, fontSize = 13.sp)
+    val risk = snapshot.riskLevel.name.lowercase().replaceFirstChar { it.uppercase() }
+    StatusBadge(
+        if (snapshot.riskLevel == RiskLevel.UNKNOWN) "Risk unavailable" else "$risk risk",
+        color = if (snapshot.riskLevel == RiskLevel.UNKNOWN) palette.caution else palette.brand,
+        fontSize = 13.sp,
+        uppercase = false
+    )
+    snapshot.targetBranch?.takeIf(String::isNotBlank)?.let { branch ->
+        Text("Target branch · $branch", color = palette.inkMuted, fontSize = 13.sp)
+    }
+    if (snapshot.files.isNotEmpty()) {
+        Text("Affected files", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, fontSize = 13.sp, lineHeight = 19.sp) }
+    }
+    if (snapshot.testPlan.isNotEmpty()) {
+        Text("Test plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, fontSize = 13.sp, lineHeight = 19.sp) }
+    }
+    snapshot.rollbackPlan?.takeIf(String::isNotBlank)?.let { plan ->
+        Text("Rollback plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text(plan, color = palette.inkMuted, fontSize = 13.sp, lineHeight = 19.sp)
+    }
+}
+
+private fun formatHistoryTime(raw: String?): String {
+    if (raw.isNullOrBlank()) return "time unavailable"
+    return runCatching {
+        val formatter = DateTimeFormatter.ofPattern("MMM d, yyyy 'at' h:mm a", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
+        formatter.format(Instant.parse(raw))
+    }.getOrDefault("time unavailable")
 }

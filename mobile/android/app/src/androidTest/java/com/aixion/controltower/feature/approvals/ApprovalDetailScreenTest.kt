@@ -311,7 +311,7 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
-    fun approvalDetailShowsInvocationIdentityAndRiskRationale() {
+    fun approvalDetailKeepsSafetyContextVisibleAndHidesRawIdsUntilExpanded() {
         val request = approval(ApprovalStatus.REQUESTED).copy(
             projectId = "project-production",
             sourceAgentId = "agent-antigravity-01",
@@ -325,14 +325,17 @@ class ApprovalDetailScreenTest {
             ApprovalDetailContent(request, null, {}, {}, {})
         }
 
+        composeRule.onNodeWithText("Risk rationale").assertExists()
+        composeRule.onNodeWithText("ANTIGRAVITY · Verified source").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("main").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Show technical details").performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithText("Approval ID: approval-detail-test", substring = true).assertCountEquals(0)
+        composeRule.onNodeWithText("Show technical details").performClick()
         composeRule.onNodeWithText("Approval ID: approval-detail-test", substring = true).assertExists()
         composeRule.onNodeWithText("Project ID: project-production", substring = true).assertExists()
         composeRule.onNodeWithText("Source agent ID: agent-antigravity-01", substring = true).assertExists()
         composeRule.onNodeWithText("Session ID: session-codex-42", substring = true).assertExists()
-        composeRule.onNodeWithText(
-            "Source invocation ID: antigravity:session-codex-42:tool-19",
-            substring = true
-        ).assertExists()
+        composeRule.onNodeWithText("Source invocation ID: antigravity:session-codex-42:tool-19", substring = true).assertExists()
         composeRule.onNodeWithText("Expires at: 2026-10-21T12:30:00Z", substring = true).assertExists()
         composeRule.onNodeWithText("Source verified: Yes", substring = true).assertExists()
         composeRule.onNodeWithText(
@@ -372,6 +375,7 @@ class ApprovalDetailScreenTest {
             .assertIsDisplayed()
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").performScrollTo()
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").assertIsDisplayed()
+        composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
         composeRule.onNodeWithText("antigravity:session-42:tool-19").assertIsDisplayed()
         composeRule.onNodeWithText("2026-10-22T14:30:00Z").performScrollTo()
         composeRule.onNodeWithText("2026-10-22T14:30:00Z").assertIsDisplayed()
@@ -390,9 +394,11 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
-        composeRule.onAllNodesWithText("Not provided").assertCountEquals(4)
+        composeRule.onAllNodesWithText("Not provided").assertCountEquals(3)
         composeRule.onNodeWithText("ANTIGRAVITY · Source not verified").assertExists()
         composeRule.onNodeWithText("No risk rationale was supplied.").assertExists()
+        composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
+        composeRule.onNodeWithText("Source invocation ID: Not provided", substring = true).assertExists()
     }
 
     @Test

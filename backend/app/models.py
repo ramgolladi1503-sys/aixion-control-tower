@@ -364,6 +364,67 @@ class ApprovalRequest(ApprovalRequestCreate):
         return AgentProvider.MANUAL if value is None else value
 
 
+class ApprovalHistoryRequestSnapshot(BaseModel):
+    """Immutable request fields displayed for a hash-verified decision record."""
+
+    id: str
+    project_id: str
+    work_order_id: str | None = None
+    title: str
+    summary: str
+    agent_name: str
+    target_branch: str
+    files: list[FileChange]
+    test_plan: list[str] = Field(default_factory=list)
+    rollback_plan: str = ""
+    source_provider: AgentProvider
+    source_agent_id: str | None = None
+    source_agent_name: str | None = None
+    source_session_id: str | None = None
+    source_invocation_id: str | None = None
+    source_task_url: str | None = None
+    risk: RiskAssessment
+
+    @classmethod
+    def from_approval(cls, approval: ApprovalRequest) -> ApprovalHistoryRequestSnapshot:
+        return cls(
+            id=approval.id,
+            project_id=approval.project_id,
+            work_order_id=approval.work_order_id,
+            title=approval.title,
+            summary=approval.summary,
+            agent_name=approval.agent_name,
+            target_branch=approval.target_branch,
+            files=approval.files,
+            test_plan=approval.test_plan,
+            rollback_plan=approval.rollback_plan,
+            source_provider=approval.source_provider,
+            source_agent_id=approval.source_agent_id,
+            source_agent_name=approval.source_agent_name,
+            source_session_id=approval.source_session_id,
+            source_invocation_id=approval.source_invocation_id,
+            source_task_url=approval.source_task_url,
+            risk=approval.risk,
+        )
+
+
+class ApprovalDecisionHistoryEntry(BaseModel):
+    audit_event_id: str
+    approval_id: str
+    decision: str
+    reason: str | None = None
+    decided_at: datetime
+    reviewer_label: str
+    request_snapshot_verified: bool
+    request_snapshot: ApprovalHistoryRequestSnapshot | None = None
+
+
+class ApprovalDecisionHistoryResponse(BaseModel):
+    events: list[ApprovalDecisionHistoryEntry] = Field(default_factory=list)
+    limit: int
+    has_more: bool
+
+
 class MCPPendingRequest(BaseModel):
     id: str = Field(default_factory=lambda: new_id("mcp_pending"))
     project_id: str

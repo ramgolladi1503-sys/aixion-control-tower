@@ -115,6 +115,48 @@ data class ApprovalSummary(
         }
 }
 
+/** An immutable reviewer decision event. It is intentionally separate from mutable approval status. */
+data class ApprovalHistoryEvent(
+    val eventId: String,
+    val approvalId: String,
+    val decision: String,
+    val reason: String?,
+    val decidedAt: String?,
+    val reviewerLabel: String,
+    val requestSnapshotVerified: Boolean,
+    val requestSnapshot: ApprovalHistoryRequestSnapshot?
+)
+
+data class ApprovalHistoryPage(
+    val events: List<ApprovalHistoryEvent>,
+    val limit: Int,
+    val hasMore: Boolean
+)
+
+data class ApprovalHistoryRequestSnapshot(
+    val projectId: String?,
+    val title: String?,
+    val summary: String?,
+    val agentName: String?,
+    val targetBranch: String?,
+    val files: List<ApprovalHistoryFile>,
+    val testPlan: List<String>,
+    val rollbackPlan: String?,
+    val sourceProvider: String?,
+    val sourceAgentName: String?,
+    val sourceSessionId: String?,
+    val sourceInvocationId: String?,
+    val sourceTaskUrl: String?,
+    val riskLevel: RiskLevel,
+    val riskReasons: List<String>,
+    val requiredActions: List<String>
+)
+
+data class ApprovalHistoryFile(
+    val path: String,
+    val changeType: String
+)
+
 val ApprovalStatus.canonical: ApprovalStatus
     get() = when (this) {
         ApprovalStatus.PENDING_REVIEW -> ApprovalStatus.REQUESTED

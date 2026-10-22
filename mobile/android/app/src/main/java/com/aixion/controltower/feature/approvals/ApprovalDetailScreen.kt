@@ -23,6 +23,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -191,6 +192,7 @@ fun ApprovalDetailContent(
     val canApprove = canDecide && !hasRequiredActions
     val requiresRiskConfirmation = requiresExplicitRiskConfirmation(approval.risk)
     var showRiskConfirmation by remember(approval.id) { mutableStateOf(false) }
+    var showTechnicalDetails by remember(approval.id) { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -262,20 +264,10 @@ fun ApprovalDetailContent(
             }
 
             item {
-                DetailPanel(
-                    title = "Request Identity",
-                    body = buildList {
-                        add("Approval ID: ${approval.id}")
-                        add("Project: ${approval.projectName}")
-                        if (approval.projectId.isNotBlank()) add("Project ID: ${approval.projectId}")
-                        add("Agent: ${approval.agentName}")
-                        add("Provider: ${approval.sourceProvider}")
-                        add("Source agent ID: ${approval.sourceAgentId ?: "Not provided"}")
-                        add("Session ID: ${approval.sourceSessionId ?: "Not provided"}")
-                        add("Source invocation ID: ${approval.sourceInvocationId ?: "Not provided"}")
-                        add("Expires at: ${approval.expiresAt ?: "Not provided"}")
-                        add("Source verified: ${if (approval.verifiedSource) "Yes" else "No"}")
-                    }.joinToString("\n")
+                TechnicalDetailsDisclosure(
+                    approval = approval,
+                    expanded = showTechnicalDetails,
+                    onToggle = { showTechnicalDetails = !showTechnicalDetails }
                 )
             }
             item {
@@ -367,6 +359,40 @@ internal fun requiresExplicitRiskConfirmation(risk: RiskLevel): Boolean =
     risk == RiskLevel.HIGH || risk == RiskLevel.CRITICAL
 
 @Composable
+private fun TechnicalDetailsDisclosure(
+    approval: ApprovalSummary,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(elevated = true) {
+        TextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
+            Text(if (expanded) "Hide technical details" else "Show technical details")
+        }
+        if (expanded) {
+            Text("Request and connector identifiers", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                buildList {
+                    add("Approval ID: ${approval.id}")
+                    add("Project: ${approval.projectName}")
+                    if (approval.projectId.isNotBlank()) add("Project ID: ${approval.projectId}")
+                    add("Agent: ${approval.agentName}")
+                    add("Provider: ${approval.sourceProvider}")
+                    add("Source agent ID: ${approval.sourceAgentId ?: "Not provided"}")
+                    add("Session ID: ${approval.sourceSessionId ?: "Not provided"}")
+                    add("Source invocation ID: ${approval.sourceInvocationId ?: "Not provided"}")
+                    add("Expires at: ${approval.expiresAt ?: "Not provided"}")
+                    add("Source verified: ${if (approval.verifiedSource) "Yes" else "No"}")
+                }.joinToString("\n"),
+                color = palette.inkMuted,
+                fontSize = 14.sp,
+                lineHeight = 20.sp
+            )
+        }
+    }
+}
+
+@Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun ApprovalHeroPanel(
     approval: ApprovalSummary,
@@ -432,7 +458,6 @@ private fun ApprovalHeroPanel(
             DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
             DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
             DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
-            DecisionContextLine("Invocation", approval.sourceInvocationId?.ifBlank { null } ?: "Not provided")
             DecisionContextLine("Expires", approval.expiresAt?.ifBlank { null } ?: "Not provided")
         }
     }

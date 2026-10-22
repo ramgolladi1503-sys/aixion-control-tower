@@ -7,7 +7,9 @@ import multiprocessing
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
 
@@ -19,6 +21,7 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app import main
+from app import application_repository_access
 from app.agent_auth import revoke_external_agent_token
 from app.agent_credential_models import AgentCredentialRecord
 from app.application_repositories import ApplicationRepositories
@@ -577,6 +580,83 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
         ).fetchone()[0] == 1
     assert set(store.approval_requests) == initial_store_approval_ids
     assert set(store.external_agents) == initial_store_agent_ids
+
+
+def test_postgres_approval_history_reads_verified_decision_from_runtime_bundle(
+    postgres_approval_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect, workspace, project, user, repositories, agent, agent_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    postgres_settings = replace(main.get_settings(), postgres_auth_enabled=True)
+    monkeypatch.setattr(main, "get_settings", lambda: postgres_settings)
+    monkeypatch.setattr(
+        application_repository_access,
+        "get_settings",
+        lambda: postgres_settings,
+    )
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_repositories",
+        repositories,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_runtime",
+        SimpleNamespace(repositories=repositories),
+        raising=False,
+    )
+
+    client = TestClient(main.app)
+    created = client.post(
+        "/agents/approvals",
+        headers={
+            "X-Aixion-Agent-Id": agent.id,
+            "X-Aixion-Agent-Token": agent_token,
+        },
+        json={
+            "project_id": project.id,
+            "title": "PostgreSQL history verification",
+            "summary": "The history route must read the bound immutable audit record.",
+            "agent_name": agent.display_name,
+            "target_branch": "feature/approval-history-test",
+            "files": [
+                {
+                    "path": "README.md",
+                    "change_type": "modify",
+                    "diff": "-old\n+new",
+                }
+            ],
+            "risk": {"level": "LOW", "reasons": []},
+            "source_session_id": "history-session",
+            "source_invocation_id": f"history-{uuid.uuid4().hex}",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    approval_id = created.json()["id"]
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "reason": "Approved in PostgreSQL integration test."},
+    )
+    assert decision.status_code == 200, decision.text
+    assert decision.json()["approved_payload_hash"]
+
+    history = client.get("/approvals/history")
+
+    assert history.status_code == 200, history.text
+    payload = history.json()
+    assert payload["events"]
+    event = payload["events"][0]
+    assert event["approval_id"] == approval_id
+    assert event["decision"] == "approve"
+    assert event["request_snapshot_verified"] is True
+    assert event["request_snapshot"]["title"] == "PostgreSQL history verification"
+    assert event["reviewer_label"] == "You"
+    assert user.email not in history.text
+    client.close()
 
 
 def test_postgres_http_duplicate_invocation_create_is_idempotent_and_conflicts_on_change(

@@ -4,6 +4,7 @@ import com.aixion.controltower.core.api.dto.AccountDeletionInfoDto
 import com.aixion.controltower.core.api.dto.AccountDeletionRequestDto
 import com.aixion.controltower.core.api.dto.AccountDeletionResponseDto
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryResponseDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.AuthResponseDto
 import com.aixion.controltower.core.api.dto.AuthUserDto
@@ -153,6 +154,9 @@ interface ControlTowerApi {
 
     @GET("approvals")
     suspend fun listApprovals(): List<ApprovalRequestDto>
+
+    @GET("approvals/history")
+    suspend fun listApprovalHistory(@Query("limit") limit: Int = 50): ApprovalHistoryResponseDto
 
     @GET("approvals/{approvalId}")
     suspend fun getApproval(@Path("approvalId") approvalId: String): ApprovalRequestDto

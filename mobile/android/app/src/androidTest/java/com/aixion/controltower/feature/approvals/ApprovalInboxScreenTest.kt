@@ -1,6 +1,8 @@
 package com.aixion.controltower.feature.approvals
 
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.runtime.CompositionLocalProvider
@@ -9,6 +11,9 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.aixion.controltower.core.model.ApprovalStatus
+import com.aixion.controltower.core.model.ApprovalHistoryEvent
+import com.aixion.controltower.core.model.ApprovalHistoryFile
+import com.aixion.controltower.core.model.ApprovalHistoryRequestSnapshot
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
@@ -38,10 +43,9 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onNodeWithText("Approvals").assertExists()
-        composeRule.onNodeWithText("Review requests from connected agents, then see every decision and its status here.").assertExists()
+        composeRule.onNodeWithText("Review pending requests and see the decisions recorded for each one.").assertExists()
         composeRule.onNodeWithText("Needs review 2").assertExists()
         composeRule.onNodeWithText("Status blocked 1").assertExists()
-        composeRule.onNodeWithText("Approved 1").assertExists()
         composeRule.onNodeWithText("Pending approval").assertExists()
         composeRule.onNodeWithText("Blocked approval").assertExists()
         composeRule.onNodeWithText("Approved approval").assertExists()
@@ -93,7 +97,7 @@ class ApprovalInboxScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Refresh approvals").performClick()
+        composeRule.onNodeWithText("Refresh").performClick()
 
         assertEquals(true, refreshRequested)
     }
@@ -139,7 +143,108 @@ class ApprovalInboxScreenTest {
         Thread.sleep(100)
         composeRule.runOnIdle { assertEquals(countAfterStop, refreshCount) }
     }
+
+    @Test
+    fun historyUsesImmutableDecisionAndVerifiedSnapshotInsteadOfCurrentApprovalStatus() {
+        val currentApproval = approval(
+            id = "approval-immutable-history",
+            title = "Mutable record currently says approved",
+            status = ApprovalStatus.APPROVED
+        )
+        val event = historyEvent(
+            decision = "reject",
+            reviewerLabel = "You",
+            requestSnapshotVerified = true,
+            requestSnapshot = historySnapshot(title = "Original request that was denied")
+        )
+
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    approvals = listOf(currentApproval),
+                    approvalHistory = listOf(event),
+                    historyLoaded = true
+                )
+            )
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+
+        composeRule.onNodeWithText("Denied").assertExists()
+        composeRule.onNodeWithText("Original request that was denied").assertExists()
+        composeRule.onNodeWithText("Reviewer · You").assertExists()
+        composeRule.onNodeWithText(
+            "Decision record only. Delivery to the agent and execution are not confirmed here."
+        ).assertExists()
+        composeRule.onAllNodesWithText("Mutable record currently says approved").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Execution complete").assertCountEquals(0)
+    }
+
+    @Test
+    fun historyHidesUnverifiedSnapshotAndShowsGenericUnavailableState() {
+        val event = historyEvent(
+            decision = "approve",
+            reviewerLabel = "Workspace reviewer",
+            requestSnapshotVerified = false,
+            requestSnapshot = historySnapshot(title = "Unverified secret request")
+        )
+
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    approvalHistory = listOf(event),
+                    historyLoaded = true
+                )
+            )
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+
+        composeRule.onNodeWithText("Approved").assertExists()
+        composeRule.onNodeWithText("Reviewer · Workspace reviewer").assertExists()
+        composeRule.onNodeWithText("Request details unavailable").assertExists()
+        composeRule.onNodeWithText("This older or unverifiable record is shown without request details.").assertExists()
+        composeRule.onAllNodesWithText("Unverified secret request").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Delivered to agent").assertCountEquals(0)
+    }
 }
+
+private fun historyEvent(
+    decision: String,
+    reviewerLabel: String,
+    requestSnapshotVerified: Boolean,
+    requestSnapshot: ApprovalHistoryRequestSnapshot?
+) = ApprovalHistoryEvent(
+    eventId = "audit-event-test-only",
+    approvalId = "approval-id-test-only",
+    decision = decision,
+    reason = "Checked the requested changes.",
+    decidedAt = "2026-10-22T10:00:00Z",
+    reviewerLabel = reviewerLabel,
+    requestSnapshotVerified = requestSnapshotVerified,
+    requestSnapshot = requestSnapshot
+)
+
+private fun historySnapshot(title: String) = ApprovalHistoryRequestSnapshot(
+    projectId = "private-project-id",
+    title = title,
+    summary = "A request summary preserved with the decision.",
+    agentName = "Antigravity",
+    targetBranch = "main",
+    files = listOf(ApprovalHistoryFile("src/Main.kt", "modify")),
+    testPlan = listOf("Run focused tests"),
+    rollbackPlan = "Revert the change",
+    sourceProvider = "ANTIGRAVITY",
+    sourceAgentName = "Antigravity on Mac",
+    sourceSessionId = "private-session-id",
+    sourceInvocationId = "private-invocation-id",
+    sourceTaskUrl = "https://example.invalid/task",
+    riskLevel = RiskLevel.HIGH,
+    riskReasons = listOf("Review carefully"),
+    requiredActions = listOf("Review")
+)
 
 private fun approval(id: String, title: String, status: ApprovalStatus): ApprovalSummary {
     return ApprovalSummary(

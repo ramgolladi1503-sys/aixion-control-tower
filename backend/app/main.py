@@ -55,6 +55,9 @@ from .mcp_gateway_routes import router as mcp_gateway_router
 from .mcp_registry_routes import router as mcp_registry_router
 from .mcp_transport_routes import router as mcp_transport_router
 from .models import (
+    ApprovalDecisionHistoryEntry,
+    ApprovalDecisionHistoryResponse,
+    ApprovalHistoryRequestSnapshot,
     ApprovalGroups,
     ApprovalRequest,
     ApprovalRequestCreate,
@@ -992,6 +995,121 @@ def list_approval_requests(
     return requests
 
 
+@app.get("/approvals/history", response_model=ApprovalDecisionHistoryResponse)
+def list_approval_decision_history(
+    http_request: Request,
+    limit: int = 50,
+    user: AuthUser = ReviewerDependency,
+) -> ApprovalDecisionHistoryResponse:
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+
+    workspace_id = _workspace_id_for_route(user, http_request)
+    if workspace_id is None:
+        if get_settings().is_production:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        # Never turn a missing workspace into an unscoped history query.
+        return ApprovalDecisionHistoryResponse(events=[], limit=limit, has_more=False)
+
+    try:
+        event_repository = audit_event_repository_for_request(http_request)
+        approval_repository = _approval_repository_for_route(http_request)
+        project_repository = _project_repository_for_route(http_request)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Approval decision history is unavailable for this persistence runtime",
+        ) from exc
+
+    audit_events = event_repository.list_for_workspace(
+        workspace_id,
+        event_type="approval.decision",
+        limit=limit + 1,
+    )
+    has_more = len(audit_events) > limit
+    history: list[ApprovalDecisionHistoryEntry] = []
+    decision_aliases = {
+        "approve": "approve",
+        "deny": "deny",
+        "denied": "deny",
+        "reject": "deny",
+        "revise": "revise",
+        "request_revision": "revise",
+        "revision": "revise",
+    }
+
+    for event in audit_events[:limit]:
+        raw_decision = event.details.get("decision")
+        decision_key = raw_decision.strip().lower() if isinstance(raw_decision, str) else ""
+        decision = decision_aliases.get(decision_key, "unknown")
+        approval_id = event.entity_id
+        approval = approval_repository.get(approval_id)
+        request_snapshot: ApprovalHistoryRequestSnapshot | None = None
+        request_snapshot_verified = False
+
+        # The audit query is workspace-filtered. Recheck the event and both
+        # linked records before attaching request contents to the response.
+        if event.workspace_id in {None, workspace_id} and approval is not None:
+            project = project_repository.get(approval.project_id)
+            scope_matches = (
+                project is not None
+                and project.workspace_id == workspace_id
+                and approval.workspace_id in {None, workspace_id}
+                and approval.workspace_id in {None, project.workspace_id}
+            )
+            if scope_matches:
+                reviewed_hash = event.details.get("reviewed_payload_hash")
+                hash_candidate = approval.model_copy(deep=True)
+                hash_candidate.approved_payload_hash_version = 2
+                if hash_candidate.workspace_id is None:
+                    hash_candidate.workspace_id = workspace_id
+                if not isinstance(reviewed_hash, str) and decision == "approve":
+                    # Older approve events froze this field under the request's
+                    # original hash version. Older deny/revise events did not
+                    # freeze any request snapshot and remain unverifiable.
+                    reviewed_hash = event.details.get("approved_payload_hash")
+                    hash_candidate = approval
+                if isinstance(reviewed_hash, str) and decision in {
+                    "approve",
+                    "deny",
+                    "revise",
+                }:
+                    try:
+                        request_snapshot_verified = (
+                            compute_approval_payload_hash(hash_candidate) == reviewed_hash
+                        )
+                    except ValueError:
+                        request_snapshot_verified = False
+                if request_snapshot_verified:
+                    request_snapshot = ApprovalHistoryRequestSnapshot.from_approval(approval)
+
+        history.append(
+            ApprovalDecisionHistoryEntry(
+                audit_event_id=event.id,
+                approval_id=approval_id,
+                decision=decision,
+                reason=(
+                    event.details.get("reason")
+                    if isinstance(event.details.get("reason"), str)
+                    else None
+                ),
+                decided_at=event.created_at,
+                reviewer_label=(
+                    "You"
+                    if event.actor.casefold() == user.email.casefold()
+                    else "Workspace reviewer"
+                ),
+                request_snapshot_verified=request_snapshot_verified,
+                request_snapshot=request_snapshot,
+            )
+        )
+    return ApprovalDecisionHistoryResponse(
+        events=history,
+        limit=limit,
+        has_more=has_more,
+    )
+
+
 @app.get("/approvals/grouped", response_model=ApprovalGroups)
 def list_grouped_approval_requests(
     user: AuthUser = ReviewerDependency,
@@ -1148,6 +1266,11 @@ def decide_approval(
         ):
             raise HTTPException(status_code=404, detail="Approval request not found")
         decision_workspace_id = candidate.workspace_id or project.workspace_id
+        reviewed_payload = candidate.model_copy(deep=True)
+        reviewed_payload.approved_payload_hash_version = 2
+        if reviewed_payload.workspace_id is None:
+            reviewed_payload.workspace_id = decision_workspace_id
+        reviewed_payload_hash = compute_approval_payload_hash(reviewed_payload)
         decision_audit_event = AuditEvent(
             event_type="approval.decision",
             entity_id=candidate.id,
@@ -1158,6 +1281,7 @@ def decide_approval(
                 "previous_status": previous_status,
                 "new_status": candidate.status,
                 "approved_payload_hash": candidate.approved_payload_hash,
+                "reviewed_payload_hash": reviewed_payload_hash,
                 "source_provider": candidate.source_provider,
                 "source_agent_id": candidate.source_agent_id,
                 "verified_source": candidate.verified_source,

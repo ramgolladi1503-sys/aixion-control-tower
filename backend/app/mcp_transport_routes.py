@@ -5,11 +5,18 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .application_repository_access import mcp_child_server_repository_for_request
+from .application_repository_access import (
+    mcp_child_server_repository_for_request,
+    project_repository_for_request,
+    workspace_id_for_request,
+)
 from .auth import require_maintainer
 from .mcp_gateway import MCPGatewayDecision, MCPGatewayToolCall
 from .mcp_gateway_routes import gateway_for_project
-from .mcp_child_server_repository import SQLiteMCPChildServerRepository
+from .mcp_child_server_repository import (
+    PostgresMCPChildServerRepository,
+    SQLiteMCPChildServerRepository,
+)
 from .models import AuthUser, MCPChildServer
 from .store import store
 from .workspace_access import project_workspace_id, workspace_id_for_user
@@ -63,8 +70,16 @@ def _enabled_child_servers(project_id: str) -> list[MCPChildServer]:
 
 
 def _registered_tools(project_id: str) -> list[dict[str, Any]]:
+    return _registered_tools_from_servers(_enabled_child_servers(project_id), allow_demo=True)
+
+
+def _registered_tools_from_servers(
+    servers: list[MCPChildServer],
+    *,
+    allow_demo: bool,
+) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
-    for server in _enabled_child_servers(project_id):
+    for server in servers:
         for tool in server.tools:
             tools.append(
                 {
@@ -80,7 +95,7 @@ def _registered_tools(project_id: str) -> list[dict[str, Any]]:
             )
     if tools:
         return tools
-    return _demo_tools()
+    return _demo_tools() if allow_demo else []
 
 
 def _demo_tools() -> list[dict[str, Any]]:
@@ -268,9 +283,42 @@ def handle_mcp_jsonrpc(
     user: AuthUser = MaintainerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> MCPJsonRpcResponse:
+    postgres_child_servers: list[MCPChildServer] | None = None
     if http_request is not None:
         repository = mcp_child_server_repository_for_request(http_request)
-        if not isinstance(repository, SQLiteMCPChildServerRepository):
+        if isinstance(repository, PostgresMCPChildServerRepository):
+            # Only discovery methods are safe until tool-call approval, audit,
+            # pending-request, and forwarding effects share one durable path.
+            if payload.method == "tools/call":
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "MCP tools/call is unavailable until approval, pending-request, "
+                        "audit, and forwarding state share a durable runtime."
+                    ),
+                )
+            project_repository = project_repository_for_request(http_request)
+            workspace_id = workspace_id_for_request(user, http_request)
+            project = project_repository.get(project_id)
+            if (
+                project is None
+                or workspace_id is None
+                or project.workspace_id != workspace_id
+            ):
+                raise HTTPException(status_code=404, detail="Project not found")
+            if payload.method == "tools/list":
+                postgres_child_servers = repository.list_for_workspace(
+                    workspace_id,
+                    project_id=project_id,
+                    enabled=True,
+                )
+        elif isinstance(repository, SQLiteMCPChildServerRepository):
+            if project_id not in store.projects:
+                raise HTTPException(status_code=404, detail="Project not found")
+            workspace_id = workspace_id_for_request(user, http_request)
+            if workspace_id is not None and project_workspace_id(project_id) != workspace_id:
+                raise HTTPException(status_code=404, detail="Project not found")
+        else:
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -278,11 +326,12 @@ def handle_mcp_jsonrpc(
                     "pending-request, approval, and forwarding state share a durable runtime."
                 ),
             )
-    if project_id not in store.projects:
-        raise HTTPException(status_code=404, detail="Project not found")
-    workspace_id = workspace_id_for_user(user)
-    if workspace_id is not None and project_workspace_id(project_id) != workspace_id:
-        raise HTTPException(status_code=404, detail="Project not found")
+    else:
+        if project_id not in store.projects:
+            raise HTTPException(status_code=404, detail="Project not found")
+        workspace_id = workspace_id_for_user(user)
+        if workspace_id is not None and project_workspace_id(project_id) != workspace_id:
+            raise HTTPException(status_code=404, detail="Project not found")
     if payload.jsonrpc != "2.0":
         return _error_response(payload.id, code=-32600, message="Only JSON-RPC 2.0 is supported")
     if payload.method not in SUPPORTED_METHODS:
@@ -299,7 +348,12 @@ def handle_mcp_jsonrpc(
         )
 
     if payload.method == "tools/list":
-        return _result_response(payload.id, {"tools": _registered_tools(project_id)})
+        tools = (
+            _registered_tools_from_servers(postgres_child_servers, allow_demo=False)
+            if postgres_child_servers is not None
+            else _registered_tools(project_id)
+        )
+        return _result_response(payload.id, {"tools": tools})
 
     try:
         tool_call = _tool_call_from_params(project_id, payload.params)

@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.model.ApprovalHistoryEvent
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.data.repository.ApprovalRepository
 import java.time.Clock
@@ -53,6 +54,12 @@ data class ApprovalsUiState(
     val loading: Boolean = true,
     val refreshing: Boolean = false,
     val approvals: List<ApprovalSummary> = emptyList(),
+    val approvalHistory: List<ApprovalHistoryEvent> = emptyList(),
+    val historyLoading: Boolean = false,
+    val historyLoaded: Boolean = false,
+    val historyLimit: Int = 50,
+    val historyHasMore: Boolean = false,
+    val historyErrorMessage: String? = null,
     val selectedApproval: ApprovalSummary? = null,
     val openingApprovalId: String? = null,
     val detailTargetApprovalId: String? = null,
@@ -117,6 +124,7 @@ class ApprovalsViewModel internal constructor(
     val state: StateFlow<ApprovalsUiState> = _state.asStateFlow()
     private var openApprovalRequestSequence = 0L
     private var refreshInFlight = false
+    private var historyRequestInFlight = false
 
     init {
         refresh()
@@ -124,6 +132,37 @@ class ApprovalsViewModel internal constructor(
 
     fun refresh() {
         viewModelScope.launch { refresh(showLoading = true) }
+    }
+
+    fun loadApprovalHistory(forceRefresh: Boolean = false) {
+        if (historyRequestInFlight || (_state.value.historyLoaded && !forceRefresh)) return
+        viewModelScope.launch {
+            if (historyRequestInFlight || (_state.value.historyLoaded && !forceRefresh)) return@launch
+            historyRequestInFlight = true
+            _state.value = _state.value.copy(historyLoading = true, historyErrorMessage = null)
+            try {
+                val page = repository.listApprovalHistory()
+                _state.value = _state.value.copy(
+                    approvalHistory = page.events,
+                    historyLoading = false,
+                    historyLoaded = true,
+                    historyLimit = page.limit,
+                    historyHasMore = page.hasMore,
+                    historyErrorMessage = null
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _state.value = _state.value.copy(
+                    historyLoading = false,
+                    historyLoaded = false,
+                    historyErrorMessage = "Decision history could not be loaded. Retry when the backend is reachable."
+                )
+            } finally {
+                historyRequestInFlight = false
+                _state.value = _state.value.copy(historyLoading = false)
+            }
+        }
     }
 
     suspend fun refreshInForeground(): Boolean? = refresh(showLoading = false)

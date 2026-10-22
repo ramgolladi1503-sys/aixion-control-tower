@@ -2,9 +2,9 @@ package com.aixion.controltower.feature.approvals
 
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.model.ApprovalHistoryEvent
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
-import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -44,47 +44,24 @@ class ApprovalInboxFilterTest {
     }
 
     @Test
-    fun historyFiltersOnlyUseAuthoritativeApprovalStatuses() {
-        val approved = approval("approved", ApprovalStatus.APPROVED)
-        val denied = approval("denied", ApprovalStatus.DENIED)
-        val rejected = approval("rejected", ApprovalStatus.REJECTED)
-        val expired = approval("expired", ApprovalStatus.EXPIRED)
-        val blocked = approval("blocked", ApprovalStatus.BLOCKED)
-        val revision = approval("revision", ApprovalStatus.REVISION_REQUESTED)
-
-        val approvals = listOf(approved, denied, rejected, expired, blocked, revision)
-
-        assertEquals(
-            listOf("blocked", "revision", "approved", "denied", "rejected", "expired"),
-            filterApprovalsForInbox(
-                approvals,
-                ApprovalInboxSection.HISTORY,
-                ApprovalHistoryFilter.ALL
-            ).map { it.id }
+    fun historyIsNeverDerivedFromMutableApprovalStatuses() {
+        val mutableApprovals = listOf(
+            approval("current-approved", ApprovalStatus.APPROVED),
+            approval("current-denied", ApprovalStatus.DENIED),
+            approval("expired", ApprovalStatus.EXPIRED)
         )
+
+        assertTrue(filterApprovalsForInbox(mutableApprovals, ApprovalInboxSection.HISTORY).isEmpty())
         assertEquals(
-            listOf("approved"),
-            filterApprovalsForInbox(
-                approvals,
-                ApprovalInboxSection.HISTORY,
-                ApprovalHistoryFilter.APPROVED
-            ).map { it.id }
-        )
-        assertEquals(
-            listOf("denied", "rejected"),
-            filterApprovalsForInbox(
-                approvals,
-                ApprovalInboxSection.HISTORY,
+            listOf("event-reject"),
+            filterApprovalHistory(
+                listOf(historyEvent("event-reject", "reject"), historyEvent("event-approve", "approve")),
                 ApprovalHistoryFilter.REJECTED
-            ).map { it.id }
+            ).map { it.eventId }
         )
         assertEquals(
-            listOf("expired"),
-            filterApprovalsForInbox(
-                approvals,
-                ApprovalInboxSection.HISTORY,
-                ApprovalHistoryFilter.EXPIRED
-            ).map { it.id }
+            "Denied",
+            decisionHistoryLabel(historyEvent("event-reject", "reject").decision)
         )
     }
 
@@ -102,14 +79,7 @@ class ApprovalInboxFilterTest {
         assertTrue(
             filterApprovalsForInbox(all, ApprovalInboxSection.NEEDS_REVIEW).isEmpty()
         )
-        assertEquals(
-            listOf("approved"),
-            filterApprovalsForInbox(
-                all,
-                ApprovalInboxSection.HISTORY,
-                ApprovalHistoryFilter.ALL
-            ).map { it.id }
-        )
+        assertTrue(filterApprovalsForInbox(all, ApprovalInboxSection.HISTORY).isEmpty())
     }
 
     @Test
@@ -121,6 +91,17 @@ class ApprovalInboxFilterTest {
         assertTrue(!canSelectApprovalFromInbox(fresh.copy(errorMessage = "sync failed")))
     }
 }
+
+private fun historyEvent(id: String, decision: String) = ApprovalHistoryEvent(
+    eventId = id,
+    approvalId = "approval-$id",
+    decision = decision,
+    reason = "reviewed",
+    decidedAt = "2026-10-22T10:00:00Z",
+    reviewerLabel = "You",
+    requestSnapshotVerified = false,
+    requestSnapshot = null
+)
 
 private fun approval(id: String, status: ApprovalStatus) = ApprovalSummary(
     id = id,
