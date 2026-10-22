@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import socket
+import sqlite3
+import subprocess
+import sys
+import time
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlparse
-import json
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -725,6 +730,203 @@ def test_antigravity_hook_denies_when_real_api_poll_expires_request(monkeypatch)
             "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=?",
             (created_id,),
         ).fetchone()[0] == 0
+
+
+def _free_loopback_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _start_isolated_api(db_path: Path, port: int) -> subprocess.Popen:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "AIXION_PROFILE": "test",
+            "AIXION_AUTH_ENABLED": "false",
+            "AIXION_DB_PATH": str(db_path),
+            "AIXION_POSTGRES_RUNTIME_PROBE_ENABLED": "false",
+            "AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED": "false",
+            "AIXION_POSTGRES_AUTH_ENABLED": "false",
+        }
+    )
+    environment.pop("AIXION_POSTGRES_DSN", None)
+    backend_root = Path(__file__).parents[1]
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
+        ],
+        cwd=backend_root,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _wait_for_isolated_api(process: subprocess.Popen, base_url: str) -> None:
+    import httpx
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise AssertionError(f"Local API process exited with code {process.returncode}")
+        try:
+            response = httpx.get(f"{base_url}/health", timeout=0.5)
+            if response.status_code == 200:
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.1)
+    raise AssertionError("Local API process did not become healthy before timeout")
+
+
+def _stop_isolated_api(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path) -> None:
+    import httpx
+
+    db_path = tmp_path / "api-restart.sqlite3"
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    api_process = _start_isolated_api(db_path, port)
+    hook_process: subprocess.Popen | None = None
+    restarted_api: subprocess.Popen | None = None
+    try:
+        _wait_for_isolated_api(api_process, base_url)
+        with httpx.Client(base_url=base_url, timeout=5) as api:
+            seeded = api.post("/demo/seed")
+            assert seeded.status_code == 200, seeded.text
+            projects_response = api.get("/projects")
+            assert projects_response.status_code == 200, projects_response.text
+            projects = projects_response.json()
+            assert projects
+            project_id = projects[0]["id"]
+            registered = api.post(
+                "/agents",
+                json={
+                    "provider": "ANTIGRAVITY",
+                    "display_name": "Antigravity restart integration",
+                    "auth_type": "API_KEY",
+                    "allowed_project_ids": [project_id],
+                    "allowed_actions": [
+                        "CREATE_APPROVAL",
+                        "READ_APPROVAL_DECISION",
+                        "CONSUME_APPROVAL_DECISION",
+                        "EXPIRE_OWN_APPROVAL",
+                    ],
+                    "enabled": True,
+                },
+            )
+            assert registered.status_code == 200, registered.text
+            agent_id = registered.json()["agent"]["id"]
+            agent_token = registered.json()["agent_token"]
+
+        hook_environment = os.environ.copy()
+        hook_environment.update(
+            {
+                "AIXION_API_BASE_URL": base_url,
+                "AIXION_AGENT_ID": agent_id,
+                "AIXION_AGENT_TOKEN": agent_token,
+                "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+                "AIXION_PROJECT_ID": project_id,
+                "AIXION_APPROVAL_TIMEOUT_SECONDS": "45",
+            }
+        )
+        hook_payload = {
+            "conversationId": "session-api-process-restart",
+            "stepIdx": 41,
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "echo restart-recovery"},
+            },
+        }
+        hook_process = subprocess.Popen(
+            [sys.executable, str(HOOK_PATH)],
+            env=hook_environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert hook_process.stdin is not None
+        hook_process.stdin.write(json.dumps(hook_payload) + "\n")
+        hook_process.stdin.close()
+
+        approval: dict | None = None
+        deadline = time.monotonic() + 10
+        with httpx.Client(base_url=base_url, timeout=5) as api:
+            while time.monotonic() < deadline:
+                response = api.get("/approvals")
+                assert response.status_code == 200, response.text
+                approval = next(
+                    (
+                        item
+                        for item in response.json()
+                        if item.get("source_session_id")
+                        == hook_payload["conversationId"]
+                    ),
+                    None,
+                )
+                if approval is not None:
+                    break
+                assert hook_process.poll() is None, "Hook exited before approval was observed"
+                time.sleep(0.1)
+        assert approval is not None, "Hook did not create an approval through the local API"
+        assert hook_process.poll() is None, "Hook did not remain blocked on the pending approval"
+
+        old_pid = api_process.pid
+        _stop_isolated_api(api_process)
+        time.sleep(2.5)
+        assert hook_process.poll() is None, "Hook failed open or exited while the API was unavailable"
+
+        restarted_api = _start_isolated_api(db_path, port)
+        assert restarted_api.pid != old_pid
+        _wait_for_isolated_api(restarted_api, base_url)
+        with httpx.Client(base_url=base_url, timeout=5) as api:
+            decision = api.post(
+                f"/approvals/{approval['id']}/decision",
+                json={"decision": "approve"},
+            )
+            assert decision.status_code == 200, decision.text
+
+        stdout, stderr = hook_process.communicate(timeout=20)
+        assert hook_process.returncode == 0, stderr
+        result = json.loads(stdout.strip().splitlines()[-1])
+        assert result["decision"] == "allow"
+        assert result["reason"] == "Approved from Aixion Control Tower"
+
+        with sqlite3.connect(db_path) as connection:
+            claim_count = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (approval["id"],),
+            ).fetchone()[0]
+        assert claim_count == 1
+    finally:
+        if hook_process is not None and hook_process.poll() is None:
+            hook_process.kill()
+            hook_process.wait(timeout=5)
+        if restarted_api is not None:
+            _stop_isolated_api(restarted_api)
+        _stop_isolated_api(api_process)
 
 
 def test_mobile_approval_list_expires_overdue_agent_requests() -> None:

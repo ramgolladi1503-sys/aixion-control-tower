@@ -1,18 +1,21 @@
 package com.aixion.controltower.notifications
 
-import android.content.Context
 import android.Manifest
+import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import com.aixion.controltower.BuildConfig
 import com.aixion.controltower.core.api.ApiClient
+import com.aixion.controltower.core.api.ControlTowerApi
+import com.aixion.controltower.core.api.dto.DeviceRegistrationDto
 import com.aixion.controltower.core.api.dto.DeviceRegistrationRequestDto
 import com.aixion.controltower.core.auth.SecureStringPreferences
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeout
-import androidx.core.content.ContextCompat
 
 internal enum class PushRegistrationResult {
     REGISTERED,
@@ -23,15 +26,48 @@ internal enum class PushRegistrationResult {
     BACKEND_UNAVAILABLE
 }
 
-internal class PushDeviceRegistrationRepository(context: Context) {
-    private val appContext = context.applicationContext
-    private val api = ApiClient.create(appContext)
-    private val preferences = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+internal interface PushRegistrationApi {
+    suspend fun currentUserId(): String
+    suspend fun registerDevice(payload: DeviceRegistrationRequestDto): DeviceRegistrationDto
+    suspend fun unregisterDevice(deviceId: String)
+}
+
+internal interface PushRegistrationStateStore {
+    fun migrateLegacyPendingToken()
+    fun activeDeviceId(): String?
+    fun activeUserId(): String?
+    fun saveActiveRegistration(deviceId: String, userId: String)
+    fun readPendingUnregistrations(): MutableSet<Pair<String, String>>
+    fun writePendingUnregistrations(pending: Set<Pair<String, String>>)
+    fun clearActiveRegistration()
+    fun clearPendingFcmToken()
+}
+
+internal class PushDeviceRegistrationRepository internal constructor(
+    private val api: PushRegistrationApi,
+    private val hasNotificationPermission: () -> Boolean,
+    private val currentFcmToken: suspend () -> String?,
+    private val state: PushRegistrationStateStore,
+    private val appVersion: String
+) {
+    constructor(context: Context) : this(
+        api = ApiPushRegistrationAdapter(ApiClient.create(context.applicationContext)),
+        hasNotificationPermission = {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context.applicationContext,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+        },
+        currentFcmToken = {
+            FirebaseMessaging.getInstance().token.await().takeIf(String::isNotBlank)
+        },
+        state = SharedPreferencesPushRegistrationStateStore(context.applicationContext),
+        appVersion = BuildConfig.VERSION_NAME
+    )
 
     suspend fun registerCurrentDevice(): PushRegistrationResult {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(appContext, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
+        if (!hasNotificationPermission()) {
             return if (unregisterCurrentDevice()) {
                 PushRegistrationResult.PERMISSION_REQUIRED
             } else {
@@ -39,17 +75,12 @@ internal class PushDeviceRegistrationRepository(context: Context) {
             }
         }
 
-        // An older app version stored FCM refresh tokens as plaintext. Reading
-        // through the encrypted store migrates that value before any network call.
-        SecureStringPreferences.get(
-            appContext,
-            PREFERENCES,
-            PENDING_FCM_TOKEN,
-            PUSH_TOKEN_KEY_ALIAS
-        )
+        // Migrate old plaintext tokens before network access. The FCM token is
+        // never copied into registration state or logged by this repository.
+        state.migrateLegacyPendingToken()
 
         val userId = try {
-            api.me().id
+            api.currentUserId()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
@@ -58,45 +89,52 @@ internal class PushDeviceRegistrationRepository(context: Context) {
         retryPendingUnregistrations(userId)
 
         val token = try {
-            FirebaseMessaging.getInstance().token.await().takeIf(String::isNotBlank)
+            currentFcmToken()?.takeIf(String::isNotBlank)
                 ?: return PushRegistrationResult.FIREBASE_NOT_CONFIGURED
         } catch (cancelled: CancellationException) {
             throw cancelled
-        } catch (_: IllegalStateException) {
-            return PushRegistrationResult.FIREBASE_NOT_CONFIGURED
         } catch (_: Exception) {
             return PushRegistrationResult.FIREBASE_NOT_CONFIGURED
         }
 
         return try {
-            val previousDeviceId = preferences.getString(REGISTERED_DEVICE_ID, null)
-            val previousUserId = preferences.getString(REGISTERED_USER_ID, null)
-            val registration = api.registerNotificationDevice(
+            val previousDeviceId = state.activeDeviceId()
+            val previousUserId = state.activeUserId()
+            val registration = api.registerDevice(
                 DeviceRegistrationRequestDto(
                     token = token,
-                    app_version = BuildConfig.VERSION_NAME
+                    app_version = appVersion
                 )
             )
-            preferences.edit()
-                .putString(REGISTERED_DEVICE_ID, registration.id)
-                .putString(REGISTERED_USER_ID, registration.user_id ?: userId)
-                .apply()
-            clearPendingFcmToken()
+            if (registration.id.isBlank() ||
+                (!registration.user_id.isNullOrBlank() && registration.user_id != userId)
+            ) {
+                // Do not persist a response that cannot be bound to this device
+                // and authenticated account. Keep prior local state and token
+                // cleanup intent so the caller can retry after server recovery.
+                return PushRegistrationResult.BACKEND_UNAVAILABLE
+            }
+            state.saveActiveRegistration(
+                registration.id,
+                registration.user_id?.takeIf(String::isNotBlank) ?: userId
+            )
+            state.clearPendingFcmToken()
 
-            val pending = readPendingUnregistrations()
-            if (previousDeviceId != null && previousDeviceId != registration.id && !previousUserId.isNullOrBlank()) {
+            val pending = state.readPendingUnregistrations()
+            if (previousDeviceId != null && previousDeviceId != registration.id &&
+                !previousUserId.isNullOrBlank()
+            ) {
                 pending += previousDeviceId to previousUserId
             }
-            // The server binds one FCM token to one account. A successful
-            // register may have reassigned this installation after an account
-            // switch, making any pending cleanup reference to this same row stale.
+            // A successful registration may reassign this token to the active
+            // account; cleanup for that same row would now be stale.
             pending.removeAll { it.first == registration.id }
             val cleanupPending = cleanupUnregistrations(pending, userId)
             if (cleanupPending.isNotEmpty()) {
-                writePendingUnregistrations(cleanupPending)
+                state.writePendingUnregistrations(cleanupPending)
                 PushRegistrationResult.REGISTERED_CLEANUP_PENDING
             } else {
-                writePendingUnregistrations(emptySet())
+                state.writePendingUnregistrations(emptySet())
                 PushRegistrationResult.REGISTERED
             }
         } catch (cancelled: CancellationException) {
@@ -107,43 +145,45 @@ internal class PushDeviceRegistrationRepository(context: Context) {
     }
 
     suspend fun unregisterCurrentDevice(): Boolean {
-        val pending = readPendingUnregistrations()
-        val deviceId = preferences.getString(REGISTERED_DEVICE_ID, null)
-        val deviceOwnerId = preferences.getString(REGISTERED_USER_ID, null)
+        val pending = state.readPendingUnregistrations()
+        val deviceId = state.activeDeviceId()
+        val deviceOwnerId = state.activeUserId()
         if (!deviceId.isNullOrBlank() && !deviceOwnerId.isNullOrBlank()) {
             pending += deviceId to deviceOwnerId
         }
         if (pending.isEmpty()) {
-            clearActiveRegistration()
+            state.clearActiveRegistration()
             return true
         }
 
-        // Persist the cleanup intent before attempting network I/O so a process
-        // death cannot silently lose the only reference to the server record.
-        writePendingUnregistrations(pending)
+        // Persist cleanup intent before network I/O so process death cannot
+        // silently lose the only reference to the server registration.
+        state.writePendingUnregistrations(pending)
         return try {
-            val userId = api.me().id
+            val userId = api.currentUserId()
             val remaining = cleanupUnregistrations(pending, userId)
-            writePendingUnregistrations(remaining)
+            state.writePendingUnregistrations(remaining)
             remaining.isEmpty()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
             false
         } finally {
-            clearActiveRegistration()
+            state.clearActiveRegistration()
         }
     }
 
     suspend fun retryPendingUnregistrations(userId: String? = null) {
         val currentUserId = userId ?: try {
-            api.me().id
+            api.currentUserId()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
             return
         }
-        writePendingUnregistrations(cleanupUnregistrations(readPendingUnregistrations(), currentUserId))
+        state.writePendingUnregistrations(
+            cleanupUnregistrations(state.readPendingUnregistrations(), currentUserId)
+        )
     }
 
     private suspend fun cleanupUnregistrations(
@@ -155,7 +195,7 @@ internal class PushDeviceRegistrationRepository(context: Context) {
             if (ownerId != currentUserId) continue
             val removed = try {
                 withTimeout(UNREGISTER_TIMEOUT_MILLIS) {
-                    api.unregisterNotificationDevice(deviceId)
+                    api.unregisterDevice(deviceId)
                 }
                 true
             } catch (cancelled: CancellationException) {
@@ -169,47 +209,96 @@ internal class PushDeviceRegistrationRepository(context: Context) {
         return remaining
     }
 
-    private fun readPendingUnregistrations(): MutableSet<Pair<String, String>> {
-        return preferences.getStringSet(PENDING_UNREGISTER_DEVICE_IDS, emptySet())
-            .orEmpty()
-            .mapNotNull { encoded ->
-                val separator = encoded.indexOf('|')
-                if (separator <= 0 || separator == encoded.lastIndex) null
-                else encoded.substring(0, separator) to encoded.substring(separator + 1)
-            }
-            .toMutableSet()
+    private class ApiPushRegistrationAdapter(
+        private val api: ControlTowerApi
+    ) : PushRegistrationApi {
+        override suspend fun currentUserId(): String = api.me().id
+
+        override suspend fun registerDevice(
+            payload: DeviceRegistrationRequestDto
+        ): DeviceRegistrationDto = api.registerNotificationDevice(payload)
+
+        override suspend fun unregisterDevice(deviceId: String) {
+            api.unregisterNotificationDevice(deviceId)
+        }
     }
 
-    private fun writePendingUnregistrations(pending: Set<Pair<String, String>>) {
-        preferences.edit()
-            .putStringSet(PENDING_UNREGISTER_DEVICE_IDS, pending.map { (id, owner) -> "$id|$owner" }.toSet())
-            .commit()
+    private class SharedPreferencesPushRegistrationStateStore(
+        context: Context
+    ) : PushRegistrationStateStore {
+        private val appContext = context.applicationContext
+        private val preferences = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+
+        override fun migrateLegacyPendingToken() {
+            // Reading through the encrypted store migrates values written by
+            // older releases before any request sends a token to the backend.
+            SecureStringPreferences.get(
+                appContext,
+                PREFERENCES,
+                PENDING_FCM_TOKEN,
+                PUSH_TOKEN_KEY_ALIAS
+            )
+        }
+
+        override fun activeDeviceId(): String? = preferences.getString(REGISTERED_DEVICE_ID, null)
+
+        override fun activeUserId(): String? = preferences.getString(REGISTERED_USER_ID, null)
+
+        override fun saveActiveRegistration(deviceId: String, userId: String) {
+            preferences.edit()
+                .putString(REGISTERED_DEVICE_ID, deviceId)
+                .putString(REGISTERED_USER_ID, userId)
+                .apply()
+        }
+
+        override fun readPendingUnregistrations(): MutableSet<Pair<String, String>> {
+            return preferences.getStringSet(PENDING_UNREGISTER_DEVICE_IDS, emptySet())
+                .orEmpty()
+                .mapNotNull { encoded ->
+                    val separator = encoded.indexOf('|')
+                    if (separator <= 0 || separator == encoded.lastIndex) null
+                    else encoded.substring(0, separator) to encoded.substring(separator + 1)
+                }
+                .toMutableSet()
+        }
+
+        override fun writePendingUnregistrations(pending: Set<Pair<String, String>>) {
+            preferences.edit()
+                .putStringSet(
+                    PENDING_UNREGISTER_DEVICE_IDS,
+                    pending.map { (id, owner) -> "$id|$owner" }.toSet()
+                )
+                .commit()
+        }
+
+        override fun clearActiveRegistration() {
+            preferences.edit()
+                .remove(REGISTERED_DEVICE_ID)
+                .remove(REGISTERED_USER_ID)
+                .commit()
+            clearPendingFcmToken()
+        }
+
+        override fun clearPendingFcmToken() {
+            SecureStringPreferences.remove(
+                appContext,
+                PREFERENCES,
+                PENDING_FCM_TOKEN,
+                PUSH_TOKEN_KEY_ALIAS
+            )
+        }
+
+        private companion object {
+            const val PREFERENCES = "aixion_push"
+            const val REGISTERED_DEVICE_ID = "registered_device_id"
+            const val REGISTERED_USER_ID = "registered_user_id"
+            const val PENDING_FCM_TOKEN = "pending_fcm_token"
+            const val PUSH_TOKEN_KEY_ALIAS = "com.aixion.controltower.push.token.v1"
+            const val PENDING_UNREGISTER_DEVICE_IDS = "pending_unregister_device_ids"
+        }
     }
 
-    private fun clearActiveRegistration() {
-        preferences.edit()
-            .remove(REGISTERED_DEVICE_ID)
-            .remove(REGISTERED_USER_ID)
-            .commit()
-        clearPendingFcmToken()
-    }
-
-    private fun clearPendingFcmToken() {
-        SecureStringPreferences.remove(
-            appContext,
-            PREFERENCES,
-            PENDING_FCM_TOKEN,
-            PUSH_TOKEN_KEY_ALIAS
-        )
-    }
-
-    companion object {
-        private const val PREFERENCES = "aixion_push"
-        private const val REGISTERED_DEVICE_ID = "registered_device_id"
-        private const val REGISTERED_USER_ID = "registered_user_id"
-        private const val PENDING_FCM_TOKEN = "pending_fcm_token"
-        private const val PUSH_TOKEN_KEY_ALIAS = "com.aixion.controltower.push.token.v1"
-        private const val PENDING_UNREGISTER_DEVICE_IDS = "pending_unregister_device_ids"
-        private const val UNREGISTER_TIMEOUT_MILLIS = 4_000L
+    private companion object {
+        const val UNREGISTER_TIMEOUT_MILLIS = 4_000L
     }
 }
