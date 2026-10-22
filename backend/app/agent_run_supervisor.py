@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 from .agent_run_faults import InjectedAgentRunFault, default_fault_reason, raise_if_fault_configured
 from .agent_run_creation import build_agent_run_creation_records
 from .agent_run_models import (
+    DEFAULT_AGENT_RUN_STEPS,
     AgentRun,
     AgentRunCreate,
     AgentRunEvent,
@@ -24,23 +26,44 @@ from .agent_run_state_machine import (
     transition_run,
     transition_step,
 )
-from .agent_run_verifier import canonical_evidence_hash, classify_execution_result, validate_scope_contract
-from .agent_task_models import AgentTaskStatus
+from .agent_run_verifier import (
+    canonical_evidence_hash,
+    classify_execution_result,
+    validate_scope_contract,
+)
+from .agent_task_models import (
+    AgentTask,
+    AgentTaskEvent,
+    AgentTaskEventType,
+    AgentTaskStatus,
+)
 from .agent_run_repository import (
     AgentRunRepository,
     AgentRunRepositoryConflict,
     PostgresAgentRunRepository,
     SQLiteAgentRunRepository,
 )
-from .agent_task_repository import AgentTaskRepository, SQLiteAgentTaskRepository
-from .approval_repository import ApprovalDecisionRepository, SQLiteApprovalDecisionRepository
+from .agent_task_repository import (
+    AgentTaskRepository,
+    PostgresAgentTaskRepository,
+    SQLiteAgentTaskRepository,
+)
+from .approval_repository import (
+    ApprovalDecisionRepository,
+    PostgresApprovalDecisionRepository,
+    SQLiteApprovalDecisionRepository,
+)
 from .approval_decisions import (
     agent_run_repository,
     agent_task_repository,
     approval_decision_repository,
 )
 from .approval_integrity import compute_approval_payload_hash
-from .agent_worker_container_validation import ContainerRuntime, ContainerValidationExecutor, ContainerValidationPolicy
+from .agent_worker_container_validation import (
+    ContainerRuntime,
+    ContainerValidationExecutor,
+    ContainerValidationPolicy,
+)
 from .agent_worker_github_branch import GitHubBranchClient, run_agent_worker_github_branch_creation
 from .agent_worker_github_files import GitHubFileClient, run_agent_worker_github_file_application
 from .agent_worker_github_pr import GitHubPullRequestClient, run_agent_worker_github_pr_creation
@@ -50,7 +73,7 @@ from .agent_worker_workspace import (
     cleanup_agent_worker_workspace,
     prepare_agent_worker_workspace,
 )
-from .models import ApprovalStatus, AuditEvent, now_utc
+from .models import ApprovalRequest, ApprovalStatus, AuditEvent, now_utc
 from .store import store
 from .workspace_access import agent_run_scope_is_consistent
 
@@ -144,7 +167,9 @@ def create_agent_run(
     if task is None:
         raise ValueError("Agent task not found.")
     if task.status != AgentTaskStatus.APPROVED:
-        raise AgentRunConflict(f"Agent task must be APPROVED before a run is created; got {task.status}.")
+        raise AgentRunConflict(
+            f"Agent task must be APPROVED before a run is created; got {task.status}."
+        )
     if not task.approval_request_id:
         raise AgentRunConflict("A linked APPROVED approval is required before a run is created.")
     approval = active_approval_repository.get(task.approval_request_id)
@@ -162,7 +187,9 @@ def create_agent_run(
         not approval.approved_payload_hash
         or approval.approved_payload_hash != compute_approval_payload_hash(approval)
     ):
-        raise AgentRunConflict("Approved request payload is missing or fails its frozen hash check.")
+        raise AgentRunConflict(
+            "Approved request payload is missing or fails its frozen hash check."
+        )
     existing = active_run_repository.get_active_for_task(task.id)
     if existing is not None:
         return existing
@@ -187,9 +214,7 @@ def create_agent_run(
             return existing
         raise AgentRunConflict(str(error)) from error
     if isinstance(active_run_repository, SQLiteAgentRunRepository):
-        store.project_agent_run_creation(
-            records.run, records.steps, records.events, records.audit
-        )
+        store.project_agent_run_creation(records.run, records.steps, records.events, records.audit)
         if records.scheduled_audit is not None:
             store.audit_events.append(records.scheduled_audit)
     return records.run
@@ -284,8 +309,14 @@ def _ready_step(
 ) -> AgentRunStep | None:
     now = _now()
     for step in _run_steps(run.id):
-        if step.status == AgentRunStepStatus.RETRY_WAIT and step.next_retry_at and step.next_retry_at <= now:
-            previous, new = transition_step(step, AgentRunStepStatus.READY, reason="Retry backoff elapsed.")
+        if (
+            step.status == AgentRunStepStatus.RETRY_WAIT
+            and step.next_retry_at
+            and step.next_retry_at <= now
+        ):
+            previous, new = transition_step(
+                step, AgentRunStepStatus.READY, reason="Retry backoff elapsed."
+            )
             ready_event = _append_event(
                 run,
                 AgentRunEventType.STEP_READY,
@@ -378,10 +409,14 @@ def _apply_execution_result(
 
     if result.decision == VerificationDecision.RETRY_TRANSIENT:
         if step.attempt_count < step.max_attempts:
-            previous, new = transition_step(step, AgentRunStepStatus.RETRY_WAIT, reason=result.reason)
+            previous, new = transition_step(
+                step, AgentRunStepStatus.RETRY_WAIT, reason=result.reason
+            )
             delay_seconds = min(300, 2 ** max(1, step.attempt_count))
             step.next_retry_at = _now() + timedelta(seconds=delay_seconds)
-            previous_run, new_run = transition_run(run, AgentRunStatus.RETRY_WAIT, reason=result.reason)
+            previous_run, new_run = transition_run(
+                run, AgentRunStatus.RETRY_WAIT, reason=result.reason
+            )
             _append_event(
                 run,
                 AgentRunEventType.STEP_RETRY_SCHEDULED,
@@ -522,9 +557,7 @@ def execute_next_step(
         active_run_repository,
         (SQLiteAgentRunRepository, PostgresAgentRunRepository),
     ):
-        raise AgentRunConflict(
-            "AgentRun execution is unavailable for the configured repository."
-        )
+        raise AgentRunConflict("AgentRun execution is unavailable for the configured repository.")
     if active_run_repository is None:
         run = store.agent_runs.get(run_id)
         if run is None:
@@ -537,18 +570,29 @@ def execute_next_step(
         run_steps = active_run_repository.list_steps_for_run(run_id)
         run_events = active_run_repository.list_events_for_run(run_id)
         store.project_agent_run_snapshot(run, run_steps, run_events)
-    postgres_scope_validation = isinstance(
-        active_run_repository, PostgresAgentRunRepository
-    )
-    if postgres_scope_validation:
+    postgres_read_only_execution = isinstance(active_run_repository, PostgresAgentRunRepository)
+    if postgres_read_only_execution:
         current_step = store.agent_run_steps.get(run.current_step_id or "")
-        if (
-            current_step is None
-            or current_step.step_type != AgentRunStepType.VALIDATE_SCOPE
-        ):
+        if current_step is None or current_step.step_type not in {
+            AgentRunStepType.VALIDATE_SCOPE,
+            AgentRunStepType.VERIFY_RESULT,
+        }:
             raise AgentRunConflict(
                 "PostgreSQL AgentRun execution currently supports only the "
-                "side-effect-free VALIDATE_SCOPE step."
+                "read-only VALIDATE_SCOPE and VERIFY_RESULT steps."
+            )
+        if current_step.step_type == AgentRunStepType.VERIFY_RESULT and (
+            not isinstance(task_repository, PostgresAgentTaskRepository)
+            or not isinstance(approval_repository, PostgresApprovalDecisionRepository)
+        ):
+            raise AgentRunConflict(
+                "PostgreSQL VERIFY_RESULT requires repository-bound task and approval reads."
+            )
+        if current_step.step_type == AgentRunStepType.VERIFY_RESULT and [
+            step.step_type for step in _run_steps(run.id)
+        ] != list(DEFAULT_AGENT_RUN_STEPS):
+            raise AgentRunConflict(
+                "PostgreSQL VERIFY_RESULT requires the complete canonical AgentRun step plan."
             )
     if run.status in {
         AgentRunStatus.BLOCKED,
@@ -564,10 +608,12 @@ def execute_next_step(
         raise AgentRunConflict("Cancelled run cannot execute.")
 
     lease_token = acquire_run_lease(
-        run, worker_id=worker_id, lease_seconds=lease_seconds,
+        run,
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
         run_repository=active_run_repository,
     )
-    if postgres_scope_validation:
+    if postgres_read_only_execution:
         # Lease acquisition may have waited behind another process. Refresh the
         # durable run and step snapshot before deciding what code may execute.
         durable_run = active_run_repository.get(run_id)
@@ -583,7 +629,9 @@ def execute_next_step(
     step = _ready_step(run, pending_events=retry_ready_events)
     if step is None:
         release_run_lease(
-            run, worker_id=worker_id, lease_token=lease_token,
+            run,
+            worker_id=worker_id,
+            lease_token=lease_token,
             run_repository=active_run_repository,
         )
         if run.status == AgentRunStatus.RETRY_WAIT:
@@ -593,7 +641,10 @@ def execute_next_step(
                 reason="No step is ready because retry backoff has not elapsed.",
             )
         raise AgentRunConflict("No executable step is ready.")
-    if postgres_scope_validation and step.step_type != AgentRunStepType.VALIDATE_SCOPE:
+    if postgres_read_only_execution and step.step_type not in {
+        AgentRunStepType.VALIDATE_SCOPE,
+        AgentRunStepType.VERIFY_RESULT,
+    }:
         release_run_lease(
             run,
             worker_id=worker_id,
@@ -602,20 +653,42 @@ def execute_next_step(
         )
         raise AgentRunConflict(
             "PostgreSQL AgentRun execution currently supports only the "
-            "side-effect-free VALIDATE_SCOPE step."
+            "read-only VALIDATE_SCOPE and VERIFY_RESULT steps."
+        )
+
+    if (
+        postgres_read_only_execution
+        and step.step_type == AgentRunStepType.VERIFY_RESULT
+        and (
+            [item.step_type for item in _run_steps(run.id)] != list(DEFAULT_AGENT_RUN_STEPS)
+            or any(
+                item.sequence < step.sequence and item.status != AgentRunStepStatus.SUCCEEDED
+                for item in _run_steps(run.id)
+            )
+        )
+    ):
+        release_run_lease(
+            run,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            run_repository=active_run_repository,
+        )
+        raise AgentRunConflict(
+            "PostgreSQL VERIFY_RESULT requires every preceding AgentRun step to have succeeded."
         )
 
     durable_run_after_ready = active_run_repository.get(run.id)
     durable_steps_after_ready = active_run_repository.list_steps_for_run(run.id)
     durable_steps_by_id = {item.id: item for item in durable_steps_after_ready}
     changed_ready_steps = [
-        step for step in _run_steps(run.id)
-        if durable_steps_by_id.get(step.id) != step
+        step for step in _run_steps(run.id) if durable_steps_by_id.get(step.id) != step
     ]
     if changed_ready_steps:
         if durable_run_after_ready is None or durable_run_after_ready != run:
             release_run_lease(
-                run, worker_id=worker_id, lease_token=lease_token,
+                run,
+                worker_id=worker_id,
+                lease_token=lease_token,
                 run_repository=active_run_repository,
             )
             raise AgentRunConflict("Run changed before retry readiness could be committed.")
@@ -641,7 +714,9 @@ def execute_next_step(
             )
         except Exception as error:
             release_run_lease(
-                run, worker_id=worker_id, lease_token=lease_token,
+                run,
+                worker_id=worker_id,
+                lease_token=lease_token,
                 run_repository=active_run_repository,
             )
             raise AgentRunConflict("Retry readiness could not be committed.") from error
@@ -672,7 +747,9 @@ def execute_next_step(
     checkpoint_expected_run = active_run_repository.get(run.id)
     if checkpoint_expected_run is None or checkpoint_expected_run != run:
         release_run_lease(
-            run, worker_id=worker_id, lease_token=lease_token,
+            run,
+            worker_id=worker_id,
+            lease_token=lease_token,
             run_repository=active_run_repository,
         )
         raise AgentRunConflict("Run changed before the RUNNING checkpoint.")
@@ -687,34 +764,38 @@ def execute_next_step(
     checkpoint_events: list[AgentRunEvent] = []
     if run.status in {AgentRunStatus.SCHEDULED, AgentRunStatus.RETRY_WAIT}:
         previous_run, new_run = transition_run(run, AgentRunStatus.RUNNING)
-        checkpoint_events.append(_append_event(
+        checkpoint_events.append(
+            _append_event(
+                run,
+                AgentRunEventType.RUN_STATE_CHANGED,
+                previous_status=previous_run.value,
+                new_status=new_run.value,
+                message="Mission Control worker started or resumed execution.",
+                actor=worker_id,
+                publish=False,
+            )
+        )
+    checkpoint_events.append(
+        _append_event(
             run,
-            AgentRunEventType.RUN_STATE_CHANGED,
-            previous_status=previous_run.value,
-            new_status=new_run.value,
-            message="Mission Control worker started or resumed execution.",
+            AgentRunEventType.STEP_STARTED,
+            step=step,
+            previous_status=previous.value,
+            new_status=new.value,
+            message=f"Executing {step.step_type.value}.",
             actor=worker_id,
+            input_evidence_hash=canonical_evidence_hash(
+                {
+                    "run_id": run.id,
+                    "task_id": run.task_id,
+                    "step_type": step.step_type.value,
+                    "attempt": step.attempt_count,
+                }
+            ),
+            metadata={"idempotency_key": step.idempotency_key},
             publish=False,
-        ))
-    checkpoint_events.append(_append_event(
-        run,
-        AgentRunEventType.STEP_STARTED,
-        step=step,
-        previous_status=previous.value,
-        new_status=new.value,
-        message=f"Executing {step.step_type.value}.",
-        actor=worker_id,
-        input_evidence_hash=canonical_evidence_hash(
-            {
-                "run_id": run.id,
-                "task_id": run.task_id,
-                "step_type": step.step_type.value,
-                "attempt": step.attempt_count,
-            }
-        ),
-        metadata={"idempotency_key": step.idempotency_key},
-        publish=False,
-    ))
+        )
+    )
 
     # Commit the RUNNING boundary before invoking external work. This is a
     # compare-and-swap transaction over the run, every step, its checkpoint
@@ -754,11 +835,15 @@ def execute_next_step(
             for field_name in AgentRunStep.model_fields:
                 setattr(current, field_name, getattr(snapshot, field_name))
         release_run_lease(
-            run, worker_id=worker_id, lease_token=lease_token,
+            run,
+            worker_id=worker_id,
+            lease_token=lease_token,
             run_repository=active_run_repository,
         )
         raise AgentRunConflict("AgentRun RUNNING checkpoint could not be committed.") from error
-    store.project_agent_run_control_transition(run, updated_steps, checkpoint_events, [checkpoint_audit])
+    store.project_agent_run_control_transition(
+        run, updated_steps, checkpoint_events, [checkpoint_audit]
+    )
 
     # Completion compares against the committed RUNNING checkpoint. If its
     # transaction fails, that checkpoint remains durable for lease recovery.
@@ -855,6 +940,166 @@ def execute_next_step(
         restore_completion_checkpoint()
         raise AgentRunConflict("AgentRun step completion could not be committed.") from error
     return result
+
+
+def _verify_postgres_agent_run_result(
+    *,
+    run: AgentRun,
+    task: AgentTask,
+    approval: ApprovalRequest | None,
+    events: list[AgentTaskEvent],
+    task_repository: AgentTaskRepository | None,
+    approval_repository: ApprovalDecisionRepository | None,
+) -> AgentRunStepExecutionResult:
+    """Verify repository-backed, run-bound worker evidence for PostgreSQL runs."""
+    reasons: list[str] = []
+    if not isinstance(task_repository, PostgresAgentTaskRepository) or not isinstance(
+        approval_repository, PostgresApprovalDecisionRepository
+    ):
+        reasons.append("Durable task and approval repositories are unavailable.")
+    if (
+        not run.workspace_id
+        or task.workspace_id != run.workspace_id
+        or task.project_id != run.project_id
+        or task.approval_request_id != run.approval_request_id
+        or task.repository != run.repository
+        or task.branch_preference != run.metadata.get("branch_preference")
+        or not run.repository
+        or not run.metadata.get("branch_preference")
+        or not run.approval_request_id
+        or approval is None
+        or approval.id != run.approval_request_id
+        or approval.workspace_id != run.workspace_id
+        or approval.project_id != run.project_id
+    ):
+        reasons.append("Task, approval, project, and run scope do not match.")
+
+    approval_hash_valid = False
+    if approval is not None:
+        try:
+            approval_hash_valid = bool(
+                approval.approved_payload_hash
+                and approval.approved_payload_hash == compute_approval_payload_hash(approval)
+            )
+        except (TypeError, ValueError):
+            approval_hash_valid = False
+    if approval is None or approval.status != ApprovalStatus.APPROVED or not approval_hash_valid:
+        reasons.append("The linked approved request is missing, changed, or not approved.")
+
+    validation_worker = f"mission-control:{run.id}:validation"
+    validation_events = sorted(
+        (
+            event
+            for event in events
+            if event.task_id == task.id
+            and event.event_type
+            in {
+                AgentTaskEventType.TESTS_PASSED,
+                AgentTaskEventType.TESTS_FAILED,
+            }
+            and event.actor == validation_worker
+            and event.metadata.get("worker_id") == validation_worker
+            and event.metadata.get("approval_request_id") == run.approval_request_id
+        ),
+        key=lambda event: (event.created_at, event.id),
+    )
+    validation_event = validation_events[-1] if validation_events else None
+    test_plan = list(approval.test_plan) if approval is not None else []
+    raw_results = validation_event.metadata.get("results") if validation_event is not None else None
+    validation_evidence_valid = bool(
+        validation_event is not None
+        and validation_event.event_type == AgentTaskEventType.TESTS_PASSED
+        and validation_event.status == AgentTaskStatus.APPROVED
+        and validation_event.metadata.get("commands_executed") is True
+        and isinstance(validation_event.metadata.get("command_count"), int)
+        and not isinstance(validation_event.metadata.get("command_count"), bool)
+        and validation_event.metadata.get("command_count") == len(test_plan)
+        and test_plan
+        and isinstance(raw_results, list)
+        and len(raw_results) == len(test_plan)
+        and all(
+            isinstance(result, dict)
+            and result.get("command") == command
+            and isinstance(result.get("exit_code"), int)
+            and not isinstance(result.get("exit_code"), bool)
+            and result.get("exit_code") == 0
+            and result.get("timed_out") is False
+            for result, command in zip(raw_results, test_plan, strict=True)
+        )
+    )
+    if not validation_evidence_valid:
+        reasons.append("Run-bound validation evidence is missing or unsuccessful.")
+
+    pr_worker = f"mission-control:{run.id}:pr"
+    pr_events = [
+        event
+        for event in events
+        if event.task_id == task.id and event.event_type == AgentTaskEventType.PR_CREATED
+    ]
+    pr_event = pr_events[0] if len(pr_events) == 1 else None
+    pr_metadata = pr_event.metadata if pr_event is not None else {}
+    pr_number = pr_metadata.get("pull_request_number")
+    pr_url = pr_metadata.get("pull_request_url")
+    parsed_url = urlsplit(pr_url) if isinstance(pr_url, str) else None
+    expected_path = (
+        f"/{run.repository}/pull/{pr_number}"
+        if run.repository and isinstance(pr_number, int) and not isinstance(pr_number, bool)
+        else None
+    )
+    pr_evidence_valid = bool(
+        len(pr_events) == 1
+        and pr_event is not None
+        and pr_event.actor == pr_worker
+        and pr_metadata.get("worker_id") == pr_worker
+        and pr_metadata.get("approval_request_id") == run.approval_request_id
+        and pr_metadata.get("repository") == run.repository
+        and pr_metadata.get("head_branch") == run.metadata.get("branch_preference")
+        and isinstance(pr_number, int)
+        and not isinstance(pr_number, bool)
+        and pr_number > 0
+        and pr_metadata.get("pull_request_opened") is True
+        and pr_metadata.get("merged") is False
+        and pr_metadata.get("operation_type") == "github_pull_request_creation"
+        and parsed_url is not None
+        and parsed_url.scheme == "https"
+        and parsed_url.hostname == "github.com"
+        and parsed_url.netloc == "github.com"
+        and parsed_url.path == expected_path
+        and not parsed_url.query
+        and not parsed_url.fragment
+        and pr_event.status == AgentTaskStatus.READY_FOR_PR
+        and (validation_event is not None and validation_event.created_at <= pr_event.created_at)
+    )
+    if not pr_evidence_valid:
+        reasons.append("Run-bound, unmerged pull-request evidence is missing or inconsistent.")
+
+    if task.status not in {AgentTaskStatus.READY_FOR_PR, AgentTaskStatus.DONE}:
+        reasons.append("Task status does not confirm a ready or completed pull request.")
+
+    evidence = {
+        "task_id": task.id,
+        "workspace_id": run.workspace_id,
+        "project_id": run.project_id,
+        "approval_request_id": run.approval_request_id,
+        "task_status": task.status.value,
+        "approval_hash_valid": approval_hash_valid,
+        "validation_event_id": validation_event.id if validation_event else None,
+        "validation_passed": validation_evidence_valid,
+        "pr_event_id": pr_event.id if pr_event else None,
+        "pr_event_count": len(pr_events),
+        "pull_request_url": pr_url if pr_evidence_valid else None,
+    }
+    success = not reasons
+    result = classify_execution_result(
+        success=success,
+        reason=(
+            "Run-bound validation and pull-request evidence are consistent."
+            if success
+            else "Objective incomplete: " + " ".join(reasons)
+        ),
+        evidence=evidence,
+    )
+    return result.model_copy(update={"output_reference": pr_url if success else None})
 
 
 class DefaultAgentRunStepExecutor:
@@ -969,6 +1214,8 @@ class DefaultAgentRunStepExecutor:
                     cwd=workspace.repository_path,
                     timeout_seconds=timeout_seconds,
                     executor=executor,
+                    task_repository=self.task_repository,
+                    approval_repository=self.approval_repository,
                 )
                 evidence = result.to_dict()
                 evidence.update(
@@ -1010,25 +1257,26 @@ class DefaultAgentRunStepExecutor:
                 self.task_repository.list_events(task.id, workspace_id=task.workspace_id)
                 if self.task_repository is not None
                 else [
-                    event for event in store.agent_task_events.values()
-                    if event.task_id == task.id
+                    event for event in store.agent_task_events.values() if event.task_id == task.id
                 ]
             )
-            pr_events = [
-                event
-                for event in task_events
-                if event.event_type.value == "PR_CREATED"
-            ]
+            if isinstance(self.run_repository, PostgresAgentRunRepository):
+                return _verify_postgres_agent_run_result(
+                    run=run,
+                    task=task,
+                    approval=approval,
+                    events=task_events,
+                    task_repository=self.task_repository,
+                    approval_repository=self.approval_repository,
+                )
+            pr_events = [event for event in task_events if event.event_type.value == "PR_CREATED"]
             validation_passed = any(
-                event.event_type.value == "TESTS_PASSED"
-                for event in task_events
+                event.event_type.value == "TESTS_PASSED" for event in task_events
             )
             pr_url = next(
                 (
                     event.metadata.get("pull_request_url")
-                    for event in reversed(
-                        sorted(pr_events, key=lambda event: event.created_at)
-                    )
+                    for event in reversed(sorted(pr_events, key=lambda event: event.created_at))
                     if event.metadata.get("pull_request_url")
                 ),
                 None,
@@ -1067,8 +1315,7 @@ class DefaultAgentRunStepExecutor:
             )
             prior_steps = [item for item in steps if item.sequence < step.sequence]
             all_prior_passed = all(
-                item.status == AgentRunStepStatus.SUCCEEDED
-                for item in prior_steps
+                item.status == AgentRunStepStatus.SUCCEEDED for item in prior_steps
             )
             evidence_payload = {
                 "run_id": run.id,
@@ -1126,10 +1373,9 @@ def recover_stale_leases(
         # Keep malformed or cross-scope compatibility data from becoming an
         # authorization or recovery source. Durable repository checks remain
         # authoritative at commit time.
-        if (
-            isinstance(active_repository, SQLiteAgentRunRepository)
-            and not agent_run_scope_is_consistent(expected_run)
-        ):
+        if isinstance(
+            active_repository, SQLiteAgentRunRepository
+        ) and not agent_run_scope_is_consistent(expected_run):
             continue
         if workspace_id is not None and expected_run.workspace_id != workspace_id:
             continue
@@ -1329,7 +1575,11 @@ def resume_agent_run(
     updated_steps = [step.model_copy(deep=True) for step in expected_steps]
     events: list[AgentRunEvent] = []
     current_step_index = next(
-        (index for index, step in enumerate(updated_steps) if step.id == durable_run.current_step_id),
+        (
+            index
+            for index, step in enumerate(updated_steps)
+            if step.id == durable_run.current_step_id
+        ),
         None,
     )
     if current_step_index is not None and updated_steps[current_step_index].status in {
@@ -1344,33 +1594,37 @@ def resume_agent_run(
             reason=reason or "Operator resumed step.",
         )
         step.next_retry_at = None
-        events.append(AgentRunEvent(
-            run_id=updated_run.id,
-            task_id=updated_run.task_id,
-            step_id=step.id,
-            correlation_id=updated_run.correlation_id,
-            event_type=AgentRunEventType.STEP_READY,
-            previous_status=previous_step.value,
-            new_status=new_step.value,
-            message="Operator returned the current step to READY.",
-            reason=reason,
-            actor=actor,
-            attempt_number=step.attempt_count,
-        ))
+        events.append(
+            AgentRunEvent(
+                run_id=updated_run.id,
+                task_id=updated_run.task_id,
+                step_id=step.id,
+                correlation_id=updated_run.correlation_id,
+                event_type=AgentRunEventType.STEP_READY,
+                previous_status=previous_step.value,
+                new_status=new_step.value,
+                message="Operator returned the current step to READY.",
+                reason=reason,
+                actor=actor,
+                attempt_number=step.attempt_count,
+            )
+        )
     updated_run.pause_requested = False
     previous, new = transition_run(updated_run, AgentRunStatus.SCHEDULED, reason=reason)
-    events.append(AgentRunEvent(
-        run_id=updated_run.id,
-        task_id=updated_run.task_id,
-        step_id=updated_run.current_step_id,
-        correlation_id=updated_run.correlation_id,
-        event_type=AgentRunEventType.OPERATOR_ACTION,
-        previous_status=previous.value,
-        new_status=new.value,
-        message="Operator resumed the run.",
-        reason=reason,
-        actor=actor,
-    ))
+    events.append(
+        AgentRunEvent(
+            run_id=updated_run.id,
+            task_id=updated_run.task_id,
+            step_id=updated_run.current_step_id,
+            correlation_id=updated_run.correlation_id,
+            event_type=AgentRunEventType.OPERATOR_ACTION,
+            previous_status=previous.value,
+            new_status=new.value,
+            message="Operator resumed the run.",
+            reason=reason,
+            actor=actor,
+        )
+    )
     audit = AuditEvent(
         event_type="agent_run.resumed",
         entity_id=updated_run.id,
@@ -1440,33 +1694,37 @@ def cancel_agent_run(
                 AgentRunStepStatus.CANCELLED,
                 reason=reason or "Run cancelled.",
             )
-            events.append(AgentRunEvent(
-                run_id=updated_run.id,
-                task_id=updated_run.task_id,
-                step_id=step.id,
-                correlation_id=updated_run.correlation_id,
-                event_type=AgentRunEventType.STEP_CANCELLED,
-                previous_status=previous.value,
-                new_status=new.value,
-                message="Pending work was cancelled.",
-                reason=reason,
-                actor=actor,
-                attempt_number=step.attempt_count,
-            ))
+            events.append(
+                AgentRunEvent(
+                    run_id=updated_run.id,
+                    task_id=updated_run.task_id,
+                    step_id=step.id,
+                    correlation_id=updated_run.correlation_id,
+                    event_type=AgentRunEventType.STEP_CANCELLED,
+                    previous_status=previous.value,
+                    new_status=new.value,
+                    message="Pending work was cancelled.",
+                    reason=reason,
+                    actor=actor,
+                    attempt_number=step.attempt_count,
+                )
+            )
     updated_run.cancel_requested = True
     previous, new = transition_run(updated_run, AgentRunStatus.CANCELLED, reason=reason)
-    events.append(AgentRunEvent(
-        run_id=updated_run.id,
-        task_id=updated_run.task_id,
-        step_id=updated_run.current_step_id,
-        correlation_id=updated_run.correlation_id,
-        event_type=AgentRunEventType.OPERATOR_ACTION,
-        previous_status=previous.value,
-        new_status=new.value,
-        message="Operator cancelled the run.",
-        reason=reason,
-        actor=actor,
-    ))
+    events.append(
+        AgentRunEvent(
+            run_id=updated_run.id,
+            task_id=updated_run.task_id,
+            step_id=updated_run.current_step_id,
+            correlation_id=updated_run.correlation_id,
+            event_type=AgentRunEventType.OPERATOR_ACTION,
+            previous_status=previous.value,
+            new_status=new.value,
+            message="Operator cancelled the run.",
+            reason=reason,
+            actor=actor,
+        )
+    )
     audit = AuditEvent(
         event_type="agent_run.cancelled",
         entity_id=updated_run.id,
@@ -1583,9 +1841,7 @@ def retry_agent_run_step(
     except AgentRunRepositoryConflict as error:
         raise AgentRunConflict(f"Step retry was not committed: {error}") from error
     if isinstance(active_repository, SQLiteAgentRunRepository):
-        store.project_agent_run_control_transition(
-            updated_run, updated_steps, [event], [audit]
-        )
+        store.project_agent_run_control_transition(updated_run, updated_steps, [event], [audit])
         return store.agent_run_steps[updated_step.id]
     return updated_step
 

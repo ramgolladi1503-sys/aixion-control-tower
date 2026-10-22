@@ -198,7 +198,11 @@ def _require_step_boundary(
         current = store.agent_run_steps.get(current_step_id)
     else:
         current = next(
-            (step for step in run_repository.list_steps_for_run(run.id) if step.id == current_step_id),
+            (
+                step
+                for step in run_repository.list_steps_for_run(run.id)
+                if step.id == current_step_id
+            ),
             None,
         )
     if (
@@ -240,20 +244,14 @@ def create_run(
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
     task_repository = (
-        agent_task_repository_for_request(request)
-        if request is not None
-        else agent_task_repository
+        agent_task_repository_for_request(request) if request is not None else agent_task_repository
     )
     approval_repository = (
         approval_decision_repository_for_request(request)
         if request is not None
         else approval_decision_repository
     )
-    run_repository = (
-        agent_run_repository_for_request(request)
-        if request is not None
-        else None
-    )
+    run_repository = agent_run_repository_for_request(request) if request is not None else None
     workspace_id = (
         workspace_id_for_request(user, request)
         if request is not None
@@ -262,10 +260,7 @@ def create_run(
     if get_settings().auth_enabled and workspace_id is None:
         raise HTTPException(status_code=404, detail="Agent task not found")
     task = task_repository.get(payload.task_id)
-    if (
-        task is None
-        or (workspace_id is not None and task.workspace_id != workspace_id)
-    ):
+    if task is None or (workspace_id is not None and task.workspace_id != workspace_id):
         raise HTTPException(status_code=404, detail="Agent task not found")
     if (
         payload.capability_lease_id
@@ -360,9 +355,7 @@ def get_run_metrics(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> Response:
     workspace_id = (
-        user.workspace_id
-        if user.id == METRICS_SCRAPER_USER_ID
-        else workspace_id_for_user(user)
+        user.workspace_id if user.id == METRICS_SCRAPER_USER_ID else workspace_id_for_user(user)
     )
     notification_repository = (
         getattr(http_request.app.state, "notification_outbox_repository", None)
@@ -417,10 +410,17 @@ def list_faults(user: AuthUser = MaintainerDependency) -> list[AgentRunFaultConf
     _require_non_production_fault_injection()
     workspace_id = workspace_id_for_user(user)
     return sorted(
-        [fault for fault in store.agent_run_faults.values()
-         if fault.run_id is not None and fault.run_id in store.agent_runs
-         and agent_run_scope_is_consistent(store.agent_runs[fault.run_id])
-         and (workspace_id is None or _run_workspace_id(store.agent_runs[fault.run_id]) == workspace_id)],
+        [
+            fault
+            for fault in store.agent_run_faults.values()
+            if fault.run_id is not None
+            and fault.run_id in store.agent_runs
+            and agent_run_scope_is_consistent(store.agent_runs[fault.run_id])
+            and (
+                workspace_id is None
+                or _run_workspace_id(store.agent_runs[fault.run_id]) == workspace_id
+            )
+        ],
         key=lambda fault: fault.created_at,
         reverse=True,
     )
@@ -434,7 +434,9 @@ def create_fault(
     _require_non_production_fault_injection()
     workspace_id = workspace_id_for_user(user)
     if not payload.run_id:
-        raise HTTPException(status_code=422, detail="A run_id is required for workspace-scoped fault injection")
+        raise HTTPException(
+            status_code=422, detail="A run_id is required for workspace-scoped fault injection"
+        )
     if payload.run_id not in store.agent_runs:
         raise HTTPException(status_code=404, detail="Agent run not found")
     run = store.agent_runs[payload.run_id]
@@ -471,9 +473,16 @@ def disable_fault(
     _require_non_production_fault_injection()
     fault = store.agent_run_faults.get(fault_id)
     workspace_id = workspace_id_for_user(user)
-    if fault is None or fault.run_id not in store.agent_runs or (
-        not agent_run_scope_is_consistent(store.agent_runs[fault.run_id])
-        or (workspace_id is not None and _run_workspace_id(store.agent_runs[fault.run_id]) != workspace_id)
+    if (
+        fault is None
+        or fault.run_id not in store.agent_runs
+        or (
+            not agent_run_scope_is_consistent(store.agent_runs[fault.run_id])
+            or (
+                workspace_id is not None
+                and _run_workspace_id(store.agent_runs[fault.run_id]) != workspace_id
+            )
+        )
     ):
         raise HTTPException(status_code=404, detail="Fault configuration not found")
     fault.enabled = False
@@ -531,9 +540,7 @@ def bind_run_capability_lease(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
-    run_repository = (
-        agent_run_repository_for_request(request) if request is not None else None
-    )
+    run_repository = agent_run_repository_for_request(request) if request is not None else None
     if isinstance(run_repository, PostgresAgentRunRepository):
         workspace_id = workspace_id_for_request(user, request)
         if workspace_id is None:
@@ -590,9 +597,7 @@ def execute_run_next_step(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
-    run_repository = (
-        agent_run_repository_for_request(request) if request is not None else None
-    )
+    run_repository = agent_run_repository_for_request(request) if request is not None else None
     if run_repository is not None and not isinstance(
         run_repository, (SQLiteAgentRunRepository, PostgresAgentRunRepository)
     ):
@@ -624,9 +629,7 @@ def execute_run_next_step(
         run = store.agent_runs[run_id]
     else:
         run = _run_or_404(run_id, user)
-    task_repository = (
-        agent_task_repository_for_request(request) if request is not None else None
-    )
+    task_repository = agent_task_repository_for_request(request) if request is not None else None
     approval_repository = (
         approval_decision_repository_for_request(request) if request is not None else None
     )
@@ -648,24 +651,24 @@ def execute_run_next_step(
         )
         if current_step is None:
             raise HTTPException(status_code=409, detail="Run has no current step")
-        if (
-            isinstance(run_repository, PostgresAgentRunRepository)
-            and current_step.step_type != AgentRunStepType.VALIDATE_SCOPE
-        ):
+        postgres_read_only_step = current_step.step_type in {
+            AgentRunStepType.VALIDATE_SCOPE,
+            AgentRunStepType.VERIFY_RESULT,
+        }
+        if isinstance(run_repository, PostgresAgentRunRepository) and not postgres_read_only_step:
             raise HTTPException(
                 status_code=409,
                 detail=(
                     "PostgreSQL AgentRun execution currently supports only the "
-                    "side-effect-free VALIDATE_SCOPE step."
+                    "read-only VALIDATE_SCOPE and VERIFY_RESULT steps."
                 ),
             )
         try:
-            postgres_scope_only = (
-                isinstance(run_repository, PostgresAgentRunRepository)
-                and current_step.step_type == AgentRunStepType.VALIDATE_SCOPE
+            postgres_read_only = (
+                isinstance(run_repository, PostgresAgentRunRepository) and postgres_read_only_step
             )
             trust_actions = []
-            if not postgres_scope_only:
+            if not postgres_read_only:
                 ensure_run_capability(run, user=user)
                 trust_actions = authorize_run_step(
                     run,

@@ -20,10 +20,21 @@ from app.agent_run_models import (
     AgentRunStatus,
     AgentRunStepStatus,
     AgentRunStepType,
+    VerificationDecision,
 )
 from app.agent_run_repository import AgentRunRepositoryConflict
+from app.agent_run_verifier import canonical_evidence_hash
 from app.agent_run_routes import MaintainerDependency, ReviewerDependency
-from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.agent_worker_validation_runner import (
+    CommandExecutionResult,
+    run_agent_worker_validation_commands,
+)
+from app.agent_task_models import (
+    AgentTask,
+    AgentTaskEvent,
+    AgentTaskEventType,
+    AgentTaskStatus,
+)
 from app.approval_integrity import compute_approval_payload_hash
 from app.application_repositories import ApplicationRepositories
 from app.auth import require_maintainer, require_owner, require_reviewer
@@ -308,7 +319,6 @@ def test_postgres_agent_run_http_control_transitions_are_durable_and_audited(
     created = client.post("/agent/runs", json={"task_id": task_id})
     assert created.status_code == 200, created.text
     run_id = created.json()["run"]["id"]
-
     paused = client.post(f"/agent/runs/{run_id}/pause", json={"reason": "operator pause"})
     assert paused.status_code == 200, paused.text
     assert paused.json()["run"]["status"] == AgentRunStatus.PAUSED.value
@@ -335,8 +345,7 @@ def test_postgres_agent_run_http_control_transitions_are_durable_and_audited(
             (workspace.id, run_id),
         ).fetchall()
         event_rows = conn.execute(
-            "SELECT event_type FROM agent_run_events "
-            "WHERE workspace_id=%s AND run_id=%s",
+            "SELECT event_type FROM agent_run_events WHERE workspace_id=%s AND run_id=%s",
             (workspace.id, run_id),
         ).fetchall()
 
@@ -351,6 +360,151 @@ def test_postgres_agent_run_http_control_transitions_are_durable_and_audited(
     assert "OPERATOR_ACTION" in event_types
     assert "STEP_CANCELLED" in event_types
     assert run_id not in store.agent_runs
+
+
+def _seed_postgres_verify_result_ready(
+    *,
+    connect: Callable[[], Connection],
+    workspace: Workspace,
+    task_id: str,
+    repositories: ApplicationRepositories,
+    client: TestClient,
+    include_evidence: bool = True,
+) -> str:
+    with connect() as conn:
+        task_row = conn.execute(
+            "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        task = AgentTask.model_validate(task_row[0])
+        task.repository = "owner/approved-repository"
+        task.branch_preference = "feature/approved-branch"
+        conn.execute(
+            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
+        )
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (task.approval_request_id, workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+        approval.test_plan = ["python -m pytest"]
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
+        )
+
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    if include_evidence:
+        validation = run_agent_worker_validation_commands(
+            task_id=task_id,
+            worker_id=f"mission-control:{run_id}:validation",
+            executor=lambda command: CommandExecutionResult(command=command, exit_code=0),
+            task_repository=repositories.agent_tasks,
+            approval_repository=repositories.approval_decisions,
+        )
+        assert validation.success is True, validation.reason
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None
+    steps = repositories.agent_runs.list_steps_for_run(run_id)
+    verify_step = next(step for step in steps if step.step_type == AgentRunStepType.VERIFY_RESULT)
+    now = now_utc()
+    run.status = AgentRunStatus.RUNNING
+    run.current_step_id = verify_step.id
+    run.current_step_index = verify_step.sequence
+    run.started_at = now
+    run.updated_at = now
+    task.status = AgentTaskStatus.READY_FOR_PR
+    task.updated_at = now
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status=%s,current_step_id=%s,updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (
+                run.status.value,
+                run.current_step_id,
+                now,
+                Jsonb(run.model_dump(mode="json")),
+                run_id,
+                workspace.id,
+            ),
+        )
+        conn.execute(
+            "UPDATE agent_tasks SET status=%s,updated_at=%s,payload=%s "
+            "WHERE task_id=%s AND workspace_id=%s",
+            (
+                task.status.value,
+                now,
+                Jsonb(task.model_dump(mode="json")),
+                task_id,
+                workspace.id,
+            ),
+        )
+        for step in steps:
+            if step.sequence < verify_step.sequence:
+                step.status = AgentRunStepStatus.SUCCEEDED
+                step.decision = VerificationDecision.PASS
+                step.reason = "Prior worker step fixture completed."
+                step.evidence = {"fixture": "prior_worker_step_completed"}
+                step.evidence_hash = canonical_evidence_hash(step.evidence)
+                step.completed_at = now
+            elif step.id == verify_step.id:
+                step.status = AgentRunStepStatus.READY
+            else:
+                step.status = AgentRunStepStatus.PENDING
+            step.updated_at = now
+            conn.execute(
+                "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+                (
+                    step.status.value,
+                    now,
+                    Jsonb(step.model_dump(mode="json")),
+                    step.id,
+                    run_id,
+                    workspace.id,
+                ),
+            )
+
+        if include_evidence:
+            pr_worker = f"mission-control:{run_id}:pr"
+            pr_event = AgentTaskEvent(
+                task_id=task_id,
+                event_type=AgentTaskEventType.PR_CREATED,
+                message="PR worker created the review pull request.",
+                status=AgentTaskStatus.READY_FOR_PR,
+                actor=pr_worker,
+                created_at=now + timedelta(seconds=1),
+                metadata={
+                    "worker_id": pr_worker,
+                    "approval_request_id": task.approval_request_id,
+                    "repository": task.repository,
+                    "head_branch": task.branch_preference,
+                    "pull_request_number": 42,
+                    "pull_request_url": "https://github.com/owner/approved-repository/pull/42",
+                    "pull_request_opened": True,
+                    "merged": False,
+                    "operation_type": "github_pull_request_creation",
+                },
+            )
+            for event in (pr_event,):
+                conn.execute(
+                    "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        event.id,
+                        task_id,
+                        workspace.id,
+                        event.event_type.value,
+                        event.actor,
+                        event.created_at,
+                        Jsonb(event.model_dump(mode="json")),
+                    ),
+                )
+    return run_id
 
 
 def test_postgres_agent_run_executes_only_durable_scope_validation(
@@ -378,7 +532,7 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
             (task.approval_request_id, workspace.id),
         ).fetchone()
         approval = ApprovalRequest.model_validate(approval_row[0])
-        approval.test_plan = ["python -c 'print(1)'"]
+        approval.test_plan = ["python -m pytest"]
         approval.approved_payload_hash = compute_approval_payload_hash(approval)
         conn.execute(
             "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
@@ -402,8 +556,7 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
     assert body["steps"][0]["status"] == AgentRunStepStatus.SUCCEEDED.value
     assert body["steps"][1]["status"] == AgentRunStepStatus.READY.value
     assert any(
-        event["event_type"] == AgentRunEventType.STEP_SUCCEEDED.value
-        for event in body["events"]
+        event["event_type"] == AgentRunEventType.STEP_SUCCEEDED.value for event in body["events"]
     )
     durable_run = repositories.agent_runs.get(run_id)
     assert durable_run is not None and durable_run.status == AgentRunStatus.RUNNING
@@ -416,9 +569,417 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
         json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
     )
     assert rejected.status_code == 409
-    assert "only the side-effect-free VALIDATE_SCOPE step" in rejected.json()["detail"]
+    assert "read-only VALIDATE_SCOPE and VERIFY_RESULT steps" in rejected.json()["detail"]
     assert repositories.agent_runs.get(run_id) == durable_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
+
+
+def test_postgres_agent_run_verifies_run_bound_durable_evidence_once(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    verify_step = next(
+        step for step in body["steps"] if step["step_type"] == AgentRunStepType.VERIFY_RESULT.value
+    )
+    seal_step = next(
+        step for step in body["steps"] if step["step_type"] == AgentRunStepType.SEAL_EVIDENCE.value
+    )
+    assert verify_step["status"] == AgentRunStepStatus.SUCCEEDED.value
+    assert verify_step["evidence"]["validation_passed"] is True
+    assert verify_step["evidence"]["pr_event_count"] == 1
+    assert seal_step["status"] == AgentRunStepStatus.READY.value
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.lease_token is None
+    assert (
+        next(
+            step
+            for step in repositories.agent_runs.list_steps_for_run(run_id)
+            if step.step_type == AgentRunStepType.VERIFY_RESULT
+        ).status
+        == AgentRunStepStatus.SUCCEEDED
+    )
+    with connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+                "AND event_type='agent_run.step_completed'",
+                (workspace.id, run_id),
+            ).fetchone()[0]
+            == 1
+        )
+
+    replay = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+    )
+    assert replay.status_code == 409
+    assert repositories.agent_runs.get(run_id) == durable_run
+    with connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+                "AND event_type='agent_run.step_completed'",
+                (workspace.id, run_id),
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_postgres_agent_run_verify_result_ignores_process_local_fake_events(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+        include_evidence=False,
+    )
+    task = repositories.agent_tasks.get(task_id)
+    assert task is not None
+    approval_id = task.approval_request_id
+    now = now_utc()
+    validation_worker = f"mission-control:{run_id}:validation"
+    pr_worker = f"mission-control:{run_id}:pr"
+    fake_events = [
+        AgentTaskEvent(
+            task_id=task_id,
+            event_type=AgentTaskEventType.TESTS_PASSED,
+            status=AgentTaskStatus.APPROVED,
+            actor=validation_worker,
+            created_at=now,
+            metadata={
+                "worker_id": validation_worker,
+                "approval_request_id": approval_id,
+                "command_count": 1,
+                "commands_executed": True,
+                "results": [
+                    {"command": "python -c 'print(1)'", "exit_code": 0, "timed_out": False}
+                ],
+            },
+        ),
+        AgentTaskEvent(
+            task_id=task_id,
+            event_type=AgentTaskEventType.PR_CREATED,
+            status=AgentTaskStatus.READY_FOR_PR,
+            actor=pr_worker,
+            created_at=now,
+            metadata={
+                "worker_id": pr_worker,
+                "approval_request_id": approval_id,
+                "repository": "owner/approved-repository",
+                "head_branch": "feature/approved-branch",
+                "pull_request_number": 42,
+                "pull_request_url": "https://github.com/owner/approved-repository/pull/42",
+                "pull_request_opened": True,
+                "merged": False,
+                "operation_type": "github_pull_request_creation",
+            },
+        ),
+    ]
+    for event in fake_events:
+        store.agent_task_events[event.id] = event
+    try:
+        response = client.post(
+            f"/agent/runs/{run_id}/execute-next",
+            json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+        )
+    finally:
+        for event in fake_events:
+            store.agent_task_events.pop(event.id, None)
+
+    assert response.status_code == 200, response.text
+    verify_step = next(
+        step
+        for step in response.json()["steps"]
+        if step["step_type"] == AgentRunStepType.VERIFY_RESULT.value
+    )
+    assert verify_step["status"] != AgentRunStepStatus.SUCCEEDED.value
+    assert verify_step["evidence"]["validation_passed"] is False
+    assert verify_step["evidence"]["pr_event_count"] == 0
+
+
+def test_postgres_agent_run_verify_result_requires_all_prior_steps_succeeded(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+        include_evidence=False,
+    )
+    first = repositories.agent_runs.list_steps_for_run(run_id)[0]
+    first.status = AgentRunStepStatus.SKIPPED
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+            "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+            (
+                first.status.value,
+                now_utc(),
+                Jsonb(first.model_dump(mode="json")),
+                first.id,
+                run_id,
+                workspace.id,
+            ),
+        )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    assert "every preceding AgentRun step to have succeeded" in response.json()["detail"]
+    assert repositories.agent_runs.get(run_id).status == AgentRunStatus.RUNNING
+    assert (
+        repositories.agent_runs.list_steps_for_run(run_id)[0].status == AgentRunStepStatus.SKIPPED
+    )
+
+
+def test_postgres_agent_run_releases_lease_if_prerequisite_changes_after_claim(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.agent_run_supervisor as supervisor
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+        include_evidence=False,
+    )
+    original_acquire = supervisor.acquire_run_lease
+
+    def acquire_then_invalidate(run, **kwargs):
+        token = original_acquire(run, **kwargs)
+        prior = repositories.agent_runs.list_steps_for_run(run_id)[0]
+        prior.status = AgentRunStepStatus.SKIPPED
+        with connect() as conn:
+            conn.execute(
+                "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s WHERE step_id=%s",
+                (prior.status.value, now_utc(), Jsonb(prior.model_dump(mode="json")), prior.id),
+            )
+        return token
+
+    monkeypatch.setattr(supervisor, "acquire_run_lease", acquire_then_invalidate)
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+    )
+    assert response.status_code == 409
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.lease_token is None
+    with connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE entity_id=%s AND event_type='agent_run.lease_released'",
+                (run_id,),
+            ).fetchone()[0]
+            >= 1
+        )
+
+
+@pytest.mark.parametrize(
+    ("evidence_field", "invalid_value"),
+    [("command_count", True), ("exit_code", False)],
+)
+def test_postgres_verify_result_rejects_boolean_as_json_integer(
+    postgres_agent_run_route_runtime,
+    evidence_field: str,
+    invalid_value: bool,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    event = next(
+        item
+        for item in repositories.agent_tasks.list_events(task_id, workspace_id=workspace.id)
+        if item.event_type == AgentTaskEventType.TESTS_PASSED
+    )
+    if evidence_field == "command_count":
+        event.metadata[evidence_field] = invalid_value
+    else:
+        event.metadata["results"][0][evidence_field] = invalid_value
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_task_events SET payload=%s WHERE event_id=%s",
+            (Jsonb(event.model_dump(mode="json")), event.id),
+        )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+    )
+    assert response.status_code == 200, response.text
+    verify = next(
+        step
+        for step in response.json()["steps"]
+        if step["step_type"] == AgentRunStepType.VERIFY_RESULT.value
+    )
+    assert verify["status"] != AgentRunStepStatus.SUCCEEDED.value
+    assert verify["decision"] != VerificationDecision.PASS.value
+    assert verify["output_reference"] is None
+
+
+@pytest.mark.parametrize("mutated_field", ["repository", "branch_preference"])
+def test_postgres_verify_result_rejects_task_snapshot_mutation(
+    postgres_agent_run_route_runtime,
+    mutated_field: str,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    task = repositories.agent_tasks.get(task_id)
+    setattr(
+        task,
+        mutated_field,
+        "attacker/changed-value" if mutated_field == "repository" else "feature/changed-after-run",
+    )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s",
+            (Jsonb(task.model_dump(mode="json")), task_id),
+        )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+    )
+    assert response.status_code == 200, response.text
+    verify = next(
+        step
+        for step in response.json()["steps"]
+        if step["step_type"] == AgentRunStepType.VERIFY_RESULT.value
+    )
+    assert verify["status"] != AgentRunStepStatus.SUCCEEDED.value
+    assert verify["decision"] != VerificationDecision.PASS.value
+    assert verify["output_reference"] is None
+
+
+def test_postgres_agent_run_verify_result_rolls_back_completion_when_audit_fails(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    with connect() as conn:
+        conn.execute(
+            "CREATE FUNCTION reject_verify_result_audit() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ BEGIN "
+            "IF NEW.event_type='agent_run.step_completed' THEN "
+            "RAISE EXCEPTION 'injected verify result audit failure'; "
+            "END IF; RETURN NEW; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_verify_result_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_verify_result_audit()"
+        )
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    assert "completion could not be committed" in response.json()["detail"]
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.lease_token is not None
+    verify_step = next(
+        step
+        for step in repositories.agent_runs.list_steps_for_run(run_id)
+        if step.step_type == AgentRunStepType.VERIFY_RESULT
+    )
+    assert verify_step.status == AgentRunStepStatus.RUNNING
+    with connect() as conn:
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='STEP_SUCCEEDED'",
+                (run_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+                "AND event_type='agent_run.step_completed'",
+                (workspace.id, run_id),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_postgres_scope_validation_blocks_approval_changed_after_run_creation(
@@ -447,7 +1008,7 @@ def test_postgres_scope_validation_blocks_approval_changed_after_run_creation(
             (task.approval_request_id, other_workspace.id),
         ).fetchone()
         approval = ApprovalRequest.model_validate(approval_row[0])
-        approval.test_plan = ["python -c 'print(1)'"]
+        approval.test_plan = ["python -m pytest"]
         approval.approved_payload_hash = compute_approval_payload_hash(approval)
         conn.execute(
             "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
@@ -556,8 +1117,14 @@ def _create_run_with_postgres_capability_lease(
             "email_verified,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT (user_id) DO NOTHING",
             (
-                owner.id, workspace.id, owner.email, owner.email.lower(), owner.role.value,
-                owner.disabled, owner.email_verified, Jsonb(owner.model_dump(mode="json")),
+                owner.id,
+                workspace.id,
+                owner.email,
+                owner.email.lower(),
+                owner.role.value,
+                owner.disabled,
+                owner.email_verified,
+                Jsonb(owner.model_dump(mode="json")),
             ),
         )
         PostgresTrustRepository().insert_capability_lease(conn, lease)
@@ -593,15 +1160,21 @@ def test_postgres_agent_run_capability_binding_is_durable_and_idempotent(
     persisted = repositories.agent_runs.get(run_id)
     assert persisted is not None and persisted.capability_lease_id == lease.id
     with connect() as conn:
-        assert conn.execute(
-            "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='CAPABILITY_LEASE_ATTACHED'",
-            (run_id,),
-        ).fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
-            "AND event_type='agent_run.capability_lease_attached'",
-            (run_id,),
-        ).fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='CAPABILITY_LEASE_ATTACHED'",
+                (run_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='agent_run.capability_lease_attached'",
+                (run_id,),
+            ).fetchone()[0]
+            == 1
+        )
     assert run_id not in store.agent_runs
 
     with connect() as conn:
@@ -677,14 +1250,15 @@ def test_postgres_credential_revocation_route_uses_durable_workspace_state(
     assert response.json()["revoked"] is True
     assert response.json()["metadata"]["revoked_by_user_id"] == state["users"][0].id
     with connect() as conn:
-        persisted = repositories.trust.get_credential_grant(
-            conn, grant.id, workspace.id
-        )
+        persisted = repositories.trust.get_credential_grant(conn, grant.id, workspace.id)
         assert persisted is not None and persisted.revoked
-        assert conn.execute(
-            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
-            (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
-        ).fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+                (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
+            ).fetchone()[0]
+            == 1
+        )
     assert store.credential_grants == sqlite_grants_before
     assert store.trust_events == sqlite_events_before
 
@@ -695,10 +1269,13 @@ def test_postgres_credential_revocation_route_uses_durable_workspace_state(
     )
     assert hidden.status_code == 404
     with connect() as conn:
-        assert conn.execute(
-            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
-            (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
-        ).fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+                (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
+            ).fetchone()[0]
+            == 1
+        )
 
     state["current_user"]["value"] = state["users"][0]
     monkeypatch.setattr(main.app.state, "trust_event_repository", object())
@@ -708,10 +1285,13 @@ def test_postgres_credential_revocation_route_uses_durable_workspace_state(
     )
     assert partial_runtime.status_code == 409
     with connect() as conn:
-        assert conn.execute(
-            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
-            (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
-        ).fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+                (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_postgres_credential_issue_introspect_and_revoke_are_durable(
@@ -829,13 +1409,31 @@ def test_postgres_credential_issue_introspect_and_revoke_are_durable(
 
 @pytest.mark.parametrize(
     (
-        "status", "approved_payload_hash", "expires_at", "valid_signature",
-        "lease_branch", "lease_max_retries",
+        "status",
+        "approved_payload_hash",
+        "expires_at",
+        "valid_signature",
+        "lease_branch",
+        "lease_max_retries",
     ),
     [
         (CapabilityLeaseStatus.REVOKED, None, None, True, "feature/approved-branch", 3),
-        (CapabilityLeaseStatus.EXPIRED, None, now_utc() - timedelta(seconds=1), True, "feature/approved-branch", 3),
-        (CapabilityLeaseStatus.ACTIVE, "sha256:" + "f" * 64, None, True, "feature/approved-branch", 3),
+        (
+            CapabilityLeaseStatus.EXPIRED,
+            None,
+            now_utc() - timedelta(seconds=1),
+            True,
+            "feature/approved-branch",
+            3,
+        ),
+        (
+            CapabilityLeaseStatus.ACTIVE,
+            "sha256:" + "f" * 64,
+            None,
+            True,
+            "feature/approved-branch",
+            3,
+        ),
         (CapabilityLeaseStatus.ACTIVE, None, None, False, "feature/approved-branch", 3),
         (CapabilityLeaseStatus.ACTIVE, None, None, True, "feature/other-branch", 3),
         (CapabilityLeaseStatus.ACTIVE, None, None, True, "feature/approved-branch", 1),
@@ -878,15 +1476,21 @@ def test_postgres_agent_run_capability_binding_rejects_invalid_leases(
     assert response.status_code == 409
     assert repositories.agent_runs.get(run_id).capability_lease_id is None
     with connect() as conn:
-        assert conn.execute(
-            "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='CAPABILITY_LEASE_ATTACHED'",
-            (run_id,),
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
-            "AND event_type='agent_run.capability_lease_attached'",
-            (run_id,),
-        ).fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='CAPABILITY_LEASE_ATTACHED'",
+                (run_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='agent_run.capability_lease_attached'",
+                (run_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_postgres_agent_run_capability_binding_hides_other_workspace_lease(
@@ -953,16 +1557,22 @@ def test_postgres_agent_run_capability_binding_serializes_concurrent_same_lease_
     attached = repository.get(run_id)
     assert attached is not None and attached.capability_lease_id == first.id
     with connect() as conn:
-        assert conn.execute(
-            "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
-            "AND event_type='CAPABILITY_LEASE_ATTACHED'",
-            (run_id,),
-        ).fetchone()[0] == 1
-        assert conn.execute(
-            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
-            "AND event_type='agent_run.capability_lease_attached'",
-            (run_id,),
-        ).fetchone()[0] == 1
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
+                "AND event_type='CAPABILITY_LEASE_ATTACHED'",
+                (run_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='agent_run.capability_lease_attached'",
+                (run_id,),
+            ).fetchone()[0]
+            == 1
+        )
 
     with pytest.raises(AgentRunRepositoryConflict, match="cannot be replaced"):
         repository.attach_capability_lease(
@@ -1012,13 +1622,19 @@ def test_postgres_agent_run_capability_binding_rolls_back_if_audit_insert_fails(
     persisted = repository.get(run_id)
     assert persisted is not None and persisted.capability_lease_id is None
     with connect() as conn:
-        assert conn.execute(
-            "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
-            "AND event_type='CAPABILITY_LEASE_ATTACHED'",
-            (run_id,),
-        ).fetchone()[0] == 0
-        assert conn.execute(
-            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
-            "AND event_type='agent_run.capability_lease_attached'",
-            (run_id,),
-        ).fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM agent_run_events WHERE run_id=%s "
+                "AND event_type='CAPABILITY_LEASE_ATTACHED'",
+                (run_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='agent_run.capability_lease_attached'",
+                (run_id,),
+            ).fetchone()[0]
+            == 0
+        )

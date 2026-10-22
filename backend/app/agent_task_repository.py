@@ -273,9 +273,27 @@ def _validate_worker_outcome_commit(
             expected.status != updated.status
             and not (
                 expected.status == AgentTaskStatus.APPROVED
-                and updated.status == AgentTaskStatus.READY_FOR_PR
                 and event is not None
-                and event.event_type == AgentTaskEventType.PR_CREATED
+                and (
+                    (
+                        updated.status == AgentTaskStatus.READY_FOR_PR
+                        and event.event_type == AgentTaskEventType.PR_CREATED
+                    )
+                    or (
+                        updated.status == AgentTaskStatus.FAILED
+                        and event.event_type == AgentTaskEventType.TESTS_FAILED
+                        and event.status == AgentTaskStatus.FAILED
+                        and expected.approval_request_id is not None
+                        and event.metadata.get("approval_request_id")
+                        == expected.approval_request_id
+                        and event.metadata.get("runner_type") == "validation_command_runner"
+                        and event.metadata.get("commands_executed") is True
+                        and audit.event_type == "agent_worker.validation_run_completed"
+                        and audit.details.get("approval_request_id")
+                        == expected.approval_request_id
+                        and audit.details.get("passed") is False
+                    )
+                )
             )
         )
         or not expected.worker_lease_owner
