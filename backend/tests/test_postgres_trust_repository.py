@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 from types import SimpleNamespace
 
 import psycopg
@@ -422,6 +423,110 @@ def test_postgres_lease_revocation_rolls_back_on_trust_event_failure(trust_repos
     with connect() as conn:
         persisted = repository.get_capability_lease(conn, lease.id, workspace_id)
         assert persisted is not None and persisted.status == CapabilityLeaseStatus.ACTIVE
+        assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0
+
+
+def test_postgres_credential_revocation_is_workspace_scoped_idempotent_and_atomic(
+    trust_repository,
+):
+    repository, connect, workspace_id, user_id, _project_id, approval_id = trust_repository
+    events = PostgresTrustEventRepository(connect)
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    grant = CredentialGrant(
+        lease_id=lease.id,
+        workspace_id=workspace_id,
+        grant_type=CredentialGrantType.INTERNAL_CAPABILITY_TOKEN,
+        audience="worker",
+        subject="agent:test",
+        scope=["run:execute"],
+        expires_at=now_utc() + timedelta(minutes=5),
+        token_hash=uuid.uuid4().hex,
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            repository.insert_credential_grant(conn, grant)
+
+    def revoke(scope: str):
+        with connect() as conn:
+            with conn.transaction():
+                return repository.revoke_credential_grant(
+                    conn,
+                    grant_id=grant.id,
+                    workspace_id=scope,
+                    actor_user_id=user_id,
+                    actor="owner@example.test",
+                    reason="Operator revoked credential",
+                    now=now_utc(),
+                    trust_event_repository=events,
+                )
+
+    with pytest.raises(ValueError, match="not found"):
+        revoke("different-workspace")
+    barrier = Barrier(2)
+
+    def concurrent_revoke():
+        barrier.wait(timeout=5)
+        return revoke(workspace_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = list(pool.map(lambda _index: concurrent_revoke(), range(2)))
+    assert first.revoked and first.revoked_at is not None
+    assert second.revoked and second.revoked_at is not None
+    assert first.metadata["revoked_by_user_id"] == user_id
+    assert second.metadata["revoked_by_user_id"] == user_id
+    with connect() as conn:
+        persisted = repository.get_credential_grant(conn, grant.id, workspace_id)
+        assert persisted == first
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+            (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
+        ).fetchone()[0] == 1
+    assert events.verify().valid
+
+
+def test_postgres_credential_revocation_rolls_back_if_event_append_fails(trust_repository):
+    repository, connect, workspace_id, user_id, _project_id, approval_id = trust_repository
+    events = PostgresTrustEventRepository(connect)
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    grant = CredentialGrant(
+        lease_id=lease.id,
+        workspace_id=workspace_id,
+        grant_type=CredentialGrantType.INTERNAL_CAPABILITY_TOKEN,
+        audience="worker",
+        subject="agent:test",
+        scope=["run:execute"],
+        expires_at=now_utc() + timedelta(minutes=5),
+        token_hash=uuid.uuid4().hex,
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            repository.insert_credential_grant(conn, grant)
+        conn.execute(
+            "UPDATE trust_event_heads SET event_hash=%s WHERE singleton=TRUE", ("0" * 64,)
+        )
+
+    with pytest.raises(PostgresTrustEventRepositoryError, match="empty ledger"):
+        with connect() as conn:
+            with conn.transaction():
+                repository.revoke_credential_grant(
+                    conn,
+                    grant_id=grant.id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    actor="owner@example.test",
+                    reason="Operator revoked credential",
+                    now=now_utc(),
+                    trust_event_repository=events,
+                )
+    with connect() as conn:
+        persisted = repository.get_credential_grant(conn, grant.id, workspace_id)
+        assert persisted is not None and not persisted.revoked
         assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0
 
 

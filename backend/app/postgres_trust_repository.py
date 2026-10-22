@@ -612,7 +612,12 @@ class PostgresTrustRepository:
         )
 
     def get_credential_grant(
-        self, conn: Connection, grant_id: str, workspace_id: str
+        self,
+        conn: Connection,
+        grant_id: str,
+        workspace_id: str,
+        *,
+        for_update: bool = False,
     ) -> CredentialGrant | None:
         return self._get(
             conn,
@@ -622,7 +627,66 @@ class PostgresTrustRepository:
             workspace_id=workspace_id,
             model=CredentialGrant,
             columns=(("lease_id", "lease_id"), ("grant_type", "grant_type"), ("audience", "audience"), ("subject", "subject"), ("expires_at", "expires_at"), ("revoked", "revoked"), ("token_hash", "token_hash")),
+            for_update=for_update,
         )
+
+    def revoke_credential_grant(
+        self,
+        conn: Connection,
+        *,
+        grant_id: str,
+        workspace_id: str,
+        actor_user_id: str,
+        actor: str,
+        reason: str,
+        now: datetime,
+        trust_event_repository: PostgresTrustEventRepository,
+    ) -> CredentialGrant:
+        """Revoke one credential grant and append its event in one transaction."""
+        self._require_scope(workspace_id)
+        if not actor_user_id or not actor or len(reason.strip()) < 3:
+            raise ValueError("Credential revocation requires actor and reason")
+        if conn.autocommit:
+            raise ValueError("Credential revocation requires a transaction")
+        grant = self.get_credential_grant(
+            conn, grant_id, workspace_id, for_update=True
+        )
+        if grant is None:
+            raise ValueError("Credential grant not found")
+        if grant.revoked:
+            return grant
+
+        updated = grant.model_copy(
+            update={
+                "revoked": True,
+                "revoked_at": now,
+                "metadata": {
+                    **grant.metadata,
+                    "revoked_by_user_id": actor_user_id,
+                    "revocation_reason": reason.strip(),
+                },
+            }
+        )
+        changed = conn.execute(
+            "UPDATE credential_grants SET revoked=TRUE,payload=%s "
+            "WHERE grant_id=%s AND workspace_id=%s AND revoked=FALSE",
+            (Jsonb(_model_payload(updated)), grant_id, workspace_id),
+        )
+        if changed.rowcount != 1:
+            raise PostgresTrustRepositoryConflict(
+                "Credential grant changed during revocation"
+            )
+        trust_event_repository.append_in_transaction(
+            conn,
+            TrustEventType.CREDENTIAL_GRANT_REVOKED,
+            entity_type="credential_grant",
+            entity_id=updated.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            correlation_id=updated.lease_id,
+            payload={"lease_id": updated.lease_id, "reason": reason.strip()},
+        )
+        return updated
 
     def consume_effective_action(
         self,

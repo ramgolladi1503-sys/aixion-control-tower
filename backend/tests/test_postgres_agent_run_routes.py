@@ -21,7 +21,7 @@ from app.agent_run_routes import MaintainerDependency, ReviewerDependency
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.approval_integrity import compute_approval_payload_hash
 from app.application_repositories import ApplicationRepositories
-from app.auth import require_maintainer, require_reviewer
+from app.auth import require_maintainer, require_owner, require_reviewer
 from app.models import (
     ApprovalRequest,
     ApprovalStatus,
@@ -44,6 +44,9 @@ from app.trust_models import (
     CapabilityLeaseMode,
     CapabilityLeaseStatus,
     CapabilityScope,
+    CredentialGrant,
+    CredentialGrantType,
+    TrustEventType,
 )
 from app.postgres_trust_repository import PostgresTrustRepository
 from app.trust_policy import lease_receipt_payload
@@ -479,6 +482,97 @@ def test_postgres_agent_run_capability_binding_is_durable_and_idempotent(
         json={"capability_lease_id": lease.id},
     )
     assert revoked_retry.status_code == 409
+
+
+def test_postgres_credential_revocation_route_uses_durable_workspace_state(
+    postgres_agent_run_route_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect, workspace, _project, other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    _run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        state=state,
+        client=client,
+    )
+    grant = CredentialGrant(
+        lease_id=lease.id,
+        workspace_id=workspace.id,
+        grant_type=CredentialGrantType.INTERNAL_CAPABILITY_TOKEN,
+        audience="runner",
+        subject="agent:codex",
+        scope=["run:execute"],
+        expires_at=now_utc() + timedelta(minutes=5),
+        token_hash=uuid.uuid4().hex,
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repositories.trust.insert_credential_grant(conn, grant)
+
+    runtime = SimpleNamespace(connect=connect)
+    for name, value in {
+        "postgres_runtime": runtime,
+        "postgres_repositories": repositories,
+        "trust_repository": repositories.trust,
+        "trust_event_repository": repositories.trust_events,
+    }.items():
+        monkeypatch.setattr(main.app.state, name, value, raising=False)
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        require_owner,
+        lambda: state["current_user"]["value"],
+    )
+    sqlite_grants_before = dict(store.credential_grants)
+    sqlite_events_before = dict(store.trust_events)
+
+    response = client.post(
+        f"/trust/credentials/{grant.id}/revoke",
+        json={"reason": "Owner revoked the credential"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["revoked"] is True
+    assert response.json()["metadata"]["revoked_by_user_id"] == state["users"][0].id
+    with connect() as conn:
+        persisted = repositories.trust.get_credential_grant(
+            conn, grant.id, workspace.id
+        )
+        assert persisted is not None and persisted.revoked
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+            (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
+        ).fetchone()[0] == 1
+    assert store.credential_grants == sqlite_grants_before
+    assert store.trust_events == sqlite_events_before
+
+    state["current_user"]["value"] = state["users"][1]
+    hidden = client.post(
+        f"/trust/credentials/{grant.id}/revoke",
+        json={"reason": "Other workspace revoke attempt"},
+    )
+    assert hidden.status_code == 404
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+            (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
+        ).fetchone()[0] == 1
+
+    state["current_user"]["value"] = state["users"][0]
+    monkeypatch.setattr(main.app.state, "trust_event_repository", object())
+    partial_runtime = client.post(
+        f"/trust/credentials/{grant.id}/revoke",
+        json={"reason": "Retry with partial persistence"},
+    )
+    assert partial_runtime.status_code == 409
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+            (grant.id, TrustEventType.CREDENTIAL_GRANT_REVOKED.value),
+        ).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize(

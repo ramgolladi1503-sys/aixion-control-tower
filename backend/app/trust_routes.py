@@ -647,13 +647,43 @@ def revoke_capability_credential(
     grant_id: str,
     payload: CredentialRevocationRequest,
     user: AuthUser = OwnerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> CredentialGrantPublic:
-    grant = revoke_credential_grant(
-        _credential_or_404(grant_id, user),
-        user=user,
-        reason=payload.reason,
-    )
-    return _credential_public(grant)
+    try:
+        runtime = _postgres_trust_runtime(request)
+        if runtime is not None:
+            workspace_id = workspace_id_for_request(user, request)
+            if workspace_id is None:
+                raise HTTPException(
+                    status_code=403, detail="Workspace membership is required"
+                )
+            repositories = request.app.state.postgres_repositories
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    grant = repositories.trust.revoke_credential_grant(
+                        conn,
+                        grant_id=grant_id,
+                        workspace_id=workspace_id,
+                        actor_user_id=user.id,
+                        actor=user.email,
+                        reason=payload.reason,
+                        now=now_utc(),
+                        trust_event_repository=repositories.trust_events,
+                    )
+            return _credential_public(grant)
+        if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL credential revocation requires the complete durable trust repository bundle",
+            )
+        grant = revoke_credential_grant(
+            _credential_or_404(grant_id, user),
+            user=user,
+            reason=payload.reason,
+        )
+        return _credential_public(grant)
+    except (ValueError, TrustControlConflict, PostgresTrustRepositoryConflict) as error:
+        raise _trust_error(error) from error
 
 
 @router.get("/scorecards", response_model=list[AgentReliabilityScorecard])
