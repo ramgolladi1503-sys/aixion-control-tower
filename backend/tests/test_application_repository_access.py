@@ -19,6 +19,7 @@ from app.agent_task_repository import PostgresAgentTaskRepository
 from app.agent_run_repository import PostgresAgentRunRepository
 from app.idea_repository import PostgresIdeaRepository
 from app.work_order_repository import PostgresWorkOrderRepository
+from app.mcp_child_server_repository import PostgresMCPChildServerRepository
 from app.approval_repository import PostgresApprovalDecisionRepository
 from app.test_run_repository import PostgresTestRunRepository
 from app.workspace_membership_repository import WorkspaceMembershipSnapshot
@@ -370,6 +371,59 @@ def test_idea_and_work_order_accessors_reject_mismatched_postgres_runtime(
 
     with pytest.raises(RuntimeError, match="unavailable or mismatched"):
         accessor(request)
+
+
+def test_mcp_child_server_repository_uses_matching_postgres_runtime_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PostgresMCPChildServerRepository(lambda: None)  # type: ignore[arg-type]
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "mcp_child_servers", repository)
+    runtime = SimpleNamespace(repositories=repositories)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=runtime,
+                postgres_repositories=repositories,
+                mcp_child_server_repository=object(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert repository_access.mcp_child_server_repository_for_request(request) is repository
+
+
+def test_mcp_child_server_repository_rejects_mismatched_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(
+        repositories,
+        "mcp_child_servers",
+        PostgresMCPChildServerRepository(lambda: None),  # type: ignore[arg-type]
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=object()),
+                postgres_repositories=repositories,
+                mcp_child_server_repository=object(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable or mismatched"):
+        repository_access.mcp_child_server_repository_for_request(request)
 
 
 def test_test_run_repository_uses_matching_postgres_runtime_bundle(

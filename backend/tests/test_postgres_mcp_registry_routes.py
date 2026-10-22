@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -59,6 +60,10 @@ def postgres_mcp_registry_route_runtime(
 
         repositories = ApplicationRepositories.from_connector(connect)
         monkeypatch.setattr(
+            "app.application_repository_access.get_settings",
+            lambda: SimpleNamespace(postgres_auth_enabled=True),
+        )
+        monkeypatch.setattr(
             main.app.state,
             "mcp_child_server_repository",
             repositories.mcp_child_servers,
@@ -68,6 +73,18 @@ def postgres_mcp_registry_route_runtime(
             main.app.state,
             "project_repository",
             repositories.projects,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            main.app.state,
+            "postgres_repositories",
+            repositories,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            main.app.state,
+            "postgres_runtime",
+            SimpleNamespace(repositories=repositories),
             raising=False,
         )
         user = AuthUser(

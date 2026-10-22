@@ -18,7 +18,10 @@ from .workspace_access import workspace_id_for_user as resolve_workspace_id_for_
 from .workspace_membership_repository import WorkspaceMembershipRepository
 from .work_order_repository import PostgresWorkOrderRepository, WorkOrderRepository
 from .models import AuthUser
-from .mcp_child_server_repository import MCPChildServerRepository
+from .mcp_child_server_repository import (
+    MCPChildServerRepository,
+    PostgresMCPChildServerRepository,
+)
 from .test_run_repository import PostgresTestRunRepository, TestRunRepository
 
 
@@ -256,9 +259,23 @@ def test_run_repository_for_request(request: _RequestState | None) -> TestRunRep
 def mcp_child_server_repository_for_request(
     request: _RequestState | None,
 ) -> MCPChildServerRepository:
-    """Return the MCP registry adapter bound to this FastAPI application."""
+    """Return the MCP registry adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        runtime = getattr(state, "postgres_runtime", None)
+        repository = getattr(repositories, "mcp_child_servers", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(repository, PostgresMCPChildServerRepository)
+        ):
+            raise RuntimeError(
+                "PostgreSQL MCP child-server repository is unavailable or mismatched"
+            )
+        return repository
     repository = getattr(state, "mcp_child_server_repository", None)
     if repository is None:
         raise RuntimeError("Application MCP child-server repository is unavailable")
