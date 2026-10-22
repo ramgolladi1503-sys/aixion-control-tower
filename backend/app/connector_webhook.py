@@ -83,7 +83,14 @@ class ConnectorWebhookResponse(BaseModel):
 
 
 def _audit(event_type: str, entity_id: str, details: dict[str, Any], actor: str) -> AuditEvent:
-    event = AuditEvent(event_type=event_type, entity_id=entity_id, details=details, actor=actor)
+    connector = store.agent_connectors.get(entity_id)
+    event = AuditEvent(
+        event_type=event_type,
+        entity_id=entity_id,
+        workspace_id=connector.workspace_id if connector is not None else None,
+        details=details,
+        actor=actor,
+    )
     store.audit_events.append(event)
     return event
 

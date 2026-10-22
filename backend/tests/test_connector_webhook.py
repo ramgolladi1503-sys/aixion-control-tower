@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.approval_decisions import agent_task_repository
+from app.connector_models import AgentConnector
+from app.connector_webhook import _audit
 from app.models import Project
 from app.store import store
 
@@ -71,6 +73,15 @@ def _task_payload(project_id: str) -> dict:
 
 def _bearer(secret: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {secret}"}
+
+
+def test_connector_webhook_audit_uses_persisted_connector_workspace_scope() -> None:
+    connector = AgentConnector(name="Scoped webhook", workspace_id="workspace_webhook")
+    store.agent_connectors[connector.id] = connector
+
+    event = _audit("connector.webhook_refused", connector.id, {"reason": "invalid payload"}, actor="connector")
+
+    assert event.workspace_id == connector.workspace_id
 
 
 def _compact_json(payload: dict) -> str:
