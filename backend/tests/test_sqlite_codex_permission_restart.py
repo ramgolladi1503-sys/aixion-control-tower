@@ -172,6 +172,16 @@ def _finish_hook(process: subprocess.Popen[str]) -> tuple[dict[str, Any], str]:
     return output["hookSpecificOutput"]["decision"], stderr
 
 
+def _assert_terminal_diagnostic(stderr: str, *, approval_id: str, decision: str) -> None:
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    assert len(lines) == 1
+    diagnostic = json.loads(lines[0])
+    assert diagnostic["event"] == "terminal_decision"
+    assert diagnostic["provider"] == "CODEX"
+    assert diagnostic["decision"] == decision
+    assert diagnostic["approval_id"] == approval_id
+
+
 def _read_approvals(db_path: Path, agent_id: str) -> list[dict[str, Any]]:
     with sqlite3.connect(db_path, timeout=5) as connection:
         rows = connection.execute(
@@ -271,7 +281,7 @@ def test_identified_codex_invocation_recovers_after_api_restart_and_consumes_onc
         assert decision["status"] == "APPROVED"
         hook_decision, stderr = _finish_hook(hook_process)
         hook_process = None
-        assert stderr == ""
+        _assert_terminal_diagnostic(stderr, approval_id=approval["id"], decision="allow")
         assert hook_decision == {"behavior": "allow"}
         assert _claim_count(db_path, approval["id"]) == 1
 
@@ -280,7 +290,7 @@ def test_identified_codex_invocation_recovers_after_api_restart_and_consumes_onc
         replay_process = _launch_hook(event, environment)
         replay_decision, replay_stderr = _finish_hook(replay_process)
         replay_process = None
-        assert replay_stderr == ""
+        _assert_terminal_diagnostic(replay_stderr, approval_id=approval["id"], decision="deny")
         assert replay_decision["behavior"] == "deny"
         assert _claim_count(db_path, approval["id"]) == 1
         invocation_approvals = [
@@ -325,7 +335,7 @@ def test_codex_callback_without_tool_use_id_gets_new_identity_after_relaunch(
         assert first_decision["status"] == "APPROVED"
         first_output, first_stderr = _finish_hook(first_process)
         first_process = None
-        assert first_stderr == ""
+        _assert_terminal_diagnostic(first_stderr, approval_id=first_approval["id"], decision="allow")
         assert first_output == {"behavior": "allow"}
         assert _claim_count(db_path, first_approval["id"]) == 1
 
@@ -345,7 +355,7 @@ def test_codex_callback_without_tool_use_id_gets_new_identity_after_relaunch(
         assert second_decision["status"] in {"DENIED", "REJECTED"}
         second_output, second_stderr = _finish_hook(second_process)
         second_process = None
-        assert second_stderr == ""
+        _assert_terminal_diagnostic(second_stderr, approval_id=second_approval["id"], decision="deny")
         assert second_output["behavior"] == "deny"
         assert _claim_count(db_path, first_approval["id"]) == 1
         assert _claim_count(db_path, second_approval["id"]) == 0

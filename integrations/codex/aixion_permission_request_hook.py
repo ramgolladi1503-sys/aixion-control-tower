@@ -24,7 +24,10 @@ MAX_RESPONSE_BYTES = 256 * 1024
 MAX_WAIT_SECONDS = 15 * 60
 POLL_INTERVAL_SECONDS = 2
 MAX_RECONNECT_BACKOFF_SECONDS = 10
+MAX_CREATE_ATTEMPTS = 2
+CREATE_RETRY_DELAY_SECONDS = 0.25
 APPROVAL_PROTOCOL_VERSION = "1"
+DIAGNOSTIC_APPROVAL_ID = re.compile(r"^approval_[a-f0-9]{12}$")
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/aixion/codex.json")
 SENSITIVE_KEY = re.compile(r"(token|secret|password|credential|private.?key|api.?key)", re.I)
 SENSITIVE_VALUE = re.compile(
@@ -47,6 +50,86 @@ class RateLimitError(GateError):
         super().__init__("Control Tower rate limit exceeded")
 
 
+def _new_diagnostic_context() -> dict[str, str | None]:
+    return {"correlation_id": None, "approval_id": None}
+
+
+def _emit_diagnostic(
+    *,
+    context: dict[str, str | None],
+    event: str,
+    attempt: int | None = None,
+    decision: str | None = None,
+) -> None:
+    """Write fixed-field, content-free diagnostics without affecting the gate."""
+    record = {
+        "component": "aixion_approval_hook",
+        "provider": "CODEX",
+        "event": event,
+        "correlation_id": context.get("correlation_id"),
+        "approval_id": context.get("approval_id"),
+        "attempt": attempt,
+        "decision": decision,
+    }
+    try:
+        sys.stderr.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError:
+        # Diagnostic output must never change an authorization result.
+        return
+
+
+def _short_correlation_id(source_invocation_id: str) -> str:
+    return hashlib.sha256(source_invocation_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _validated_diagnostic_approval_id(value: Any) -> str | None:
+    if isinstance(value, str) and DIAGNOSTIC_APPROVAL_ID.fullmatch(value):
+        return value
+    return None
+
+
+def _create_approval_with_retry(
+    *,
+    api_base: str,
+    config: dict[str, str],
+    token: str,
+    body: dict[str, Any],
+    diagnostics: dict[str, str | None] | None = None,
+) -> dict[str, Any] | None:
+    """Retry one ambiguous create with unchanged callback identity and payload.
+
+    Each HTTP attempt has a 10-second transport timeout. Two attempts and one
+    short delay bound this recovery path to at most 20.25 seconds.
+    """
+    for attempt in range(MAX_CREATE_ATTEMPTS):
+        try:
+            return _request(
+                "POST", f"{api_base}/agents/approvals", config, token, body
+            )
+        except AmbiguousRequestError:
+            if attempt + 1 == MAX_CREATE_ATTEMPTS:
+                if diagnostics is not None:
+                    _emit_diagnostic(
+                        context=diagnostics,
+                        event="approval_create_retry_exhausted",
+                        attempt=attempt + 1,
+                    )
+                return None
+            if diagnostics is not None:
+                _emit_diagnostic(
+                    context=diagnostics,
+                    event="approval_create_retry",
+                    attempt=attempt + 2,
+                )
+            time.sleep(CREATE_RETRY_DELAY_SECONDS)
+    return None
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    """Reject JavaScript-style numeric constants accepted by Python's JSON parser."""
+    raise ValueError(f"Non-standard JSON constant: {value}")
+
+
 def _emit_decision(behavior: str, message: str) -> None:
     result: dict[str, Any] = {
         "hookSpecificOutput": {
@@ -65,8 +148,8 @@ def _read_input() -> dict[str, Any]:
     if len(raw) > MAX_INPUT_BYTES:
         raise GateError("Codex hook input exceeds its size limit")
     try:
-        value = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        value = json.loads(raw, parse_constant=_reject_nonstandard_json_constant)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise GateError("Codex hook input is invalid JSON") from exc
     if not isinstance(value, dict) or value.get("hook_event_name") != "PermissionRequest":
         raise GateError("Expected a Codex PermissionRequest event")
@@ -182,7 +265,12 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def _request(method: str, url: str, config: dict[str, str], token: str,
              body: dict[str, Any] | None = None) -> dict[str, Any]:
-    encoded = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
+    try:
+        encoded = None if body is None else json.dumps(
+            body, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise GateError("Control Tower request contains invalid JSON data") from exc
     request = urllib.request.Request(url, data=encoded, method=method, headers={
         "Accept": "application/json", "Content-Type": "application/json",
         "X-Aixion-Agent-Id": config["agent_id"], "X-Aixion-Agent-Token": token,
@@ -194,8 +282,8 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         if len(raw) > MAX_RESPONSE_BYTES:
             raise AmbiguousRequestError("Control Tower response exceeds its size limit")
         try:
-            result = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            result = json.loads(raw, parse_constant=_reject_nonstandard_json_constant)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             raise AmbiguousRequestError("Control Tower returned invalid response data") from exc
         if not isinstance(result, dict):
             raise AmbiguousRequestError("Control Tower returned an invalid response")
@@ -328,7 +416,11 @@ def _invocation_identity(
     return source_session_id, source_invocation_id
 
 
-def run(event: dict[str, Any], environ: dict[str, str] | None = None) -> tuple[str, str]:
+def _run(
+    event: dict[str, Any],
+    environ: dict[str, str] | None,
+    diagnostics: dict[str, str | None],
+) -> tuple[str, str]:
     env = os.environ if environ is None else environ
     if event.get("hook_event_name") != "PermissionRequest":
         raise GateError("Only PermissionRequest events are supported")
@@ -338,7 +430,12 @@ def run(event: dict[str, Any], environ: dict[str, str] | None = None) -> tuple[s
         raise GateError("Codex permission request is missing tool identity or JSON arguments")
     if _contains_sensitive(args):
         return "deny", "Tool arguments contain secret-like material; redact it before approval"
-    arg_bytes = json.dumps(args, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    try:
+        arg_bytes = json.dumps(
+            args, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise GateError("Codex permission request arguments are not valid JSON") from exc
     if len(arg_bytes) > MAX_ARGUMENTS_BYTES:
         return "deny", "Tool arguments exceed the approval display limit"
 
@@ -346,6 +443,7 @@ def run(event: dict[str, Any], environ: dict[str, str] | None = None) -> tuple[s
     if invocation_identity is None:
         return "deny", "Codex permission request is missing stable session, turn, or tool-call identity"
     source_session_id, source_invocation_id = invocation_identity
+    diagnostics["correlation_id"] = _short_correlation_id(source_invocation_id)
 
     config = _configuration(env)
     token = _agent_token(env, config)
@@ -364,13 +462,25 @@ def run(event: dict[str, Any], environ: dict[str, str] | None = None) -> tuple[s
         "source_invocation_id": source_invocation_id,
     }
     api_base = config["api_base_url"]
-    created = _request("POST", f"{api_base}/agents/approvals", config, token, body)
+    try:
+        created = _create_approval_with_retry(
+            api_base=api_base,
+            config=config,
+            token=token,
+            body=body,
+            diagnostics=diagnostics,
+        )
+    except GateError:
+        return "deny", "Control Tower rejected the approval request"
+    if created is None:
+        return "deny", "Control Tower approval creation remained ambiguous"
     approval_id = created.get("id")
     if (not isinstance(approval_id, str) or not approval_id
             or created.get("status") not in {"PENDING_REVIEW", "REQUESTED", "APPROVED"}
             or not _identity_matches(created, approval_id=approval_id, config=config)
             or not _matches(created, body=body, config=config)):
         return "deny", "Control Tower did not create a matching actionable approval"
+    diagnostics["approval_id"] = _validated_diagnostic_approval_id(approval_id)
     original = _snapshot(created)
     try:
         timeout = int(env.get("AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS", "600"))
@@ -451,6 +561,25 @@ def run(event: dict[str, Any], environ: dict[str, str] | None = None) -> tuple[s
     return "deny", "Approval timed out; the request expired and the Codex request was denied"
 
 
+def run(event: dict[str, Any], environ: dict[str, str] | None = None) -> tuple[str, str]:
+    diagnostics = _new_diagnostic_context()
+    try:
+        result = _run(event, environ, diagnostics)
+    except Exception:
+        _emit_diagnostic(
+            context=diagnostics,
+            event="terminal_decision",
+            decision="deny",
+        )
+        raise
+    _emit_diagnostic(
+        context=diagnostics,
+        event="terminal_decision",
+        decision=result[0],
+    )
+    return result
+
+
 def _report_delivery_failure(
     *,
     api_base: str,
@@ -529,9 +658,19 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(f"Aixion Codex hook preflight passed for {details['agent_id']} / {details['project_id']}\n")
         return 0
     try:
-        behavior, message = run(_read_input())
+        event = _read_input()
     except Exception as exc:
+        _emit_diagnostic(
+            context=_new_diagnostic_context(),
+            event="terminal_decision",
+            decision="deny",
+        )
         behavior, message = "deny", f"Aixion approval gate failed: {exc.__class__.__name__}"
+    else:
+        try:
+            behavior, message = run(event)
+        except Exception as exc:
+            behavior, message = "deny", f"Aixion approval gate failed: {exc.__class__.__name__}"
     _emit_decision(behavior, message)
     return 0
 

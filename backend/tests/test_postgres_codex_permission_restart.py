@@ -317,6 +317,16 @@ def _finish_hook(process: subprocess.Popen[str]) -> tuple[dict[str, Any], str]:
     return output["hookSpecificOutput"]["decision"], stderr
 
 
+def _assert_terminal_diagnostic(stderr: str, *, approval_id: str, decision: str) -> None:
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    assert len(lines) == 1
+    diagnostic = json.loads(lines[0])
+    assert diagnostic["event"] == "terminal_decision"
+    assert diagnostic["provider"] == "CODEX"
+    assert diagnostic["decision"] == decision
+    assert diagnostic["approval_id"] == approval_id
+
+
 def _read_approvals(connect, agent_id: str) -> list[dict[str, Any]]:
     with connect() as connection:
         rows = connection.execute(
@@ -430,14 +440,14 @@ def test_identified_codex_invocation_survives_postgres_api_restart_and_consumes_
         assert decision["status"] == "APPROVED"
         hook_decision, stderr = _finish_hook(hook_process)
         hook_process = None
-        assert stderr == ""
+        _assert_terminal_diagnostic(stderr, approval_id=approval["id"], decision="allow")
         assert hook_decision == {"behavior": "allow"}
         assert _claim_count(connect, approval["id"]) == 1
 
         replay_process = _launch_hook(event, environment)
         replay_decision, replay_stderr = _finish_hook(replay_process)
         replay_process = None
-        assert replay_stderr == ""
+        _assert_terminal_diagnostic(replay_stderr, approval_id=approval["id"], decision="deny")
         assert replay_decision["behavior"] == "deny"
         assert _claim_count(connect, approval["id"]) == 1
         invocation_approvals = [

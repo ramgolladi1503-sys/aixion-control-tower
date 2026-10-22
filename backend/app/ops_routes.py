@@ -28,8 +28,10 @@ class RuntimeReadinessResponse(BaseModel):
     auth_enabled: bool
     trust_enforcement: bool
     lease_signing_key_configured: bool
-    database_backend: Literal["sqlite"]
-    application_store_mode: Literal["sqlite_local", "postgres_probe_only"]
+    database_backend: Literal["sqlite", "postgresql", "mixed"]
+    application_store_mode: Literal[
+        "sqlite_local", "postgres_probe_only", "postgres_auth_runtime"
+    ]
     application_store_ready: bool
     approval_recovery_status: Literal[
         "not_started", "starting", "healthy", "degraded", "failed"
@@ -160,11 +162,11 @@ def build_runtime_readiness(
     migrations_applied = False
     recovery_snapshot_available = False
 
-    if settings.postgres_runtime_probe_enabled:
+    if settings.postgres_runtime_probe_enabled or settings.postgres_auth_enabled:
         postgres_probe_status = "not_ready"
         if postgres_runtime is None:
             errors.append(
-                "PostgreSQL runtime probe is enabled but the runtime is unavailable."
+                "PostgreSQL runtime is unavailable while auth routing is selected or the probe is enabled."
             )
         else:
             try:
@@ -231,14 +233,25 @@ def build_runtime_readiness(
         and lease.expires_at > now_utc()
         for lease in store.capability_leases.values()
     )
-    # A healthy PostgreSQL schema probe does not mean the routes, workers, or
-    # outboxes are bound to that database. Until the application publishes a
-    # complete PostgreSQL repository bundle and the SQLite-backed surfaces are
-    # disabled/migrated, report the actual SQLite authority explicitly.
-    application_store_mode: Literal["sqlite_local", "postgres_probe_only"] = (
-        "postgres_probe_only" if postgres_runtime is not None else "sqlite_local"
-    )
-    application_store_ready = application_store_mode == "sqlite_local" and not settings.is_production
+    # Auth mode selects the lifespan-owned PostgreSQL bundle for many routes,
+    # but process-global SQLite writers remain. Report that mixed authority
+    # explicitly and never call it application-ready.
+    if settings.postgres_auth_enabled:
+        application_store_mode = "postgres_auth_runtime"
+        database_backend = "mixed"
+        application_store_ready = False
+        errors.append(
+            "Application persistence is mixed: PostgreSQL auth routing is active, but "
+            "SQLite-backed authorities remain and the complete cutover is not ready."
+        )
+    elif postgres_runtime is not None:
+        application_store_mode = "postgres_probe_only"
+        database_backend = "sqlite"
+        application_store_ready = False
+    else:
+        application_store_mode = "sqlite_local"
+        database_backend = "sqlite"
+        application_store_ready = not settings.is_production
     application_repository_bindings = _application_repository_bindings(
         application_state=application_state,
         postgres_runtime=postgres_runtime,
@@ -263,7 +276,7 @@ def build_runtime_readiness(
         auth_enabled=settings.auth_enabled,
         trust_enforcement=settings.trust_enforcement,
         lease_signing_key_configured=settings.lease_signing_key_configured,
-        database_backend="sqlite",
+        database_backend=database_backend,
         application_store_mode=application_store_mode,
         application_store_ready=application_store_ready,
         approval_recovery_status=recovery_status,

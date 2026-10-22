@@ -578,6 +578,86 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     assert set(store.external_agents) == initial_store_agent_ids
 
 
+def test_postgres_http_duplicate_invocation_create_is_idempotent_and_conflicts_on_change(
+    postgres_approval_route_runtime,
+) -> None:
+    connect, workspace, project, _user, repositories, agent, agent_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    client = TestClient(main.app)
+    headers = {
+        "X-Aixion-Agent-Id": agent.id,
+        "X-Aixion-Agent-Token": agent_token,
+    }
+    invocation_id = f"duplicate-create-{uuid.uuid4().hex}"
+    payload = {
+        "project_id": project.id,
+        "title": "Review Antigravity command",
+        "summary": "Same invocation and exact action payload must resolve once.",
+        "agent_name": agent.display_name,
+        "target_branch": "feature/approval-route-test",
+        "files": [
+            {
+                "path": "antigravity://tool/run_command",
+                "change_type": "tool_call",
+                "diff": '{"command":"echo idempotent-create"}',
+            }
+        ],
+        "source_session_id": "session-duplicate-create-test",
+        "source_invocation_id": invocation_id,
+    }
+
+    first = client.post("/agents/approvals", headers=headers, json=payload)
+    assert first.status_code == 200, first.text
+    first_approval = first.json()
+
+    with connect() as connection:
+        initial_audit_count = connection.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.created_by_agent'",
+            (first_approval["id"],),
+        ).fetchone()[0]
+        initial_notification_count = connection.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s",
+            (first_approval["id"],),
+        ).fetchone()[0]
+        initial_approval_count = connection.execute(
+            "SELECT count(*) FROM approval_requests WHERE workspace_id=%s "
+            "AND source_agent_id=%s AND source_invocation_id=%s",
+            (workspace.id, agent.id, invocation_id),
+        ).fetchone()[0]
+
+    retry = client.post("/agents/approvals", headers=headers, json=payload)
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["id"] == first_approval["id"]
+
+    changed = client.post(
+        "/agents/approvals",
+        headers=headers,
+        json={**payload, "summary": "Changed action for the same invocation."},
+    )
+    assert changed.status_code == 409, changed.text
+
+    durable = repositories.approval_decisions.get(first_approval["id"])
+    assert durable is not None
+    assert durable.summary == payload["summary"]
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_requests WHERE workspace_id=%s "
+            "AND source_agent_id=%s AND source_invocation_id=%s",
+            (workspace.id, agent.id, invocation_id),
+        ).fetchone()[0] == initial_approval_count == 1
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.created_by_agent'",
+            (first_approval["id"],),
+        ).fetchone()[0] == initial_audit_count == 1
+        assert connection.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s",
+            (first_approval["id"],),
+        ).fetchone()[0] == initial_notification_count == 1
+
+
 def test_postgres_reviewer_from_other_workspace_cannot_decide_approval(
     postgres_approval_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
@@ -866,7 +946,7 @@ def test_postgres_same_invocation_recovers_after_fresh_api_process(
         postgres_approval_route_runtime
     )
     client = TestClient(main.app)
-    state: dict[str, dict | None] = {"approval": None}
+    state: dict[str, object] = {"approval": None, "create_bodies": []}
     payload = {
         "conversationId": "session-postgres-create-response-loss",
         "stepIdx": 23,
@@ -893,6 +973,9 @@ def test_postgres_same_invocation_recovers_after_fresh_api_process(
         assert request_agent_id == agent.id
         assert request_token == agent_token
         assert body is not None
+        create_bodies = state["create_bodies"]
+        assert isinstance(create_bodies, list)
+        create_bodies.append(body.copy())
         response = client.post(
             "/agents/approvals",
             headers={
@@ -903,16 +986,25 @@ def test_postgres_same_invocation_recovers_after_fresh_api_process(
             json=body,
         )
         assert response.status_code == 200, response.text
-        state["approval"] = response.json()
+        received_approval = response.json()
+        prior_approval = state["approval"]
+        if prior_approval is not None:
+            assert received_approval["id"] == prior_approval["id"]
+        state["approval"] = received_approval
         raise antigravity_hook.AmbiguousRequestError(
-            "simulated process loss after the approval committed in PostgreSQL"
+            "simulated response loss after approval commit in PostgreSQL"
         )
 
     with patch.object(
         antigravity_hook, "_request", side_effect=lose_committed_create_response
     ), patch.object(antigravity_hook.time, "sleep"):
-        with pytest.raises(antigravity_hook.AmbiguousRequestError):
-            antigravity_hook.run(payload, environment)
+        first_attempt = antigravity_hook.run(payload, environment)
+
+    assert first_attempt["decision"] == "deny"
+    assert "remained ambiguous" in first_attempt["reason"]
+    create_bodies = state["create_bodies"]
+    assert len(create_bodies) == antigravity_hook.MAX_CREATE_ATTEMPTS == 2
+    assert create_bodies[0] == create_bodies[1]
 
     created = state["approval"]
     assert created is not None
@@ -1108,6 +1200,7 @@ def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
         environment["AIXION_API_BASE_URL"] = first_server[2]
         real_request = antigravity_hook._request
         created: dict[str, dict] = {}
+        create_bodies: list[dict] = []
 
         def lose_committed_create_response(
             method: str,
@@ -1116,10 +1209,16 @@ def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
             request_token: str,
             body: dict | None = None,
         ) -> dict:
+            if method == "POST" and urlparse(url).path == "/agents/approvals":
+                assert body is not None
+                create_bodies.append(body.copy())
             result = real_request(
                 method, url, request_agent_id, request_token, body
             )
             if method == "POST" and urlparse(url).path == "/agents/approvals":
+                prior = created.get("approval")
+                if prior is not None:
+                    assert result["id"] == prior["id"]
                 created["approval"] = result
                 raise antigravity_hook.AmbiguousRequestError(
                     "simulated lost HTTP response after PostgreSQL commit"
@@ -1129,8 +1228,12 @@ def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
         with patch.object(
             antigravity_hook, "_request", side_effect=lose_committed_create_response
         ), patch.object(antigravity_hook.time, "sleep"):
-            with pytest.raises(antigravity_hook.AmbiguousRequestError):
-                antigravity_hook.run(payload, environment)
+            first_attempt = antigravity_hook.run(payload, environment)
+
+        assert first_attempt["decision"] == "deny"
+        assert "remained ambiguous" in first_attempt["reason"]
+        assert len(create_bodies) == antigravity_hook.MAX_CREATE_ATTEMPTS == 2
+        assert create_bodies[0] == create_bodies[1]
 
         first_approval = created["approval"]
         approval_id = first_approval["id"]

@@ -97,9 +97,13 @@ The protected JSON config contains `api_base_url`, `agent_id`, and
 is `AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS` (default 600, range 1–900 seconds).
 During the wait, the hook honors API `Retry-After` responses and retries
 ambiguous decision `GET` failures with exponential delays of 2, 4, then at most
-10 seconds, bounded by the configured deadline. It never retries approval
-creation or consume `POST`s after ambiguous outcomes. The hook's Codex command
-timeout is 960 seconds so the API wait can expire and return an explicit
+10 seconds, bounded by the configured deadline. For an ambiguous approval
+creation outcome, the hook retries the exact same callback identity and body
+once after 250 ms; each request has a 10-second timeout. If both outcomes are
+ambiguous, it denies and emits a generic diagnostic to stderr. Invocation
+idempotency prevents a duplicate approval when the first request committed.
+It never retries consume `POST`s after ambiguous outcomes. The hook's Codex
+command timeout is 960 seconds so the API wait can expire and return an explicit
 denial. Tokens are read from macOS Keychain or a protected owner-only file
 (`AIXION_AGENT_TOKEN_FILE`). Process-environment tokens are disabled by
 default; local tests must set both `AIXION_AGENT_TOKEN` and

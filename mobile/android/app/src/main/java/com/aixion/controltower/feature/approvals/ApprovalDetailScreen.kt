@@ -544,17 +544,20 @@ private fun DecisionPanel(
         }
         if (canDecide) {
             Spacer(modifier = Modifier.height(TowerSpacing.md))
-            Row(horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm), modifier = Modifier.fillMaxWidth()) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 OutlinedButton(
                     onClick = onReject,
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     enabled = canDecide
                 ) { Text("Reject", color = RiskCritical) }
                 Button(
                     onClick = onApprove,
                     enabled = canApprove,
                     colors = ButtonDefaults.buttonColors(containerColor = RiskLow, contentColor = TowerBackground),
-                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                 ) { Text("Approve request") }
             }
         }

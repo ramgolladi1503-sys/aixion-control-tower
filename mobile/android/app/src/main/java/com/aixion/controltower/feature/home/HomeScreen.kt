@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -46,7 +47,8 @@ import java.util.Date
 fun HomeScreen(
     viewModel: HomeViewModel = viewModel(),
     onApprovalSelected: (ApprovalSummary) -> Unit = {},
-    onOpenConnect: () -> Unit = {}
+    onOpenConnect: () -> Unit = {},
+    onOpenApprovals: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
     ForegroundRefreshEffect(onRefresh = viewModel::refreshInForeground)
@@ -156,13 +158,11 @@ fun HomeScreen(
             }
         } else if (!state.refreshing && state.hasSuccessfulSync && state.actionRequiredApprovals.isNotEmpty()) {
             item {
-                TowerSectionHeader(
-                    title = "Needs your decision",
-                    subtitle = "Review the exact request before approving or rejecting it."
+                HomeApprovalPreview(
+                    approvals = state.actionRequiredApprovals,
+                    onApprovalSelected = onApprovalSelected,
+                    onOpenApprovals = onOpenApprovals
                 )
-            }
-            items(state.actionRequiredApprovals.take(2)) { approval ->
-                ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
         } else if (!state.refreshing && state.hasSuccessfulSync && state.unsupportedApprovals.isEmpty()) {
             item {
@@ -195,6 +195,26 @@ fun HomeScreen(
 
         item {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        }
+    }
+}
+
+@Composable
+internal fun HomeApprovalPreview(
+    approvals: List<ApprovalSummary>,
+    onApprovalSelected: (ApprovalSummary) -> Unit,
+    onOpenApprovals: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)) {
+        TowerSectionHeader(
+            title = "Needs your decision",
+            subtitle = "Review the exact request before approving or rejecting it."
+        )
+        approvals.take(3).forEach { approval ->
+            ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
+        }
+        TextButton(onClick = onOpenApprovals, modifier = Modifier.fillMaxWidth()) {
+            Text("See all approvals")
         }
     }
 }

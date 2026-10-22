@@ -299,6 +299,7 @@ def test_antigravity_invocation_recovers_once_after_sqlite_api_process_restart(
         }
         real_request = hook._request
         created: dict[str, dict[str, Any]] = {}
+        create_bodies: list[dict[str, Any]] = []
 
         def lose_committed_create_response(
             method: str,
@@ -307,8 +308,14 @@ def test_antigravity_invocation_recovers_once_after_sqlite_api_process_restart(
             request_token: str,
             body: dict[str, Any] | None = None,
         ) -> dict[str, Any]:
+            if method == "POST" and urlparse(url).path == "/agents/approvals":
+                assert body is not None
+                create_bodies.append(body.copy())
             result = real_request(method, url, request_agent_id, request_token, body)
             if method == "POST" and urlparse(url).path == "/agents/approvals":
+                prior = created.get("approval")
+                if prior is not None:
+                    assert result["id"] == prior["id"]
                 created["approval"] = result
                 _stop_sqlite_approval_api(first_server)
                 raise hook.AmbiguousRequestError(
@@ -317,8 +324,12 @@ def test_antigravity_invocation_recovers_once_after_sqlite_api_process_restart(
             return result
 
         with patch.object(hook, "_request", side_effect=lose_committed_create_response):
-            with pytest.raises(hook.AmbiguousRequestError):
-                hook.run(invocation_payload, environment)
+            first_attempt = hook.run(invocation_payload, environment)
+
+        assert first_attempt["decision"] == "deny"
+        assert "remained ambiguous" in first_attempt["reason"]
+        assert len(create_bodies) == hook.MAX_CREATE_ATTEMPTS == 2
+        assert create_bodies[0] == create_bodies[1]
 
         first_approval = created["approval"]
         approval_id = first_approval["id"]

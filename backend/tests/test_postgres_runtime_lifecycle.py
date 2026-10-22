@@ -26,6 +26,18 @@ class FakeRuntime:
             approval_decisions=object(),
             agent_tasks=object(),
             agent_runs=object(),
+            projects=object(),
+            workspace_membership=object(),
+            external_agent_auth=object(),
+            work_orders=object(),
+            ideas=object(),
+            audit_events=object(),
+            test_runs=object(),
+            connectors=object(),
+            mcp_child_servers=object(),
+            mcp_pending_requests=object(),
+            trust=object(),
+            trust_events=object(),
         )
 
     def open(self, *, wait: bool = False) -> None:
@@ -166,6 +178,10 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
             assert captured == [runtime.email_outbox]
             assert application.state.postgres_runtime is runtime
             assert application.state.postgres_repositories is runtime.repositories
+            for state_name, repository_name in main._POSTGRES_APP_STATE_BINDINGS.items():
+                assert getattr(application.state, state_name) is getattr(
+                    runtime.repositories, repository_name
+                )
             assert len(recovery_calls) == 1
             assert recovery_calls[0]["approval_repository"] is runtime.repositories.approval_decisions
             assert recovery_calls[0]["task_repository"] is runtime.repositories.agent_tasks
@@ -173,6 +189,8 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
         assert runtime.closed is True
         assert application.state.postgres_runtime is None
         assert application.state.postgres_repositories is None
+        for state_name in main._POSTGRES_APP_STATE_BINDINGS:
+            assert not hasattr(application.state, state_name)
 
     asyncio.run(exercise())
 

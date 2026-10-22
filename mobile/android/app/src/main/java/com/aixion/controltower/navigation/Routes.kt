@@ -1,5 +1,7 @@
 package com.aixion.controltower.navigation
 
+import java.util.Locale
+
 sealed class Route(val value: String, val label: String) {
     data object Auth : Route("auth", "Login")
     data object Home : Route("home", "Home")
@@ -9,7 +11,15 @@ sealed class Route(val value: String, val label: String) {
     data object Inbox : Route("inbox", "Approvals")
     data object AgentTasks : Route("agent_tasks", "Agent Work")
     data object AgentRuns : Route("agent_runs", "Runs")
-    data object AgentAccess : Route("agent_access", "Agent Access")
+    data object AgentAccess : Route("agent_access/{provider}", "Agent Access") {
+        fun forProvider(provider: String): String {
+            val normalizedProvider = provider.trim().uppercase(Locale.ROOT)
+            require(normalizedProvider == "ANTIGRAVITY" || normalizedProvider == "CODEX") {
+                "Unsupported agent access provider"
+            }
+            return "agent_access/${normalizedProvider.lowercase(Locale.ROOT)}"
+        }
+    }
     data object Connectors : Route("connectors", "Connect")
     data object MCPQueue : Route("mcp_queue", "MCP")
     data object Tests : Route("tests", "Tests")

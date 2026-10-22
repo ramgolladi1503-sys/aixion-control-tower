@@ -22,7 +22,10 @@ MAX_CONFIG_BYTES = 16 * 1024
 MAX_POLL_SECONDS = 15 * 60
 POLL_INTERVAL_SECONDS = 2
 MAX_RECONNECT_BACKOFF_SECONDS = 10
+MAX_CREATE_ATTEMPTS = 2
+CREATE_RETRY_DELAY_SECONDS = 0.25
 APPROVAL_PROTOCOL_VERSION = "1"
+DIAGNOSTIC_APPROVAL_ID = re.compile(r"^approval_[a-f0-9]{12}$")
 SENSITIVE_KEY = re.compile(r"(token|secret|password|credential|private.?key|api.?key)", re.I)
 SENSITIVE_VALUE = re.compile(
     r"(?:bearer\s+[A-Za-z0-9._~-]{8,}|(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[\"']?[A-Za-z0-9._~/-]{8,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
@@ -56,6 +59,79 @@ class RateLimitError(GateError):
     def __init__(self, retry_after_seconds: int) -> None:
         self.retry_after_seconds = max(1, min(MAX_POLL_SECONDS, retry_after_seconds))
         super().__init__("Control Tower rate limit exceeded")
+
+
+def _new_diagnostic_context() -> dict[str, str | None]:
+    return {"correlation_id": None, "approval_id": None}
+
+
+def _emit_diagnostic(
+    *,
+    context: dict[str, str | None],
+    event: str,
+    attempt: int | None = None,
+    decision: str | None = None,
+) -> None:
+    """Write fixed-field, content-free diagnostics without affecting the gate."""
+    record = {
+        "component": "aixion_approval_hook",
+        "provider": "ANTIGRAVITY",
+        "event": event,
+        "correlation_id": context.get("correlation_id"),
+        "approval_id": context.get("approval_id"),
+        "attempt": attempt,
+        "decision": decision,
+    }
+    try:
+        sys.stderr.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError:
+        # Diagnostic output must never change an authorization result.
+        return
+
+
+def _short_correlation_id(source_invocation_id: str) -> str:
+    return hashlib.sha256(source_invocation_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _validated_diagnostic_approval_id(value: Any) -> str | None:
+    if isinstance(value, str) and DIAGNOSTIC_APPROVAL_ID.fullmatch(value):
+        return value
+    return None
+
+
+def _create_approval_with_retry(
+    *,
+    api_base: str,
+    agent_id: str,
+    token: str,
+    body: dict[str, Any],
+    diagnostics: dict[str, str | None] | None = None,
+) -> dict[str, Any] | None:
+    """Retry one ambiguous create using the exact same invocation and payload.
+
+    Each HTTP attempt has a 10-second transport timeout. Two attempts and one
+    short delay bound this recovery path to at most 20.25 seconds.
+    """
+    for attempt in range(MAX_CREATE_ATTEMPTS):
+        try:
+            return _request("POST", f"{api_base}/agents/approvals", agent_id, token, body)
+        except AmbiguousRequestError:
+            if attempt + 1 == MAX_CREATE_ATTEMPTS:
+                if diagnostics is not None:
+                    _emit_diagnostic(
+                        context=diagnostics,
+                        event="approval_create_retry_exhausted",
+                        attempt=attempt + 1,
+                    )
+                return None
+            if diagnostics is not None:
+                _emit_diagnostic(
+                    context=diagnostics,
+                    event="approval_create_retry",
+                    attempt=attempt + 2,
+                )
+            time.sleep(CREATE_RETRY_DELAY_SECONDS)
+    return None
 
 
 def _decision(value: str, reason: str) -> dict[str, str]:
@@ -426,7 +502,11 @@ def _agent_token(env: dict[str, str], config: dict[str, str]) -> str:
     return token
 
 
-def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[str, str]:
+def _run(
+    payload: dict[str, Any],
+    environ: dict[str, str] | None,
+    diagnostics: dict[str, str | None],
+) -> dict[str, str]:
     env = os.environ if environ is None else environ
     call = payload.get("toolCall")
     if not isinstance(call, dict) or not isinstance(call.get("name"), str):
@@ -479,6 +559,7 @@ def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[
         [session_id, step_index, tool_name, args], sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     invocation_id = "antigravity:v1:" + hashlib.sha256(invocation_material).hexdigest()
+    diagnostics["correlation_id"] = _short_correlation_id(invocation_id)
     approval_body = {
         "project_id": project_id,
         "title": f"Antigravity approval: {tool_name}",
@@ -495,7 +576,18 @@ def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[
         "source_session_id": session_id,
         "source_invocation_id": invocation_id,
     }
-    created = _request("POST", f"{api_base}/agents/approvals", agent_id, token, approval_body)
+    try:
+        created = _create_approval_with_retry(
+            api_base=api_base,
+            agent_id=agent_id,
+            token=token,
+            body=approval_body,
+            diagnostics=diagnostics,
+        )
+    except GateError:
+        return _decision("deny", "Control Tower rejected the approval request")
+    if created is None:
+        return _decision("deny", "Control Tower approval creation remained ambiguous")
     approval_id = created.get("id")
     if (
         not isinstance(approval_id, str)
@@ -508,6 +600,7 @@ def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[
         return _decision("deny", "Control Tower did not create an actionable approval")
     if not _matches_invocation_payload(created, body=approval_body, agent_id=agent_id):
         return _decision("deny", "Control Tower approval does not match the original tool invocation")
+    diagnostics["approval_id"] = _validated_diagnostic_approval_id(approval_id)
     try:
         created_snapshot = _approval_snapshot(created)
     except (KeyError, TypeError):
@@ -596,6 +689,25 @@ def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[
     return _decision("deny", "Approval timed out; the request expired and the tool call was denied")
 
 
+def run(payload: dict[str, Any], environ: dict[str, str] | None = None) -> dict[str, str]:
+    diagnostics = _new_diagnostic_context()
+    try:
+        result = _run(payload, environ, diagnostics)
+    except Exception:
+        _emit_diagnostic(
+            context=diagnostics,
+            event="terminal_decision",
+            decision="deny",
+        )
+        raise
+    _emit_diagnostic(
+        context=diagnostics,
+        event="terminal_decision",
+        decision=result["decision"],
+    )
+    return result
+
+
 def _report_delivery_failure(
     *,
     api_base: str,
@@ -641,7 +753,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     try:
-        result = run(_read_input())
+        payload = _read_input()
+    except Exception as exc:  # fail closed and never print arguments or credentials
+        _emit_diagnostic(
+            context=_new_diagnostic_context(),
+            event="terminal_decision",
+            decision="deny",
+        )
+        _emit(_decision("deny", f"Aixion approval gate failed: {exc.__class__.__name__}"))
+        return 0
+    try:
+        result = run(payload)
     except Exception as exc:  # fail closed and never print arguments or credentials
         _emit(_decision("deny", f"Aixion approval gate failed: {exc.__class__.__name__}"))
         return 0

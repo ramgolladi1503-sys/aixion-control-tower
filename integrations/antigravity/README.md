@@ -103,6 +103,11 @@ The generated Antigravity hook timeout is 960 seconds (15 minute maximum wait
 plus request margin).
 The hook itself denies after `AIXION_APPROVAL_TIMEOUT_SECONDS` (default 600,
 maximum 900). Keep the Antigravity hook timeout longer than that value.
+If approval creation has an ambiguous network/server outcome, the hook retries
+the exact same invocation once after 250 ms. Each request has a 10-second
+timeout; if the retry is also ambiguous, the hook denies and emits a generic
+diagnostic to stderr. The server's invocation idempotency prevents a duplicate
+approval when the first request committed.
 The backend's `AIXION_AGENT_APPROVAL_TTL_SECONDS` (default 600, range 30–900)
 is a server-side backstop for an agent process that disappears before it can
 close its approval. When the hook reaches its own timeout, it expires its own

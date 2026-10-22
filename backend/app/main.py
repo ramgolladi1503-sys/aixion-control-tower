@@ -107,6 +107,29 @@ from .workspace_access import (
 
 logger = logging.getLogger(__name__)
 
+# These app.state adapters are consumed by routes that intentionally require
+# one lifespan-owned repository bundle. Bind them together in PostgreSQL auth
+# mode and restore the local/test adapters after shutdown.
+_POSTGRES_APP_STATE_BINDINGS = {
+    "approval_decision_repository": "approval_decisions",
+    "agent_task_repository": "agent_tasks",
+    "agent_run_repository": "agent_runs",
+    "project_repository": "projects",
+    "workspace_membership_repository": "workspace_membership",
+    "external_agent_auth_repository": "external_agent_auth",
+    "work_order_repository": "work_orders",
+    "idea_repository": "ideas",
+    "audit_event_repository": "audit_events",
+    "test_run_repository": "test_runs",
+    "connector_repository": "connectors",
+    "notification_outbox_repository": "notification_outbox",
+    "mcp_child_server_repository": "mcp_child_servers",
+    "mcp_pending_repository": "mcp_pending_requests",
+    "trust_repository": "trust",
+    "trust_event_repository": "trust_events",
+}
+_STATE_BINDING_MISSING = object()
+
 
 def _set_approval_recovery_state(
     application: FastAPI,
@@ -207,9 +230,7 @@ def _validate_postgres_notification_runtime(
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     postgres_runtime: PostgresRuntime | None = None
     settings = get_settings()
-    original_notification_repository = getattr(
-        application.state, "notification_outbox_repository", None
-    )
+    original_repository_bindings: dict[str, object] = {}
     notification_repository = getattr(
         application.state, "notification_outbox_repository", None
     )
@@ -237,28 +258,43 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             raise
         application.state.postgres_runtime = postgres_runtime
         application.state.postgres_repositories = postgres_runtime.repositories
-        if getattr(settings, "postgres_auth_enabled", False):
-            notification_repository = getattr(
-                postgres_runtime.repositories, "notification_outbox", None
-            )
-            if not isinstance(
-                notification_repository, PostgresNotificationOutboxRepository
-            ):
-                postgres_runtime.close()
-                application.state.postgres_runtime = None
-                application.state.postgres_repositories = None
-                raise RuntimeError(
-                    "PostgreSQL notification repository bundle is unavailable"
-                )
-            # Notification reads and device registration must use the same
-            # lifespan-owned pool as the PostgreSQL account and membership data.
-            application.state.notification_outbox_repository = notification_repository
         if settings.postgres_auth_rate_limits_enabled:
             logger.info("PostgreSQL-backed authentication rate limiting enabled")
     dispatch_task: asyncio.Task[None] | None = None
     email_task: asyncio.Task[None] | None = None
     recovery_task: asyncio.Task[None] | None = None
     try:
+        if getattr(settings, "postgres_auth_enabled", False):
+            if postgres_runtime is None:
+                raise RuntimeError("PostgreSQL auth is enabled but the runtime is unavailable")
+            for state_name, repository_name in _POSTGRES_APP_STATE_BINDINGS.items():
+                previous = getattr(
+                    application.state, state_name, _STATE_BINDING_MISSING
+                )
+                repository = getattr(postgres_runtime.repositories, repository_name, None)
+                if repository is None:
+                    raise RuntimeError(
+                        "PostgreSQL application repository bundle is incomplete"
+                    )
+                if (
+                    previous is not _STATE_BINDING_MISSING
+                    and previous is not None
+                    and previous is not repository
+                    and not any(
+                        base.__name__.startswith("SQLite")
+                        for base in type(previous).__mro__
+                    )
+                ):
+                    raise RuntimeError(
+                        "PostgreSQL application repository state contains a foreign binding"
+                    )
+                original_repository_bindings[state_name] = previous
+                setattr(application.state, state_name, repository)
+            notification_repository = postgres_runtime.repositories.notification_outbox
+            if not isinstance(notification_repository, PostgresNotificationOutboxRepository):
+                raise RuntimeError(
+                    "PostgreSQL notification repository bundle is unavailable"
+                )
         push_worker_repository = (
             notification_repository
             if settings.outbox_dispatch_mode == "inline"
@@ -375,21 +411,25 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 with suppress(asyncio.CancelledError):
                     await task
         if postgres_runtime is not None:
-            runtime_repositories = getattr(postgres_runtime, "repositories", None)
-            runtime_notification_repository = getattr(
-                runtime_repositories, "notification_outbox", None
-            )
-            postgres_runtime.close()
-            application.state.postgres_runtime = None
-            application.state.postgres_repositories = None
-            if (
-                runtime_notification_repository is not None
-                and getattr(application.state, "notification_outbox_repository", None)
-                is runtime_notification_repository
-            ):
-                application.state.notification_outbox_repository = (
-                    original_notification_repository
-                )
+            try:
+                postgres_runtime.close()
+            finally:
+                application.state.postgres_runtime = None
+                application.state.postgres_repositories = None
+                runtime_repositories = getattr(postgres_runtime, "repositories", None)
+                for state_name, repository_name in _POSTGRES_APP_STATE_BINDINGS.items():
+                    runtime_repository = getattr(
+                        runtime_repositories, repository_name, None
+                    )
+                    if getattr(application.state, state_name, None) is not runtime_repository:
+                        continue
+                    previous = original_repository_bindings.get(
+                        state_name, _STATE_BINDING_MISSING
+                    )
+                    if previous is _STATE_BINDING_MISSING:
+                        delattr(application.state, state_name)
+                    else:
+                        setattr(application.state, state_name, previous)
 
 
 app = FastAPI(

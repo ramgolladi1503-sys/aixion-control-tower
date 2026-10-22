@@ -24,6 +24,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.compose.material.icons.Icons
@@ -212,6 +214,13 @@ fun ControlTowerApp(
                                 navController.navigate(Route.Connectors.value) {
                                     launchSingleTop = true
                                 }
+                            },
+                            onOpenApprovals = {
+                                navController.navigate(Route.Inbox.value) {
+                                    launchSingleTop = true
+                                    popUpTo(Route.Home.value) { saveState = true }
+                                    restoreState = true
+                                }
                             }
                         )
                     }
@@ -243,11 +252,16 @@ fun ControlTowerApp(
                         )
                     }
                     composable(Route.AgentRuns.value) { AgentRunsScreen() }
-                    composable(Route.AgentAccess.value) { AgentAccessScreen() }
+                    composable(
+                        route = Route.AgentAccess.value,
+                        arguments = listOf(navArgument("provider") { type = NavType.StringType })
+                    ) { AgentAccessScreen() }
                     composable(Route.Connectors.value) {
                         ConnectorsScreen(
-                            onOpenAgentAccess = {
-                                navController.navigate(Route.AgentAccess.value) { launchSingleTop = true }
+                            onOpenAgentAccess = { provider ->
+                                navController.navigate(Route.AgentAccess.forProvider(provider)) {
+                                    launchSingleTop = true
+                                }
                             }
                         )
                     }

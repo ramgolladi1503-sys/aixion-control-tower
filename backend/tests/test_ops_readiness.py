@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 
 os.environ.setdefault("AIXION_PROFILE", "test")
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
@@ -8,8 +9,10 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.auth import require_user
+from app import ops_routes
 from app.main import app
 from app.models import AuthUser, UserRole
+from app.settings import get_settings
 from app.ops_routes import build_runtime_readiness
 from app.store import store
 
@@ -127,6 +130,44 @@ def test_readiness_reports_postgres_probe_without_claiming_it_is_active_store(
     assert readiness.application_store_mode == "postgres_probe_only"
     assert readiness.application_store_ready is False
     assert readiness.app_state_repository_bindings["approval_decisions"] == "sqlite"
+
+
+def test_readiness_reports_postgres_auth_as_mixed_and_not_ready(monkeypatch) -> None:
+    class Runtime:
+        def probe(self):
+            schema = type("Schema", (), {"ready": True})()
+            return type(
+                "Probe",
+                (),
+                {
+                    "ready": True,
+                    "schema": schema,
+                    "pool_size": 2,
+                    "pool_available": 2,
+                    "pool_waiting": 0,
+                },
+            )()
+
+    settings = replace(
+        get_settings(),
+        auth_enabled=True,
+        postgres_auth_enabled=True,
+        postgres_runtime_probe_enabled=True,
+        postgres_auth_rate_limits_enabled=True,
+        email_dispatch_enabled=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=app.state,
+    )
+
+    assert readiness.database_backend == "mixed"
+    assert readiness.application_store_mode == "postgres_auth_runtime"
+    assert readiness.application_store_ready is False
+    assert readiness.postgres_probe_status == "ready"
+    assert readiness.status == "not_ready"
+    assert any("persistence is mixed" in error for error in readiness.errors)
 
 
 def test_readiness_reports_bound_repository_identity_without_claiming_full_readiness(

@@ -24,6 +24,14 @@ class FakeRuntime:
             external_agent_auth=object(),
             audit_events=object(),
             email_outbox=object(),
+            work_orders=object(),
+            ideas=object(),
+            test_runs=object(),
+            connectors=object(),
+            mcp_child_servers=object(),
+            mcp_pending_requests=object(),
+            trust=object(),
+            trust_events=object(),
         )
         self.closed = False
 
@@ -134,7 +142,7 @@ def test_lifespan_refuses_mixed_notification_producer_repository(monkeypatch) ->
         _bind_notification_runtime(application, runtime.repositories)
         application.state.approval_decision_repository = object()
 
-        with pytest.raises(RuntimeError, match="same application runtime"):
+        with pytest.raises(RuntimeError, match="foreign binding"):
             async with main.lifespan(application):
                 pytest.fail("Mixed SQLite/PostgreSQL notification authority must fail closed")
         assert runtime.closed is True

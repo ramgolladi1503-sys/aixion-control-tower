@@ -147,7 +147,7 @@ def test_agent_approval_api_rejects_unknown_protocol_and_accepts_legacy_v1(monke
     project = _project()
     agent_id, token = _register_agent(
         project,
-        allowed_actions=["CREATE_APPROVAL"],
+        allowed_actions=APPROVAL_CONNECTOR_ACTIONS,
     )
     approval_payload = {
         "project_id": project.id,
@@ -207,6 +207,51 @@ def test_agent_approval_api_rejects_unknown_protocol_and_accepts_legacy_v1(monke
     assert legacy.status_code == 200, legacy.text
     assert legacy.json()["source_invocation_id"] == "legacy-invocation"
     assert lookups["project"] > 0
+
+    # The protocol fence protects every connector operation, especially the
+    # consume endpoint that authorizes a host hook to return `allow`.
+    approval_id = legacy.json()["id"]
+    state_before = (
+        dict(store.approval_requests),
+        list(store.audit_events),
+        dict(store.notifications),
+    )
+    unsupported_headers = {
+        **_headers(agent_id, token),
+        "X-Aixion-Approval-Protocol": "2",
+    }
+    protected_requests = [
+        (
+            "GET",
+            f"/agents/identity?provider=CHATGPT&project_id={project.id}",
+            None,
+        ),
+        (
+            "POST",
+            "/agents/approvals",
+            {**approval_payload, "source_invocation_id": "unsupported-version-invocation"},
+        ),
+        ("GET", f"/agents/approvals/{approval_id}/decision", None),
+        ("POST", f"/agents/approvals/{approval_id}/consume", None),
+        (
+            "POST",
+            f"/agents/approvals/{approval_id}/delivery-failure",
+            {
+                "source_invocation_id": "legacy-invocation",
+                "approved_payload_hash": "sha256:" + "0" * 64,
+                "reason_code": "CLAIM_RESPONSE_AMBIGUOUS",
+            },
+        ),
+        ("POST", f"/agents/approvals/{approval_id}/expire", None),
+    ]
+    for method, path, body in protected_requests:
+        response = client.request(method, path, json=body, headers=unsupported_headers)
+        assert response.status_code == 426, (method, path, response.text)
+        assert response.headers["X-Aixion-Supported-Approval-Protocols"] == "1"
+
+    assert store.approval_requests == state_before[0]
+    assert store.audit_events == state_before[1]
+    assert store.notifications == state_before[2]
 
 
 def test_agent_registration_exposes_owner_visible_credential_status() -> None:

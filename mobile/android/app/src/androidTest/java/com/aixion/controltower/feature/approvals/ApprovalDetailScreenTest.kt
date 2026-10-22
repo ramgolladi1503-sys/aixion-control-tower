@@ -11,6 +11,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
@@ -18,6 +21,7 @@ import com.aixion.controltower.core.model.RiskLevel
 import java.time.Instant
 import org.junit.Rule
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ApprovalDetailScreenTest {
@@ -104,6 +108,26 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("READY FOR DECISION").assertExists()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
         composeRule.onNodeWithText("Reject").assertIsEnabled()
+    }
+
+    @Test
+    fun decisionActionsAreStackedFullWidthTargets() {
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                ApprovalDetailContent(approval(ApprovalStatus.REQUESTED), null, {}, {}, {})
+            }
+        }
+
+        val rejectBounds = composeRule.onNodeWithText("Reject").fetchSemanticsNode().boundsInRoot
+        val approveBounds = composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot
+
+        assertTrue("Decision buttons should be separate vertical targets", rejectBounds.bottom < approveBounds.top)
+        assertTrue("Reject should remain a 48dp or taller target", rejectBounds.height >= 48f)
+        assertTrue("Approve should remain a 48dp or taller target", approveBounds.height >= 48f)
+        assertTrue(
+            "Decision buttons should use the same full-width size",
+            kotlin.math.abs(rejectBounds.width - approveBounds.width) < 1f
+        )
     }
 
     @Test

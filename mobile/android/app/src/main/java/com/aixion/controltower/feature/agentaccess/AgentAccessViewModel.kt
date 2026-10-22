@@ -2,6 +2,7 @@ package com.aixion.controltower.feature.agentaccess
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.aixion.controltower.core.api.ApiClient
 import com.aixion.controltower.core.api.dto.ProjectDto
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 data class AgentAccessUiState(
     val loading: Boolean = true,
@@ -35,9 +37,23 @@ data class AgentAccessUiState(
     val error: String = ""
 )
 
-class AgentAccessViewModel(application: Application) : AndroidViewModel(application) {
+internal fun agentAccessUiStateForProvider(provider: String?): AgentAccessUiState {
+    val selectedProvider = when (provider?.trim()?.uppercase(Locale.ROOT)) {
+        "CODEX" -> "CODEX"
+        else -> "ANTIGRAVITY"
+    }
+    return AgentAccessUiState(
+        selectedProvider = selectedProvider,
+        displayName = if (selectedProvider == "CODEX") "Codex on this Mac" else "Antigravity on this Mac"
+    )
+}
+
+class AgentAccessViewModel(
+    application: Application,
+    savedStateHandle: SavedStateHandle
+) : AndroidViewModel(application) {
     private val repository = AgentAccessRepository(ApiClient.create(application.applicationContext))
-    private val _state = MutableStateFlow(AgentAccessUiState())
+    private val _state = MutableStateFlow(agentAccessUiStateForProvider(savedStateHandle["provider"]))
     val state: StateFlow<AgentAccessUiState> = _state.asStateFlow()
 
     init {
