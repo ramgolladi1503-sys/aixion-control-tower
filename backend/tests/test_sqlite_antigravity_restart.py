@@ -728,6 +728,7 @@ def test_hook_process_crash_after_consume_commit_fails_closed_on_relaunch(
     server = _start_sqlite_approval_api(db_path)
     consume_committed = threading.Event()
     release_consume_response = threading.Event()
+    consume_handler_completed = threading.Event()
     proxy_errors: list[str] = []
 
     class DropConsumeResponseHandler(BaseHTTPRequestHandler):
@@ -774,6 +775,9 @@ def test_hook_process_crash_after_consume_commit_fails_closed_on_relaunch(
                 return
             except Exception as error:  # surfaced in the test thread below
                 proxy_errors.append(f"{type(error).__name__}: {error}")
+            finally:
+                if self.command == "POST" and self.path.endswith("/consume"):
+                    consume_handler_completed.set()
 
     proxy = ThreadingHTTPServer(("127.0.0.1", 0), DropConsumeResponseHandler)
     proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
@@ -848,6 +852,9 @@ def test_hook_process_crash_after_consume_commit_fails_closed_on_relaunch(
         hook_process.communicate(timeout=5)
         hook_process = None
         release_consume_response.set()
+        assert consume_handler_completed.wait(timeout=10), (
+            "proxy did not finish handling the committed consume response"
+        )
 
         # Relaunching the exact invocation after the host crash must observe the
         # existing unique claim and deny, even though the request is approved.

@@ -259,9 +259,9 @@ def _fcm_access_token() -> str:
     request = Request()
 
     def bounded_request(url: str, **kwargs: Any) -> Any:
-        # google-auth's Requests transport defaults to 120 seconds. Keep token
-        # refresh within the same bound as the subsequent FCM send so a worker
-        # does not outlive its notification lease while waiting on credentials.
+        # google-auth's Requests transport defaults to 120 seconds. Bound each
+        # token-endpoint HTTP request to the FCM request timeout. google-auth
+        # may retry, so this is not a total refresh or notification-lease bound.
         kwargs.setdefault("timeout", FCM_TIMEOUT_SECONDS)
         return request(url, **kwargs)
 
