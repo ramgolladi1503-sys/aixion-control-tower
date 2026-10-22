@@ -41,8 +41,10 @@ from .application_repository_access import (
     workspace_id_for_request,
     workspace_membership_repository_for_request,
 )
+from .settings import get_settings
 from .models import AuditEvent, AuthUser, now_utc
 from .connector_repository import (
+    ConnectorRepository,
     ConnectorRepositoryConflict,
     ConnectorRepositoryScopeError,
     PostgresConnectorRepository,
@@ -115,17 +117,40 @@ def _get_bound_connector_or_404(
     connector_id: str, user: AuthUser, request: Request
 ) -> AgentConnector | None:
     """Read from the explicitly bound repository, or signal local adapter use."""
-    if getattr(request.app.state, "connector_repository", None) is None:
+    repository = _connector_repository_or_none(request)
+    if repository is None:
         return None
     workspace_id = workspace_id_for_request(user, request) or user.workspace_id
     if not workspace_id:
         raise HTTPException(status_code=404, detail="Connector not found")
-    connector = connector_repository_for_request(request).get_for_workspace(
+    connector = repository.get_for_workspace(
         connector_id, workspace_id=workspace_id
     )
     if connector is None:
         raise HTTPException(status_code=404, detail="Connector not found")
     return connector
+
+
+def _connector_repository_or_none(request: Request | None) -> ConnectorRepository | None:
+    """Choose the configured connector authority, with no PostgreSQL fallback."""
+    if request is None:
+        if get_settings().postgres_auth_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL connector repository runtime is unavailable",
+            )
+        return None
+    if get_settings().postgres_auth_enabled:
+        try:
+            return connector_repository_for_request(request)
+        except RuntimeError as error:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL connector repository runtime is unavailable or mismatched",
+            ) from error
+    if getattr(request.app.state, "connector_repository", None) is None:
+        return None
+    return connector_repository_for_request(request)
 
 
 def _connector_audit(
@@ -214,11 +239,7 @@ def create_connector(
         if http_request is None
         else workspace_id_for_request(user, http_request)
     )
-    repository = (
-        None
-        if http_request is None or getattr(http_request.app.state, "connector_repository", None) is None
-        else connector_repository_for_request(http_request)
-    )
+    repository = _connector_repository_or_none(http_request)
     if repository is not None and not workspace_id:
         workspace_id = user.workspace_id
     if repository is not None and not workspace_id:
@@ -279,14 +300,15 @@ def list_connectors(
         if http_request is None
         else workspace_membership_repository_for_request(http_request)
     )
-    if http_request is not None and getattr(http_request.app.state, "connector_repository", None) is not None:
+    repository = _connector_repository_or_none(http_request)
+    if repository is not None:
         if not workspace_id:
             workspace_id = user.workspace_id
         if not workspace_id:
             raise HTTPException(status_code=404, detail="Workspace not found")
         return [
             _to_public(connector)
-            for connector in connector_repository_for_request(http_request).list_for_workspace(workspace_id)
+            for connector in repository.list_for_workspace(workspace_id)
         ]
     return [_to_public(connector) for connector in store.agent_connectors.values()
             if connector_scope_is_consistent(
@@ -317,7 +339,7 @@ async def connector_webhook(
     x_aixion_timestamp: str | None = Header(default=None),
     x_aixion_nonce: str | None = Header(default=None),
 ) -> ConnectorWebhookResponse:
-    selected_repository = getattr(request.app.state, "connector_repository", None)
+    selected_repository = _connector_repository_or_none(request)
     if selected_repository is None:
         connector = _get_connector_or_404(connector_id)
         return await handle_connector_webhook(
@@ -330,9 +352,15 @@ async def connector_webhook(
             x_aixion_nonce,
         )
 
-    selected_task_repository = getattr(request.app.state, "agent_task_repository", None)
-    selected_project_repository = getattr(request.app.state, "project_repository", None)
-    selected_memberships = getattr(request.app.state, "workspace_membership_repository", None)
+    if get_settings().postgres_auth_enabled:
+        repositories = request.app.state.postgres_repositories
+        selected_task_repository = repositories.agent_tasks
+        selected_project_repository = repositories.projects
+        selected_memberships = repositories.workspace_membership
+    else:
+        selected_task_repository = getattr(request.app.state, "agent_task_repository", None)
+        selected_project_repository = getattr(request.app.state, "project_repository", None)
+        selected_memberships = getattr(request.app.state, "workspace_membership_repository", None)
     if not all((
         isinstance(selected_repository, PostgresConnectorRepository),
         isinstance(selected_task_repository, PostgresAgentTaskRepository),
@@ -364,8 +392,16 @@ async def connector_webhook(
 
 
 @router.post("/{connector_id}/simulate", response_model=ConnectorSimulationResponse)
-def simulate_connector_webhook_route(connector_id: str, payload: ConnectorSimulationRequest, user: AuthUser = OwnerDependency) -> ConnectorSimulationResponse:
-    return simulate_connector_webhook(_get_connector_or_404(connector_id, user), payload)
+def simulate_connector_webhook_route(
+    connector_id: str,
+    payload: ConnectorSimulationRequest,
+    user: AuthUser = OwnerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> ConnectorSimulationResponse:
+    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    return simulate_connector_webhook(
+        bound if bound is not None else _get_connector_or_404(connector_id, user), payload
+    )
 
 
 @router.get("/{connector_id}/schema-mapper", response_model=ConnectorSchemaMapperStatus)
@@ -428,7 +464,7 @@ def update_connector(
     )
     project_repository = (
         project_repository_for_request(http_request)
-        if http_request is not None and getattr(http_request.app.state, "connector_repository", None) is not None
+        if http_request is not None and _connector_repository_or_none(http_request) is not None
         else None
     )
     _validate_scopes(payload, workspace_id, project_repository)

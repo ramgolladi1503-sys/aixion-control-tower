@@ -10,6 +10,7 @@ os.environ.setdefault("AIXION_PROFILE", "test")
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app import main
+from app.notification_outbox_repository import PostgresNotificationOutboxRepository
 
 
 class FakeRuntime:
@@ -18,7 +19,11 @@ class FakeRuntime:
         self.opened = False
         self.closed = False
         self.email_outbox = object()
-        self.repositories = SimpleNamespace(email_outbox=self.email_outbox)
+        self.notification_outbox = object.__new__(PostgresNotificationOutboxRepository)
+        self.repositories = SimpleNamespace(
+            email_outbox=self.email_outbox,
+            notification_outbox=self.notification_outbox,
+        )
 
     def open(self, *, wait: bool = False) -> None:
         assert wait is True

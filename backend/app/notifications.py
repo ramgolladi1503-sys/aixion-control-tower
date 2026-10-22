@@ -12,11 +12,13 @@ from pydantic import BaseModel, Field
 
 from .auth import require_user
 from .application_repository_access import workspace_id_for_request
+from .application_repositories import ApplicationRepositories
 from .models import AuditEvent, AuthUser, DeviceRegistration, Notification, NotificationStatus, now_utc
 from .notification_outbox_repository import PostgresNotificationOutboxRepository
 from .settings import get_settings
 from .store import store
 from .workspace_access import workspace_id_for_user
+from .workspace_membership_repository import PostgresWorkspaceMembershipRepository
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 logger = logging.getLogger(__name__)
@@ -31,17 +33,48 @@ PUSH_BODY = "A request is waiting for your review. Open the app to view details.
 def _postgres_notification_repository(
     http_request: Request | None,
 ) -> PostgresNotificationOutboxRepository | None:
+    settings = get_settings()
+    if getattr(settings, "postgres_auth_enabled", False):
+        if http_request is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL notification runtime is unavailable",
+            )
+        state = http_request.app.state
+        runtime = getattr(state, "postgres_runtime", None)
+        repositories = getattr(state, "postgres_repositories", None)
+        if (
+            runtime is None
+            or repositories is None
+            or getattr(runtime, "repositories", None) is not repositories
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL notification runtime is unavailable",
+            )
+        repository = getattr(state, "notification_outbox_repository", None)
+        expected_repository = getattr(repositories, "notification_outbox", None)
+        membership_repository = getattr(repositories, "workspace_membership", None)
+        if (
+            not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(expected_repository, PostgresNotificationOutboxRepository)
+            or not isinstance(
+                membership_repository, PostgresWorkspaceMembershipRepository
+            )
+            or repository is not expected_repository
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL notification repository is unavailable",
+            )
+        return expected_repository
+
     repository = (
         getattr(http_request.app.state, "notification_outbox_repository", None)
         if http_request is not None
         else None
     )
     if repository is None:
-        if get_settings().postgres_auth_enabled:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="PostgreSQL notification repository is unavailable",
-            )
         return None
     if not isinstance(repository, PostgresNotificationOutboxRepository):
         raise RuntimeError("Application notification repository has an unsupported adapter")
@@ -528,6 +561,10 @@ def dispatch_one_due_push(*, now: datetime | None = None) -> str | None:
 async def notification_dispatch_loop() -> None:
     """Run the opt-in local/demo outbox worker in the API process."""
     settings = get_settings()
+    if getattr(settings, "postgres_auth_enabled", False):
+        raise RuntimeError(
+            "PostgreSQL authentication requires the PostgreSQL notification dispatcher"
+        )
     if not settings.push_dispatch_enabled:
         logger.info("Push dispatch loop disabled by configuration")
         return

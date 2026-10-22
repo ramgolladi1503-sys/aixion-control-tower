@@ -512,6 +512,113 @@ class PostgresMCPPendingRepository:
             result.append(pending)
         return result
 
+    def retry_for_workspace(
+        self,
+        *,
+        pending_id: str,
+        workspace_id: str,
+        reason: str,
+        reset_attempts: bool,
+        actor: str,
+        now: datetime,
+    ) -> MCPPendingRequest | None:
+        """Reset a retryable pending request and append its audit atomically.
+
+        A retry already in WAITING_FOR_APPROVAL is an idempotent no-op. An
+        expired FORWARDING lease is marked outcome-unknown and committed before
+        returning a conflict so callers can never replay an uncertain child
+        invocation.
+        """
+        if not workspace_id or not actor:
+            raise MCPPendingRepositoryScopeError("PostgreSQL MCP retry requires workspace and actor")
+
+        expired_lease = False
+        updated: MCPPendingRequest | None = None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT pending_id,approval_id,workspace_id,project_id,payload "
+                "FROM mcp_pending_requests WHERE pending_id=%s AND workspace_id=%s FOR UPDATE",
+                (pending_id, workspace_id),
+            ).fetchone()
+            if row is None:
+                return None
+            current = _decode((row[0], row[4], row[1], row[2], row[3]), pending_id)
+            if current is None:
+                return None
+            if current.workspace_id != workspace_id:
+                raise MCPPendingRepositoryScopeError("MCP pending workspace is inconsistent")
+            if current.last_error == "FORWARD_OUTCOME_UNKNOWN":
+                raise MCPPendingRepositoryConflict(
+                    "MCP forwarding outcome is unknown; create a new request instead of replaying this invocation"
+                )
+            if current.status in {
+                MCPPendingStatus.FORWARDED,
+                MCPPendingStatus.BLOCKED_BY_DECISION,
+                MCPPendingStatus.ORPHANED,
+            }:
+                raise MCPPendingRepositoryConflict(
+                    f"MCP pending request cannot be retried from {current.status}"
+                )
+            if current.status == MCPPendingStatus.FORWARDING:
+                if current.lease_expires_at is not None and current.lease_expires_at > now:
+                    raise MCPPendingRepositoryConflict("MCP pending request has an active lease")
+                self._mark_outcome_unknown_postgres(conn, current, now)
+                expired_lease = True
+            elif current.status == MCPPendingStatus.WAITING_FOR_APPROVAL:
+                # Repeated retry requests do not append duplicate audit events.
+                return current
+            elif current.status == MCPPendingStatus.DEAD_LETTER:
+                updated = current.model_copy(update={
+                    "status": MCPPendingStatus.WAITING_FOR_APPROVAL,
+                    "attempts": 0 if reset_attempts else current.attempts,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "last_error": None,
+                    "updated_at": now,
+                })
+                event = AuditEvent(
+                    event_type="MCP_PENDING_RETRIED",
+                    actor=actor,
+                    entity_id=current.approval_request_id,
+                    workspace_id=current.workspace_id,
+                    details={
+                        "mcp_pending_request_id": current.id,
+                        "project_id": current.project_id,
+                        "server_name": current.server_name,
+                        "tool_name": current.tool_name,
+                        "reason": reason,
+                        "previous_status": current.status,
+                        "new_status": updated.status,
+                        "reset_attempts": reset_attempts,
+                        "attempts": updated.attempts,
+                    },
+                    created_at=now,
+                )
+                conn.execute(
+                    "UPDATE mcp_pending_requests SET status=%s,attempts=%s,lease_owner=NULL,"
+                    "lease_expires_at=NULL,last_error=NULL,updated_at=%s,payload=%s "
+                    "WHERE pending_id=%s AND workspace_id=%s",
+                    (
+                        updated.status.value,
+                        updated.attempts,
+                        updated.updated_at,
+                        Jsonb(updated.model_dump(mode="json")),
+                        updated.id,
+                        workspace_id,
+                    ),
+                )
+                self._insert_audit(conn, event, current.approval_request_id)
+            else:
+                raise MCPPendingRepositoryConflict(
+                    f"MCP pending request cannot be retried from {current.status}"
+                )
+
+        if expired_lease:
+            raise MCPPendingRepositoryConflict(
+                "MCP forwarding lease expired with an unknown child-server outcome; create a new request instead of replaying"
+            )
+        return updated
+
     def claim_forwarding(
         self,
         *,

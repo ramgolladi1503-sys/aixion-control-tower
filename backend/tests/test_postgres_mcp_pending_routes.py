@@ -131,6 +131,11 @@ def postgres_mcp_pending_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Itera
             workspace_id=workspace.id,
         )
         for dependency in (mcp_gateway_routes.ReviewerDependency, mcp_gateway_routes.MaintainerDependency):
+            monkeypatch.delitem(
+                main.app.dependency_overrides,
+                dependency.dependency,
+                raising=False,
+            )
             monkeypatch.setitem(main.app.dependency_overrides, dependency.dependency, lambda: user)
         yield connect, workspace, project, user, pending
     finally:
@@ -147,6 +152,7 @@ def test_postgres_mcp_pending_reads_are_workspace_scoped_and_do_not_project_to_s
     before_pending = dict(store.mcp_pending_requests)
     before_approvals = dict(store.approval_requests)
     before_audits = {event.id for event in store.audit_events}
+    before_child_calls = mcp_gateway_routes.child_received_count_for_test()
 
     listed = client.get("/mcp-gateway/pending-requests", params={"project_id": project.id})
     assert listed.status_code == 200, listed.text
@@ -185,16 +191,44 @@ def test_postgres_mcp_pending_reads_are_workspace_scoped_and_do_not_project_to_s
     assert store.mcp_pending_requests == before_pending
     assert store.approval_requests == before_approvals
     assert {event.id for event in store.audit_events} == before_audits
+    assert mcp_gateway_routes.child_received_count_for_test() == before_child_calls
 
 
 def test_postgres_mcp_mutation_routes_fail_closed_without_sqlite_projection(
     postgres_mcp_pending_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connect, _workspace, project, _user, pending = postgres_mcp_pending_route_runtime
+    # Keep this safety regression independent of app-state changes made by
+    # other route/lifespan tests. monkeypatch restores every value on teardown.
+    repositories = main.app.state.postgres_repositories
+    runtime = SimpleNamespace(repositories=repositories)
+    monkeypatch.setattr(
+        mcp_gateway_routes,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(main.app.state, "postgres_repositories", repositories, raising=False)
+    monkeypatch.setattr(main.app.state, "postgres_runtime", runtime, raising=False)
+    for dependency in (mcp_gateway_routes.ReviewerDependency, mcp_gateway_routes.MaintainerDependency):
+        monkeypatch.delitem(
+            main.app.dependency_overrides,
+            dependency.dependency,
+            raising=False,
+        )
+        monkeypatch.setitem(
+            main.app.dependency_overrides,
+            dependency.dependency,
+            lambda: _user,
+        )
+    assert mcp_gateway_routes.get_settings().postgres_auth_enabled is True
+    assert main.app.state.postgres_runtime.repositories is main.app.state.postgres_repositories
+
     client = TestClient(main.app)
     before_pending = dict(store.mcp_pending_requests)
     before_approvals = dict(store.approval_requests)
     before_audits = {event.id for event in store.audit_events}
+    before_child_calls = mcp_gateway_routes.child_received_count_for_test()
 
     submitted = client.post(
         "/mcp-gateway/requests",
@@ -211,14 +245,253 @@ def test_postgres_mcp_mutation_routes_fail_closed_without_sqlite_projection(
     )
     assert submitted.status_code == 503
 
+    # Retrying an already waiting request is an idempotent read-like no-op.
     retried = client.post(f"/mcp-gateway/pending-requests/{pending.id}/retry", json={})
-    assert retried.status_code == 503
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == MCPPendingStatus.WAITING_FOR_APPROVAL
     resolved = client.post(f"/mcp-gateway/approvals/{pending.approval_request_id}/resolve")
     assert resolved.status_code == 503
 
     with connect() as connection:
         assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 1
         assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 0
+    assert store.mcp_pending_requests == before_pending
+    assert store.approval_requests == before_approvals
+    assert {event.id for event in store.audit_events} == before_audits
+    assert mcp_gateway_routes.child_received_count_for_test() == before_child_calls
+
+
+def test_postgres_mcp_retry_dead_letter_is_atomic_and_idempotent(
+    postgres_mcp_pending_route_runtime,
+) -> None:
+    connect, _workspace, _project, _user, pending = postgres_mcp_pending_route_runtime
+    dead_letter = pending.model_copy(update={
+        "status": MCPPendingStatus.DEAD_LETTER,
+        "attempts": 2,
+        "last_error": "temporary transport failure",
+        "updated_at": now_utc(),
+    })
+    with connect() as connection:
+        connection.execute(
+            "UPDATE mcp_pending_requests SET status=%s,attempts=%s,last_error=%s,updated_at=%s,payload=%s "
+            "WHERE pending_id=%s",
+            (
+                dead_letter.status.value,
+                dead_letter.attempts,
+                dead_letter.last_error,
+                dead_letter.updated_at,
+                Jsonb(dead_letter.model_dump(mode="json")),
+                dead_letter.id,
+            ),
+        )
+
+    before_sqlite_pending = dict(store.mcp_pending_requests)
+    before_sqlite_approvals = dict(store.approval_requests)
+    before_sqlite_audits = {event.id for event in store.audit_events}
+    client = TestClient(main.app)
+    payload = {"reason": "retry after transient failure", "reset_attempts": False}
+    first = client.post(f"/mcp-gateway/pending-requests/{pending.id}/retry", json=payload)
+    second = client.post(f"/mcp-gateway/pending-requests/{pending.id}/retry", json=payload)
+
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == MCPPendingStatus.WAITING_FOR_APPROVAL
+    assert first.json()["attempts"] == 2
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT status,attempts,last_error,payload FROM mcp_pending_requests WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == MCPPendingStatus.WAITING_FOR_APPROVAL.value
+        assert row[1] == 2
+        assert row[2] is None
+        events = connection.execute(
+            "SELECT event_type,details FROM audit_events WHERE approval_id=%s",
+            (pending.approval_request_id,),
+        ).fetchall()
+        assert len(events) == 1
+        assert events[0][0] == "MCP_PENDING_RETRIED"
+        assert events[0][1]["mcp_pending_request_id"] == pending.id
+        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 0
+    assert store.mcp_pending_requests == before_sqlite_pending
+    assert store.approval_requests == before_sqlite_approvals
+    assert {event.id for event in store.audit_events} == before_sqlite_audits
+
+
+def test_postgres_mcp_retry_hides_cross_workspace_request(
+    postgres_mcp_pending_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, _workspace, _project, _user, pending = postgres_mcp_pending_route_runtime
+    monkeypatch.setattr(
+        mcp_gateway_routes,
+        "workspace_id_for_request",
+        lambda _user, _request: "workspace_not_owner",
+    )
+    before_sqlite_pending = dict(store.mcp_pending_requests)
+
+    response = TestClient(main.app).post(
+        f"/mcp-gateway/pending-requests/{pending.id}/retry",
+        json={"reason": "should not be visible"},
+    )
+
+    assert response.status_code == 404
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT status,attempts FROM mcp_pending_requests WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
+        assert row == (MCPPendingStatus.WAITING_FOR_APPROVAL.value, pending.attempts)
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 0
+    assert store.mcp_pending_requests == before_sqlite_pending
+
+
+def test_postgres_mcp_retry_rolls_back_pending_when_audit_insert_fails(
+    postgres_mcp_pending_route_runtime,
+) -> None:
+    connect, _workspace, _project, _user, pending = postgres_mcp_pending_route_runtime
+    dead_letter = pending.model_copy(update={
+        "status": MCPPendingStatus.DEAD_LETTER,
+        "attempts": 1,
+        "last_error": "temporary transport failure",
+        "updated_at": now_utc(),
+    })
+    with connect() as connection:
+        connection.execute(
+            "UPDATE mcp_pending_requests SET status=%s,attempts=%s,last_error=%s,updated_at=%s,payload=%s "
+            "WHERE pending_id=%s",
+            (
+                dead_letter.status.value,
+                dead_letter.attempts,
+                dead_letter.last_error,
+                dead_letter.updated_at,
+                Jsonb(dead_letter.model_dump(mode="json")),
+                dead_letter.id,
+            ),
+        )
+        connection.execute(
+            "CREATE FUNCTION reject_mcp_retry_audit() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN RAISE EXCEPTION 'injected MCP retry audit failure'; END; $$"
+        )
+        connection.execute(
+            "CREATE TRIGGER reject_mcp_retry_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_mcp_retry_audit()"
+        )
+
+    response = TestClient(main.app).post(
+        f"/mcp-gateway/pending-requests/{pending.id}/retry",
+        json={"reason": "rollback check"},
+    )
+
+    assert response.status_code == 503
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT status,attempts,last_error FROM mcp_pending_requests WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
+        assert row == (
+            MCPPendingStatus.DEAD_LETTER.value,
+            dead_letter.attempts,
+            dead_letter.last_error,
+        )
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 0
+
+
+def test_postgres_mcp_retry_expired_forwarding_lease_is_never_replayed(
+    postgres_mcp_pending_route_runtime,
+) -> None:
+    connect, _workspace, _project, _user, pending = postgres_mcp_pending_route_runtime
+    expired = pending.model_copy(update={
+        "status": MCPPendingStatus.FORWARDING,
+        "attempts": 1,
+        "lease_owner": "mcp-worker",
+        "lease_expires_at": now_utc() - timedelta(minutes=1),
+        "updated_at": now_utc() - timedelta(minutes=1),
+    })
+    with connect() as connection:
+        connection.execute(
+            "UPDATE mcp_pending_requests SET status=%s,attempts=%s,lease_owner=%s,lease_expires_at=%s,"
+            "updated_at=%s,payload=%s WHERE pending_id=%s",
+            (
+                expired.status.value,
+                expired.attempts,
+                expired.lease_owner,
+                expired.lease_expires_at,
+                expired.updated_at,
+                Jsonb(expired.model_dump(mode="json")),
+                expired.id,
+            ),
+        )
+
+    before_sqlite_pending = dict(store.mcp_pending_requests)
+    before_child_calls = mcp_gateway_routes.child_received_count_for_test()
+    response = TestClient(main.app).post(
+        f"/mcp-gateway/pending-requests/{pending.id}/retry",
+        json={"reason": "expired lease"},
+    )
+
+    assert response.status_code == 409
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT status,lease_owner,lease_expires_at,last_error FROM mcp_pending_requests "
+            "WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
+        assert row == (
+            MCPPendingStatus.DEAD_LETTER.value,
+            None,
+            None,
+            "FORWARD_OUTCOME_UNKNOWN",
+        )
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE approval_id=%s AND event_type='mcp.forward_outcome_unknown'",
+            (pending.approval_request_id,),
+        ).fetchone()[0] == 1
+    assert store.mcp_pending_requests == before_sqlite_pending
+    assert mcp_gateway_routes.child_received_count_for_test() == before_child_calls
+
+
+@pytest.mark.parametrize("binding_failure", ["missing_repositories", "mismatched_runtime"])
+def test_postgres_mcp_retry_and_resolve_fail_closed_for_missing_or_mixed_bundle(
+    postgres_mcp_pending_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    binding_failure: str,
+) -> None:
+    connect, _workspace, _project, _user, pending = postgres_mcp_pending_route_runtime
+    if binding_failure == "missing_repositories":
+        monkeypatch.setattr(main.app.state, "postgres_repositories", None, raising=False)
+    else:
+        monkeypatch.setattr(
+            main.app.state,
+            "postgres_runtime",
+            SimpleNamespace(repositories=object()),
+            raising=False,
+        )
+
+    before_pending = dict(store.mcp_pending_requests)
+    before_approvals = dict(store.approval_requests)
+    before_audits = {event.id for event in store.audit_events}
+    client = TestClient(main.app)
+
+    retried = client.post(f"/mcp-gateway/pending-requests/{pending.id}/retry", json={})
+    resolved = client.post(f"/mcp-gateway/approvals/{pending.approval_request_id}/resolve")
+
+    assert retried.status_code == 503
+    assert resolved.status_code == 503
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT status,attempts,payload FROM mcp_pending_requests WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == MCPPendingStatus.WAITING_FOR_APPROVAL.value
+        assert row[1] == pending.attempts
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 0
     assert store.mcp_pending_requests == before_pending
     assert store.approval_requests == before_approvals
     assert {event.id for event in store.audit_events} == before_audits

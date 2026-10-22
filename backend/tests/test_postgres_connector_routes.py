@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -13,6 +14,8 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app import main
+import app.application_repository_access as repository_access
+import app.connector_routes as connector_routes
 from app.application_repositories import ApplicationRepositories
 from app.auth import require_owner
 from app.connector_models import AgentConnector
@@ -72,7 +75,25 @@ def postgres_connector_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterato
                  Jsonb(user.model_dump(mode="json"))),
             )
         repositories = ApplicationRepositories.from_connector(connect)
-        monkeypatch.setattr(main.app.state, "connector_repository", repositories.connectors, raising=False)
+        monkeypatch.setattr(
+            repository_access,
+            "get_settings",
+            lambda: SimpleNamespace(postgres_auth_enabled=True),
+        )
+        monkeypatch.setattr(
+            connector_routes,
+            "get_settings",
+            lambda: SimpleNamespace(postgres_auth_enabled=True),
+        )
+        monkeypatch.setattr(main.app.state, "postgres_repositories", repositories, raising=False)
+        monkeypatch.setattr(
+            main.app.state,
+            "postgres_runtime",
+            SimpleNamespace(repositories=repositories),
+            raising=False,
+        )
+        # A stale local binding must not become the connector authority in PG auth mode.
+        monkeypatch.setattr(main.app.state, "connector_repository", object(), raising=False)
         monkeypatch.setattr(main.app.state, "agent_task_repository", repositories.agent_tasks, raising=False)
         monkeypatch.setattr(main.app.state, "project_repository", repositories.projects, raising=False)
         monkeypatch.setattr(main.app.state, "workspace_membership_repository",
@@ -83,6 +104,72 @@ def postgres_connector_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterato
         main.app.dependency_overrides.pop(require_owner, None)
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_connector_management_fails_closed_without_or_with_mismatched_postgres_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    request = type("Request", (), {"app": type("App", (), {"state": type("State", (), {
+        "postgres_repositories": None,
+        "connector_repository": object(),
+    })()})()})()
+    with pytest.raises(RuntimeError, match="repository runtime is unavailable"):
+        repository_access.connector_repository_for_request(request)
+
+    request.app.state.postgres_repositories = SimpleNamespace(connectors=object())
+    request.app.state.postgres_runtime = SimpleNamespace(
+        repositories=request.app.state.postgres_repositories
+    )
+    with pytest.raises(RuntimeError, match="connector repository bundle is unavailable or mismatched"):
+        repository_access.connector_repository_for_request(request)
+
+
+def test_connector_route_rejects_repository_bundle_from_another_runtime_without_mutation(
+    postgres_connector_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, _workspace, _user = postgres_connector_route_runtime
+    repositories_a = main.app.state.postgres_repositories
+    repositories_b = ApplicationRepositories.from_connector(connect)
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_runtime",
+        SimpleNamespace(repositories=repositories_b),
+    )
+    with pytest.raises(RuntimeError, match="not bound to the active runtime"):
+        repository_access.connector_repository_for_request(
+            SimpleNamespace(app=main.app)
+        )
+    before_connectors = set(store.agent_connectors)
+    before_audits = {event.id for event in store.audit_events}
+    with connect() as conn:
+        before_db_connectors = conn.execute(
+            "SELECT count(*) FROM agent_connectors"
+        ).fetchone()[0]
+        before_db_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_type='connector'"
+        ).fetchone()[0]
+
+    response = TestClient(main.app).post(
+        "/connectors",
+        json={"name": "Must not be written through a mismatched runtime"},
+    )
+
+    assert response.status_code == 503
+    assert "PostgreSQL connector repository runtime is unavailable or mismatched" in response.json()["detail"]
+    assert main.app.state.postgres_repositories is repositories_a
+    assert set(store.agent_connectors) == before_connectors
+    assert {event.id for event in store.audit_events} == before_audits
+    with connect() as conn:
+        assert conn.execute("SELECT count(*) FROM agent_connectors").fetchone()[0] == before_db_connectors
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_type='connector'"
+        ).fetchone()[0] == before_db_audits
 
 
 def test_connector_management_routes_use_workspace_bound_postgres_and_atomic_audit(
@@ -383,10 +470,20 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
 def test_postgres_webhook_rejects_mixed_repository_runtime(
     postgres_connector_route_runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(main.app.state, "agent_task_repository", None)
+    repositories = main.app.state.postgres_repositories
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_repositories",
+        SimpleNamespace(
+            connectors=repositories.connectors,
+            agent_tasks=None,
+            projects=repositories.projects,
+            workspace_membership=repositories.workspace_membership,
+        ),
+    )
     response = TestClient(main.app).post(
         "/connectors/missing/webhook",
         json={"action": "CREATE_AGENT_TASK"},
     )
     assert response.status_code == 503
-    assert "one PostgreSQL connector, task, project, and workspace runtime" in response.json()["detail"]
+    assert "PostgreSQL connector repository runtime is unavailable or mismatched" in response.json()["detail"]

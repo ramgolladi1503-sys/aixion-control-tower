@@ -227,6 +227,31 @@ def dispatch_one_due_email_postgres(
     return True
 
 
+async def _drain_email_dispatch_task(dispatch_task: asyncio.Task[object]) -> None:
+    """Wait for the thread-backed dispatch task despite repeated cancellation."""
+    while not dispatch_task.done():
+        try:
+            await asyncio.shield(dispatch_task)
+        except asyncio.CancelledError:
+            # A repeated cancellation targets this loop task. Shielding keeps
+            # asyncio from cancelling the to_thread task while its worker runs.
+            if dispatch_task.done():
+                break
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Email outbox dispatch iteration failed during shutdown"
+            )
+            break
+
+    if dispatch_task.done() and not dispatch_task.cancelled():
+        try:
+            dispatch_task.result()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Email outbox dispatch iteration failed during shutdown"
+            )
+
+
 async def email_dispatch_loop(
     *, postgres_repository: PostgresEmailOutboxRepository | None = None
 ) -> None:
@@ -249,12 +274,7 @@ async def email_dispatch_loop(
         except asyncio.CancelledError:
             # Cancelling asyncio.to_thread does not stop its worker thread.
             # Drain it before lifespan closes the shared PostgreSQL pool.
-            try:
-                await dispatch_task
-            except Exception:
-                logging.getLogger(__name__).warning(
-                    "Email outbox dispatch iteration failed during shutdown"
-                )
+            await _drain_email_dispatch_task(dispatch_task)
             raise
         except Exception:
             # Do not log recipient, verification code, SMTP response, or secrets.

@@ -17,7 +17,10 @@ from .mcp_gateway import (
     MCPGatewayDecision,
     MCPGatewayToolCall,
 )
-from .mcp_pending_repository import MCPPendingRepositoryError
+from .mcp_pending_repository import (
+    MCPPendingRepositoryConflict,
+    MCPPendingRepositoryError,
+)
 from .application_repository_access import workspace_id_for_request
 from .models import AuditEvent, AuthUser, MCPPendingRequest, MCPPendingStatus, now_utc
 from .store import store
@@ -45,7 +48,7 @@ class GatewaySubmitRequest(BaseModel):
 
 
 class PendingRetryRequest(BaseModel):
-    reason: str = ""
+    reason: str = Field(default="", max_length=500)
     reset_attempts: bool = True
 
 
@@ -352,7 +355,37 @@ def retry_pending_gateway_request(
     request: Request = None,  # type: ignore[assignment]
 ) -> MCPPendingRequest:
     if request is not None:
-        _require_local_mcp_write_runtime(request)
+        repository = _postgres_pending_repository_for_request(request)
+        if repository is not None:
+            workspace_id = _pending_read_workspace_id(user, request)
+            if workspace_id is None:
+                raise HTTPException(status_code=404, detail="MCP pending request not found")
+            payload = payload or PendingRetryRequest()
+            retry = getattr(repository, "retry_for_workspace", None)
+            if not callable(retry):
+                raise HTTPException(
+                    status_code=503,
+                    detail="PostgreSQL MCP retry transaction is unavailable",
+                )
+            try:
+                pending = retry(
+                    pending_id=pending_request_id,
+                    workspace_id=workspace_id,
+                    reason=payload.reason,
+                    reset_attempts=payload.reset_attempts,
+                    actor=user.email,
+                    now=now_utc(),
+                )
+            except MCPPendingRepositoryConflict as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except (MCPPendingRepositoryError, RuntimeError, psycopg.Error) as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="PostgreSQL MCP retry transaction failed",
+                ) from error
+            if pending is None:
+                raise HTTPException(status_code=404, detail="MCP pending request not found")
+            return pending
     pending = _pending_for_user(pending_request_id, user)
     payload = payload or PendingRetryRequest()
     previous_status = pending.status

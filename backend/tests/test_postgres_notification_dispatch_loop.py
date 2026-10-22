@@ -38,7 +38,6 @@ class FakeRuntime:
 
 
 def _bind_notification_runtime(application: FastAPI, repositories: SimpleNamespace) -> None:
-    application.state.notification_outbox_repository = repositories.notification_outbox
     application.state.approval_decision_repository = repositories.approval_decisions
     application.state.agent_task_repository = repositories.agent_tasks
     application.state.agent_run_repository = repositories.agent_runs
@@ -55,7 +54,7 @@ def test_lifespan_rejects_postgres_notification_worker_without_runtime(monkeypat
             "get_settings",
             lambda: SimpleNamespace(
                 outbox_dispatch_mode="inline",
-                push_dispatch_enabled=False,
+                push_dispatch_enabled=True,
                 email_dispatch_enabled=False,
                 postgres_runtime_probe_enabled=False,
                 postgres_auth_rate_limits_enabled=False,
@@ -108,6 +107,10 @@ def test_lifespan_selects_postgres_dispatcher_only_for_coherent_runtime(monkeypa
             await asyncio.wait_for(dispatched.wait(), timeout=1)
             assert selected == [runtime.repositories.notification_outbox]
             assert application.state.postgres_repositories is runtime.repositories
+            assert (
+                application.state.notification_outbox_repository
+                is runtime.repositories.notification_outbox
+            )
         assert runtime.closed is True
 
     asyncio.run(exercise())
@@ -180,6 +183,24 @@ def test_lifespan_rejects_invalid_notification_repository_before_startup() -> No
                 raise AssertionError("Invalid notification repository unexpectedly started")
         except RuntimeError as error:
             assert str(error) == "Application notification repository has an unsupported adapter"
+
+    asyncio.run(exercise())
+
+
+def test_local_push_loop_refuses_postgres_auth_mode(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.notifications.get_settings",
+        lambda: SimpleNamespace(
+            postgres_auth_enabled=True,
+            push_dispatch_enabled=True,
+        ),
+    )
+
+    async def exercise() -> None:
+        from app.notifications import notification_dispatch_loop
+
+        with pytest.raises(RuntimeError, match="PostgreSQL notification dispatcher"):
+            await notification_dispatch_loop()
 
     asyncio.run(exercise())
 

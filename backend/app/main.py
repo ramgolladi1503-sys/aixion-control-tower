@@ -154,6 +154,9 @@ def _validate_postgres_notification_runtime(
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     postgres_runtime: PostgresRuntime | None = None
     settings = get_settings()
+    original_notification_repository = getattr(
+        application.state, "notification_outbox_repository", None
+    )
     notification_repository = getattr(
         application.state, "notification_outbox_repository", None
     )
@@ -181,17 +184,53 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             raise
         application.state.postgres_runtime = postgres_runtime
         application.state.postgres_repositories = postgres_runtime.repositories
+        if getattr(settings, "postgres_auth_enabled", False):
+            notification_repository = getattr(
+                postgres_runtime.repositories, "notification_outbox", None
+            )
+            if not isinstance(
+                notification_repository, PostgresNotificationOutboxRepository
+            ):
+                postgres_runtime.close()
+                application.state.postgres_runtime = None
+                application.state.postgres_repositories = None
+                raise RuntimeError(
+                    "PostgreSQL notification repository bundle is unavailable"
+                )
+            # Notification reads and device registration must use the same
+            # lifespan-owned pool as the PostgreSQL account and membership data.
+            application.state.notification_outbox_repository = notification_repository
         if settings.postgres_auth_rate_limits_enabled:
             logger.info("PostgreSQL-backed authentication rate limiting enabled")
     dispatch_task: asyncio.Task[None] | None = None
     email_task: asyncio.Task[None] | None = None
     try:
+        push_worker_repository = (
+            notification_repository
+            if settings.outbox_dispatch_mode == "inline"
+            and settings.push_dispatch_enabled
+            else None
+        )
         _validate_postgres_notification_runtime(
             application,
             postgres_runtime=postgres_runtime,
-            notification_repository=notification_repository,
+            notification_repository=push_worker_repository,
             settings=settings,
         )
+        if (
+            getattr(settings, "postgres_auth_enabled", False)
+            and settings.outbox_dispatch_mode == "inline"
+            and settings.email_dispatch_enabled
+        ):
+            email_repository = getattr(
+                getattr(application.state, "postgres_repositories", None),
+                "email_outbox",
+                None,
+            )
+            if email_repository is None:
+                raise RuntimeError(
+                    "PostgreSQL email dispatch requires the lifespan-owned PostgreSQL outbox"
+                )
         reconcile_linked_approval_tasks(
             approval_repository=getattr(
                 application.state,
@@ -243,9 +282,21 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 with suppress(asyncio.CancelledError):
                     await task
         if postgres_runtime is not None:
+            runtime_repositories = getattr(postgres_runtime, "repositories", None)
+            runtime_notification_repository = getattr(
+                runtime_repositories, "notification_outbox", None
+            )
             postgres_runtime.close()
             application.state.postgres_runtime = None
             application.state.postgres_repositories = None
+            if (
+                runtime_notification_repository is not None
+                and getattr(application.state, "notification_outbox_repository", None)
+                is runtime_notification_repository
+            ):
+                application.state.notification_outbox_repository = (
+                    original_notification_repository
+                )
 
 
 app = FastAPI(

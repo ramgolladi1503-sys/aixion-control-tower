@@ -10,7 +10,7 @@ from .agent_auth_repository import ExternalAgentAuthenticationRepository
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
 from .approval_repository import ApprovalDecisionRepository
 from .project_repository import ProjectRepository
-from .connector_repository import ConnectorRepository
+from .connector_repository import ConnectorRepository, PostgresConnectorRepository
 from .idea_repository import IdeaRepository
 from .settings import get_settings
 from .workspace_access import workspace_id_for_user as resolve_workspace_id_for_user
@@ -101,7 +101,7 @@ def project_repository_for_request(request: _RequestState | None) -> ProjectRepo
     still point at SQLite. Local and test configurations continue to use their
     explicitly app-bound adapter.
     """
-    if get_settings().postgres_auth_enabled:
+    if getattr(get_settings(), "postgres_auth_enabled", False):
         return application_repositories_for_request(request).projects
 
     app = getattr(request, "app", None)
@@ -113,7 +113,31 @@ def project_repository_for_request(request: _RequestState | None) -> ProjectRepo
 
 
 def connector_repository_for_request(request: _RequestState | None) -> ConnectorRepository:
-    """Return the connector adapter explicitly bound to this FastAPI app."""
+    """Return the connector repository selected by this application's authority.
+
+    PostgreSQL auth mode uses the connector adapter from the lifespan-owned
+    repository bundle. It must never fall back to a separate app binding or the
+    process-local store. Local and test modes continue to use the explicit
+    app-bound adapter.
+    """
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        app = getattr(request, "app", None)
+        state = getattr(app, "state", None)
+        runtime = getattr(state, "postgres_runtime", None)
+        if runtime is None or getattr(runtime, "repositories", None) is not repositories:
+            raise RuntimeError(
+                "PostgreSQL connector repository is not bound to the active runtime"
+            )
+        repository = getattr(repositories, "connectors", None)
+        if not isinstance(repositories, ApplicationRepositories) or not isinstance(
+            repository, PostgresConnectorRepository
+        ):
+            raise RuntimeError("PostgreSQL connector repository bundle is unavailable or mismatched")
+        return repository
+
+    if request is None:
+        raise RuntimeError("Application connector repository requires an app-bound request")
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
     repository = getattr(state, "connector_repository", None)
@@ -188,7 +212,7 @@ def workspace_membership_repository_for_request(
     request: _RequestState | None,
 ) -> WorkspaceMembershipRepository:
     """Return membership reads from the active authentication authority."""
-    if get_settings().postgres_auth_enabled:
+    if getattr(get_settings(), "postgres_auth_enabled", False):
         return application_repositories_for_request(request).workspace_membership
 
     app = getattr(request, "app", None)
@@ -202,12 +226,12 @@ def workspace_membership_repository_for_request(
 def workspace_id_for_request(user: AuthUser, request: _RequestState | None) -> str | None:
     """Resolve membership from PostgreSQL auth or the local app binding."""
     settings = get_settings()
-    if settings.postgres_auth_enabled:
+    if getattr(settings, "postgres_auth_enabled", False):
         return resolve_workspace_id_for_user(
             user,
             membership_repository=workspace_membership_repository_for_request(request),
         )
-    if request is None or not settings.auth_enabled:
+    if request is None or not getattr(settings, "auth_enabled", False):
         return resolve_workspace_id_for_user(user)
     return resolve_workspace_id_for_user(
         user,

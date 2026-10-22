@@ -105,6 +105,9 @@ def postgres_notification_route_runtime(
             repositories.workspace_membership,
             raising=False,
         )
+        active_runtime = SimpleNamespace(repositories=repositories)
+        monkeypatch.setattr(main.app.state, "postgres_runtime", active_runtime, raising=False)
+        monkeypatch.setattr(main.app.state, "postgres_repositories", repositories, raising=False)
         user = AuthUser(
             id=owner.id,
             email=owner.email,
@@ -237,7 +240,25 @@ def test_notification_routes_fail_closed_without_postgres_repository_when_auth_u
     response = TestClient(main.app).get("/notifications")
 
     assert response.status_code == 503
-    assert response.json()["detail"] == "PostgreSQL notification repository is unavailable"
+    assert response.json()["detail"] == "PostgreSQL notification runtime is unavailable"
     assert set(store.notifications) == before_notifications
     assert set(store.device_registrations) == before_devices
     assert {event.id for event in store.audit_events} == before_audits
+
+
+def test_notification_route_rejects_repository_from_another_runtime(
+    postgres_notification_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect, _workspace, _user, _notification = postgres_notification_route_runtime
+    monkeypatch.setattr(
+        notifications,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    main.app.state.postgres_runtime = SimpleNamespace(repositories=object())
+
+    response = TestClient(main.app).get("/notifications")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "PostgreSQL notification runtime is unavailable"

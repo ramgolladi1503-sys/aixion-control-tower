@@ -177,7 +177,11 @@ def postgres_agent_run_route_runtime(
         }.items():
             monkeypatch.setattr(main.app.state, name, value, raising=False)
 
-        settings = SimpleNamespace(auth_enabled=False, is_production=False)
+        settings = SimpleNamespace(
+            auth_enabled=False,
+            is_production=False,
+            postgres_auth_enabled=False,
+        )
         monkeypatch.setattr("app.agent_run_routes.get_settings", lambda: settings)
         monkeypatch.setattr("app.application_repository_access.get_settings", lambda: settings)
         monkeypatch.setitem(
