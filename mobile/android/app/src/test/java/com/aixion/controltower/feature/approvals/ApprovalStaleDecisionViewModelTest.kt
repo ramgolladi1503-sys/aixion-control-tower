@@ -3,6 +3,8 @@ package com.aixion.controltower.feature.approvals
 import android.app.Application
 import android.content.Context
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryEventDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryResponseDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.RiskAssessmentDto
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -109,6 +111,97 @@ class ApprovalStaleDecisionViewModelTest {
         }
     }
 
+    @Test
+    fun approvalHistoryLoadsOlderPageAppendingInOrderAndDeduplicatingOverlap() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = StaleApprovalApi()
+            api.historyPages[null] = ApprovalHistoryResponseDto(
+                events = listOf(historyDto("event-1")),
+                limit = 2,
+                hasMore = true,
+                nextCursor = "cursor-1"
+            )
+            api.historyPages["cursor-1"] = ApprovalHistoryResponseDto(
+                events = listOf(historyDto("event-1"), historyDto("event-2")),
+                limit = 2,
+                hasMore = true,
+                nextCursor = "cursor-2"
+            )
+            api.historyPages["cursor-2"] = ApprovalHistoryResponseDto(
+                events = listOf(historyDto("event-3")),
+                limit = 2,
+                hasMore = false
+            )
+            val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
+            val viewModel = ApprovalsViewModel(application, ApprovalRepository(api))
+            runCurrent()
+
+            viewModel.loadApprovalHistory()
+            runCurrent()
+            assertEquals(listOf("event-1"), viewModel.state.value.approvalHistory.map { it.eventId })
+            assertEquals("cursor-1", viewModel.state.value.historyNextCursor)
+
+            viewModel.loadOlderApprovalHistory()
+            viewModel.loadOlderApprovalHistory()
+            runCurrent()
+            assertEquals(listOf("event-1", "event-2"), viewModel.state.value.approvalHistory.map { it.eventId })
+            assertEquals("cursor-2", viewModel.state.value.historyNextCursor)
+            assertEquals(listOf(null, "cursor-1"), api.historyCursors)
+
+            viewModel.loadOlderApprovalHistory()
+            runCurrent()
+            assertEquals(listOf("event-1", "event-2", "event-3"), viewModel.state.value.approvalHistory.map { it.eventId })
+            assertEquals(false, viewModel.state.value.historyHasMore)
+            assertEquals(listOf(null, "cursor-1", "cursor-2"), api.historyCursors)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun failedOlderHistoryPageKeepsLoadedEventsAndRetriesSameCursor() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = StaleApprovalApi()
+            api.historyPages[null] = ApprovalHistoryResponseDto(
+                events = listOf(historyDto("event-1")),
+                hasMore = true,
+                nextCursor = "cursor-1"
+            )
+            api.failHistoryCursor = "cursor-1"
+            val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
+            val viewModel = ApprovalsViewModel(application, ApprovalRepository(api))
+            runCurrent()
+
+            viewModel.loadApprovalHistory()
+            runCurrent()
+            viewModel.loadOlderApprovalHistory()
+            runCurrent()
+
+            assertEquals(listOf("event-1"), viewModel.state.value.approvalHistory.map { it.eventId })
+            assertEquals(true, viewModel.state.value.historyLoaded)
+            assertEquals(true, viewModel.state.value.historyHasMore)
+            assertEquals("cursor-1", viewModel.state.value.historyNextCursor)
+            assertTrue(viewModel.state.value.historyLoadMoreError.orEmpty().contains("Older decisions"))
+
+            api.failHistoryCursor = null
+            api.historyPages["cursor-1"] = ApprovalHistoryResponseDto(
+                events = listOf(historyDto("event-2")),
+                hasMore = false
+            )
+            viewModel.loadOlderApprovalHistory()
+            runCurrent()
+
+            assertEquals(listOf("event-1", "event-2"), viewModel.state.value.approvalHistory.map { it.eventId })
+            assertEquals(false, viewModel.state.value.historyHasMore)
+            assertEquals(null, viewModel.state.value.historyLoadMoreError)
+            assertEquals(listOf(null, "cursor-1", "cursor-1"), api.historyCursors)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private class StaleApprovalApi(
         private val terminalOnRefresh: Boolean = true,
         private val expiresAt: String = "2026-10-22T12:00:00Z"
@@ -116,8 +209,22 @@ class ApprovalStaleDecisionViewModelTest {
         var decisionCalls = 0
         val decisionApprovalIds = mutableListOf<String>()
         val statusApprovalIds = mutableListOf<String>()
+        val historyCursors = mutableListOf<String?>()
+        val historyPages = mutableMapOf<String?, ApprovalHistoryResponseDto>()
+        var failHistoryCursor: String? = null
 
         override suspend fun listApprovals(): List<ApprovalRequestDto> = emptyList()
+
+        override suspend fun listApprovalHistory(
+            limit: Int,
+            cursor: String?
+        ): ApprovalHistoryResponseDto {
+            historyCursors += cursor
+            if (cursor != null && cursor == failHistoryCursor) {
+                throw IOException("History page unavailable")
+            }
+            return historyPages[cursor] ?: ApprovalHistoryResponseDto(limit = limit)
+        }
 
         override suspend fun decideApproval(
             approvalId: String,
@@ -151,6 +258,13 @@ class ApprovalStaleDecisionViewModelTest {
             .let(::requireNotNull)
     }
 }
+
+private fun historyDto(id: String) = ApprovalHistoryEventDto(
+    auditEventId = id,
+    approvalId = "approval-$id",
+    decision = "approve",
+    reviewerLabel = "You"
+)
 
 private fun approvalDto(
     id: String,

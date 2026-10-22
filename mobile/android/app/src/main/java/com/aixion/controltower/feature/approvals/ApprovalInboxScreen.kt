@@ -3,6 +3,7 @@ package com.aixion.controltower.feature.approvals
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -27,6 +28,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -131,6 +135,7 @@ fun ApprovalInboxScreen(
         onRetry = viewModel::refresh,
         onHistorySelected = { viewModel.loadApprovalHistory() },
         onHistoryRetry = { viewModel.loadApprovalHistory(forceRefresh = true) },
+        onLoadOlderHistory = viewModel::loadOlderApprovalHistory,
         onApprovalSelected = { approval ->
             viewModel.selectApproval(approval)
             onApprovalSelected(approval)
@@ -144,6 +149,7 @@ fun ApprovalInboxContent(
     onRetry: () -> Unit = {},
     onHistorySelected: () -> Unit = {},
     onHistoryRetry: () -> Unit = {},
+    onLoadOlderHistory: () -> Unit = {},
     onApprovalSelected: (ApprovalSummary) -> Unit = {}
 ) {
     val palette = LocalTowerPalette.current
@@ -304,16 +310,6 @@ fun ApprovalInboxContent(
                     }
                 }
             }
-            if (state.historyLoaded && state.historyHasMore) {
-                item {
-                    Text(
-                        "Showing the latest ${state.historyLimit} decisions. Older entries are not loaded in this view yet.",
-                        color = palette.inkMuted,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp
-                    )
-                }
-            }
         }
 
         if (state.hasError) {
@@ -430,6 +426,35 @@ fun ApprovalInboxContent(
         if (selectedSection == ApprovalInboxSection.HISTORY && state.historyErrorMessage == null) {
             items(visibleHistory, key = { it.eventId }) { event ->
                 ApprovalDecisionHistoryCard(event)
+            }
+        }
+
+        if (selectedSection == ApprovalInboxSection.HISTORY && state.historyLoaded && state.historyHasMore) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
+                    state.historyLoadMoreError?.let { message ->
+                        Text(
+                            text = message,
+                            color = palette.danger,
+                            fontSize = 14.sp,
+                            lineHeight = 21.sp,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                        )
+                    }
+                    Button(
+                        onClick = onLoadOlderHistory,
+                        enabled = !state.historyLoadingMore && !state.historyLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            when {
+                                state.historyLoadingMore -> "Loading older decisions…"
+                                state.historyLoadMoreError != null -> "Retry loading older decisions"
+                                else -> "Load older decisions"
+                            }
+                        )
+                    }
+                }
             }
         }
     }

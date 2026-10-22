@@ -21,9 +21,16 @@ class ApprovalRepository(private val api: ControlTowerApi) {
         return api.getApproval(approvalId).toUiSummary(projectName)
     }
 
-    suspend fun listApprovalHistory(limit: Int = APPROVAL_HISTORY_LIMIT): ApprovalHistoryPage {
+    suspend fun listApprovalHistory(
+        limit: Int = APPROVAL_HISTORY_LIMIT,
+        cursor: String? = null
+    ): ApprovalHistoryPage {
         require(limit in 1..APPROVAL_HISTORY_LIMIT) { "Approval history limit must be between 1 and $APPROVAL_HISTORY_LIMIT" }
-        val response = api.listApprovalHistory(limit)
+        require(cursor == null || cursor.isNotBlank()) { "Approval history cursor cannot be blank" }
+        val response = api.listApprovalHistory(limit, cursor)
+        if (response.hasMore && response.nextCursor.isNullOrBlank()) {
+            throw IllegalStateException("Approval history page is missing its continuation cursor")
+        }
         val events = response.events.map { event ->
             require(event.auditEventId.isNotBlank() && event.approvalId.isNotBlank()) {
                 "Approval history event is missing its audit identity"
@@ -70,7 +77,8 @@ class ApprovalRepository(private val api: ControlTowerApi) {
         return ApprovalHistoryPage(
             events = events,
             limit = response.limit.coerceIn(1, APPROVAL_HISTORY_LIMIT),
-            hasMore = response.hasMore
+            hasMore = response.hasMore,
+            nextCursor = response.nextCursor?.takeIf(String::isNotBlank)
         )
     }
 

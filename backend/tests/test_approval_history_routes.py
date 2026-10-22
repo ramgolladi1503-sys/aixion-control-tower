@@ -34,6 +34,13 @@ class FakeAuditRepository:
             and event.workspace_id in {None, workspace_id}
         ]
         matching.sort(key=lambda event: (event.created_at, event.id), reverse=True)
+        before = filters.get("before")
+        if before is not None:
+            matching = [
+                event
+                for event in matching
+                if (event.created_at, event.id) < before
+            ]
         return matching[: int(filters["limit"])]
 
 
@@ -178,7 +185,10 @@ def test_history_uses_immutable_decision_audit_and_redacts_reviewer_email(monkey
     assert "actor" not in payload["events"][0]
     assert "owner@example.test" not in response.text
     assert audit_repository.queries == [
-        ("workspace-one", {"event_type": "approval.decision", "limit": 51})
+        (
+            "workspace-one",
+            {"event_type": "approval.decision", "before": None, "limit": 51},
+        )
     ]
 
 
@@ -306,6 +316,76 @@ def test_history_enforces_workspace_scope_and_bounded_limit(monkeypatch) -> None
     ]
     assert audit_repository.queries[0][0] == "workspace-one"
     assert audit_repository.queries[0][1]["limit"] == 3
+
+
+def test_history_cursor_pages_are_stable_and_do_not_overlap(monkeypatch) -> None:
+    approvals = [_approval(f"approval-page-{index}") for index in range(5)]
+    timestamp = now_utc()
+    events = [
+        _decision_event(
+            approval,
+            decision="approve",
+            actor="owner@example.test",
+            reviewed_payload_hash=_reviewed_hash(approval),
+            created_at=timestamp,
+        )
+        for approval in approvals
+    ]
+    client, repository = _request(monkeypatch, events=events, approvals=approvals)
+
+    first = client.get("/approvals/history?limit=2")
+    assert first.status_code == 200, first.text
+    first_payload = first.json()
+    assert first_payload["has_more"] is True
+    assert isinstance(first_payload["next_cursor"], str)
+
+    second = client.get(
+        "/approvals/history?limit=2&cursor=" + first_payload["next_cursor"]
+    )
+    assert second.status_code == 200, second.text
+    second_payload = second.json()
+    assert second_payload["has_more"] is True
+    assert isinstance(second_payload["next_cursor"], str)
+
+    third = client.get(
+        "/approvals/history?limit=2&cursor=" + second_payload["next_cursor"]
+    )
+    assert third.status_code == 200, third.text
+    third_payload = third.json()
+    assert third_payload["has_more"] is False
+    assert third_payload["next_cursor"] is None
+
+    ids = [
+        entry["audit_event_id"]
+        for payload in (first_payload, second_payload, third_payload)
+        for entry in payload["events"]
+    ]
+    expected = [
+        event.id
+        for event in sorted(events, key=lambda item: (item.created_at, item.id), reverse=True)
+    ]
+    assert ids == expected
+    assert len(ids) == len(set(ids))
+    assert repository.queries[1][1]["before"] == (
+        events[0].created_at,
+        first_payload["events"][-1]["audit_event_id"],
+    )
+
+
+def test_history_rejects_malformed_cursor(monkeypatch) -> None:
+    approval = _approval("approval-invalid-cursor")
+    event = _decision_event(
+        approval,
+        decision="approve",
+        actor="owner@example.test",
+        reviewed_payload_hash=_reviewed_hash(approval),
+    )
+    client, repository = _request(monkeypatch, events=[event], approvals=[approval])
+
+    response = client.get("/approvals/history?cursor=not-a-valid-cursor")
+
+    assert response.status_code == 422
+    assert repository.queries == []
 
 
 def test_history_rechecks_approval_and_project_workspace_before_snapshot(monkeypatch) -> None:

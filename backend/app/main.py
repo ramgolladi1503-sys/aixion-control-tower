@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
@@ -109,6 +112,65 @@ from .workspace_access import (
 )
 
 logger = logging.getLogger(__name__)
+
+_APPROVAL_HISTORY_CURSOR_MAX_LENGTH = 2_048
+
+
+def _encode_approval_history_cursor(event: AuditEvent) -> str:
+    created_at = event.created_at.astimezone(timezone.utc).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+    payload = json.dumps(
+        {"created_at": created_at, "event_id": event.id, "v": 1},
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_approval_history_cursor(cursor: str) -> tuple[datetime, str]:
+    if not cursor or len(cursor) > _APPROVAL_HISTORY_CURSOR_MAX_LENGTH:
+        raise ValueError("Approval history cursor is invalid")
+    allowed_characters = (
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    )
+    if any(character not in allowed_characters for character in cursor):
+        raise ValueError("Approval history cursor is invalid")
+    try:
+        raw = base64.b64decode(
+            cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
+        )
+        payload = json.loads(raw)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Approval history cursor is invalid") from error
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"created_at", "event_id", "v"}
+        or payload.get("v") != 1
+        or not isinstance(payload.get("created_at"), str)
+        or not isinstance(payload.get("event_id"), str)
+        or not payload["event_id"]
+        or len(payload["event_id"]) > 512
+    ):
+        raise ValueError("Approval history cursor is invalid")
+    try:
+        created_at = datetime.fromisoformat(payload["created_at"].replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("Approval history cursor is invalid") from error
+    if created_at.utcoffset() is None:
+        raise ValueError("Approval history cursor is invalid")
+    canonical = _encode_approval_history_cursor(
+        AuditEvent(
+            id=payload["event_id"],
+            event_type="approval.decision",
+            entity_id="cursor",
+            created_at=created_at,
+        )
+    )
+    if canonical != cursor:
+        raise ValueError("Approval history cursor is invalid")
+    return created_at.astimezone(timezone.utc), payload["event_id"]
 
 # These app.state adapters are consumed by routes that intentionally require
 # one lifespan-owned repository bundle. Bind them together in PostgreSQL auth
@@ -999,10 +1061,15 @@ def list_approval_requests(
 def list_approval_decision_history(
     http_request: Request,
     limit: int = 50,
+    cursor: str | None = None,
     user: AuthUser = ReviewerDependency,
 ) -> ApprovalDecisionHistoryResponse:
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    try:
+        before = _decode_approval_history_cursor(cursor) if cursor is not None else None
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="cursor is invalid") from exc
 
     workspace_id = _workspace_id_for_route(user, http_request)
     if workspace_id is None:
@@ -1021,12 +1088,18 @@ def list_approval_decision_history(
             detail="Approval decision history is unavailable for this persistence runtime",
         ) from exc
 
-    audit_events = event_repository.list_for_workspace(
-        workspace_id,
-        event_type="approval.decision",
-        limit=limit + 1,
-    )
+    try:
+        audit_events = event_repository.list_for_workspace(
+            workspace_id,
+            event_type="approval.decision",
+            before=before,
+            limit=limit + 1,
+        )
+    except ValueError as exc:
+        # A decoded cursor must satisfy repository boundary validation too.
+        raise HTTPException(status_code=422, detail="cursor is invalid") from exc
     has_more = len(audit_events) > limit
+    page_events = audit_events[:limit]
     history: list[ApprovalDecisionHistoryEntry] = []
     decision_aliases = {
         "approve": "approve",
@@ -1038,7 +1111,7 @@ def list_approval_decision_history(
         "revision": "revise",
     }
 
-    for event in audit_events[:limit]:
+    for event in page_events:
         raw_decision = event.details.get("decision")
         decision_key = raw_decision.strip().lower() if isinstance(raw_decision, str) else ""
         decision = decision_aliases.get(decision_key, "unknown")
@@ -1107,6 +1180,11 @@ def list_approval_decision_history(
         events=history,
         limit=limit,
         has_more=has_more,
+        next_cursor=(
+            _encode_approval_history_cursor(page_events[-1])
+            if has_more and page_events
+            else None
+        ),
     )
 
 

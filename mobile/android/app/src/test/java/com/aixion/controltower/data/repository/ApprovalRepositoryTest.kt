@@ -51,7 +51,8 @@ class ApprovalRepositoryTest {
                     )
                 ),
                 limit = 50,
-                hasMore = true
+                hasMore = true,
+                nextCursor = "opaque-cursor-2"
             )
         )
 
@@ -59,8 +60,10 @@ class ApprovalRepositoryTest {
         val event = page.events.single()
 
         assertEquals(50, api.requestedLimit)
+        assertEquals(null, api.requestedCursor)
         assertEquals(50, page.limit)
         assertEquals(true, page.hasMore)
+        assertEquals("opaque-cursor-2", page.nextCursor)
         assertEquals("reject", event.decision)
         assertEquals("You", event.reviewerLabel)
         assertEquals(true, event.requestSnapshotVerified)
@@ -106,6 +109,33 @@ class ApprovalRepositoryTest {
     }
 
     @Test
+    fun listApprovalHistoryForwardsOpaqueCursor() = runTest {
+        val api = HistoryApprovalApi(
+            ApprovalHistoryResponseDto(events = emptyList(), limit = 50, nextCursor = null)
+        )
+
+        val page = ApprovalRepository(api).listApprovalHistory(cursor = "opaque/key+value==")
+
+        assertEquals(50, api.requestedLimit)
+        assertEquals("opaque/key+value==", api.requestedCursor)
+        assertEquals(null, page.nextCursor)
+    }
+
+    @Test
+    fun listApprovalHistoryRejectsHasMoreWithoutContinuationCursor() = runTest {
+        val repository = ApprovalRepository(
+            HistoryApprovalApi(ApprovalHistoryResponseDto(hasMore = true, nextCursor = null))
+        )
+
+        try {
+            repository.listApprovalHistory()
+            fail("Expected a missing continuation cursor to be rejected")
+        } catch (_: IllegalStateException) {
+            // A has-more response without an opaque cursor cannot be paged safely.
+        }
+    }
+
+    @Test
     fun listApprovalsThrowsWhenBackendListFails() = runTest {
         val repository = ApprovalRepository(FailingApprovalApi())
 
@@ -146,9 +176,11 @@ private class HistoryApprovalApi(
     private val response: ApprovalHistoryResponseDto
 ) : BaseFakeControlTowerApi() {
     var requestedLimit: Int? = null
+    var requestedCursor: String? = null
 
-    override suspend fun listApprovalHistory(limit: Int): ApprovalHistoryResponseDto {
+    override suspend fun listApprovalHistory(limit: Int, cursor: String?): ApprovalHistoryResponseDto {
         requestedLimit = limit
+        requestedCursor = cursor
         return response
     }
 }

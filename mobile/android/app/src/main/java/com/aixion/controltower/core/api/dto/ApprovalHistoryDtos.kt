@@ -5,7 +5,8 @@ import com.google.gson.annotations.SerializedName
 data class ApprovalHistoryResponseDto(
     val events: List<ApprovalHistoryEventDto> = emptyList(),
     val limit: Int = 50,
-    @SerializedName("has_more") val hasMore: Boolean = false
+    @SerializedName("has_more") val hasMore: Boolean = false,
+    @SerializedName("next_cursor") val nextCursor: String? = null
 )
 
 data class ApprovalHistoryEventDto(

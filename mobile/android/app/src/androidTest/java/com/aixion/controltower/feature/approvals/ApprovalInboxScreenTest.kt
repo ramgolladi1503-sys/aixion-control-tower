@@ -310,6 +310,33 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithText("Unverified secret request").assertCountEquals(0)
         composeRule.onAllNodesWithText("Delivered to agent").assertCountEquals(0)
     }
+
+    @Test
+    fun historyShowsAccessibleLoadOlderActionAndRetryState() {
+        var loadRequests = 0
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalInboxContent(
+                    state = ApprovalsUiState(
+                        loading = false,
+                        historyLoaded = true,
+                        historyHasMore = true,
+                        historyNextCursor = "opaque-cursor",
+                        historyLoadMoreError = "Older decisions could not be loaded. Retry when the backend is reachable."
+                    ),
+                    onLoadOlderHistory = { loadRequests += 1 }
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+        composeRule.onNodeWithText(
+            "Older decisions could not be loaded. Retry when the backend is reachable."
+        ).assertExists()
+        composeRule.onNodeWithText("Retry loading older decisions").performClick()
+
+        assertEquals(1, loadRequests)
+    }
 }
 
 private fun historyEvent(

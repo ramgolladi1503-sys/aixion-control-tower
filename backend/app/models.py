@@ -423,6 +423,7 @@ class ApprovalDecisionHistoryResponse(BaseModel):
     events: list[ApprovalDecisionHistoryEntry] = Field(default_factory=list)
     limit: int
     has_more: bool
+    next_cursor: str | None = None
 
 
 class MCPPendingRequest(BaseModel):

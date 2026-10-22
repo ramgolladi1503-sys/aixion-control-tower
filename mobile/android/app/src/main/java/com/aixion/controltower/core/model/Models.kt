@@ -130,7 +130,8 @@ data class ApprovalHistoryEvent(
 data class ApprovalHistoryPage(
     val events: List<ApprovalHistoryEvent>,
     val limit: Int,
-    val hasMore: Boolean
+    val hasMore: Boolean,
+    val nextCursor: String? = null
 )
 
 data class ApprovalHistoryRequestSnapshot(

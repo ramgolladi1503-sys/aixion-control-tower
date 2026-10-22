@@ -101,3 +101,44 @@ def test_legacy_audit_workspace_resolution_uses_durable_project_row() -> None:
     repository = SQLiteAuditEventRepository(store._connect)
     assert repository.list_for_workspace("workspace-legacy") == [event]
     assert repository.get_for_workspace(event.id, "workspace-legacy") == event
+
+
+def test_sqlite_audit_repository_paginates_by_created_at_and_id_with_workspace_scope() -> None:
+    from app.models import now_utc
+
+    timestamp = now_utc()
+    workspace_events = [
+        AuditEvent(
+            id=f"history-{suffix}",
+            event_type="approval.decision",
+            entity_id=f"approval-{suffix}",
+            workspace_id="workspace-page",
+            created_at=timestamp,
+        )
+        for suffix in ("a", "b", "c")
+    ]
+    foreign_event = AuditEvent(
+        id="history-z-foreign",
+        event_type="approval.decision",
+        entity_id="approval-foreign",
+        workspace_id="workspace-other",
+        created_at=timestamp,
+    )
+    store.audit_events.extend([*workspace_events, foreign_event])
+    store.persist()
+    repository = SQLiteAuditEventRepository(store._connect)
+    ordered = sorted(
+        workspace_events, key=lambda event: (event.created_at, event.id), reverse=True
+    )
+
+    first_page = repository.list_for_workspace("workspace-page", limit=2)
+    second_page = repository.list_for_workspace(
+        "workspace-page",
+        before=(first_page[-1].created_at, first_page[-1].id),
+        limit=2,
+    )
+
+    assert first_page == ordered[:2]
+    assert second_page == ordered[2:]
+    assert not set(item.id for item in first_page) & set(item.id for item in second_page)
+    assert all(item.workspace_id == "workspace-page" for item in [*first_page, *second_page])

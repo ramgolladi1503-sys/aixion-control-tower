@@ -92,7 +92,8 @@ open class BaseFakeControlTowerApi : ControlTowerApi {
     override suspend fun listWorkOrders(): List<WorkOrderDto> = emptyList()
     override suspend fun createWorkOrder(payload: WorkOrderCreateDto): WorkOrderDto = unsupported()
     override suspend fun listApprovals(): List<ApprovalRequestDto> = emptyList()
-    override suspend fun listApprovalHistory(limit: Int): ApprovalHistoryResponseDto = ApprovalHistoryResponseDto(limit = limit)
+    override suspend fun listApprovalHistory(limit: Int, cursor: String?): ApprovalHistoryResponseDto =
+        ApprovalHistoryResponseDto(limit = limit)
     override suspend fun getApproval(approvalId: String): ApprovalRequestDto = unsupported()
     override suspend fun decideApproval(approvalId: String, payload: DecisionRequestDto): ApprovalRequestDto = unsupported()
     override suspend fun listTestRuns(): List<TestRunDto> = emptyList()

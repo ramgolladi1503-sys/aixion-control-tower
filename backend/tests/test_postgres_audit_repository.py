@@ -243,3 +243,50 @@ def test_postgres_audit_reader_fails_on_payload_column_mismatch(
 
     with pytest.raises(PostgresAuditRepositoryError, match="does not match"):
         repository.get_for_workspace(event.id, workspace_a)
+
+
+def test_postgres_audit_keyset_pagination_is_stable_and_workspace_scoped(
+    postgres_audit_repository,
+) -> None:
+    repository, connect, workspace_a, workspace_b = postgres_audit_repository
+    timestamp = now_utc()
+    events_a = [
+        _insert_event(
+            connect,
+            workspace_id=workspace_a,
+            event_type="approval.decision",
+            entity_id=f"approval-page-{suffix}",
+            actor="reviewer-a",
+            details={"decision": "approve"},
+            created_at=timestamp,
+        )
+        for suffix in ("a", "b", "c")
+    ]
+    foreign_event = _insert_event(
+        connect,
+        workspace_id=workspace_b,
+        event_type="approval.decision",
+        entity_id="approval-foreign-page",
+        actor="reviewer-b",
+        details={"decision": "deny"},
+        created_at=timestamp,
+    )
+    ordered = sorted(events_a, key=lambda event: (event.created_at, event.id), reverse=True)
+    first_page = repository.list_for_workspace(
+        workspace_a, event_type="approval.decision", limit=2
+    )
+    second_page = repository.list_for_workspace(
+        workspace_a,
+        event_type="approval.decision",
+        before=(first_page[-1].created_at, first_page[-1].id),
+        limit=2,
+    )
+
+    assert first_page == ordered[:2]
+    assert second_page == ordered[2:]
+    assert not set(item.id for item in first_page) & set(item.id for item in second_page)
+    assert repository.list_for_workspace(
+        workspace_b,
+        event_type="approval.decision",
+        before=(timestamp + timedelta(microseconds=1), foreign_event.id),
+    ) == [foreign_event]

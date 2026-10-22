@@ -56,10 +56,13 @@ data class ApprovalsUiState(
     val approvals: List<ApprovalSummary> = emptyList(),
     val approvalHistory: List<ApprovalHistoryEvent> = emptyList(),
     val historyLoading: Boolean = false,
+    val historyLoadingMore: Boolean = false,
     val historyLoaded: Boolean = false,
     val historyLimit: Int = 50,
     val historyHasMore: Boolean = false,
+    val historyNextCursor: String? = null,
     val historyErrorMessage: String? = null,
+    val historyLoadMoreError: String? = null,
     val selectedApproval: ApprovalSummary? = null,
     val openingApprovalId: String? = null,
     val detailTargetApprovalId: String? = null,
@@ -136,18 +139,22 @@ class ApprovalsViewModel internal constructor(
 
     fun loadApprovalHistory(forceRefresh: Boolean = false) {
         if (historyRequestInFlight || (_state.value.historyLoaded && !forceRefresh)) return
+        historyRequestInFlight = true
+        _state.value = _state.value.copy(
+            historyLoading = true,
+            historyErrorMessage = null,
+            historyLoadMoreError = null
+        )
         viewModelScope.launch {
-            if (historyRequestInFlight || (_state.value.historyLoaded && !forceRefresh)) return@launch
-            historyRequestInFlight = true
-            _state.value = _state.value.copy(historyLoading = true, historyErrorMessage = null)
             try {
-                val page = repository.listApprovalHistory()
+                val page = repository.listApprovalHistory(cursor = null)
                 _state.value = _state.value.copy(
                     approvalHistory = page.events,
                     historyLoading = false,
                     historyLoaded = true,
                     historyLimit = page.limit,
                     historyHasMore = page.hasMore,
+                    historyNextCursor = page.nextCursor,
                     historyErrorMessage = null
                 )
             } catch (cancelled: CancellationException) {
@@ -155,12 +162,51 @@ class ApprovalsViewModel internal constructor(
             } catch (error: Exception) {
                 _state.value = _state.value.copy(
                     historyLoading = false,
-                    historyLoaded = false,
+                    historyLoaded = _state.value.historyLoaded,
                     historyErrorMessage = "Decision history could not be loaded. Retry when the backend is reachable."
                 )
             } finally {
                 historyRequestInFlight = false
                 _state.value = _state.value.copy(historyLoading = false)
+            }
+        }
+    }
+
+    fun loadOlderApprovalHistory() {
+        if (historyRequestInFlight) return
+        val current = _state.value
+        val requestedCursor = current.historyNextCursor ?: return
+        if (!current.historyLoaded || !current.historyHasMore) return
+        historyRequestInFlight = true
+        _state.value = current.copy(historyLoadingMore = true, historyLoadMoreError = null)
+        viewModelScope.launch {
+            val latest = current
+            try {
+                val page = repository.listApprovalHistory(cursor = requestedCursor)
+                if (page.hasMore && page.nextCursor == requestedCursor) {
+                    throw IllegalStateException("Approval history cursor did not advance")
+                }
+                val existingIds = latest.approvalHistory.mapTo(mutableSetOf()) { it.eventId }
+                val appended = page.events.filter { existingIds.add(it.eventId) }
+                _state.value = _state.value.copy(
+                    approvalHistory = latest.approvalHistory + appended,
+                    historyLoadingMore = false,
+                    historyLoaded = true,
+                    historyLimit = page.limit,
+                    historyHasMore = page.hasMore,
+                    historyNextCursor = page.nextCursor,
+                    historyLoadMoreError = null
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _state.value = _state.value.copy(
+                    historyLoadingMore = false,
+                    historyLoadMoreError = "Older decisions could not be loaded. Retry when the backend is reachable."
+                )
+            } finally {
+                historyRequestInFlight = false
+                _state.value = _state.value.copy(historyLoadingMore = false)
             }
         }
     }

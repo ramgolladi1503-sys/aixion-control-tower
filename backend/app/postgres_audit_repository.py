@@ -48,6 +48,7 @@ class PostgresAuditEventRepository:
         limit: int,
         detail_key: str | None,
         detail_value: str | None,
+        before: tuple[datetime, str] | None,
     ) -> None:
         if not workspace_id:
             raise ValueError("PostgreSQL audit reads require a workspace")
@@ -55,6 +56,16 @@ class PostgresAuditEventRepository:
             raise ValueError("Audit query limit must be between 1 and 1001")
         if detail_value is not None and detail_key is None:
             raise ValueError("Audit detail-value filtering requires a detail key")
+        if before is not None:
+            if (
+                not isinstance(before, tuple)
+                or len(before) != 2
+                or not isinstance(before[0], datetime)
+                or before[0].utcoffset() is None
+                or not isinstance(before[1], str)
+                or not before[1]
+            ):
+                raise ValueError("Audit cursor boundary is invalid")
 
     def list_for_workspace(
         self,
@@ -67,6 +78,7 @@ class PostgresAuditEventRepository:
         detail_value: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        before: tuple[datetime, str] | None = None,
         limit: int = 1_000,
     ) -> list[AuditEvent]:
         self._validate_query(
@@ -74,6 +86,7 @@ class PostgresAuditEventRepository:
             limit=limit,
             detail_key=detail_key,
             detail_value=detail_value,
+            before=before,
         )
         if created_after is not None and created_before is not None and created_after > created_before:
             raise ValueError("Audit created_after must not be later than created_before")
@@ -100,6 +113,9 @@ class PostgresAuditEventRepository:
         if created_before is not None:
             clauses.append("created_at <= %s")
             params.append(created_before)
+        if before is not None:
+            clauses.append("(created_at,event_id) < (%s,%s)")
+            params.extend(before)
         params.append(limit)
 
         with self._connect() as conn:

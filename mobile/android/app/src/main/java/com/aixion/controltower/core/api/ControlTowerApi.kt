@@ -156,7 +156,10 @@ interface ControlTowerApi {
     suspend fun listApprovals(): List<ApprovalRequestDto>
 
     @GET("approvals/history")
-    suspend fun listApprovalHistory(@Query("limit") limit: Int = 50): ApprovalHistoryResponseDto
+    suspend fun listApprovalHistory(
+        @Query("limit") limit: Int = 50,
+        @Query("cursor") cursor: String? = null
+    ): ApprovalHistoryResponseDto
 
     @GET("approvals/{approvalId}")
     suspend fun getApproval(@Path("approvalId") approvalId: String): ApprovalRequestDto
