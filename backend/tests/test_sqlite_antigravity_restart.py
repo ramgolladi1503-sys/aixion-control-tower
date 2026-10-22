@@ -594,8 +594,8 @@ def test_installed_antigravity_command_runs_same_invocation_approval_flow(
         tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]
     ] = []
 
-    def start_server():
-        handle = _start_sqlite_approval_api(db_path)
+    def start_server(port: int = 0):
+        handle = _start_sqlite_approval_api(db_path, port=port)
         servers.append(handle)
         return handle
 
@@ -707,6 +707,11 @@ def test_installed_antigravity_command_runs_same_invocation_approval_flow(
             )
             assert approvals[0]["source_invocation_id"] == expected_invocation_id
             approval_id = approvals[0]["id"]
+            original_port = int(urlparse(server[2]).port or 0)
+            _stop_sqlite_approval_api(server)
+            time.sleep(0.7)
+            server = start_server(original_port)
+            assert server[2] == f"http://127.0.0.1:{original_port}"
             with httpx.Client(timeout=10) as client:
                 decision_response = client.post(
                     f"{server[2]}/approvals/{approval_id}/decision",
@@ -762,12 +767,17 @@ def test_installed_antigravity_command_runs_same_invocation_approval_flow(
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
                 (approval_id,),
             ).fetchone()[0] == expected_claims
-            assert connection.execute(
-                "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
-                "AND json_extract(payload,'$.event_type')='approval.created_by_agent' "
-                "AND json_extract(payload,'$.entity_id')=?",
-                (approval_id,),
-            ).fetchone()[0] == 1
+            for event_type, expected_count in (
+                ("approval.created_by_agent", 1),
+                ("approval.decision", 1),
+                ("approval.delivery_claimed", expected_claims),
+            ):
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
+                    "AND json_extract(payload,'$.event_type')=? "
+                    "AND json_extract(payload,'$.entity_id')=?",
+                    (event_type, approval_id),
+                ).fetchone()[0] == expected_count
     finally:
         for server in reversed(servers):
             if server[0].is_alive():
