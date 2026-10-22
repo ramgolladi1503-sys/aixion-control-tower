@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -17,6 +18,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -135,6 +138,36 @@ class ApprovalDetailScreenTest {
         assertTrue(
             "Decision buttons should use the same full-width size",
             kotlin.math.abs(rejectBounds.width - approveBounds.width) < 1f
+        )
+    }
+
+    @Test
+    fun decisionProgressStatusUsesPoliteLiveRegionAndUpdatesInPlace() {
+        val decisionInFlight = androidx.compose.runtime.mutableStateOf(false)
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = approval(ApprovalStatus.REQUESTED),
+                lastActionMessage = null,
+                onOpenDiff = {},
+                onApprove = {},
+                onReject = {},
+                decisionInFlight = decisionInFlight.value
+            )
+        }
+
+        val status = composeRule.onNodeWithTag("approval-decision-status")
+        status.assertTextContains("Approval is available.")
+        assertEquals(
+            LiveRegionMode.Polite,
+            status.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+
+        composeRule.runOnIdle { decisionInFlight.value = true }
+
+        status.assertTextContains("Sending the decision and waiting for the server.")
+        assertEquals(
+            LiveRegionMode.Polite,
+            status.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
         )
     }
 
