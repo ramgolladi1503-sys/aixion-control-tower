@@ -6,6 +6,12 @@
 - Added policy tests for Codex's least-privilege request and rejection of provider/project/enablement/action mismatches. `ANDROID_HOME=/Users/madhuram/Library/Android/sdk ./gradlew testDebugUnitTest` passed (`BUILD SUCCESSFUL`, 25 tasks). No new config keys or migrations.
 - ADB currently returns no attached devices, so device UI validation is unavailable. Prior exact-head CI on `c92d5b6` is green but predates these changes. Re-run exact-head GitHub CI after pushing. This setup work does not prove native Codex pause/resume, physical approval, or any remaining pre-billing slice exit gate.
 
+### Android release endpoint fail-closed recheck — 2026-10-22
+
+- On the current checkout, `ANDROID_HOME=/Users/madhuram/Library/Android/sdk ./gradlew verifyReleaseApiUrlGuard` passed: the accepted HTTPS host was allowed and all 12 unsafe URL cases were rejected.
+- `ANDROID_HOME=/Users/madhuram/Library/Android/sdk ./gradlew assembleRelease -PAIXION_API_BASE_URL=http://10.0.2.2:8000/` failed at `:app:preReleaseBuild` with the expected HTTPS/public-host validation error, before release compilation. This confirms the unsafe API URL cannot enter a release build through that task path. It does not validate a signed release artifact or production endpoint.
+- No source behavior, config, credentials, schema, or rollout changed. The SDK path was supplied only to the Gradle process; `local.properties` was not created.
+
 ### Current AST persistence inventory refresh — 2026-10-22
 
 - Re-ran the read-only v7 persistence inventory against the current checkout. The JSON report is at `/tmp/aixion-persistence-inventory-20261022-latest.json`. It reports 296 reads, 164 writes, 94 explicit persistence calls, 33 direct persistence-boundary accesses, 587 static access sites across 53 modules, 146 routes (144 with reachable SQLite access), 1,459 route-graph references over 453 unique sites, 31 store maps, 5 lifespan worker entries, and 26 guarded Python script entrypoints.
