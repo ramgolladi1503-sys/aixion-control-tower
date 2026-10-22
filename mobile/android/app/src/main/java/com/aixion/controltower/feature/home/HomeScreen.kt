@@ -243,16 +243,19 @@ private fun HomeHeader(
                 }
             )
         }
-        lastSuccessfulSyncAt?.let { syncedAt ->
-            Text(
-                text = "Last successful sync · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(syncedAt))}",
-                color = TowerTextMuted,
-                fontSize = 12.sp,
-                lineHeight = 16.sp,
-                modifier = Modifier.padding(top = TowerSpacing.sm)
-            )
-        }
+        lastSuccessfulSyncAt?.let { syncedAt -> HomeSyncTimestamp(syncedAt) }
     }
+}
+
+@Composable
+internal fun HomeSyncTimestamp(syncedAt: Instant) {
+    Text(
+        text = "Last successful sync · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(syncedAt))}",
+        color = TowerTextMuted,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        modifier = Modifier.padding(top = TowerSpacing.sm)
+    )
 }
 
 @Composable

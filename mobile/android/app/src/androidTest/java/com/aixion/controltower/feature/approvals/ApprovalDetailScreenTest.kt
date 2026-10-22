@@ -1,9 +1,15 @@
 package com.aixion.controltower.feature.approvals
 
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -37,7 +43,13 @@ class ApprovalDetailScreenTest {
         }
 
         composeRule.onNodeWithText("UNSUPPORTED DATA").assertExists()
-        composeRule.onNodeWithText("This request contains an unrecognized status or risk value. Decisions are disabled.").assertExists()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Unsupported approval data"))
+        composeRule.onNodeWithText("Unsupported approval data").assertExists()
+        composeRule.onNodeWithText(
+            "The backend returned a status or risk value this app does not recognize. " +
+                "Decisions are disabled until the app and backend versions are compatible."
+        ).assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
         composeRule.onNodeWithText("Reject").assertDoesNotExist()
     }
@@ -214,6 +226,60 @@ class ApprovalDetailScreenTest {
             "Antigravity command can cause broad side effects.",
             substring = true
         ).assertExists()
+    }
+
+    @Test
+    fun approvalDecisionContextIsReachableFromSummaryBeforeDecision() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            projectName = "Payments service",
+            targetBranch = "release/production",
+            sourceProvider = "ANTIGRAVITY",
+            sourceInvocationId = "antigravity:session-42:tool-19",
+            verifiedSource = true,
+            expiresAt = "2026-10-22T14:30:00Z",
+            riskReasons = listOf(
+                "Command may modify production configuration.",
+                "Command runs with workspace write access."
+            )
+        )
+        composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
+
+        composeRule.onNodeWithText("Decision context").assertExists()
+        composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+        composeRule.onNodeWithText("Command may modify production configuration.", substring = true)
+            .performScrollTo()
+        composeRule.onNodeWithText("Command may modify production configuration.", substring = true)
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("Payments service").performScrollTo()
+        composeRule.onNodeWithText("Payments service").assertIsDisplayed()
+        composeRule.onNodeWithText("release/production").assertIsDisplayed()
+        composeRule.onNodeWithText("Command runs with workspace write access.", substring = true)
+            .performScrollTo()
+        composeRule.onNodeWithText("Command runs with workspace write access.", substring = true)
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("ANTIGRAVITY · Verified source").performScrollTo()
+        composeRule.onNodeWithText("ANTIGRAVITY · Verified source").assertIsDisplayed()
+        composeRule.onNodeWithText("antigravity:session-42:tool-19").assertIsDisplayed()
+        composeRule.onNodeWithText("2026-10-22T14:30:00Z").performScrollTo()
+        composeRule.onNodeWithText("2026-10-22T14:30:00Z").assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+    }
+
+    @Test
+    fun approvalDecisionContextLabelsMissingFieldsInsteadOfHidingThem() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            projectName = "",
+            targetBranch = "",
+            sourceInvocationId = null,
+            verifiedSource = false,
+            expiresAt = "",
+            riskReasons = emptyList()
+        )
+        composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
+
+        composeRule.onAllNodesWithText("Not provided").assertCountEquals(4)
+        composeRule.onNodeWithText("ANTIGRAVITY · Source not verified").assertExists()
+        composeRule.onNodeWithText("No risk rationale was supplied.").assertExists()
     }
 
     @Test

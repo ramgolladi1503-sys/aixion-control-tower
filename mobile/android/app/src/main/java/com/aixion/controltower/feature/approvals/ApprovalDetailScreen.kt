@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,7 +41,6 @@ import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.components.DiffBlock
-import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.RiskBadge
 import com.aixion.controltower.core.ui.components.SourceBadge
 import com.aixion.controltower.core.ui.components.StatusBadge
@@ -374,12 +374,8 @@ private fun ApprovalHeroPanel(
     hasRequiredActions: Boolean
 ) {
     TowerHeroPanel {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatusBadge(
                     label = when {
                         hasUnsupportedData -> "UNSUPPORTED DATA"
@@ -395,30 +391,65 @@ private fun ApprovalHeroPanel(
                         else -> RiskMedium
                     }
                 )
-                Spacer(modifier = Modifier.height(TowerSpacing.md))
-                Text(
-                    text = approval.title,
-                    color = TowerTextPrimary,
-                    fontSize = 25.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 30.sp
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(text = approval.summary, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 20.sp)
+                RiskBadge(approval.risk)
             }
-            ForgedLogoMark(size = 50.dp, color = TowerTextPrimary.copy(alpha = 0.78f))
+            Spacer(modifier = Modifier.height(TowerSpacing.md))
+            Text(
+                text = approval.title,
+                color = TowerTextPrimary,
+                fontSize = 25.sp,
+                fontWeight = FontWeight.SemiBold,
+                lineHeight = 30.sp
+            )
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+            Text(text = approval.summary, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 20.sp)
         }
 
-        Spacer(modifier = Modifier.height(TowerSpacing.lg))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            RiskBadge(approval.risk)
-            StatusBadge(approval.status.name, TowerTextMuted)
-        }
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SourceBadge(approval)
-            StatusBadge(approval.targetBranch, TowerAccent)
+        DecisionContextLine(
+            "Risk rationale",
+            approval.riskReasons.ifEmpty { listOf("No risk rationale was supplied.") }.joinToString("\n")
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(TowerBackground.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
+                .padding(TowerSpacing.md),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+        ) {
+            Text("Decision context", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
+            DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
+            DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
+            DecisionContextLine("Invocation", approval.sourceInvocationId?.ifBlank { null } ?: "Not provided")
+            DecisionContextLine("Expires", approval.expiresAt?.ifBlank { null } ?: "Not provided")
         }
+    }
+}
+
+@Composable
+private fun DecisionContextLine(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            label,
+            color = TowerTextMuted,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            lineHeight = 20.sp,
+            modifier = Modifier.width(96.dp)
+        )
+        Text(
+            value,
+            color = TowerTextPrimary,
+            fontSize = 14.sp,
+            lineHeight = 20.sp,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 

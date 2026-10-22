@@ -467,6 +467,71 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
     assert set(store.agent_connectors) == before_connector_ids
 
 
+def test_postgres_hmac_failure_updates_postgres_without_sqlite_persist(
+    postgres_connector_route_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect, workspace, _user = postgres_connector_route_runtime
+    client = TestClient(main.app)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": "PostgreSQL HMAC failure test",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_actions": ["CREATE_AGENT_TASK"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+    body = json.dumps({"action": "CREATE_AGENT_TASK"}, separators=(",", ":")).encode()
+    timestamp = str(int(time.time()))
+    nonce = f"bad_signature_{uuid.uuid4().hex}"
+    valid_signature = expected_hmac_v1_signature(
+        hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+    )
+    invalid_signature = ("0" if valid_signature[0] != "0" else "1") + valid_signature[1:]
+    headers = {
+        "X-Aixion-Signature-Version": "v1",
+        "X-Aixion-Timestamp": timestamp,
+        "X-Aixion-Nonce": nonce,
+        "X-Aixion-Connector-Signature": f"v1={invalid_signature}",
+        "Content-Type": "application/json",
+    }
+    before_connector_ids = set(store.agent_connectors)
+    before_audit_ids = {event.id for event in store.audit_events}
+    persist_calls: list[str] = []
+    monkeypatch.setattr(store, "persist", lambda: persist_calls.append("called"))
+
+    response = client.post(
+        f"/connectors/{connector_id}/webhook", content=body, headers=headers
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid connector HMAC signature"
+    assert persist_calls == []
+    assert set(store.agent_connectors) == before_connector_ids
+    assert {event.id for event in store.audit_events} == before_audit_ids
+    with connect() as conn:
+        connector_payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s AND workspace_id=%s",
+            (connector_id, workspace.id),
+        ).fetchone()[0]
+        audit_rows = conn.execute(
+            "SELECT event_type,workspace_id FROM audit_events "
+            "WHERE entity_id=%s AND workspace_id=%s "
+            "AND event_type='connector.webhook_auth_failed'",
+            (connector_id, workspace.id),
+        ).fetchall()
+    assert connector_payload["failed_auth_count"] == 1
+    assert connector_payload["last_error"] == "Invalid connector HMAC signature"
+    assert [(row[0], row[1]) for row in audit_rows] == [
+        ("connector.webhook_auth_failed", workspace.id)
+    ]
+
+
 def test_postgres_webhook_rejects_mixed_repository_runtime(
     postgres_connector_route_runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:

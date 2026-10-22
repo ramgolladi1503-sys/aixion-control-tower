@@ -284,7 +284,8 @@ def _authenticate_connector(
             )
         except HTTPException as error:
             record_connector_auth_failure(connector, str(error.detail))
-            store.persist()
+            if persist_local:
+                store.persist()
             raise
     else:
         raise HTTPException(status_code=401, detail="Unsupported connector auth type")

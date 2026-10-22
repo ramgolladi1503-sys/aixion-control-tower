@@ -4,7 +4,7 @@
 **Scope:** Existing Aixion Control Tower Android app
 **Implementation status (2026-10-22):** Partially implemented. The current compact-phone shell has four destinations (Home, Approvals, Connect, Account), no More menu, a warm light palette, an approval inbox/history split, a persistent approve/reject footer with high-risk confirmation, and Home-to-Connect navigation. The theme uses Android system sans for UI and monospace for payloads; it is light-only. Source-level presence is not device certification. Unless a paragraph says otherwise, screen contracts below describe the target design; they are not claims that every detail is implemented.
 
-Current gaps include dark mode and adaptive navigation, provider liveness/last-seen health on Home, authoritative reviewer/decision-time/delivery history, full high-risk confirmation interaction coverage, password reset/show-hide, and TalkBack/large-font/device visual validation. The current Connect surface provides setup guidance; it does not establish a live provider session. Native Codex Desktop approval interception and same-invocation resume are not verified.
+Current gaps include dark mode and adaptive navigation, provider liveness/last-seen health on Home, authoritative reviewer/decision-time/delivery history, full high-risk confirmation interaction coverage, password reset, and TalkBack/large-font/device visual validation. Home sync timestamp and password show/hide are implemented in source but still need device and accessibility validation. The current Connect surface provides setup guidance; it does not establish a live provider session. Native Codex Desktop approval interception and same-invocation resume are not verified.
 
 **Scope lock:** this is a design contract for release one only. User-facing destinations are Home, Approvals (including History and request detail), Connect, and Account (including sign-in/register/logout). Agent Work, projects, command chat, MCP, technical audit, diagnostics, and administration remain outside release-one navigation. Billing and cloud deployment are outside this document. The UI must not imply that a local computer is online or that an agent resumed unless the backend/connector provides fresh evidence.
 
@@ -99,7 +99,7 @@ Use a 4dp base scale: `4, 8, 12, 16, 24, 32, 40, 48`. Screen content uses 20dp h
 
 ### 4.1 Sign-in and registration
 
-Target screen is a compact sign-in form: logo/wordmark, “Sign in”, email, password with show/hide control, primary **Log in** button, and a low-emphasis **Create account** link. Place password reset in the same form. Do not show technical API endpoints, agent setup, or an expanded registration form on initial load. The current screen has the simple email/password and account-creation flow; password reset and show/hide controls remain open work.
+Target screen is a compact sign-in form: logo/wordmark, “Sign in”, email, password with show/hide control, primary **Log in** button, and a low-emphasis **Create account** link. Place password reset in the same form. Do not show technical API endpoints, agent setup, or an expanded registration form on initial load. The current screen has the simple email/password and account-creation flow with a show/hide control; password reset remains open work. Show/hide behavior still needs device and accessibility validation.
 
 Tapping **Create account** switches the same surface to a short registration state with email, password, password requirements, and **Create account**. Verification follows as a separate, clearly labeled next step. Keep login/register accessible without making users choose among competing sign-in providers. Offer Google/GitHub sign-in only after provider auth, account linking, and recovery behavior are implemented and reviewed; never render placeholder OAuth buttons.
 
@@ -117,7 +117,7 @@ Target Home is a short status summary, not an analytics dashboard:
 4. Connection card: connected provider(s), connector last-seen state, and **Connect an agent** if none are active. Current Home instead offers a truthful **Open Connect** entry and availability reminder; it does not claim a provider is connected or display heartbeat/last-seen health.
 5. Short availability reminder only when useful: “Your computer and agent connector need to stay online for work to resume.”
 
-If backend sync fails, show the last successful sync time and a persistent “Could not refresh” panel with Retry. Clearly mark data as stale; disable decisions for stale approvals according to repository decision policy. Never say “All clear” when freshness cannot be established. The current Home shows a backend-sync error and hides fallback/mock data; it does not yet show the last successful sync timestamp.
+If backend sync fails, show the last successful sync time and a persistent “Could not refresh” panel with Retry. Clearly mark data as stale; disable decisions for stale approvals according to repository decision policy. Never say “All clear” when freshness cannot be established. The current Home shows the last successful sync timestamp, a backend-sync error, and hides fallback/mock data; device validation is still pending.
 
 **Visual order:** page title → freshness/status line → pending count and up to three review cards → connection summary/setup action → short availability note. Keep one obvious primary action per state. Say “1 approval waiting”, “3 approvals waiting”, or “No approvals waiting”; avoid celebratory success styling for zero. “Connector online” requires a fresh heartbeat and should include “Last seen …”; registration alone is “Setup started” or “Not verified”. Cards stack on narrow screens; metadata wraps instead of collapsing into tiny columns.
 
@@ -135,9 +135,9 @@ The target design for history entries is decision, reviewer, date/time with time
 
 Use a clear vertical review sequence:
 
-1. Provider and request state header, project, connector installation identity, agent/session/invocation identifiers in a “Request provenance” disclosure.
+1. Provider and request state header, followed immediately by a compact **Decision context** summary containing project, target, provider/source-verification state, invocation ID, risk rationale, and expiry. Keep missing values visible as “Not provided” or “No risk rationale was supplied”; show multiple rationale items as separate lines. This summary is present near the top before the scrollable technical detail, so the persistent decision footer is accompanied by meaningful context.
 2. Exact action payload rendered in selectable, wrapping monospace text with line breaks preserved. For file changes show a safe summary and a dedicated diff view. Do not truncate, normalize, or hide meaningful arguments.
-3. Target and scope (repository/project/workspace), risk level with textual rationale, creation time, expiry, and required actions/policy warnings.
+3. Full request provenance (connector installation, agent/session/invocation identifiers), target and scope (repository/project/workspace), risk level, creation time, expiry, and required actions/policy warnings. The initial summary supports quick review; it does not replace full provenance and exact payload inspection.
 4. Optional requester/comment context, if available and attributed.
 5. Sticky action footer only when decision is currently valid: secondary outlined **Reject** and primary **Approve request**. On narrow screens, stack full-width buttons with reject first and approve last. Both controls at least 48dp high; 12dp separation.
 
@@ -147,7 +147,7 @@ Target behavior after a decision is a terminal state and transition timeline: �
 
 Disable both controls for expired, consumed, blocked, unsupported/unknown, stale, mismatched, revoked-connector, or reconciliation-required requests. Pair disabled actions with the exact reason and a refresh/reconcile action if available. Do not present “request revision” as equivalent to rejection unless the backend contract retains that distinct decision state and wording.
 
-**Detail layout:** show the identity/state summary first, then a clearly labeled exact request block, target/risk/expiry, then provenance and optional context. Long content scrolls behind the safe-area-aware decision footer. The footer must remain associated with this request and must not obscure the final request text; at compact width it stacks Reject above Approve. The high-risk confirmation is a distinct sheet/dialog, names the provider and target, repeats the summarized exact action, and requires a deliberate confirmation tap. Do not add swipe-to-decide, double-tap shortcuts, or notification action buttons. For any conflict between displayed data and authoritative server state, refresh and fail closed before submitting.
+**Detail layout:** show the identity/state summary and decision-critical context first, then the exact request block, full provenance, and optional context. Long content scrolls behind the safe-area-aware decision footer. The footer must remain associated with this request and must not obscure the final request text; at compact width it stacks Reject above Approve. The high-risk confirmation is a distinct sheet/dialog, names the provider and target, repeats the summarized exact action, and requires a deliberate confirmation tap. Do not add swipe-to-decide, double-tap shortcuts, or notification action buttons. For any conflict between displayed data and authoritative server state, refresh and fail closed before submitting.
 
 ### 4.5 Agent Work (hidden in release one)
 
