@@ -47,6 +47,7 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     assert body["app_state_repository_bindings"]["approval_decisions"] == "sqlite"
     assert body["app_state_repository_bindings"]["projects"] == "sqlite"
     assert body["app_state_repository_bindings"]["notification_outbox"] == "unbound"
+    assert body["app_state_repository_bindings"]["mcp_pending_requests"] == "unbound"
     assert body["postgres_probe_enabled"] is False
     assert body["postgres_auth_rate_limits_enabled"] is False
     assert body["postgres_probe_status"] == "disabled"
@@ -176,6 +177,24 @@ def test_readiness_reports_bound_repository_identity_without_claiming_full_readi
     assert readiness.app_state_repository_bindings["connectors"] == "other"
     assert readiness.app_state_repository_bindings["projects"] == "unbound"
     assert readiness.application_store_ready is False
+
+
+def test_readiness_recognizes_sqlite_repository_subclasses() -> None:
+    class InstrumentedApprovalRepository(type(app.state.approval_decision_repository)):
+        pass
+
+    repository = InstrumentedApprovalRepository(
+        app.state.approval_decision_repository._connect
+    )
+    state = type(
+        "ApplicationState",
+        (),
+        {"approval_decision_repository": repository},
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.app_state_repository_bindings["approval_decisions"] == "sqlite"
 
 
 def test_production_readiness_rejects_sqlite_application_store(monkeypatch) -> None:

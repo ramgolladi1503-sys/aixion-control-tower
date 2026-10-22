@@ -86,7 +86,16 @@ _APP_STATE_REPOSITORIES = {
     "connectors": ("connector_repository", "connectors"),
     "notification_outbox": ("notification_outbox_repository", "notification_outbox"),
     "mcp_child_servers": ("mcp_child_server_repository", "mcp_child_servers"),
+    "mcp_pending_requests": ("mcp_pending_repository", "mcp_pending_requests"),
 }
+
+
+def _is_sqlite_repository(repository: object) -> bool:
+    """Recognize SQLite adapters and their test/instrumentation subclasses."""
+    return any(
+        base.__name__.startswith("SQLite")
+        for base in type(repository).__mro__
+    )
 
 
 def _application_repository_bindings(
@@ -106,7 +115,7 @@ def _application_repository_bindings(
         expected = getattr(postgres_repositories, postgres_attribute, None)
         if expected is not None and bound is expected:
             result[name] = "postgresql"
-        elif type(bound).__name__.startswith("SQLite"):
+        elif _is_sqlite_repository(bound):
             result[name] = "sqlite"
         else:
             result[name] = "other"
