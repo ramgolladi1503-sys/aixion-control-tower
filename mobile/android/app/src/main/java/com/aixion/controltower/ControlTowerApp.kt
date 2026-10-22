@@ -34,7 +34,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.feature.agentruns.AgentRunsScreen
 import com.aixion.controltower.feature.agenttasks.AgentTasksScreen
 import com.aixion.controltower.feature.agentaccess.AgentAccessScreen
@@ -71,6 +71,7 @@ fun ControlTowerApp(
     onNotificationConsumed: (Long) -> Unit = {}
 ) {
     ControlTowerTheme {
+        val palette = LocalTowerPalette.current
         val navController = rememberNavController()
         val authViewModel: AuthViewModel = viewModel()
         val authState by authViewModel.state.collectAsState()
@@ -146,7 +147,7 @@ fun ControlTowerApp(
         }
 
         Scaffold(
-            containerColor = TowerBackground,
+            containerColor = palette.canvas,
             topBar = {
                 if (showMainShell) {
                     TopAppBar(
@@ -200,7 +201,7 @@ fun ControlTowerApp(
             androidx.compose.foundation.layout.Box(
                 modifier = Modifier
                     .padding(padding)
-                    .background(TowerBackground)
+                    .background(palette.canvas)
             ) {
                 NavHost(navController = navController, startDestination = Route.Auth.value) {
                     composable(Route.Auth.value) { AuthScreen(viewModel = authViewModel) }

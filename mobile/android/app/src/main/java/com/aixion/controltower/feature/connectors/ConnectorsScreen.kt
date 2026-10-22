@@ -23,13 +23,8 @@ import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerAccent
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 @Composable
@@ -43,10 +38,11 @@ fun ConnectorsScreen(
 fun ConnectorsContent(
     onOpenAgentAccess: (String) -> Unit = {}
 ) {
+    val palette = LocalTowerPalette.current
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
+            .background(palette.canvas)
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
@@ -57,14 +53,15 @@ fun ConnectorsContent(
 
 @Composable
 private fun ConnectorsHero() {
+    val palette = LocalTowerPalette.current
     TowerHeroPanel {
         Row(verticalAlignment = Alignment.Top) {
             Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = "PLATFORM SETUP", color = RiskLow)
+                StatusBadge(label = "PLATFORM SETUP", color = palette.positive)
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
                     "Connect a platform",
-                    color = TowerTextPrimary,
+                    color = palette.ink,
                     fontSize = 28.sp,
                     fontWeight = FontWeight.SemiBold,
                     lineHeight = 34.sp
@@ -72,30 +69,31 @@ private fun ConnectorsHero() {
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
                     "Set up the coding agent running on your computer. The computer and the same agent session must stay on while a request is waiting. Antigravity is the first supported target; Codex phone approval is not verified yet.",
-                    color = TowerTextMuted,
+                    color = palette.inkMuted,
                     fontSize = 14.sp,
                     lineHeight = 21.sp
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.lg))
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatusBadge(label = "ANTIGRAVITY SETUP", color = TowerAccent)
-                    StatusBadge(label = "CODEX FLOW UNVERIFIED", color = RiskMedium)
+                    StatusBadge(label = "ANTIGRAVITY SETUP", color = palette.brand)
+                    StatusBadge(label = "CODEX FLOW UNVERIFIED", color = palette.caution)
                 }
             }
             Spacer(modifier = Modifier.padding(horizontal = TowerSpacing.xs))
-            ForgedLogoMark(size = 44.dp, color = TowerTextPrimary.copy(alpha = 0.78f))
+            ForgedLogoMark(size = 44.dp, color = palette.ink.copy(alpha = 0.78f))
         }
     }
 }
 
 @Composable
 private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        Text("Antigravity approval setup", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Antigravity approval setup", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             "Connect the local Antigravity hook and its agent credentials. Keep the computer and the same agent session running while you wait for a phone decision.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
@@ -106,11 +104,11 @@ private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
     }
 
     TowerPanel {
-        Text("Codex permission setup", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text("Codex permission setup", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
             "A local PermissionRequest hook can be configured. Same-invocation phone approve/deny has not been verified yet.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )

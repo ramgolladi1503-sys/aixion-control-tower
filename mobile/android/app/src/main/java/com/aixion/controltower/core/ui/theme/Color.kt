@@ -39,6 +39,24 @@ internal val LightTowerPalette = TowerPalette(
     info = Color(0xFF3B6178)
 )
 
+/** Warm charcoal companion to the paper/olive light palette. */
+internal val DarkTowerPalette = TowerPalette(
+    canvas = Color(0xFF171A16),
+    surface = Color(0xFF20241F),
+    surfaceRaised = Color(0xFF292E28),
+    surfaceSubtle = Color(0xFF343B33),
+    ink = Color(0xFFE9EEE5),
+    inkMuted = Color(0xFFC2C9BE),
+    inkDisabled = Color(0xFFAAB2A5),
+    line = Color(0xFF515A4F),
+    brand = Color(0xFFA9C19B),
+    onBrand = Color(0xFF1C261A),
+    positive = Color(0xFF79D5A4),
+    caution = Color(0xFFF3C96D),
+    danger = Color(0xFFFF9287),
+    info = Color(0xFF91C4E7)
+)
+
 internal val LocalTowerPalette = staticCompositionLocalOf { LightTowerPalette }
 
 /** Stable legacy tokens retain their value-level API for non-Compose status mappers. */

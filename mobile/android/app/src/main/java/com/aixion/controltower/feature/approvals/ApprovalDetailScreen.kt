@@ -49,15 +49,8 @@ import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
-import com.aixion.controltower.core.ui.theme.RiskBlocked
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerAccent
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 @Composable
@@ -114,10 +107,11 @@ internal fun ApprovalDetailEmptyContent(
     message: String?,
     onRetry: (() -> Unit)?
 ) {
+    val palette = LocalTowerPalette.current
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
+            .background(palette.canvas)
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.Center
     ) {
@@ -127,17 +121,17 @@ internal fun ApprovalDetailEmptyContent(
                     Text(
                         "Loading requested approval…",
                         modifier = Modifier.testTag("approval-detail-loading"),
-                        color = TowerTextPrimary,
+                        color = palette.ink,
                         fontSize = 18.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                    Text("The app is fetching this approval from the authenticated backend.", color = TowerTextMuted, fontSize = 14.sp)
+                    Text("The app is fetching this approval from the authenticated backend.", color = palette.inkMuted, fontSize = 14.sp)
                 }
                 message != null -> {
-                    Text("Approval unavailable", color = TowerTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Approval unavailable", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                    Text(message, modifier = Modifier.testTag("approval-detail-open-error"), color = TowerTextMuted, fontSize = 14.sp)
+                    Text(message, modifier = Modifier.testTag("approval-detail-open-error"), color = palette.inkMuted, fontSize = 14.sp)
                     onRetry?.let { retry ->
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         OutlinedButton(onClick = retry, modifier = Modifier.fillMaxWidth()) {
@@ -146,9 +140,9 @@ internal fun ApprovalDetailEmptyContent(
                     }
                 }
                 else -> {
-                    Text("No approval selected", color = TowerTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    Text("No approval selected", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                    Text("Open the inbox and select a request to review.", color = TowerTextMuted, fontSize = 14.sp)
+                    Text("Open the inbox and select a request to review.", color = palette.inkMuted, fontSize = 14.sp)
                 }
             }
         }
@@ -167,6 +161,7 @@ fun ApprovalDetailContent(
     decisionNeedsReconciliation: Boolean = false,
     onReconcileDecision: () -> Unit = {}
 ) {
+    val palette = LocalTowerPalette.current
     var decisionClock by remember(approval.id) { mutableStateOf(Instant.now()) }
     val expiryInstant = remember(approval.expiresAt) {
         ApprovalDecisionPolicy.expiryInstant(approval.expiresAt)
@@ -195,7 +190,7 @@ fun ApprovalDetailContent(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
+            .background(palette.canvas)
     ) {
         LazyColumn(
             modifier = Modifier
@@ -292,7 +287,7 @@ fun ApprovalDetailContent(
             item {
                 Button(
                     onClick = onOpenDiff,
-                    colors = ButtonDefaults.buttonColors(containerColor = TowerAccent, contentColor = TowerBackground),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.canvas),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Review Full Diff") }
             }
@@ -376,6 +371,7 @@ private fun ApprovalHeroPanel(
     hasUnsupportedData: Boolean,
     hasRequiredActions: Boolean
 ) {
+    val palette = LocalTowerPalette.current
     TowerHeroPanel {
         Column(modifier = Modifier.fillMaxWidth()) {
             FlowRow(
@@ -393,9 +389,9 @@ private fun ApprovalHeroPanel(
                         else -> "Review required"
                     },
                     color = when {
-                        isBlocked || hasUnsupportedData -> RiskCritical
-                        canApprove -> RiskLow
-                        else -> RiskMedium
+                        isBlocked || hasUnsupportedData -> palette.danger
+                        canApprove -> palette.positive
+                        else -> palette.caution
                     },
                     fontSize = 14.sp,
                     uppercase = false
@@ -405,13 +401,13 @@ private fun ApprovalHeroPanel(
             Spacer(modifier = Modifier.height(TowerSpacing.md))
             Text(
                 text = approval.title,
-                color = TowerTextPrimary,
+                color = palette.ink,
                 fontSize = 25.sp,
                 fontWeight = FontWeight.SemiBold,
                 lineHeight = 30.sp
             )
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
-            Text(text = approval.summary, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 20.sp)
+            Text(text = approval.summary, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 20.sp)
         }
 
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
@@ -423,11 +419,11 @@ private fun ApprovalHeroPanel(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(TowerBackground.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
+                .background(palette.canvas.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
                 .padding(TowerSpacing.md),
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
-            Text("Decision context", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("Decision context", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
             DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
             DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
@@ -439,6 +435,7 @@ private fun ApprovalHeroPanel(
 
 @Composable
 private fun DecisionContextLine(label: String, value: String) {
+    val palette = LocalTowerPalette.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
@@ -446,7 +443,7 @@ private fun DecisionContextLine(label: String, value: String) {
     ) {
         Text(
             label,
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium,
             lineHeight = 20.sp,
@@ -454,7 +451,7 @@ private fun DecisionContextLine(label: String, value: String) {
         )
         Text(
             value,
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 14.sp,
             lineHeight = 20.sp,
             modifier = Modifier.weight(1f)
@@ -464,46 +461,49 @@ private fun DecisionContextLine(label: String, value: String) {
 
 @Composable
 private fun DetailPanel(title: String, body: String, modifier: Modifier = Modifier) {
+    val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
                 title,
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium,
             letterSpacing = 1.2.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(body, color = TowerTextPrimary, fontSize = 14.sp, lineHeight = 20.sp)
+        Text(body, color = palette.ink, fontSize = 14.sp, lineHeight = 20.sp)
     }
 }
 
 @Composable
 private fun WarningPanel(title: String, body: String) {
+    val palette = LocalTowerPalette.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(RiskBlocked.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
-            .border(1.dp, RiskBlocked.copy(alpha = 0.32f), RoundedCornerShape(24.dp))
+            .background(palette.danger.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
+            .border(1.dp, palette.danger.copy(alpha = 0.32f), RoundedCornerShape(24.dp))
             .padding(16.dp)
     ) {
-        Text(title, color = RiskBlocked, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(title, color = palette.danger, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(body, color = TowerTextPrimary, fontSize = 14.sp, lineHeight = 20.sp)
+        Text(body, color = palette.ink, fontSize = 14.sp, lineHeight = 20.sp)
     }
 }
 
 @Composable
 private fun RequiredActionsPanel(actions: List<String>) {
+    val palette = LocalTowerPalette.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(RiskCritical.copy(alpha = 0.10f), RoundedCornerShape(24.dp))
-            .border(1.dp, RiskCritical.copy(alpha = 0.28f), RoundedCornerShape(24.dp))
+            .background(palette.danger.copy(alpha = 0.10f), RoundedCornerShape(24.dp))
+            .border(1.dp, palette.danger.copy(alpha = 0.28f), RoundedCornerShape(24.dp))
             .padding(16.dp)
     ) {
-        Text("Required Before Approval", color = RiskCritical, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text("Required Before Approval", color = palette.danger, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        actions.forEach { action -> Text("• $action", color = TowerTextPrimary, fontSize = 14.sp, lineHeight = 21.sp) }
+        actions.forEach { action -> Text("• $action", color = palette.ink, fontSize = 14.sp, lineHeight = 21.sp) }
     }
 }
 
@@ -520,10 +520,11 @@ private fun DecisionPanel(
     onReject: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
             text = "Decision Gate",
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 18.sp,
             fontWeight = FontWeight.SemiBold
         )
@@ -538,7 +539,7 @@ private fun DecisionPanel(
                 canApprove -> "Approval is available. Confirm only after reviewing diff, tests, and rollback."
                 else -> "Approval is disabled until safety requirements are satisfied."
             },
-            color = if (canApprove) TowerTextMuted else RiskMedium,
+            color = if (canApprove) palette.inkMuted else palette.caution,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
@@ -561,11 +562,11 @@ private fun DecisionPanel(
                     onClick = onReject,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     enabled = canDecide
-                ) { Text("Reject", color = RiskCritical) }
+                ) { Text("Reject", color = palette.danger) }
                 Button(
                     onClick = onApprove,
                     enabled = canApprove,
-                    colors = ButtonDefaults.buttonColors(containerColor = RiskLow, contentColor = TowerBackground),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.positive, contentColor = palette.canvas),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                 ) { Text("Approve request") }
             }

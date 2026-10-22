@@ -18,14 +18,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.aixion.controltower.core.ui.theme.TowerBorder
-import com.aixion.controltower.core.ui.theme.TowerBorderSoft
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerRadius
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerSurface
-import com.aixion.controltower.core.ui.theme.TowerSurfaceRaised
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
 @Composable
 fun TowerPanel(
@@ -33,15 +28,16 @@ fun TowerPanel(
     elevated: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val palette = LocalTowerPalette.current
     val shape = RoundedCornerShape(TowerRadius.lg)
-    val background = if (elevated) TowerSurfaceRaised else TowerSurface
+    val background = if (elevated) palette.surfaceRaised else palette.surface
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
             .background(background)
-            .border(BorderStroke(1.dp, TowerBorderSoft), shape)
+            .border(BorderStroke(1.dp, palette.line.copy(alpha = 0.62f)), shape)
             .padding(TowerSpacing.lg),
         content = content
     )
@@ -52,6 +48,7 @@ fun TowerHeroPanel(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val palette = LocalTowerPalette.current
     val shape = RoundedCornerShape(TowerRadius.xl)
     Column(
         modifier = modifier
@@ -60,12 +57,12 @@ fun TowerHeroPanel(
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        TowerSurfaceRaised.copy(alpha = 0.98f),
-                        TowerSurface.copy(alpha = 0.94f)
+                        palette.surfaceRaised.copy(alpha = 0.98f),
+                        palette.surface.copy(alpha = 0.94f)
                     )
                 )
             )
-            .border(BorderStroke(1.dp, TowerBorder), shape)
+            .border(BorderStroke(1.dp, palette.line), shape)
             .padding(TowerSpacing.xl),
         content = content
     )
@@ -77,17 +74,18 @@ fun TowerSectionHeader(
     subtitle: String? = null,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalTowerPalette.current
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
             text = title,
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 22.sp,
             fontWeight = FontWeight.SemiBold
         )
         if (!subtitle.isNullOrBlank()) {
             Text(
                 text = subtitle,
-                color = TowerTextMuted,
+                color = palette.inkMuted,
                 fontSize = 13.sp,
                 lineHeight = 19.sp,
                 modifier = Modifier.padding(top = 4.dp)
@@ -97,10 +95,11 @@ fun TowerSectionHeader(
 }
 
 @Composable
-fun TowerDivider(modifier: Modifier = Modifier, color: Color = TowerBorderSoft) {
+fun TowerDivider(modifier: Modifier = Modifier, color: Color? = null) {
+    val dividerColor = color ?: LocalTowerPalette.current.line.copy(alpha = 0.62f)
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .background(color)
+            .background(dividerColor)
     )
 }

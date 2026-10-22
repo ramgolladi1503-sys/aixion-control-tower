@@ -8,23 +8,25 @@ import org.junit.Test
 class TowerPaletteContrastTest {
     @Test
     fun primaryAndSupportingTextMeetWcagAaInBothThemes() {
-        val palette = LightTowerPalette
-        assertContrastAtLeast(palette.ink, palette.canvas, 7.0)
-        assertContrastAtLeast(palette.ink, palette.surface, 7.0)
-        assertContrastAtLeast(palette.inkMuted, palette.canvas, 4.5)
-        assertContrastAtLeast(palette.inkMuted, palette.surface, 4.5)
-        assertContrastAtLeast(palette.inkDisabled, palette.canvas, 4.5)
-        assertContrastAtLeast(palette.inkDisabled, palette.surface, 4.5)
-        assertContrastAtLeast(palette.onBrand, palette.brand, 4.5)
+        listOf(LightTowerPalette, DarkTowerPalette).forEach { palette ->
+            assertContrastAtLeast(palette.ink, palette.canvas, 7.0)
+            assertContrastAtLeast(palette.ink, palette.surface, 7.0)
+            assertContrastAtLeast(palette.inkMuted, palette.canvas, 4.5)
+            assertContrastAtLeast(palette.inkMuted, palette.surface, 4.5)
+            assertContrastAtLeast(palette.inkDisabled, palette.canvas, 4.5)
+            assertContrastAtLeast(palette.inkDisabled, palette.surface, 4.5)
+            assertContrastAtLeast(palette.onBrand, palette.brand, 4.5)
+        }
     }
 
     @Test
     fun semanticStatusTextMeetsWcagAaOnItsTintedBadgeSurface() {
-        val palette = LightTowerPalette
-        val statuses = listOf(palette.positive, palette.caution, palette.danger, palette.info)
-        statuses.forEach { foreground ->
-            val tintedSurface = foreground.copy(alpha = 0.11f).compositeOver(palette.surface)
-            assertContrastAtLeast(foreground, tintedSurface, 4.5)
+        listOf(LightTowerPalette, DarkTowerPalette).forEach { palette ->
+            val statuses = listOf(palette.positive, palette.caution, palette.danger, palette.info)
+            statuses.forEach { foreground ->
+                val tintedSurface = foreground.copy(alpha = 0.11f).compositeOver(palette.surface)
+                assertContrastAtLeast(foreground, tintedSurface, 4.5)
+            }
         }
     }
 

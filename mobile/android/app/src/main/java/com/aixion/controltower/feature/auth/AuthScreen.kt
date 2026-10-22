@@ -41,14 +41,8 @@ import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerAccent
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 @Composable
@@ -56,12 +50,13 @@ fun AuthScreen(
     viewModel: AuthViewModel = viewModel(),
     onLogoutRequested: () -> Unit = viewModel::logout
 ) {
+    val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
+            .background(palette.canvas)
             .verticalScroll(rememberScrollState())
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
@@ -81,6 +76,7 @@ fun AuthScreen(
 
 @Composable
 private fun AccountHero(state: AuthUiState) {
+    val palette = LocalTowerPalette.current
     TowerHeroPanel {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -95,12 +91,12 @@ private fun AccountHero(state: AuthUiState) {
                         state.emailVerified -> "READY TO LOGIN"
                         else -> "ACCESS REQUIRED"
                     },
-                    color = if (state.authenticated || state.emailVerified) RiskLow else RiskMedium
+                    color = if (state.authenticated || state.emailVerified) palette.positive else palette.caution
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
                     text = AuthUxCopy.heroTitle(state),
-                    color = TowerTextPrimary,
+                    color = palette.ink,
                     fontSize = 28.sp,
                     fontWeight = FontWeight.SemiBold,
                     lineHeight = 32.sp
@@ -108,12 +104,12 @@ private fun AccountHero(state: AuthUiState) {
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
                     text = AuthUxCopy.heroSubtitle(state),
-                    color = TowerTextMuted,
+                    color = palette.inkMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
                 )
             }
-            ForgedLogoMark(size = 52.dp, color = TowerTextPrimary.copy(alpha = 0.78f))
+            ForgedLogoMark(size = 52.dp, color = palette.ink.copy(alpha = 0.78f))
         }
     }
 }
@@ -123,24 +119,25 @@ private fun AccountInfoPanel(
     state: AuthUiState,
     onLogout: () -> Unit
 ) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        StatusBadge(label = "SIGNED IN", color = RiskLow)
+        StatusBadge(label = "SIGNED IN", color = palette.positive)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Account information", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Account information", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = state.userLabel ?: "Current session is active.",
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 14.sp,
             lineHeight = 20.sp
         )
         Text(
             text = "Registration, login, and verification controls are hidden because this session is already active.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
-        state.message?.let { Text(text = it, color = TowerAccent, fontSize = 14.sp) }
+        state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         OutlinedButton(onClick = onLogout, enabled = !state.loading, modifier = Modifier.fillMaxWidth()) {
             Text("Logout")
@@ -173,6 +170,7 @@ internal fun AuthFormContent(
     onVerify: () -> Unit,
     onResendVerification: () -> Unit
 ) {
+    val palette = LocalTowerPalette.current
     var registrationExpanded by rememberSaveable { mutableStateOf(false) }
     // Keep the opt-in reveal only for this composition; recreation starts masked.
     var passwordVisible by remember { mutableStateOf(false) }
@@ -190,7 +188,7 @@ internal fun AuthFormContent(
                 registrationExpanded -> "Create your account"
                 else -> "Welcome back"
             },
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 26.sp,
             fontWeight = FontWeight.SemiBold
         )
@@ -201,7 +199,7 @@ internal fun AuthFormContent(
                 registrationExpanded -> "Create an account once to use Control Tower."
                 else -> "Log in to review and decide on pending approvals."
             },
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp
         )
 
@@ -280,16 +278,16 @@ internal fun AuthFormContent(
                 }
             }
 
-            state.message?.let { Text(text = it, color = TowerAccent, fontSize = 14.sp) }
+            state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
 
             if (verificationStarted) {
                 TowerPanel(elevated = false) {
-                    Text("Verify your email", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Text(AuthUxCopy.verificationGuidance(state), color = TowerTextMuted, fontSize = 14.sp)
+                    Text("Verify your email", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text(AuthUxCopy.verificationGuidance(state), color = palette.inkMuted, fontSize = 14.sp)
                     if (state.emailVerified) {
-                        Text("Email verified. Log in to continue.", color = RiskLow, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Email verified. Log in to continue.", color = palette.positive, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     }
-                    state.devVerificationCode?.let { Text("Dev verification code: $it", color = RiskLow, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    state.devVerificationCode?.let { Text("Dev verification code: $it", color = palette.positive, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                     if (!state.emailVerified) {
                         OutlinedTextField(
                             value = state.verificationCode,
@@ -321,18 +319,19 @@ internal fun AuthFormContent(
 
 @Composable
 private fun PrivacyControlsPanel(state: AuthUiState, viewModel: AuthViewModel) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        Text("Privacy and data controls", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Privacy and data controls", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Text(
             "Privacy policy and account data controls must be available before Play Store submission. Public policy URL is still configured outside the app release.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
-        StatusBadge("PRIVACY POLICY: DRAFT", TowerAccent)
+        StatusBadge("PRIVACY POLICY: DRAFT", palette.brand)
         Text(
             "Account removal requests disable app access immediately. Audit and security records may be retained or anonymized according to the published retention policy.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
@@ -355,28 +354,30 @@ private fun PrivacyControlsPanel(state: AuthUiState, viewModel: AuthViewModel) {
 
 @Composable
 private fun RoleManagementPanel(state: RoleAdminUiState, onRefresh: () -> Unit, onUpdateRole: (String, String) -> Unit) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Owner role management", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("Visible only after login. Non-owners will see backend 403 here.", color = TowerTextMuted, fontSize = 14.sp)
+                Text("Owner role management", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("Visible only after login. Non-owners will see backend 403 here.", color = palette.inkMuted, fontSize = 14.sp)
             }
             OutlinedButton(onClick = onRefresh, enabled = !state.loading) { Text(if (state.loading) "Loading..." else "Refresh") }
         }
-        state.message?.let { Text(text = it, color = TowerAccent, fontSize = 14.sp) }
-        state.errorMessage?.let { Text(text = it, color = RiskCritical, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-        if (!state.loading && state.users.isEmpty() && state.errorMessage == null) Text("No users loaded yet. Tap Refresh after logging in as OWNER.", color = TowerTextMuted, fontSize = 14.sp)
+        state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
+        state.errorMessage?.let { Text(text = it, color = palette.danger, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+        if (!state.loading && state.users.isEmpty() && state.errorMessage == null) Text("No users loaded yet. Tap Refresh after logging in as OWNER.", color = palette.inkMuted, fontSize = 14.sp)
         state.users.forEach { user -> RoleUserCard(user, state.roles.ifEmpty { listOf("OWNER", "MAINTAINER", "REVIEWER") }, state.updatingUserId == user.id, onUpdateRole) }
     }
 }
 
 @Composable
 private fun InviteManagementPanel(state: InviteAdminUiState, roles: List<String>, onEmailChange: (String) -> Unit, onRoleChange: (String) -> Unit, onCreate: () -> Unit, onRefresh: () -> Unit, onRevoke: (String) -> Unit) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Owner invite management", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("Create, list, and revoke invites from the phone. Non-owners will see backend 403 here.", color = TowerTextMuted, fontSize = 14.sp)
+                Text("Owner invite management", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("Create, list, and revoke invites from the phone. Non-owners will see backend 403 here.", color = palette.inkMuted, fontSize = 14.sp)
             }
             OutlinedButton(onClick = onRefresh, enabled = !state.loading) { Text(if (state.loading) "Loading..." else "Refresh") }
         }
@@ -385,58 +386,62 @@ private fun InviteManagementPanel(state: InviteAdminUiState, roles: List<String>
             roles.forEach { role -> OutlinedButton(onClick = { onRoleChange(role) }, enabled = !state.loading, modifier = Modifier.weight(1f)) { Text(if (state.selectedRole == role) "✓ ${role.take(5)}" else role.take(5)) } }
         }
         Button(onClick = onCreate, enabled = !state.loading && state.inviteEmail.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text(if (state.loading) "Working..." else "Create invite") }
-        state.latestInviteCode?.let { Text("Invite code shown once: $it", color = RiskLow, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-        state.message?.let { Text(text = it, color = TowerAccent, fontSize = 14.sp) }
-        state.errorMessage?.let { Text(text = it, color = RiskCritical, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-        if (!state.loading && state.invites.isEmpty() && state.errorMessage == null) Text("No invites loaded yet.", color = TowerTextMuted, fontSize = 14.sp)
+        state.latestInviteCode?.let { Text("Invite code shown once: $it", color = palette.positive, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+        state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
+        state.errorMessage?.let { Text(text = it, color = palette.danger, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+        if (!state.loading && state.invites.isEmpty() && state.errorMessage == null) Text("No invites loaded yet.", color = palette.inkMuted, fontSize = 14.sp)
         state.invites.forEach { invite -> InviteCard(invite, state.loading, onRevoke) }
     }
 }
 
 @Composable
 private fun SessionManagementPanel(state: SessionAdminUiState, onRefresh: () -> Unit, onExpireAccess: (String) -> Unit) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Owner access management", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-                Text("List active sessions and expire another user's access. Non-owners will see backend 403 here.", color = TowerTextMuted, fontSize = 14.sp)
+                Text("Owner access management", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("List active sessions and expire another user's access. Non-owners will see backend 403 here.", color = palette.inkMuted, fontSize = 14.sp)
             }
             OutlinedButton(onClick = onRefresh, enabled = !state.loading) { Text(if (state.loading) "Loading..." else "Refresh") }
         }
-        state.message?.let { Text(text = it, color = TowerAccent, fontSize = 14.sp) }
-        state.errorMessage?.let { Text(text = it, color = RiskCritical, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
-        if (!state.loading && state.sessions.isEmpty() && state.errorMessage == null) Text("No sessions loaded yet.", color = TowerTextMuted, fontSize = 14.sp)
+        state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
+        state.errorMessage?.let { Text(text = it, color = palette.danger, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+        if (!state.loading && state.sessions.isEmpty() && state.errorMessage == null) Text("No sessions loaded yet.", color = palette.inkMuted, fontSize = 14.sp)
         state.sessions.forEach { session -> SessionCard(session, state.loading, state.clearingUserId == session.user_id, onExpireAccess) }
     }
 }
 
 @Composable
 private fun InviteCard(invite: InviteDto, loading: Boolean, onRevoke: (String) -> Unit) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = false) {
-        Text(invite.email, color = TowerTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Text("Role: ${invite.role} • Status: ${invite.status}", color = TowerAccent, fontSize = 14.sp)
-        invite.accepted_by_user_id?.let { Text("Accepted by: $it", color = TowerTextMuted, fontSize = 14.sp) }
+        Text(invite.email, color = palette.ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text("Role: ${invite.role} • Status: ${invite.status}", color = palette.brand, fontSize = 14.sp)
+        invite.accepted_by_user_id?.let { Text("Accepted by: $it", color = palette.inkMuted, fontSize = 14.sp) }
         if (invite.status == "PENDING") OutlinedButton(onClick = { onRevoke(invite.id) }, enabled = !loading) { Text("Revoke") }
     }
 }
 
 @Composable
 private fun SessionCard(session: SessionDto, loading: Boolean, clearing: Boolean, onExpireAccess: (String) -> Unit) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = false) {
-        Text(session.user_email, color = TowerTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Text("Role: ${session.user_role} • Active: ${session.active} • Revoked: ${session.revoked}", color = if (session.active) RiskLow else TowerTextMuted, fontSize = 14.sp)
-        Text("Session: ${session.id}", color = TowerTextMuted, fontSize = 14.sp)
-        session.expires_at?.let { Text("Expires: $it", color = TowerTextMuted, fontSize = 14.sp) }
+        Text(session.user_email, color = palette.ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text("Role: ${session.user_role} • Active: ${session.active} • Revoked: ${session.revoked}", color = if (session.active) palette.positive else palette.inkMuted, fontSize = 14.sp)
+        Text("Session: ${session.id}", color = palette.inkMuted, fontSize = 14.sp)
+        session.expires_at?.let { Text("Expires: $it", color = palette.inkMuted, fontSize = 14.sp) }
         if (session.active) OutlinedButton(onClick = { onExpireAccess(session.user_id) }, enabled = !loading) { Text(if (clearing) "Expiring..." else "Expire user access") }
     }
 }
 
 @Composable
 private fun RoleUserCard(user: AuthUserDto, roles: List<String>, updating: Boolean, onUpdateRole: (String, String) -> Unit) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = false) {
-        Text(user.display_name.ifBlank { user.email }, color = TowerTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Text(user.email, color = TowerTextMuted, fontSize = 14.sp)
-        Text("Current role: ${user.role}", color = TowerAccent, fontSize = 14.sp)
+        Text(user.display_name.ifBlank { user.email }, color = palette.ink, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(user.email, color = palette.inkMuted, fontSize = 14.sp)
+        Text("Current role: ${user.role}", color = palette.brand, fontSize = 14.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             roles.forEach { role -> OutlinedButton(onClick = { onUpdateRole(user.id, role) }, enabled = !updating && role != user.role, modifier = Modifier.weight(1f)) { Text(if (updating && role != user.role) "..." else role.take(5)) } }
         }

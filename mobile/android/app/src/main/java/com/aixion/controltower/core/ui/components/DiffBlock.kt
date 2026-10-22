@@ -17,22 +17,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.FileChangeSummary
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.TowerBorderSoft
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerRadius
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerSurface
-import com.aixion.controltower.core.ui.theme.TowerSurfaceRaised
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
 @Composable
 fun DiffBlock(file: FileChangeSummary, modifier: Modifier = Modifier) {
+    val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
             text = file.path,
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 15.sp,
             fontWeight = FontWeight.SemiBold,
             lineHeight = 20.sp
@@ -44,15 +39,15 @@ fun DiffBlock(file: FileChangeSummary, modifier: Modifier = Modifier) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(TowerSurfaceRaised, RoundedCornerShape(TowerRadius.md))
-                    .border(1.dp, TowerBorderSoft, RoundedCornerShape(TowerRadius.md))
+                    .background(palette.surfaceRaised, RoundedCornerShape(TowerRadius.md))
+                    .border(1.dp, palette.line.copy(alpha = 0.62f), RoundedCornerShape(TowerRadius.md))
                     .padding(TowerSpacing.md)
             ) {
                 file.diff.lines().forEach { line ->
                     val color = when {
-                        line.startsWith("+") -> RiskLow
-                        line.startsWith("-") -> RiskCritical
-                        else -> TowerTextMuted
+                        line.startsWith("+") -> palette.positive
+                        line.startsWith("-") -> palette.danger
+                        else -> palette.inkMuted
                     }
                     Text(
                         text = line,

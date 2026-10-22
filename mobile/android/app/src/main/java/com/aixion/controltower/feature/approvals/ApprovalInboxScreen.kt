@@ -34,14 +34,8 @@ import com.aixion.controltower.core.ui.ForegroundRefreshEffect
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerPanel
-import com.aixion.controltower.core.ui.theme.RiskBlocked
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 internal enum class ApprovalInboxSection {
@@ -136,6 +130,7 @@ fun ApprovalInboxContent(
     onRetry: () -> Unit = {},
     onApprovalSelected: (ApprovalSummary) -> Unit = {}
 ) {
+    val palette = LocalTowerPalette.current
     val pendingCount = filterApprovalsForInbox(
         state.approvals,
         ApprovalInboxSection.NEEDS_REVIEW
@@ -154,12 +149,12 @@ fun ApprovalInboxContent(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
+            .background(palette.canvas)
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            Text("Approvals", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Text("Approvals", color = palette.ink, fontSize = 28.sp, fontWeight = FontWeight.Bold)
             Text(
                 text = when {
                     state.loading && state.approvals.isEmpty() -> "Loading approval decisions..."
@@ -167,7 +162,7 @@ fun ApprovalInboxContent(
                     state.hasError -> "Backend approval sync failed. No mock approvals are shown."
                     else -> "Review requests from connected agents and check their current status here."
                 },
-                color = TowerTextMuted,
+                color = palette.inkMuted,
                 fontSize = 14.sp,
                 lineHeight = 20.sp
             )
@@ -179,11 +174,11 @@ fun ApprovalInboxContent(
 
         item {
             TowerPanel(elevated = true) {
-                Text("Decision gate", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("Decision gate", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
                     text = "External agents can submit work, but they do not approve it. This queue is where the operator decides whether work may continue, must stop, or needs revision.",
-                    color = TowerTextMuted,
+                    color = palette.inkMuted,
                     fontSize = 14.sp,
                     lineHeight = 21.sp
                 )
@@ -193,17 +188,17 @@ fun ApprovalInboxContent(
         state.errorMessage?.let { message ->
             item {
                 TowerPanel(elevated = true) {
-                    StatusBadge("Real data required", RiskCritical, fontSize = 14.sp, uppercase = false)
+                    StatusBadge("Real data required", palette.danger, fontSize = 14.sp, uppercase = false)
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
                         text = "Approval data unavailable",
-                        color = TowerTextPrimary,
+                        color = palette.ink,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
                         text = message,
-                        color = TowerTextMuted,
+                        color = palette.inkMuted,
                         fontSize = 14.sp,
                         lineHeight = 21.sp
                     )
@@ -217,9 +212,9 @@ fun ApprovalInboxContent(
 
         if (!state.hasError) item {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusBadge("Needs review $pendingCount", RiskMedium, fontSize = 14.sp, uppercase = false)
-                StatusBadge("Status blocked ${blocked.size}", RiskBlocked, fontSize = 14.sp, uppercase = false)
-                StatusBadge("Approved ${approved.size}", RiskLow, fontSize = 14.sp, uppercase = false)
+                StatusBadge("Needs review $pendingCount", palette.caution, fontSize = 14.sp, uppercase = false)
+                StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = 14.sp, uppercase = false)
+                StatusBadge("Approved ${approved.size}", palette.positive, fontSize = 14.sp, uppercase = false)
             }
         }
 
@@ -246,7 +241,7 @@ fun ApprovalInboxContent(
             item {
                 Text(
                     "History uses the current approval status. The original decision, reviewer, time, and delivery outcome are not available in this list yet.",
-                    color = TowerTextMuted,
+                    color = palette.inkMuted,
                     fontSize = 14.sp,
                     lineHeight = 21.sp
                 )
@@ -281,13 +276,13 @@ fun ApprovalInboxContent(
                 TowerPanel(elevated = true) {
                     Text(
                         text = "No fallback approvals loaded",
-                        color = TowerTextPrimary,
+                        color = palette.ink,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
                         text = "Authenticated approval screens now require real backend data instead of silently rendering demo approvals. Use Retry after the backend is reachable.",
-                        color = TowerTextMuted,
+                        color = palette.inkMuted,
                         fontSize = 14.sp,
                         lineHeight = 21.sp
                     )
@@ -306,7 +301,7 @@ fun ApprovalInboxContent(
                     StatusBadge(
                         if (unsupported.isNotEmpty()) "Unsupported data · decisions disabled"
                         else "Policy blocked · decisions disabled",
-                        RiskCritical,
+                        palette.danger,
                         fontSize = 14.sp,
                         uppercase = false
                     )
@@ -324,7 +319,7 @@ fun ApprovalInboxContent(
                             }
                             add("These requests remain visible below for review; update the app or backend if the data is unsupported.")
                         }.joinToString(" "),
-                        color = TowerTextMuted,
+                        color = palette.inkMuted,
                         fontSize = 14.sp,
                         lineHeight = 21.sp
                     )
@@ -350,7 +345,7 @@ fun ApprovalInboxContent(
                             ApprovalInboxSection.NEEDS_REVIEW -> "No requests need review"
                             ApprovalInboxSection.HISTORY -> "No requests match this filter"
                         },
-                        color = TowerTextPrimary,
+                        color = palette.ink,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -359,7 +354,7 @@ fun ApprovalInboxContent(
                             ApprovalInboxSection.NEEDS_REVIEW -> "New requests will appear here when an agent needs your decision."
                             ApprovalInboxSection.HISTORY -> "Try another status filter to see more requests."
                         },
-                        color = TowerTextMuted,
+                        color = palette.inkMuted,
                         fontSize = 14.sp,
                         lineHeight = 21.sp
                     )

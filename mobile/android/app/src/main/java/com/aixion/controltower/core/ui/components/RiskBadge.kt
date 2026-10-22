@@ -16,22 +16,15 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
-import com.aixion.controltower.core.ui.theme.RiskBlocked
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskHigh
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 
 @Composable
 fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier, readable: Boolean = false) {
+    val palette = LocalTowerPalette.current
     val color = when (risk) {
-        RiskLevel.LOW -> RiskLow
-        RiskLevel.MEDIUM -> RiskMedium
-        RiskLevel.HIGH -> RiskHigh
-        RiskLevel.CRITICAL -> RiskCritical
-        RiskLevel.BLOCKED -> RiskBlocked
-        RiskLevel.UNKNOWN -> RiskCritical
+        RiskLevel.LOW -> palette.positive
+        RiskLevel.MEDIUM -> palette.caution
+        RiskLevel.HIGH, RiskLevel.CRITICAL, RiskLevel.BLOCKED, RiskLevel.UNKNOWN -> palette.danger
     }
 
     StatusBadge(
@@ -73,10 +66,11 @@ private fun String.toSentenceCase(): String =
 
 @Composable
 fun SourceBadge(approval: ApprovalSummary, modifier: Modifier = Modifier) {
+    val palette = LocalTowerPalette.current
     val color = when {
-        approval.verifiedSource -> RiskLow
-        approval.sourceProvider == "MANUAL" -> TowerTextMuted
-        else -> RiskMedium
+        approval.verifiedSource -> palette.positive
+        approval.sourceProvider == "MANUAL" -> palette.inkMuted
+        else -> palette.caution
     }
     val label = when {
         approval.verifiedSource -> "Verified: ${approval.sourceLabel}"

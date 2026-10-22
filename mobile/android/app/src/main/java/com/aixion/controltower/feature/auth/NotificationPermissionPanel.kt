@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.auth
 
 import android.Manifest
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -25,10 +26,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerPanel
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 import com.aixion.controltower.notifications.PushDeviceRegistrationRepository
 import com.aixion.controltower.notifications.PushRegistrationResult
 
@@ -76,6 +73,7 @@ internal object NotificationPermissionCopy {
 
 @Composable
 internal fun NotificationPermissionPanel() {
+    val palette = LocalTowerPalette.current
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val requiresRuntimePermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -136,12 +134,12 @@ internal fun NotificationPermissionPanel() {
     TowerPanel(elevated = true) {
         StatusBadge(
             label = NotificationPermissionCopy.badge(permissionState),
-            color = if (permissionState == NotificationPermissionState.GRANTED) RiskLow else RiskMedium
+            color = if (permissionState == NotificationPermissionState.GRANTED) palette.positive else palette.caution
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Text("Approval notifications", color = TowerTextPrimary)
-        Text(NotificationPermissionCopy.status(permissionState), color = TowerTextMuted)
-        Text(PushRegistrationCopy.status(registrationState), color = TowerTextMuted)
+        Text("Approval notifications", color = palette.ink)
+        Text(NotificationPermissionCopy.status(permissionState), color = palette.inkMuted)
+        Text(PushRegistrationCopy.status(registrationState), color = palette.inkMuted)
         if (permissionState == NotificationPermissionState.DENIED) {
             Spacer(modifier = Modifier.height(8.dp))
             Button(

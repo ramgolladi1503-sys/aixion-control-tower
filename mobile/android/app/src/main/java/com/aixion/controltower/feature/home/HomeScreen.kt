@@ -31,13 +31,8 @@ import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 import java.text.DateFormat
 import java.time.Instant
@@ -50,13 +45,14 @@ fun HomeScreen(
     onOpenConnect: () -> Unit = {},
     onOpenApprovals: () -> Unit = {}
 ) {
+    val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
     ForegroundRefreshEffect(onRefresh = viewModel::refreshInForeground)
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
+            .background(palette.canvas)
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
@@ -88,17 +84,17 @@ fun HomeScreen(
                                 else -> "COMMAND STATE"
                             },
                             color = when {
-                                state.hasError -> RiskCritical
-                                state.unsupportedApprovals.isNotEmpty() -> RiskCritical
-                                state.actionRequiredCount > 0 -> RiskMedium
-                                state.refreshing -> RiskMedium
-                                else -> RiskLow
+                                state.hasError -> palette.danger
+                                state.unsupportedApprovals.isNotEmpty() -> palette.danger
+                                state.actionRequiredCount > 0 -> palette.caution
+                                state.refreshing -> palette.caution
+                                else -> palette.positive
                             }
                         )
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         Text(
                             text = homeHeroTitle(state),
-                            color = TowerTextPrimary,
+                            color = palette.ink,
                             fontSize = 28.sp,
                             fontWeight = FontWeight.SemiBold,
                             lineHeight = 33.sp
@@ -106,12 +102,12 @@ fun HomeScreen(
                         Spacer(modifier = Modifier.height(TowerSpacing.sm))
                         Text(
                             text = homeHeroSubtitle(state),
-                            color = TowerTextMuted,
+                            color = palette.inkMuted,
                             fontSize = 14.sp,
                             lineHeight = 20.sp
                         )
                     }
-                    ForgedLogoMark(size = 56.dp, color = TowerTextPrimary.copy(alpha = 0.82f))
+                    ForgedLogoMark(size = 56.dp, color = palette.ink.copy(alpha = 0.82f))
                 }
             }
         }
@@ -120,14 +116,14 @@ fun HomeScreen(
             TowerPanel(elevated = false) {
                 Text(
                     text = "Agent connections",
-                    color = TowerTextPrimary,
+                    color = palette.ink,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
                     text = "Set up or review a local hook for Antigravity or Codex. The computer and agent need to stay available while an approval is waiting.",
-                    color = TowerTextMuted,
+                    color = palette.inkMuted,
                     fontSize = 14.sp,
                     lineHeight = 21.sp
                 )
@@ -227,6 +223,7 @@ private fun HomeHeader(
     hasSuccessfulSync: Boolean,
     lastSuccessfulSyncAt: Instant?
 ) {
+    val palette = LocalTowerPalette.current
     Column {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -236,14 +233,14 @@ private fun HomeHeader(
             Column {
                 Text(
                     text = "AIXION",
-                    color = TowerTextPrimary,
+                    color = palette.ink,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 2.2.sp
                 )
                 Text(
                     text = "CONTROL TOWER",
-                    color = TowerTextMuted,
+                    color = palette.inkMuted,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
                     letterSpacing = 1.8.sp
@@ -257,9 +254,9 @@ private fun HomeHeader(
                     hasSuccessfulSync = hasSuccessfulSync
                 ),
                 color = when {
-                    hasError -> RiskCritical
-                    loading || refreshing || !hasSuccessfulSync -> RiskMedium
-                    else -> RiskLow
+                    hasError -> palette.danger
+                    loading || refreshing || !hasSuccessfulSync -> palette.caution
+                    else -> palette.positive
                 }
             )
         }
@@ -269,9 +266,10 @@ private fun HomeHeader(
 
 @Composable
 internal fun HomeSyncTimestamp(syncedAt: Instant) {
+    val palette = LocalTowerPalette.current
     Text(
         text = "Last successful sync · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(syncedAt))}",
-        color = TowerTextMuted,
+        color = palette.inkMuted,
         fontSize = 14.sp,
         lineHeight = 20.sp,
         modifier = Modifier.padding(top = TowerSpacing.sm)
@@ -280,19 +278,20 @@ internal fun HomeSyncTimestamp(syncedAt: Instant) {
 
 @Composable
 private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEnabled: Boolean) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        StatusBadge(label = "REAL DATA REQUIRED", color = RiskCritical)
+        StatusBadge(label = "REAL DATA REQUIRED", color = palette.danger)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = title,
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = body,
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
@@ -305,17 +304,18 @@ private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEn
 
 @Composable
 private fun EmptyHomePanel(title: String, body: String) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
         Text(
             text = title,
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = body,
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
