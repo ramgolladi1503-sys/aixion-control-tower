@@ -87,6 +87,8 @@ def test_email_dispatch_loop_drains_inflight_thread_on_cancellation(
         assert started_ready
         task.cancel()
         await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
         assert not task.done()
         release.set()
         try:
