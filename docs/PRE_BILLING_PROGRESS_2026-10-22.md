@@ -1,5 +1,11 @@
 # Pre-Billing Progress — 2026-10-22
 
+### PostgreSQL push outcome and invalid-token transaction — 2026-10-22
+
+- The PostgreSQL push dispatcher previously removed an FCM-unregistered device and appended its audit event in a separate transaction from recording the notification outcome. It now passes the observed device ID/token pairs into the active claim's outcome transaction. A matching device deletion, hash/audit row insertion, and notification outcome commit together; a stale lease performs none of them. The exact-token predicate preserves a device re-registered while an FCM request is in flight.
+- Added PostgreSQL integration regressions for stale claim fencing, audit failure rolling back both cleanup and outcome, and preserving a replacement token. Local Ruff, Python compilation, and `git diff --check` passed. The PostgreSQL outbox integration file contains **19 tests**; local execution skipped all 19 because `AIXION_TEST_POSTGRES_DSN` is not configured and no PostgreSQL server is listening on `127.0.0.1:5432`; this is not a passing database validation. Exact-head CI is pending.
+- No new config key, schema migration, runtime selection, cloud action, billing change, or rollout. This is one dispatcher transaction improvement and does not close Slice 1 or prove live FCM delivery.
+
 ### Repository binding diagnostics completeness
 
 - Extended `/ops/readiness` app-state repository diagnostics to include MCP pending requests and to classify SQLite adapters through their inheritance chain, including instrumented/test subclasses. PostgreSQL classification still requires identity with the active runtime’s shared `ApplicationRepositories` object. Missing app-state bindings remain explicitly `unbound`; unknown implementations remain `other`.

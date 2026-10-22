@@ -219,7 +219,10 @@ def test_claim_uses_attempt_fencing_and_rejects_stale_worker_result(
     outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
 ) -> None:
     repository, _ = outbox_repository
-    _, _, notification = _seed_notification(outbox_repository[1])
+    workspace, _, notification = _seed_notification(outbox_repository[1])
+    with outbox_repository[1]() as conn:
+        _insert_user(conn, workspace, "push-owner")
+        device = _insert_device(conn, workspace, "push-owner", "dead-token")
     started_at = now_utc()
     first = repository.claim_next_due(now=started_at, max_attempts=3, lease_seconds=30)
     assert first is not None and first.id == notification.id
@@ -239,8 +242,18 @@ def test_claim_uses_attempt_fencing_and_rejects_stale_worker_result(
         push_error=None,
         next_attempt_at=None,
         completed_at=second_started_at + timedelta(seconds=1),
+        invalid_devices=((device.id, "dead-token"),),
     )
     assert stale_result is None
+    with outbox_repository[1]() as conn:
+        assert conn.execute(
+            "SELECT token FROM device_registrations WHERE device_id=%s", (device.id,)
+        ).fetchone() == ("dead-token",)
+        assert conn.execute(
+            "SELECT 1 FROM audit_events WHERE entity_id=%s "
+            "AND event_type='notification.device_token_invalidated'",
+            (device.id,),
+        ).fetchone() is None
     accepted_result = repository.record_outcome(
         notification_id=notification.id,
         expected_attempts=second.push_attempts,
@@ -573,3 +586,78 @@ def test_postgres_dispatcher_removes_unregistered_token_and_records_failure(
             (device.id,),
         ).fetchone()
     assert audit == ("notification.device_token_invalidated",)
+
+
+def test_postgres_dispatcher_rolls_back_outcome_and_token_cleanup_together_on_audit_failure(
+    outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, connect = outbox_repository
+    workspace, _, notification = _seed_notification(connect, user_id="push-owner")
+    with connect() as conn:
+        device = _insert_device(conn, workspace, "push-owner", "expired-token")
+        conn.execute(
+            "CREATE FUNCTION reject_dispatch_cleanup_audit() RETURNS trigger AS $$ "
+            "BEGIN IF NEW.event_type='notification.device_token_invalidated' THEN "
+            "RAISE EXCEPTION 'audit unavailable'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_dispatch_cleanup_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_dispatch_cleanup_audit()"
+        )
+    monkeypatch.setenv("AIXION_PUSH_DISPATCH_ENABLED", "true")
+
+    with pytest.raises(psycopg.Error, match="audit unavailable"):
+        dispatch_one_postgres_push(
+            repository,
+            now=now_utc(),
+            sender=lambda **_: "FCM_TOKEN_UNREGISTERED",
+        )
+
+    stored = _persisted_notification(connect, notification.id)
+    assert stored.push_status == "SENDING"
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT token FROM device_registrations WHERE device_id=%s", (device.id,)
+        ).fetchone() == ("expired-token",)
+        assert conn.execute(
+            "SELECT 1 FROM audit_events WHERE entity_id=%s "
+            "AND event_type='notification.device_token_invalidated'",
+            (device.id,),
+        ).fetchone() is None
+
+
+def test_postgres_dispatcher_keeps_replaced_token_when_old_token_is_rejected(
+    outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, connect = outbox_repository
+    workspace, _, notification = _seed_notification(connect, user_id="push-owner")
+    with connect() as conn:
+        device = _insert_device(conn, workspace, "push-owner", "old-token")
+    monkeypatch.setenv("AIXION_PUSH_DISPATCH_ENABLED", "true")
+
+    def sender(**_: object) -> str:
+        # Simulate re-registration while the provider request is in flight.
+        with connect() as conn:
+            conn.execute(
+                "UPDATE device_registrations SET token=%s, "
+                "payload=jsonb_set(payload,'{token}',to_jsonb(%s::text)) "
+                "WHERE device_id=%s",
+                ("replacement-token", "replacement-token", device.id),
+            )
+        return "FCM_TOKEN_UNREGISTERED"
+
+    dispatch_one_postgres_push(repository, now=now_utc(), sender=sender)
+
+    stored = _persisted_notification(connect, notification.id)
+    assert stored.push_status == "FAILED"
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT token FROM device_registrations WHERE device_id=%s", (device.id,)
+        ).fetchone() == ("replacement-token",)
+        assert conn.execute(
+            "SELECT 1 FROM audit_events WHERE entity_id=%s "
+            "AND event_type='notification.device_token_invalidated'",
+            (device.id,),
+        ).fetchone() is None

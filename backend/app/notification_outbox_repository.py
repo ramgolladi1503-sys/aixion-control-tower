@@ -147,8 +147,15 @@ class PostgresNotificationOutboxRepository:
         push_error: str | None,
         next_attempt_at: datetime | None,
         completed_at: datetime | None = None,
+        invalid_devices: tuple[tuple[str, str], ...] = (),
     ) -> Notification | None:
-        """Persist one claim result, returning None if its claim is stale."""
+        """Persist one claim result and matching dead-token cleanup atomically.
+
+        ``invalid_devices`` contains device ID/token pairs reported unregistered
+        by FCM during this attempt. Cleanup is conditional on the same active
+        outbox claim, and each device is removed only if it still has that
+        token. A stale claim performs neither mutation.
+        """
         if expected_attempts < 1:
             raise ValueError("expected_attempts must be positive")
         if push_status not in _FINAL_PUSH_STATES:
@@ -166,6 +173,14 @@ class PostgresNotificationOutboxRepository:
             or any(ord(character) < 32 or ord(character) == 127 for character in push_error)
         ):
             raise ValueError("Push outcome error must be a bounded single-line diagnostic")
+        if any(
+            not device_id
+            or not token
+            or len(device_id) > 128
+            or len(token) > 4096
+            for device_id, token in invalid_devices
+        ):
+            raise ValueError("Invalid-device cleanup requires bounded device and token values")
 
         with self._connect() as conn:
             row = conn.execute(
@@ -179,6 +194,13 @@ class PostgresNotificationOutboxRepository:
                 return None
             notification = Notification.model_validate(row[0])
             self._validate_row(notification, row)
+            for device_id, token in dict.fromkeys(invalid_devices):
+                self._invalidate_device_if_token_matches(
+                    conn,
+                    device_id=device_id,
+                    token=token,
+                    occurred_at=current_time,
+                )
             updated = notification.model_copy(
                 update={
                     "push_status": push_status,
@@ -201,7 +223,7 @@ class PostgresNotificationOutboxRepository:
                 ),
             )
             if update.rowcount != 1:
-                return None
+                raise RuntimeError("Notification claim changed during its locked outcome update")
             return updated
 
     def list_device_targets(self, notification: Notification) -> list[DeviceRegistration]:
@@ -484,49 +506,64 @@ class PostgresNotificationOutboxRepository:
         """Remove a still-matching dead token and append its audit event atomically."""
         current_time = occurred_at or now_utc()
         with self._connect() as conn:
-            row = conn.execute(
-                "DELETE FROM device_registrations WHERE device_id=%s AND token=%s "
-                "RETURNING payload, device_id, user_id, workspace_id, token, platform, app_version",
-                (device_id, token),
-            ).fetchone()
-            if row is None:
-                return False
-            device = DeviceRegistration.model_validate(row[0])
-            if (
-                device.id != row[1]
-                or device.user_id != row[2]
-                or device.workspace_id != row[3]
-                or device.token != row[4]
-                or device.platform != row[5]
-                or device.app_version != row[6]
-                or device.workspace_id is None
-            ):
-                raise ValueError("Device registration payload does not match its scoped row")
-            event = AuditEvent(
-                event_type="notification.device_token_invalidated",
-                actor="system:fcm",
-                entity_id=device.id,
-                workspace_id=device.workspace_id,
-                details={"platform": device.platform},
-                created_at=current_time,
+            return self._invalidate_device_if_token_matches(
+                conn,
+                device_id=device_id,
+                token=token,
+                occurred_at=current_time,
             )
-            conn.execute(
-                "INSERT INTO audit_events "
-                "(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
-                "actor,details,created_at,payload) "
-                "VALUES(%s,%s,NULL,'device_registration',%s,%s,%s,%s,%s,%s)",
-                (
-                    event.id,
-                    event.workspace_id,
-                    event.entity_id,
-                    event.event_type,
-                    event.actor,
-                    Jsonb(event.details),
-                    event.created_at,
-                    Jsonb(event.model_dump(mode="json")),
-                ),
-            )
-            return True
+
+    @staticmethod
+    def _invalidate_device_if_token_matches(
+        conn: Connection,
+        *,
+        device_id: str,
+        token: str,
+        occurred_at: datetime,
+    ) -> bool:
+        row = conn.execute(
+            "DELETE FROM device_registrations WHERE device_id=%s AND token=%s "
+            "RETURNING payload, device_id, user_id, workspace_id, token, platform, app_version",
+            (device_id, token),
+        ).fetchone()
+        if row is None:
+            return False
+        device = DeviceRegistration.model_validate(row[0])
+        if (
+            device.id != row[1]
+            or device.user_id != row[2]
+            or device.workspace_id != row[3]
+            or device.token != row[4]
+            or device.platform != row[5]
+            or device.app_version != row[6]
+            or device.workspace_id is None
+        ):
+            raise ValueError("Device registration payload does not match its scoped row")
+        event = AuditEvent(
+            event_type="notification.device_token_invalidated",
+            actor="system:fcm",
+            entity_id=device.id,
+            workspace_id=device.workspace_id,
+            details={"platform": device.platform},
+            created_at=occurred_at,
+        )
+        conn.execute(
+            "INSERT INTO audit_events "
+            "(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
+            "actor,details,created_at,payload) "
+            "VALUES(%s,%s,NULL,'device_registration',%s,%s,%s,%s,%s,%s)",
+            (
+                event.id,
+                event.workspace_id,
+                event.entity_id,
+                event.event_type,
+                event.actor,
+                Jsonb(event.details),
+                event.created_at,
+                Jsonb(event.model_dump(mode="json")),
+            ),
+        )
+        return True
 
     @staticmethod
     def _write_claim(conn: Connection, notification: Notification) -> None:

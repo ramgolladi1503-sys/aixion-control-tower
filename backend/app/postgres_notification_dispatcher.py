@@ -48,6 +48,7 @@ def dispatch_one_postgres_push(
 
     accepted = 0
     errors: list[str] = []
+    invalid_devices: list[tuple[str, str]] = []
     skipped = False
     try:
         devices = repository.list_device_targets(notification)
@@ -69,19 +70,7 @@ def dispatch_one_postgres_push(
             else:
                 errors.append(error)
                 if error == "FCM_TOKEN_UNREGISTERED":
-                    try:
-                        repository.invalidate_device_if_token_matches(
-                            device_id=device.id,
-                            token=device.token,
-                            occurred_at=claimed_at,
-                        )
-                    except Exception:
-                        # Cleanup is independent of the delivery result. The
-                        # durable token remains eligible for later cleanup.
-                        logger.warning(
-                            "PostgreSQL invalid push token cleanup failed for device id=%s",
-                            device.id,
-                        )
+                    invalid_devices.append((device.id, device.token))
     except Exception:
         # Do not persist provider exception text or payload data. The outbox
         # records a bounded retry category instead.
@@ -123,14 +112,25 @@ def dispatch_one_postgres_push(
 
     # A None result means this lease expired or a newer claim replaced it. The
     # stale worker must not overwrite the newer attempt's durable state.
-    repository.record_outcome(
-        notification_id=notification.id,
-        expected_attempts=notification.push_attempts,
-        push_status=outcome_status,
-        push_error=outcome_error,
-        next_attempt_at=next_attempt_at,
-        completed_at=completed_at,
-    )
+    try:
+        repository.record_outcome(
+            notification_id=notification.id,
+            expected_attempts=notification.push_attempts,
+            push_status=outcome_status,
+            push_error=outcome_error,
+            next_attempt_at=next_attempt_at,
+            completed_at=completed_at,
+            invalid_devices=tuple(invalid_devices),
+        )
+    except Exception:
+        # Provider sends may already have reached devices. Leave the claim
+        # leased for recovery rather than attempting a second fan-out here.
+        # The outcome and any invalid-token audits share one DB transaction.
+        logger.warning(
+            "PostgreSQL push outcome persistence failed for notification id=%s",
+            notification.id,
+        )
+        raise
     return notification.id
 
 
