@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -22,6 +23,8 @@ MAX_ARGUMENTS_BYTES = 48 * 1024
 MAX_CONFIG_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_WAIT_SECONDS = 15 * 60
+MAX_REQUEST_TIMEOUT_SECONDS = 10.0
+EXPIRY_CLEANUP_TIMEOUT_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 2
 MAX_RECONNECT_BACKOFF_SECONDS = 10
 MAX_CREATE_ATTEMPTS = 2
@@ -264,7 +267,16 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _request(method: str, url: str, config: dict[str, str], token: str,
-             body: dict[str, Any] | None = None) -> dict[str, Any]:
+             body: dict[str, Any] | None = None,
+             timeout_seconds: float = MAX_REQUEST_TIMEOUT_SECONDS) -> dict[str, Any]:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        raise GateError("Control Tower request timeout is invalid")
+    request_timeout = min(float(timeout_seconds), MAX_REQUEST_TIMEOUT_SECONDS)
     try:
         encoded = None if body is None else json.dumps(
             body, separators=(",", ":"), allow_nan=False
@@ -277,7 +289,9 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         "X-Aixion-Approval-Protocol": APPROVAL_PROTOCOL_VERSION,
     })
     try:
-        with urllib.request.build_opener(_NoRedirectHandler()).open(request, timeout=10) as response:
+        with urllib.request.build_opener(_NoRedirectHandler()).open(
+            request, timeout=request_timeout
+        ) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise AmbiguousRequestError("Control Tower response exceeds its size limit")
@@ -491,8 +505,17 @@ def _run(
     deadline = time.monotonic() + timeout
     reconnect_backoff_seconds = POLL_INTERVAL_SECONDS
     while time.monotonic() < deadline:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            break
         try:
-            current = _request("GET", f"{api_base}/agents/approvals/{approval_id}/decision", config, token)
+            current = _request(
+                "GET",
+                f"{api_base}/agents/approvals/{approval_id}/decision",
+                config,
+                token,
+                timeout_seconds=remaining_seconds,
+            )
         except RateLimitError as exc:
             time.sleep(min(exc.retry_after_seconds, max(0, deadline - time.monotonic())))
             continue
@@ -526,9 +549,16 @@ def _run(
         if status == "APPROVED":
             if current.get("approved_payload_hash") != _hash(current):
                 return "deny", "Approved payload integrity check failed"
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                break
             try:
                 claimed = _request(
-                    "POST", f"{api_base}/agents/approvals/{approval_id}/consume", config, token
+                    "POST",
+                    f"{api_base}/agents/approvals/{approval_id}/consume",
+                    config,
+                    token,
+                    timeout_seconds=remaining_seconds,
                 )
             except AmbiguousRequestError:
                 _report_delivery_failure(
@@ -538,10 +568,13 @@ def _run(
                     token=token,
                     source_invocation_id=str(current.get("source_invocation_id") or ""),
                     approved_payload_hash=str(current.get("approved_payload_hash") or ""),
+                    timeout_seconds=max(0.0, deadline - time.monotonic()),
                 )
                 return "deny", "Approval delivery outcome was ambiguous; Codex request denied"
             except GateError:
                 return "deny", "Approval delivery could not be claimed safely"
+            if time.monotonic() >= deadline:
+                return "deny", "Approval arrived after the Codex request deadline"
             if claimed.get("consumed") is not True:
                 return "deny", "Approval delivery was already claimed"
             return "allow", "Approved from Aixion Control Tower"
@@ -549,7 +582,13 @@ def _run(
             return "deny", f"Unrecognized Control Tower approval state: {status}"
         time.sleep(min(POLL_INTERVAL_SECONDS, max(0, deadline - time.monotonic())))
     try:
-        expired = _request("POST", f"{api_base}/agents/approvals/{approval_id}/expire", config, token)
+        expired = _request(
+            "POST",
+            f"{api_base}/agents/approvals/{approval_id}/expire",
+            config,
+            token,
+            timeout_seconds=EXPIRY_CLEANUP_TIMEOUT_SECONDS,
+        )
     except GateError:
         return "deny", "Approval timed out; expiration could not be confirmed"
     if not _identity_matches(expired, approval_id=approval_id, config=config):
@@ -588,8 +627,11 @@ def _report_delivery_failure(
     token: str,
     source_invocation_id: str,
     approved_payload_hash: str,
+    timeout_seconds: float,
 ) -> None:
     """Best-effort audit only; failure to report can never turn deny into allow."""
+    if timeout_seconds <= 0:
+        return
     try:
         _request(
             "POST",
@@ -601,6 +643,7 @@ def _report_delivery_failure(
                 "approved_payload_hash": approved_payload_hash,
                 "reason_code": "CLAIM_RESPONSE_AMBIGUOUS",
             },
+            timeout_seconds=timeout_seconds,
         )
     except GateError:
         return

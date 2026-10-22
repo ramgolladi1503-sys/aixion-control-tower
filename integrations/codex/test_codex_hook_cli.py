@@ -207,7 +207,7 @@ def test_run_recovers_lost_create_response_with_identical_invocation_retry(
     calls: list[tuple[str, str, dict | None]] = []
     persisted: dict = {}
 
-    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None, **_kwargs) -> dict:
         calls.append((method, url, body))
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None
@@ -261,7 +261,7 @@ def test_run_denies_after_bounded_ambiguous_create_retries(
 ) -> None:
     calls: list[dict] = []
 
-    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None, **_kwargs) -> dict:
         assert method == "POST" and url.endswith("/agents/approvals")
         assert body is not None
         calls.append(body.copy())
@@ -293,7 +293,7 @@ def test_run_denies_create_conflict_or_mismatched_retry_response(
 ) -> None:
     calls = 0
 
-    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None, **_kwargs) -> dict:
         nonlocal calls
         calls += 1
         assert method == "POST" and url.endswith("/agents/approvals")
@@ -340,7 +340,7 @@ def test_run_reconnects_after_ambiguous_decision_read_then_consumes_once(
     created: dict = {}
     decision_reads = 0
 
-    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None, **_kwargs) -> dict:
         nonlocal decision_reads
         calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
         if method == "POST" and url.endswith("/agents/approvals"):
@@ -373,11 +373,14 @@ def test_run_honors_retry_after_only_until_host_deadline(
     clock = _patch_clock(monkeypatch)
     created: dict = {}
     calls: list[str] = []
+    request_timeouts: list[float] = []
     environment = _codex_environment()
     environment["AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS"] = "3"
 
-    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None, **kwargs) -> dict:
         calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
+        if "timeout_seconds" in kwargs:
+            request_timeouts.append(kwargs["timeout_seconds"])
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None
             created.update(_codex_approval(body))
@@ -396,6 +399,131 @@ def test_run_honors_retry_after_only_until_host_deadline(
     assert clock.now == 103
     assert "POST expire" in calls
     assert "POST consume" not in calls
+    assert request_timeouts == [3, hook.EXPIRY_CLEANUP_TIMEOUT_SECONDS]
+
+
+def test_late_consume_response_never_allows_codex_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    calls: list[tuple[str, float | None]] = []
+
+    def request(
+        method: str,
+        url: str,
+        _config: dict,
+        _token: str,
+        body: dict | None = None,
+        **kwargs,
+    ) -> dict:
+        calls.append((method, kwargs.get("timeout_seconds")))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_codex_approval(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._hash(approved)
+            clock.now += 0.25
+            return approved
+        if method == "POST" and url.endswith("/consume"):
+            # Model a transport that consumes the entire remaining deadline
+            # before returning a successful but too-late claim response.
+            clock.now += float(kwargs["timeout_seconds"])
+            return {"consumed": True}
+        if method == "POST" and url.endswith("/expire"):
+            return {**created, "status": "EXPIRED"}
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(
+        _codex_event(),
+        {**_codex_environment(), "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "1"},
+    )
+
+    assert result[0] == "deny"
+    assert "after the Codex request deadline" in result[1]
+    assert [method for method, _timeout in calls] == ["POST", "GET", "POST"]
+    assert calls[1][1] == pytest.approx(1.0)
+    assert calls[2][1] == pytest.approx(0.75)
+
+
+def test_ambiguous_consume_skips_failure_report_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    calls: list[tuple[str, float | None]] = []
+
+    def request(
+        method: str,
+        url: str,
+        _config: dict,
+        _token: str,
+        body: dict | None = None,
+        **kwargs,
+    ) -> dict:
+        calls.append((url.rsplit("/", 1)[-1], kwargs.get("timeout_seconds")))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_codex_approval(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._hash(approved)
+            return approved
+        if method == "POST" and url.endswith("/consume"):
+            clock.now += float(kwargs["timeout_seconds"])
+            raise hook.AmbiguousRequestError("claim outcome unknown")
+        if method == "POST" and url.endswith("/delivery-failure"):
+            pytest.fail("report must not exceed the configured approval deadline")
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(
+        _codex_event(),
+        {**_codex_environment(), "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "2"},
+    )
+
+    assert result[0] == "deny"
+    assert "ambiguous" in result[1]
+    assert [name for name, _timeout in calls] == ["approvals", "decision", "consume"]
+    assert calls[-1][1] == pytest.approx(2.0)
+
+
+def test_http_request_applies_capped_socket_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[float] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size: int) -> bytes:
+            return b'{"ok":true}'
+
+    class Opener:
+        def open(self, _request, *, timeout: float):
+            observed.append(timeout)
+            return Response()
+
+    monkeypatch.setattr(
+        hook.urllib.request,
+        "build_opener",
+        lambda *_handlers: Opener(),
+    )
+    config = {"agent_id": "agent-123"}
+
+    assert hook._request(
+        "GET", "https://example.test/decision", config, "test-token", timeout_seconds=2.5
+    ) == {"ok": True}
+    assert hook._request(
+        "GET", "https://example.test/decision", config, "test-token", timeout_seconds=90
+    ) == {"ok": True}
+    assert observed == [2.5, hook.MAX_REQUEST_TIMEOUT_SECONDS]
 
 
 def test_run_exhausted_reconnect_wait_expires_and_never_consumes(
@@ -407,7 +535,7 @@ def test_run_exhausted_reconnect_wait_expires_and_never_consumes(
     environment = _codex_environment()
     environment["AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS"] = "3"
 
-    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _config: dict, _token: str, body: dict | None = None, **_kwargs) -> dict:
         calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None

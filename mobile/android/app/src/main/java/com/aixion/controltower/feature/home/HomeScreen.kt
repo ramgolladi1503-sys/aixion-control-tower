@@ -112,28 +112,6 @@ fun HomeScreen(
             }
         }
 
-        item {
-            TowerPanel(elevated = false) {
-                Text(
-                    text = "Agent connections",
-                    color = palette.ink,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(
-                    text = "Set up or review a local hook for Antigravity or Codex. The computer and agent need to stay available while an approval is waiting.",
-                    color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 21.sp
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.md))
-                Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
-                    Text("Open Connect")
-                }
-            }
-        }
-
         state.errorMessage?.let { message ->
             item {
                 ErrorPanel(
@@ -190,7 +168,35 @@ fun HomeScreen(
         }
 
         item {
+            HomeAgentConnectionPanel(onOpenConnect = onOpenConnect)
+        }
+
+        item {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        }
+    }
+}
+
+@Composable
+internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(elevated = false) {
+        Text(
+            text = "Connect an agent",
+            color = palette.ink,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = "Set up Antigravity or Codex on the computer running your work. Keep that computer online while approvals are pending.",
+            color = palette.inkMuted,
+            fontSize = 14.sp,
+            lineHeight = 21.sp
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
+            Text("Connect platform")
         }
     }
 }
@@ -230,22 +236,6 @@ private fun HomeHeader(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(
-                    text = "AIXION",
-                    color = palette.ink,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    letterSpacing = 2.2.sp
-                )
-                Text(
-                    text = "CONTROL TOWER",
-                    color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                    letterSpacing = 1.8.sp
-                )
-            }
             StatusBadge(
                 label = homeBackendStatusLabel(
                     loading = loading,

@@ -205,7 +205,7 @@ def test_phone_approval_allows_exact_codex_permission_request(monkeypatch) -> No
     calls: list[tuple[str, str]] = []
     created_body: dict = {}
 
-    def request(method, url, _config, _token, body=None):
+    def request(method, url, _config, _token, body=None, **_kwargs):
         nonlocal created_body
         calls.append((method, url))
         if method == "POST" and url.endswith("/consume"):
@@ -241,7 +241,7 @@ def test_ambiguous_decision_poll_reconnects_and_resumes_same_request(monkeypatch
     created_body: dict = {}
     get_calls = 0
 
-    def request(method, url, _config, _token, body=None):
+    def request(method, url, _config, _token, body=None, **_kwargs):
         nonlocal created_body, get_calls
         calls.append((method, url))
         if method == "POST" and url.endswith("/consume"):
@@ -271,7 +271,7 @@ def test_repeated_ambiguous_decision_polls_expire_and_deny(monkeypatch) -> None:
     sleeps: list[int] = []
     clock = [0.0]
 
-    def request(method, url, _config, _token, body=None):
+    def request(method, url, _config, _token, body=None, **_kwargs):
         calls.append((method, url))
         if method == "POST" and url.endswith("/agents/approvals"):
             return _record(body or {})
@@ -358,7 +358,7 @@ def test_documented_permission_request_without_tool_use_id_completes_phone_flow(
     calls: list[tuple[str, str, dict | None]] = []
     approval: dict = {}
 
-    def request(method, url, _config, _token, body=None):
+    def request(method, url, _config, _token, body=None, **_kwargs):
         nonlocal approval
         calls.append((method, url, body))
         if method == "POST" and url.endswith("/consume"):
@@ -397,7 +397,7 @@ def test_restart_retry_can_resume_existing_approved_invocation(monkeypatch) -> N
     calls: list[str] = []
     approved: dict = {}
 
-    def request(method, url, _config, _token, body=None):
+    def request(method, url, _config, _token, body=None, **_kwargs):
         nonlocal approved
         calls.append(method)
         if method == "POST" and url.endswith("/consume"):
@@ -439,7 +439,7 @@ def test_malformed_present_tool_use_id_denies_before_network(monkeypatch) -> Non
 def test_duplicate_approval_delivery_claim_denies_codex_request(monkeypatch) -> None:
     created_body: dict = {}
 
-    def request(method, url, _config, _token, body=None):
+    def request(method, url, _config, _token, body=None, **_kwargs):
         nonlocal created_body
         if method == "POST" and url.endswith("/consume"):
             return {"consumed": False}
@@ -473,7 +473,7 @@ def test_ambiguous_delivery_claim_is_reported_without_allowing_codex_request(mon
     failure_body: dict = {}
     calls: list[str] = []
 
-    def request(method, url, _config, _token, body=None):
+    def request(method, url, _config, _token, body=None, **_kwargs):
         nonlocal created_body, failure_body
         if method == "POST" and url.endswith("/consume"):
             calls.append("consume")
@@ -508,7 +508,7 @@ def test_ambiguous_delivery_claim_is_reported_without_allowing_codex_request(mon
 def test_phone_rejection_denies_codex_request(monkeypatch) -> None:
     created_body: dict = {}
 
-    def request(method, _url, _config, _token, body=None):
+    def request(method, _url, _config, _token, body=None, **_kwargs):
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
@@ -548,7 +548,7 @@ def test_oversized_arguments_are_denied_before_network(monkeypatch) -> None:
 
 
 def test_mismatched_approval_identity_denies(monkeypatch) -> None:
-    def request(method, _url, _config, _token, body=None):
+    def request(method, _url, _config, _token, body=None, **_kwargs):
         if method == "POST":
             record = _record(body or {})
             record["source_agent_id"] = "another-agent"
@@ -562,7 +562,7 @@ def test_mismatched_approval_identity_denies(monkeypatch) -> None:
 def test_changed_payload_denies_even_when_approval_is_approved(monkeypatch) -> None:
     created_body: dict = {}
 
-    def request(method, _url, _config, _token, body=None):
+    def request(method, _url, _config, _token, body=None, **_kwargs):
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
@@ -592,7 +592,7 @@ def test_timeout_expires_approval_and_denies(monkeypatch) -> None:
     calls: list[str] = []
     created_body: dict = {}
 
-    def request(method, _url, _config, _token, body=None):
+    def request(method, _url, _config, _token, body=None, **_kwargs):
         nonlocal created_body
         calls.append(method)
         if method == "POST":
@@ -622,22 +622,26 @@ def test_timeout_expires_approval_and_denies(monkeypatch) -> None:
 def test_approval_read_returning_after_deadline_is_not_claimed(monkeypatch) -> None:
     calls: list[str] = []
     created_body: dict = {}
+    clock = [0.0]
+    timeouts: list[float] = []
 
-    def request(method, _url, _config, _token, body=None):
+    def request(method, _url, _config, _token, body=None, **kwargs):
         nonlocal created_body
         calls.append(method)
+        if "timeout_seconds" in kwargs:
+            timeouts.append(kwargs["timeout_seconds"])
         if method == "POST" and len(calls) == 1:
             created_body = body or {}
             return _record(created_body)
         if method == "GET":
             approved = _record(created_body, status="APPROVED")
             approved["approved_payload_hash"] = hook._hash(approved)
+            clock[0] = 2.0
             return approved
         return _record(created_body, status="APPROVED")
 
-    times = iter([0.0, 0.0, 2.0])
     monkeypatch.setattr(hook, "_request", request)
-    monkeypatch.setattr(hook.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(hook.time, "monotonic", lambda: clock[0])
 
     behavior, reason = hook.run(
         _event(), {**ENV, "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "1"}
@@ -646,6 +650,7 @@ def test_approval_read_returning_after_deadline_is_not_claimed(monkeypatch) -> N
     assert behavior == "deny"
     assert "timeout" in reason.lower()
     assert calls == ["POST", "GET", "POST"]
+    assert timeouts == [1.0, hook.EXPIRY_CLEANUP_TIMEOUT_SECONDS]
 
 
 def test_error_response_from_hook_is_explicit_codex_deny(monkeypatch, capsys) -> None:

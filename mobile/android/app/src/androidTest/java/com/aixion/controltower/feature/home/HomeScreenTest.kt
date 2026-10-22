@@ -74,4 +74,18 @@ class HomeScreenTest {
         composeRule.onNodeWithText("See all approvals").performClick()
         composeRule.runOnIdle { assertEquals(true, openedApprovals) }
     }
+
+    @Test
+    fun connectionPanelExplainsLocalRequirementAndOpensPlatformSetup() {
+        var opened = false
+        composeRule.setContent {
+            HomeAgentConnectionPanel(onOpenConnect = { opened = true })
+        }
+
+        composeRule.onNodeWithText("Connect an agent").assertExists()
+        composeRule.onNodeWithText("Keep that computer online while approvals are pending.", substring = true)
+            .assertExists()
+        composeRule.onNodeWithText("Connect platform").performClick()
+        composeRule.runOnIdle { assertTrue(opened) }
+    }
 }

@@ -260,6 +260,7 @@ def test_hook_denies_when_consume_commits_but_response_is_lost_and_retry_replays
         request_agent_id: str,
         request_token: str,
         body: dict | None = None,
+        **_kwargs: object,
     ) -> dict:
         assert request_agent_id == agent_id
         assert request_token == token
@@ -675,7 +676,7 @@ def test_antigravity_hook_denies_when_real_api_poll_expires_request(monkeypatch)
     approval_ids: list[str] = []
 
     def request(method: str, url: str, request_agent_id: str, request_token: str,
-                body: dict | None = None) -> dict:
+                body: dict | None = None, **_kwargs: object) -> dict:
         path = urlparse(url).path
         calls.append(f"{method} {path}")
         response = client.request(

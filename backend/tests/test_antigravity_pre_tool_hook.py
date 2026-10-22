@@ -111,7 +111,7 @@ def test_invalid_session_identity_denies_before_credentials_or_network(identity_
 def test_valid_session_fallback_is_preserved_exactly() -> None:
     created_body: dict = {}
 
-    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
@@ -218,7 +218,7 @@ def test_read_only_tool_targets_secret_path_and_requires_mobile_approval(tool_na
     calls: list[str] = []
     created_body: dict = {}
 
-    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         calls.append(method)
         if method == "POST":
@@ -285,7 +285,7 @@ def test_read_only_tool_with_non_secret_path_still_passes_through(tool_name: str
 def test_unknown_tool_requires_mobile_approval_then_allows_exact_snapshot() -> None:
     created_body: dict = {}
 
-    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         assert agent_id == ENV["AIXION_AGENT_ID"]
         assert token == ENV["AIXION_AGENT_TOKEN"]
@@ -317,7 +317,7 @@ def test_unknown_tool_requires_mobile_approval_then_allows_exact_snapshot() -> N
 def test_duplicate_approval_delivery_claim_denies_tool() -> None:
     created_body: dict = {}
 
-    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         if method == "POST" and url.endswith("/consume"):
             return {"consumed": False}
@@ -347,7 +347,7 @@ def test_ambiguous_delivery_claim_response_denies_without_retry() -> None:
     calls: list[str] = []
     created_body: dict = {}
 
-    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         if method == "POST" and url.endswith("/consume"):
             calls.append("consume")
@@ -383,7 +383,7 @@ def test_revoked_connector_at_consume_denies_approved_tool_call() -> None:
     calls: list[str] = []
     created_body: dict = {}
 
-    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         if method == "POST" and url.endswith("/consume"):
             calls.append("consume")
@@ -418,7 +418,7 @@ def test_ambiguous_delivery_claim_is_reported_without_allowing_tool() -> None:
     created_body: dict = {}
     failure_body: dict = {}
 
-    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body, failure_body
         if method == "POST" and url.endswith("/consume"):
             calls.append("consume")
@@ -460,7 +460,7 @@ def test_restart_retry_can_resume_existing_approved_invocation() -> None:
     calls: list[str] = []
     approved: dict = {}
 
-    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal approved
         calls.append(method)
         if method == "POST" and url.endswith("/consume"):
@@ -493,7 +493,7 @@ def test_sensitive_tool_without_step_identity_is_denied_before_network() -> None
 
 
 def test_denied_mobile_decision_blocks_tool() -> None:
-    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         if method == "POST":
             return {"id": "approval-test", "status": "PENDING_REVIEW"}
         return {"status": "DENIED", "approved_payload_hash": None}
@@ -507,7 +507,7 @@ def test_network_failure_while_waiting_emits_an_explicit_deny(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         if method == "POST":
             return {
                 **(body or {}),
@@ -548,7 +548,7 @@ def test_ambiguous_decision_poll_reconnects_and_resumes_same_approval() -> None:
     get_calls = 0
     calls: list[tuple[str, str]] = []
 
-    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body, get_calls
         calls.append((method, url))
         if method == "POST" and url.endswith("/consume"):
@@ -588,7 +588,7 @@ def test_repeated_ambiguous_decision_polls_back_off_and_expire_fail_closed() -> 
     sleeps: list[int] = []
     clock = [0.0]
 
-    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append((method, url))
         if method == "POST" and url.endswith("/agents/approvals"):
             return {
@@ -638,7 +638,7 @@ def test_repeated_ambiguous_decision_polls_back_off_and_expire_fail_closed() -> 
 def test_approval_poll_identity_mismatch_cannot_authorize_tool() -> None:
     created_body: dict = {}
 
-    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
@@ -667,7 +667,7 @@ def test_approval_poll_identity_mismatch_cannot_authorize_tool() -> None:
 def test_approval_created_for_different_invocation_is_not_polled() -> None:
     calls: list[str] = []
 
-    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append(method)
         if method == "POST":
             return {
@@ -680,7 +680,7 @@ def test_approval_created_for_different_invocation_is_not_polled() -> None:
             }
         raise AssertionError("A mismatched approval must not be polled")
 
-    def mismatched_request(method: str, url: str, agent_id: str, token: str, body: dict | None = None) -> dict:
+    def mismatched_request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         record = request(method, url, agent_id, token, body)
         if method == "POST":
             record["files"][0]["diff"] = '{"CommandLine":"echo different"}'
@@ -700,7 +700,7 @@ def test_approval_created_for_different_invocation_is_not_polled() -> None:
 def test_changed_approved_payload_is_denied_even_with_a_matching_hash() -> None:
     created_body: dict = {}
 
-    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
@@ -729,7 +729,7 @@ def test_changed_approved_payload_is_denied_even_with_a_matching_hash() -> None:
 def test_creation_response_with_wrong_project_is_not_polled() -> None:
     calls: list[str] = []
 
-    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append(method)
         return {
             **(body or {}),
@@ -754,7 +754,7 @@ def test_rate_limited_decision_poll_retries_after_server_delay() -> None:
     created_body: dict = {}
     get_calls = 0
 
-    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body, get_calls
         if method == "POST" and url.endswith("/consume"):
             return {"consumed": True}
@@ -814,7 +814,7 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
     calls: list[tuple[str, str]] = []
     created_body: dict = {}
 
-    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         calls.append((method, url))
         if method == "POST" and url.endswith("/agents/approvals"):
@@ -848,7 +848,7 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
 
     with (
         patch.object(hook, "_request", side_effect=request),
-        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 0.0, 2.0]),
+        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 1.2, 1.2, 1.2]),
         patch.object(hook.time, "sleep"),
     ):
         result = _call_hook(
@@ -864,7 +864,7 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
 def test_approval_received_after_host_deadline_is_denied() -> None:
     created_body: dict = {}
 
-    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
@@ -880,7 +880,7 @@ def test_approval_received_after_host_deadline_is_denied() -> None:
 
     with (
         patch.object(hook, "_request", side_effect=request),
-        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 2.0]),
+        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 2.0, 2.0]),
     ):
         result = _call_hook(
             {"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe"}}},
@@ -895,7 +895,7 @@ def test_approval_racing_with_timeout_is_denied() -> None:
     created_body: dict = {}
     calls: list[str] = []
 
-    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal created_body
         calls.append(method)
         if method == "POST" and not url.endswith("/expire"):
@@ -923,7 +923,7 @@ def test_approval_racing_with_timeout_is_denied() -> None:
 
     with (
         patch.object(hook, "_request", side_effect=request),
-        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 2.0]),
+        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 1.2, 1.2, 1.2]),
     ):
         result = _call_hook(
             {"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe"}}},

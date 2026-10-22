@@ -117,7 +117,7 @@ def test_run_consumes_the_approved_invocation_before_returning_allow(
     calls: list[tuple[str, str, dict | None]] = []
     created_approval: dict = {}
 
-    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         assert agent_id == "agent-123"
         assert token == "test-token"
         calls.append((method, url, body))
@@ -151,7 +151,7 @@ def test_run_denial_never_consumes_or_allows_the_invocation(
     calls: list[tuple[str, str]] = []
     created_approval: dict = {}
 
-    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append((method, url))
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None
@@ -176,7 +176,7 @@ def test_run_denies_if_mobile_approval_payload_changes_after_creation(
     calls: list[str] = []
     created_approval: dict = {}
 
-    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append(method)
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None
@@ -206,7 +206,7 @@ def test_run_recovers_lost_create_response_with_identical_invocation_retry(
     calls: list[tuple[str, str, dict | None]] = []
     persisted: dict = {}
 
-    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append((method, url, body))
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None
@@ -260,7 +260,7 @@ def test_run_denies_after_bounded_ambiguous_create_retries(
 ) -> None:
     calls: list[dict] = []
 
-    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         assert method == "POST" and url.endswith("/agents/approvals")
         assert body is not None
         calls.append(body.copy())
@@ -292,7 +292,7 @@ def test_run_denies_create_conflict_or_mismatched_retry_response(
 ) -> None:
     calls = 0
 
-    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal calls
         calls += 1
         assert method == "POST" and url.endswith("/agents/approvals")
@@ -339,7 +339,7 @@ def test_run_reconnects_after_ambiguous_decision_read_then_consumes_once(
     created: dict = {}
     decision_reads = 0
 
-    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         nonlocal decision_reads
         calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
         if method == "POST" and url.endswith("/agents/approvals"):
@@ -375,7 +375,7 @@ def test_run_honors_retry_after_only_until_host_deadline(
     environment = _test_environment()
     environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
 
-    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None
@@ -397,6 +397,197 @@ def test_run_honors_retry_after_only_until_host_deadline(
     assert "POST consume" not in calls
 
 
+def test_pending_poll_sleep_does_not_extend_configured_wait_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    decision_reads = 0
+    calls: list[tuple[str, str, float | None]] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **kwargs: object) -> dict:
+        nonlocal decision_reads
+        timeout = kwargs.get("timeout_seconds")
+        calls.append((method, url.rsplit("/", 1)[-1], timeout if isinstance(timeout, float) else None))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            decision_reads += 1
+            return {**created, "status": "PENDING_REVIEW"}
+        if method == "POST" and url.endswith("/expire"):
+            return {**created, "status": "EXPIRED"}
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert decision_reads == 2
+    assert clock.sleeps == [hook.POLL_INTERVAL_SECONDS, 1]
+    assert clock.now == 103
+    assert calls[1:] == [
+        ("GET", "decision", 3.0),
+        ("GET", "decision", 1.0),
+        ("POST", "expire", 1.0),
+    ]
+    assert not any(method == "POST" and suffix == "consume" for method, suffix, _ in calls)
+
+
+def test_request_uses_the_supplied_transport_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[float] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _size: int) -> bytes:
+            return b"{}"
+
+    class Opener:
+        def open(self, _request: object, timeout: float) -> Response:
+            observed.append(timeout)
+            return Response()
+
+    monkeypatch.setattr(hook.urllib.request, "build_opener", lambda *_args: Opener())
+
+    assert hook._request(
+        "GET", "https://control.example/decision", "agent", "token", timeout_seconds=0.25
+    ) == {}
+    assert observed == [0.25]
+
+    with pytest.raises(hook.GateError, match="outside the allowed range"):
+        hook._request(
+            "GET", "https://control.example/decision", "agent", "token", timeout_seconds=10.01
+        )
+
+
+def test_slow_poll_and_expiry_cleanup_stay_within_deadline_plus_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    timeouts: list[tuple[str, float]] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **kwargs: object) -> dict:
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        timeout = kwargs.get("timeout_seconds")
+        assert isinstance(timeout, float)
+        timeouts.append((url.rsplit("/", 1)[-1], timeout))
+        if method == "GET" and url.endswith("/decision"):
+            clock.now += timeout
+            raise hook.AmbiguousRequestError("read timed out")
+        if method == "POST" and url.endswith("/expire"):
+            clock.now += timeout
+            return {**created, "status": "EXPIRED"}
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert timeouts == [("decision", 3.0), ("expire", 1.0)]
+    assert clock.now - 100.0 == 3 + hook.EXPIRY_CLEANUP_GRACE_SECONDS
+    assert clock.now <= 100.0 + 3 + hook.EXPIRY_CLEANUP_GRACE_SECONDS
+
+
+def test_late_consume_response_cannot_allow_after_host_wait_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    consume_timeouts: list[float] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **kwargs: object) -> dict:
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            clock.now += 2.5
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._payload_hash(approved)
+            return approved
+        if method == "POST" and url.endswith("/consume"):
+            timeout = kwargs.get("timeout_seconds")
+            assert isinstance(timeout, float)
+            consume_timeouts.append(timeout)
+            # Simulate the HTTP call returning after its socket operation timeout.
+            clock.now += timeout + 0.1
+            return {"consumed": True}
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert "after the host wait deadline" in result["reason"]
+    assert consume_timeouts == [pytest.approx(0.5)]
+    assert clock.now > 103
+
+
+@pytest.mark.parametrize(
+    ("consume_finished_at", "expected_report_timeout"),
+    [(103.5, 0.5), (104.1, None)],
+)
+def test_ambiguous_consume_report_uses_only_remaining_cleanup_grace(
+    monkeypatch: pytest.MonkeyPatch,
+    consume_finished_at: float,
+    expected_report_timeout: float | None,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    request_timeouts: list[tuple[str, float]] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **kwargs: object) -> dict:
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._payload_hash(approved)
+            return approved
+        timeout = kwargs.get("timeout_seconds")
+        assert isinstance(timeout, float)
+        request_timeouts.append((url.rsplit("/", 1)[-1], timeout))
+        if method == "POST" and url.endswith("/consume"):
+            clock.now = consume_finished_at
+            raise hook.AmbiguousRequestError("claim response was lost")
+        if method == "POST" and url.endswith("/delivery-failure"):
+            return {"reported": True}
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert "outcome was ambiguous" in result["reason"]
+    assert request_timeouts[0] == ("consume", 3.0)
+    if expected_report_timeout is None:
+        assert request_timeouts == [("consume", 3.0)]
+    else:
+        assert request_timeouts == [
+            ("consume", 3.0),
+            ("delivery-failure", expected_report_timeout),
+        ]
+
+
 def test_run_exhausted_reconnect_wait_expires_and_never_consumes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -406,7 +597,7 @@ def test_run_exhausted_reconnect_wait_expires_and_never_consumes(
     environment = _test_environment()
     environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
 
-    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None

@@ -21,6 +21,8 @@ MAX_ARGUMENTS_BYTES = 48 * 1024
 MAX_CONFIG_BYTES = 16 * 1024
 MAX_POLL_SECONDS = 15 * 60
 POLL_INTERVAL_SECONDS = 2
+REQUEST_TIMEOUT_SECONDS = 10
+EXPIRY_CLEANUP_GRACE_SECONDS = 1
 MAX_RECONNECT_BACKOFF_SECONDS = 10
 MAX_CREATE_ATTEMPTS = 2
 CREATE_RETRY_DELAY_SECONDS = 0.25
@@ -206,7 +208,13 @@ def _request(
     agent_id: str,
     token: str,
     body: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+        raise GateError("Control Tower request timeout is invalid")
+    if not 0 < timeout_seconds <= REQUEST_TIMEOUT_SECONDS:
+        raise GateError("Control Tower request timeout is outside the allowed range")
     payload = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -222,7 +230,7 @@ def _request(
     )
     try:
         opener = urllib.request.build_opener(_NoRedirectHandler())
-        with opener.open(request, timeout=10) as response:
+        with opener.open(request, timeout=timeout_seconds) as response:
             content = response.read(256 * 1024 + 1)
             if len(content) > 256 * 1024:
                 raise AmbiguousRequestError("Control Tower response exceeds the size limit")
@@ -608,9 +616,18 @@ def _run(
 
     deadline = time.monotonic() + approval_timeout_seconds
     reconnect_backoff_seconds = POLL_INTERVAL_SECONDS
-    while time.monotonic() < deadline:
+    while True:
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            break
         try:
-            current = _request("GET", f"{api_base}/agents/approvals/{approval_id}/decision", agent_id, token)
+            current = _request(
+                "GET",
+                f"{api_base}/agents/approvals/{approval_id}/decision",
+                agent_id,
+                token,
+                timeout_seconds=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds),
+            )
         except RateLimitError as exc:
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
@@ -650,34 +667,65 @@ def _run(
         if status == "APPROVED":
             if current.get("approved_payload_hash") != _payload_hash(current):
                 return _decision("deny", "Approved payload integrity check failed")
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                return _decision("deny", "Approval arrived too late to claim before the host wait deadline")
             try:
                 claimed = _request(
-                    "POST", f"{api_base}/agents/approvals/{approval_id}/consume", agent_id, token
+                    "POST",
+                    f"{api_base}/agents/approvals/{approval_id}/consume",
+                    agent_id,
+                    token,
+                    timeout_seconds=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds),
                 )
             except AmbiguousRequestError:
-                _report_delivery_failure(
-                    api_base=api_base,
-                    approval_id=approval_id,
-                    agent_id=agent_id,
-                    token=token,
-                    source_invocation_id=str(current.get("source_invocation_id") or ""),
-                    approved_payload_hash=str(current.get("approved_payload_hash") or ""),
+                cleanup_remaining_seconds = (
+                    deadline + EXPIRY_CLEANUP_GRACE_SECONDS - time.monotonic()
                 )
+                if cleanup_remaining_seconds > 0:
+                    _report_delivery_failure(
+                        api_base=api_base,
+                        approval_id=approval_id,
+                        agent_id=agent_id,
+                        token=token,
+                        source_invocation_id=str(current.get("source_invocation_id") or ""),
+                        approved_payload_hash=str(current.get("approved_payload_hash") or ""),
+                        timeout_seconds=min(REQUEST_TIMEOUT_SECONDS, cleanup_remaining_seconds),
+                    )
                 return _decision("deny", "Approval delivery outcome was ambiguous; tool denied")
             except GateError:
                 return _decision("deny", "Approval delivery could not be claimed safely")
+            if time.monotonic() >= deadline:
+                return _decision("deny", "Approval claim response arrived after the host wait deadline")
             if claimed.get("consumed") is not True:
                 return _decision("deny", "Approval delivery was already claimed")
             return _decision("allow", "Approved from Aixion Control Tower")
         if status not in {"PENDING_REVIEW", "REQUESTED"}:
             return _decision("deny", f"Unrecognized approval state: {status}")
-        time.sleep(POLL_INTERVAL_SECONDS)
+        # Keep polling cadence inside the configured host wait. An unbounded
+        # final interval could otherwise extend a short timeout by up to one
+        # full polling period before the expiry transition is attempted.
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds > 0:
+            time.sleep(min(POLL_INTERVAL_SECONDS, remaining_seconds))
+    # The server also assigns an expiry when the approval is created. Try to
+    # persist the host timeout, but permit at most one second of cleanup grace
+    # after the configured decision-wait deadline. This path always denies.
+    cleanup_remaining_seconds = deadline + EXPIRY_CLEANUP_GRACE_SECONDS - time.monotonic()
+    if cleanup_remaining_seconds <= 0:
+        return _decision("deny", "Approval timed out; expiration could not be confirmed")
     try:
         expired = _request(
-            "POST", f"{api_base}/agents/approvals/{approval_id}/expire", agent_id, token
+            "POST",
+            f"{api_base}/agents/approvals/{approval_id}/expire",
+            agent_id,
+            token,
+            timeout_seconds=min(REQUEST_TIMEOUT_SECONDS, cleanup_remaining_seconds),
         )
     except GateError:
         return _decision("deny", "Approval timed out; expiration could not be confirmed")
+    if time.monotonic() > deadline + EXPIRY_CLEANUP_GRACE_SECONDS:
+        return _decision("deny", "Approval timed out; expiry response arrived after cleanup grace")
     if not _matches_request_identity(
         expired, approval_id=approval_id, project_id=project_id, agent_id=agent_id
     ):
@@ -716,6 +764,7 @@ def _report_delivery_failure(
     token: str,
     source_invocation_id: str,
     approved_payload_hash: str,
+    timeout_seconds: float,
 ) -> None:
     """Best-effort audit only; failure to report can never turn deny into allow."""
     try:
@@ -729,6 +778,7 @@ def _report_delivery_failure(
                 "approved_payload_hash": approved_payload_hash,
                 "reason_code": "CLAIM_RESPONSE_AMBIGUOUS",
             },
+            timeout_seconds=timeout_seconds,
         )
     except GateError:
         return

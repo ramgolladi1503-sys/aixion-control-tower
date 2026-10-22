@@ -1536,6 +1536,99 @@ def test_postgres_agent_run_capability_binding_is_durable_and_idempotent(
     assert revoked_retry.status_code == 409
 
 
+def test_postgres_agent_run_rejects_side_effect_step_before_claim_or_trust_mutation(
+    postgres_agent_run_route_runtime,
+) -> None:
+    """PostgreSQL must not execute a side effect without durable run/trust coupling."""
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        state=state,
+        client=client,
+    )
+    attached = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    assert attached.status_code == 200, attached.text
+
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None
+    steps = repositories.agent_runs.list_steps_for_run(run_id)
+    step = steps[0]
+    # Put the durable fixture at the first externally-effectful step. The route
+    # must reject it before acquiring a worker lease or touching trust state.
+    run.current_step_index = step.sequence
+    run.updated_at = now_utc()
+    step.step_type = AgentRunStepType.CREATE_BRANCH
+    step.status = AgentRunStepStatus.READY
+    step.updated_at = run.updated_at
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (run.updated_at, Jsonb(run.model_dump(mode="json")), run_id, workspace.id),
+        )
+        conn.execute(
+            "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+            "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+            (
+                step.status.value,
+                step.updated_at,
+                Jsonb(step.model_dump(mode="json")),
+                step.id,
+                run_id,
+                workspace.id,
+            ),
+        )
+
+    before_run = repositories.agent_runs.get(run_id)
+    before_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    with connect() as conn:
+        trust_counts_before = conn.execute(
+            "SELECT (SELECT count(*) FROM action_consumptions WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM trust_events WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM policy_decisions WHERE workspace_id=%s)",
+            (workspace.id, workspace.id, workspace.id),
+        ).fetchone()
+        run_events_before = conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s", (run_id,)
+        ).fetchone()[0]
+        audits_before = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s", (run_id,)
+        ).fetchone()[0]
+
+    rejected = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-side-effect-guard", "timeout_seconds": 10},
+    )
+
+    assert rejected.status_code == 409
+    assert "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE" in rejected.json()["detail"]
+    assert repositories.agent_runs.get(run_id) == before_run
+    assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT (SELECT count(*) FROM action_consumptions WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM trust_events WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM policy_decisions WHERE workspace_id=%s)",
+            (workspace.id, workspace.id, workspace.id),
+        ).fetchone() == trust_counts_before
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s", (run_id,)
+        ).fetchone()[0] == run_events_before
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s", (run_id,)
+        ).fetchone()[0] == audits_before
+
+
 def test_postgres_credential_revocation_route_uses_durable_workspace_state(
     postgres_agent_run_route_runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
