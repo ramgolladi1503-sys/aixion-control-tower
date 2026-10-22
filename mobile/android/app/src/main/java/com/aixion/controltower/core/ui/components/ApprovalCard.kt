@@ -12,6 +12,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -31,7 +33,7 @@ fun ApprovalCard(
 ) {
     val palette = LocalTowerPalette.current
     val clickableModifier = if (onClick != null) {
-        modifier.clickable { onClick() }
+        modifier.clickable(role = Role.Button, onClick = onClick)
     } else {
         modifier
     }
@@ -84,6 +86,18 @@ fun ApprovalCard(
             )
             SourceBadge(approval = approval)
             StatusBadge(label = "${approval.files.size} files", color = palette.inkMuted, fontSize = 14.sp, uppercase = false)
+        }
+        if (onClick != null) {
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+            Text(
+                text = "Review request",
+                color = palette.brand,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                lineHeight = 20.sp,
+                textAlign = TextAlign.End,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }

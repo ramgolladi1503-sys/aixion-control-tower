@@ -5,6 +5,10 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -54,6 +58,28 @@ class ApprovalInboxScreenTest {
         composeRule.onNodeWithText("Regression approval summary").assertExists()
         composeRule.onNodeWithText("Low").assertExists()
         composeRule.onNodeWithText("Pending review").assertExists()
+        composeRule.onAllNodesWithText("Review request").assertCountEquals(3)
+        composeRule.onNodeWithText("Review request").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button)
+        )
+    }
+
+    @Test
+    fun readOnlyInboxCardsDoNotShowReviewAffordance() {
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    refreshing = true,
+                    approvals = listOf(
+                        approval(id = "approval_refreshing", title = "Refreshing approval", status = ApprovalStatus.REQUESTED)
+                    )
+                )
+            )
+        }
+
+        composeRule.onNodeWithText("Refreshing approval").assertExists()
+        composeRule.onAllNodesWithText("Review request").assertCountEquals(0)
     }
 
     @Test
