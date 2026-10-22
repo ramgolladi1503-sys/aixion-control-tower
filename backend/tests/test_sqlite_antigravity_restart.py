@@ -25,6 +25,7 @@ HOOK_PATH = (
 def _serve_sqlite_approval_api(
     status_queue: multiprocessing.queues.Queue,
     stop_event: multiprocessing.synchronize.Event,
+    requested_port: int = 0,
 ) -> None:
     """Serve the real app with a process-local, test-owned SQLite database."""
     import uvicorn
@@ -40,7 +41,7 @@ def _serve_sqlite_approval_api(
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", 0))
+    listener.bind(("127.0.0.1", requested_port))
     listener.listen(128)
     port = listener.getsockname()[1]
     config = uvicorn.Config(
@@ -102,6 +103,8 @@ def _sanitized_test_environment(db_path: Path) -> dict[str, str]:
 
 def _start_sqlite_approval_api(
     db_path: Path,
+    *,
+    port: int = 0,
 ) -> tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]:
     """Start a real API subprocess and wait for its health endpoint."""
     process_context = multiprocessing.get_context("spawn")
@@ -113,7 +116,7 @@ def _start_sqlite_approval_api(
         os.environ.update(_sanitized_test_environment(db_path))
         process = process_context.Process(
             target=_serve_sqlite_approval_api,
-            args=(status_queue, stop_event),
+            args=(status_queue, stop_event, port),
         )
         process.start()
     finally:
@@ -315,6 +318,190 @@ def test_antigravity_invocation_recovers_once_after_sqlite_api_process_restart(
                     (event_type, approval_id),
                 ).fetchone()[0] == 1
     finally:
+        for server in reversed(servers):
+            if server[0].is_alive():
+                _stop_sqlite_approval_api(server)
+
+
+@pytest.mark.parametrize(
+    ("decision_value", "expected_decision", "expected_claims"),
+    [
+        ("approve", "allow", 1),
+        ("deny", "deny", 0),
+    ],
+)
+def test_blocked_antigravity_invocation_survives_sqlite_api_restart(
+    tmp_path: Path,
+    decision_value: str,
+    expected_decision: str,
+    expected_claims: int,
+) -> None:
+    """A waiting real hook reconnects to the same durable request after restart."""
+    import threading
+
+    db_path = tmp_path / f"blocked-hook-{decision_value}-restart.sqlite3"
+    db_path.parent.chmod(0o700)
+    servers: list[
+        tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]
+    ] = []
+    hook = _hook_module()
+    waiting_on_pending_decision = threading.Event()
+    hook_result: dict[str, Any] = {}
+    hook_error: dict[str, BaseException] = {}
+    hook_thread: threading.Thread | None = None
+
+    def start_server(port: int = 0):
+        handle = _start_sqlite_approval_api(db_path, port=port)
+        servers.append(handle)
+        return handle
+
+    try:
+        first_server = start_server()
+        with httpx.Client(timeout=10) as client:
+            project_response = client.post(
+                f"{first_server[2]}/projects",
+                json={"name": "SQLite in-flight restart project"},
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
+            agent_response = client.post(
+                f"{first_server[2]}/agents",
+                json={
+                    "provider": "ANTIGRAVITY",
+                    "display_name": "SQLite in-flight restart hook",
+                    "auth_type": "API_KEY",
+                    "allowed_project_ids": [project_id],
+                    "allowed_actions": [
+                        "CREATE_APPROVAL",
+                        "READ_APPROVAL_DECISION",
+                        "CONSUME_APPROVAL_DECISION",
+                        "REPORT_APPROVAL_DELIVERY_FAILURE",
+                        "EXPIRE_OWN_APPROVAL",
+                    ],
+                    "enabled": True,
+                },
+            )
+            assert agent_response.status_code == 200, agent_response.text
+            agent_body = agent_response.json()
+
+        invocation_payload = {
+            "conversationId": f"sqlite-inflight-{decision_value}",
+            "stepIdx": 3,
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "echo restart-in-flight"},
+            },
+        }
+        environment = {
+            "AIXION_API_BASE_URL": first_server[2],
+            "AIXION_AGENT_ID": agent_body["agent"]["id"],
+            "AIXION_AGENT_TOKEN": agent_body["agent_token"],
+            "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+            "AIXION_PROJECT_ID": project_id,
+            "AIXION_APPROVAL_TIMEOUT_SECONDS": "20",
+        }
+        real_request = hook._request
+        approval_identity: dict[str, str] = {}
+
+        def observe_real_request(
+            method: str,
+            url: str,
+            request_agent_id: str,
+            request_token: str,
+            body: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            response = real_request(
+                method, url, request_agent_id, request_token, body
+            )
+            path = urlparse(url).path
+            if method == "POST" and path == "/agents/approvals":
+                approval_identity["id"] = str(response["id"])
+                approval_identity["invocation_id"] = str(
+                    response["source_invocation_id"]
+                )
+            elif (
+                method == "GET"
+                and path.endswith("/decision")
+                and response.get("status") == "PENDING_REVIEW"
+            ):
+                waiting_on_pending_decision.set()
+            return response
+
+        def run_hook() -> None:
+            try:
+                hook_result["value"] = hook.run(
+                    invocation_payload, environment
+                )
+            except BaseException as error:
+                hook_error["error"] = error
+
+        with patch.object(hook, "_request", side_effect=observe_real_request):
+            hook_thread = threading.Thread(target=run_hook, daemon=True)
+            hook_thread.start()
+            assert waiting_on_pending_decision.wait(timeout=10), (
+                "hook never reached a real pending-decision poll"
+            )
+            assert approval_identity.get("id"), "hook did not create an approval"
+
+            first_port = int(urlparse(first_server[2]).port or 0)
+            _stop_sqlite_approval_api(first_server)
+            time.sleep(0.7)
+            second_server = start_server(first_port)
+            assert second_server[2] == first_server[2]
+
+            with httpx.Client(timeout=10) as client:
+                decision_response = client.post(
+                    f"{second_server[2]}/approvals/{approval_identity['id']}/decision",
+                    json={
+                        "decision": decision_value,
+                        "reason": "test decision after API process restart",
+                    },
+                )
+            assert decision_response.status_code == 200, decision_response.text
+            hook_thread.join(timeout=15)
+
+        assert hook_thread is not None and not hook_thread.is_alive(), (
+            "hook did not finish within the bounded test deadline"
+        )
+        assert not hook_error, f"hook raised unexpectedly: {hook_error}"
+        assert hook_result.get("value", {}).get("decision") == expected_decision
+
+        with sqlite3.connect(db_path) as connection:
+            approvals = connection.execute(
+                "SELECT entity_id,json_extract(payload,'$.status'),"
+                "json_extract(payload,'$.source_invocation_id') FROM kv_store "
+                "WHERE entity_type='approval_request' "
+                "AND json_extract(payload,'$.source_agent_id')=? "
+                "AND json_extract(payload,'$.source_invocation_id')=?",
+                (
+                    agent_body["agent"]["id"],
+                    approval_identity["invocation_id"],
+                ),
+            ).fetchall()
+            assert len(approvals) == 1
+            assert approvals[0][0] == approval_identity["id"]
+            expected_status = "APPROVED" if decision_value == "approve" else "DENIED"
+            assert approvals[0][1] == expected_status
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (approval_identity["id"],),
+            ).fetchone()[0] == expected_claims
+            for event_type in ("approval.created_by_agent", "approval.decision"):
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
+                    "AND json_extract(payload,'$.event_type')=? "
+                    "AND json_extract(payload,'$.entity_id')=?",
+                    (event_type, approval_identity["id"]),
+                ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
+                "AND json_extract(payload,'$.event_type')='approval.delivery_claimed' "
+                "AND json_extract(payload,'$.entity_id')=?",
+                (approval_identity["id"],),
+            ).fetchone()[0] == expected_claims
+    finally:
+        if hook_thread is not None and hook_thread.is_alive():
+            hook_thread.join(timeout=5)
         for server in reversed(servers):
             if server[0].is_alive():
                 _stop_sqlite_approval_api(server)
