@@ -8,6 +8,7 @@ from typing import Protocol
 import psycopg
 from psycopg.types.json import Jsonb
 
+from .agent_run_models import AgentRun
 from .agent_task_models import (
     AgentTask,
     AgentTaskEvent,
@@ -85,6 +86,7 @@ class ApprovalDecisionCommit:
     linked_task_event: AgentTaskEvent | None = None
     linked_task_audit_event: AuditEvent | None = None
     linked_task_notification: Notification | None = None
+    linked_run: AgentRun | None = None
 
 
 @dataclass(frozen=True)
@@ -429,6 +431,7 @@ class ApprovalDecisionRepository(Protocol):
         updated_approval: ApprovalRequest,
         audit_event: AuditEvent,
         decision_notification: Notification,
+        run_repository: object | None = None,
     ) -> ApprovalDecisionCommit: ...
 
 
@@ -1014,6 +1017,7 @@ class SQLiteApprovalDecisionRepository:
         updated_approval: ApprovalRequest,
         audit_event: AuditEvent,
         decision_notification: Notification,
+        run_repository: object | None = None,
     ) -> ApprovalDecisionCommit:
         if (
             expected_approval.id != approval_id
@@ -1843,6 +1847,7 @@ class PostgresApprovalDecisionRepository:
         updated_approval: ApprovalRequest,
         audit_event: AuditEvent,
         decision_notification: Notification,
+        run_repository: object | None = None,
     ) -> ApprovalDecisionCommit:
         self._validate_decision(
             approval_id=approval_id,
@@ -1906,6 +1911,7 @@ class PostgresApprovalDecisionRepository:
             linked_task_event: AgentTaskEvent | None = None
             linked_task_audit_event: AuditEvent | None = None
             linked_task_notification: Notification | None = None
+            linked_run: AgentRun | None = None
             if linked_rows:
                 task_id, task_workspace_id, task_status_value, task_payload = linked_rows[0]
                 durable_task = AgentTask.model_validate(task_payload)
@@ -2029,6 +2035,48 @@ class PostgresApprovalDecisionRepository:
                     Jsonb(decision_notification.model_dump(mode="json")),
                 ),
             )
+            if updated_approval.status == ApprovalStatus.APPROVED and updated_task is not None:
+                from .agent_run_creation import build_agent_run_creation_records
+                from .agent_run_models import AgentRunCreate
+                from .agent_run_repository import (
+                    AgentRunRepositoryConflict,
+                    PostgresAgentRunRepository,
+                )
+
+                if not isinstance(run_repository, PostgresAgentRunRepository):
+                    raise ApprovalDecisionConflict(
+                        "PostgreSQL approval of a linked AgentTask requires its durable run repository."
+                    )
+                if run_repository._connect is not self._connect:
+                    raise ApprovalDecisionConflict(
+                        "Approval and AgentRun repositories must share the same PostgreSQL connection factory."
+                    )
+                records = build_agent_run_creation_records(
+                    task=updated_task,
+                    approval=updated_approval,
+                    payload=AgentRunCreate(
+                        task_id=updated_task.id,
+                        metadata={
+                            "scheduled_from": "approval_decision",
+                            "approval_decision_actor": audit_event.actor,
+                        },
+                    ),
+                    actor=audit_event.actor,
+                )
+                try:
+                    run_repository.create_in_transaction(
+                        conn,
+                        run=records.run,
+                        steps=records.steps,
+                        events=records.events,
+                        audit=records.audit,
+                        scheduled_audit=records.scheduled_audit,
+                    )
+                except (AgentRunRepositoryConflict, psycopg.errors.UniqueViolation) as exc:
+                    raise ApprovalDecisionConflict(
+                        "Linked AgentRun could not be scheduled with the approval decision."
+                    ) from exc
+                linked_run = records.run
 
         return ApprovalDecisionCommit(
             linked_task=updated_task,
@@ -2036,6 +2084,7 @@ class PostgresApprovalDecisionRepository:
             linked_task_event=linked_task_event,
             linked_task_audit_event=linked_task_audit_event,
             linked_task_notification=linked_task_notification,
+            linked_run=linked_run,
         )
 
     @staticmethod

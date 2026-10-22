@@ -22,6 +22,7 @@ from app.agent_task_models import (
     AgentTaskStatus,
 )
 from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
+from app.agent_run_repository import PostgresAgentRunRepository
 from app.approval_integrity import compute_approval_payload_hash
 from app.approval_expiry import expire_approval
 from app.approval_repository import (
@@ -56,6 +57,7 @@ class ApprovalRepositoryCase:
     connect: Callable[[], object]
     repository: ApprovalDecisionRepository
     task_repository: SQLiteAgentTaskRepository | PostgresAgentTaskRepository
+    run_repository: PostgresAgentRunRepository | None
     workspace: Workspace
     project: Project
 
@@ -97,6 +99,7 @@ def approval_case(request, tmp_path: Path) -> Iterator[ApprovalRepositoryCase]:
             connect=connect,
             repository=SQLiteApprovalDecisionRepository(connect),
             task_repository=SQLiteAgentTaskRepository(connect),
+            run_repository=None,
             workspace=workspace,
             project=project,
         )
@@ -130,6 +133,7 @@ def approval_case(request, tmp_path: Path) -> Iterator[ApprovalRepositoryCase]:
             connect=connect,
             repository=PostgresApprovalDecisionRepository(connect),
             task_repository=PostgresAgentTaskRepository(connect),
+            run_repository=PostgresAgentRunRepository(connect),
             workspace=workspace,
             project=project,
         )
@@ -479,6 +483,7 @@ def test_decision_commits_linked_task_audit_and_notifications_across_adapters(
             entity_id=approval.id,
             workspace_id=approval.workspace_id,
         ),
+        run_repository=approval_case.run_repository,
     )
 
     persisted_task = approval_case.task_repository.get(task.id)
@@ -487,7 +492,12 @@ def test_decision_commits_linked_task_audit_and_notifications_across_adapters(
     assert persisted_task == result.linked_task
     assert len(approval_case.task_repository.list_events(task.id, workspace_id=task.workspace_id)) == 1
     assert approval_case.repository.get(approval.id) == updated
-    assert _count(approval_case, "audit_event") == 3
+    expected_audits = (
+        5
+        if approval_case.backend == "postgres" and decision_status == ApprovalStatus.APPROVED
+        else 3
+    )
+    assert _count(approval_case, "audit_event") == expected_audits
     assert _count(approval_case, "notification") == 3
 
 

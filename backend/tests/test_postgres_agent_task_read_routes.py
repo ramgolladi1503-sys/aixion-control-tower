@@ -249,7 +249,7 @@ def test_postgres_approval_decision_schedules_linked_run_in_postgres(
     assert {event.id for event in store.audit_events} == before_audit_ids
 
 
-def test_postgres_recovery_repairs_interrupted_approval_propagation(
+def test_postgres_recovery_is_idempotent_after_interrupted_route_propagation(
     postgres_agent_task_route_runtime, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connect, workspace, project = postgres_agent_task_route_runtime
@@ -286,11 +286,13 @@ def test_postgres_recovery_repairs_interrupted_approval_propagation(
     approval_repository = main.app.state.approval_decision_repository
     task_repository = main.app.state.agent_task_repository
     run_repository = main.app.state.agent_run_repository
+    # Approval, task, notification, audit and initial run committed atomically.
+    # Recovery therefore has no stranded decision to repair after route failure.
     assert reconcile_linked_approval_tasks(
         approval_repository=approval_repository,
         task_repository=task_repository,
         run_repository=run_repository,
-    ) == 1
+    ) == 0
     run = run_repository.get_active_for_task(task["id"])
     assert run is not None and run.approval_request_id == approval_id
     assert task_repository.get(task["id"]).status.value == "APPROVED"
@@ -345,6 +347,15 @@ def test_postgres_recovery_failure_is_observable_and_retry_is_idempotent(
     assert decision.status_code == 500
     monkeypatch.setattr(main, "propagate_approval_decision_to_agent_task", original_propagator)
 
+    # Model a pre-atomic legacy row state: the decision committed but its
+    # initial run was absent. Recovery remains available for these records.
+    with _connect() as conn:
+        conn.execute("DELETE FROM agent_run_events WHERE task_id=%s", (task["id"],))
+        conn.execute("DELETE FROM agent_run_steps WHERE task_id=%s", (task["id"],))
+        # Audit rows are append-only and intentionally remain as evidence of
+        # the legacy run that this fixture removes.
+        conn.execute("DELETE FROM agent_runs WHERE task_id=%s", (task["id"],))
+
     approval_repository = main.app.state.approval_decision_repository
     task_repository = main.app.state.agent_task_repository
     run_repository = main.app.state.agent_run_repository
@@ -393,7 +404,7 @@ def test_postgres_recovery_failure_is_observable_and_retry_is_idempotent(
             "SELECT count(*) FROM audit_events WHERE entity_type='agent_task' "
             "AND entity_id=%s AND event_type='agent_task.run_scheduled'",
             (task["id"],),
-        ).fetchone()[0] == 1
+        ).fetchone()[0] == 2  # the removed legacy run's immutable audit remains
 
     assert reconcile_linked_approval_tasks(
         approval_repository=approval_repository,

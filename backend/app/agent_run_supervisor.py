@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
 from .agent_run_faults import InjectedAgentRunFault, default_fault_reason, raise_if_fault_configured
+from .agent_run_creation import build_agent_run_creation_records
 from .agent_run_models import (
-    DEFAULT_AGENT_RUN_STEPS,
     AgentRun,
     AgentRunCreate,
     AgentRunEvent,
@@ -167,99 +166,19 @@ def create_agent_run(
     if existing is not None:
         return existing
 
-    run = AgentRun(
-        task_id=task.id,
-        workspace_id=task.workspace_id,
-        approval_request_id=approval.id,
-        project_id=task.project_id,
-        repository=task.repository,
-        objective=task.goal,
-        correlation_id=payload.correlation_id or f"corr_{secrets.token_hex(12)}",
-        max_attempts_per_step=payload.max_attempts_per_step,
-        metadata={
-            **payload.metadata,
-            "provider": str(task.provider),
-            "source_task_id": task.source_task_id,
-            "source_session_id": task.source_session_id,
-            "branch_preference": task.branch_preference,
-        },
-    )
-    steps: list[AgentRunStep] = []
-    events: list[AgentRunEvent] = []
-    for index, step_type in enumerate(DEFAULT_AGENT_RUN_STEPS):
-        step = AgentRunStep(
-            run_id=run.id,
-            task_id=task.id,
-            sequence=index,
-            step_type=step_type,
-            status=AgentRunStepStatus.READY if index == 0 else AgentRunStepStatus.PENDING,
-            max_attempts=payload.max_attempts_per_step,
-            idempotency_key=f"{run.id}:{index}:{step_type.value}",
-        )
-        steps.append(step)
-        if index == 0:
-            run.current_step_id = step.id
-            events.append(
-                AgentRunEvent(
-                    run_id=run.id,
-                    task_id=run.task_id,
-                    step_id=step.id,
-                    correlation_id=run.correlation_id,
-                    event_type=AgentRunEventType.STEP_READY,
-                    new_status=step.status.value,
-                    message="First Mission Control step is ready.",
-                    actor=actor,
-                    attempt_number=step.attempt_count,
-                )
-            )
-
-    events.append(
-        AgentRunEvent(
-            run_id=run.id,
-            task_id=run.task_id,
-            correlation_id=run.correlation_id,
-            event_type=AgentRunEventType.RUN_CREATED,
-            new_status=run.status.value,
-            message="Durable Mission Control run created from an approved AgentTask.",
-            actor=actor,
-            metadata={"step_count": len(DEFAULT_AGENT_RUN_STEPS)},
-        )
-    )
-    audit = AuditEvent(
-        event_type="agent_run.created",
-        entity_id=run.id,
-        workspace_id=run.workspace_id,
+    records = build_agent_run_creation_records(
+        task=task,
+        approval=approval,
+        payload=payload,
         actor=actor,
-        details={
-            "task_id": run.task_id,
-            "approval_request_id": run.approval_request_id,
-            "correlation_id": run.correlation_id,
-            "step_count": len(steps),
-        },
     )
-    scheduled_audit = None
-    if payload.metadata.get("scheduled_from") in {
-        "approval_decision",
-        "approval_recovery",
-    }:
-        scheduled_audit = AuditEvent(
-            event_type="agent_task.run_scheduled",
-            entity_id=task.id,
-            workspace_id=task.workspace_id,
-            actor=actor,
-            details={
-                "agent_run_id": run.id,
-                "approval_request_id": approval.id,
-                "run_status": run.status,
-            },
-        )
     try:
         active_run_repository.create(
-            run=run,
-            steps=steps,
-            events=events,
-            audit=audit,
-            scheduled_audit=scheduled_audit,
+            run=records.run,
+            steps=records.steps,
+            events=records.events,
+            audit=records.audit,
+            scheduled_audit=records.scheduled_audit,
         )
     except AgentRunRepositoryConflict as error:
         existing = active_run_repository.get_active_for_task(task.id)
@@ -267,10 +186,12 @@ def create_agent_run(
             return existing
         raise AgentRunConflict(str(error)) from error
     if isinstance(active_run_repository, SQLiteAgentRunRepository):
-        store.project_agent_run_creation(run, steps, events, audit)
-        if scheduled_audit is not None:
-            store.audit_events.append(scheduled_audit)
-    return run
+        store.project_agent_run_creation(
+            records.run, records.steps, records.events, records.audit
+        )
+        if records.scheduled_audit is not None:
+            store.audit_events.append(records.scheduled_audit)
+    return records.run
 
 
 def acquire_run_lease(

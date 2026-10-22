@@ -2439,80 +2439,111 @@ class PostgresAgentRunRepository:
             )
         try:
             with self._connect() as conn:
-                parent = conn.execute(
-                    "SELECT task.payload,project.payload,approval.payload "
-                    "FROM agent_tasks AS task "
-                    "JOIN projects AS project ON project.project_id=task.project_id "
-                    "AND project.workspace_id=task.workspace_id "
-                    "JOIN approval_requests AS approval ON approval.approval_id=%s "
-                    "AND approval.project_id=project.project_id "
-                    "AND approval.workspace_id=project.workspace_id "
-                    "WHERE task.task_id=%s AND task.workspace_id=%s "
-                    "AND task.project_id=%s FOR UPDATE OF task FOR KEY SHARE OF project,approval",
-                    (run.approval_request_id, run.task_id, run.workspace_id, run.project_id),
-                ).fetchone()
-                if parent is None:
-                    raise AgentRunRepositoryConflict("Approved task/project/approval scope is missing")
-                _validate_created_task_scope(
+                self.create_in_transaction(
+                    conn,
                     run=run,
-                    task_payload=parent[0],
-                    project_payload=parent[1],
-                    approval_payload=parent[2],
+                    steps=steps,
+                    events=events,
+                    audit=audit,
+                    scheduled_audit=scheduled_audit,
                 )
-                conn.execute(
-                    "INSERT INTO agent_runs(run_id,task_id,project_id,workspace_id,approval_id,status,"
-                    "current_step_id,lease_owner,lease_token,lease_expires_at,updated_at,payload) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (
-                        run.id, run.task_id, run.project_id, run.workspace_id,
-                        run.approval_request_id, run.status.value, run.current_step_id,
-                        run.lease_owner, run.lease_token, run.lease_expires_at,
-                        run.updated_at, Jsonb(run.model_dump(mode="json")),
-                    ),
-                )
-                for step in sorted(steps, key=lambda item: item.sequence):
-                    conn.execute(
-                        "INSERT INTO agent_run_steps(step_id,run_id,task_id,workspace_id,sequence,"
-                        "status,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
-                        (
-                            step.id, run.id, step.task_id, run.workspace_id, step.sequence,
-                            step.status.value, step.updated_at, Jsonb(step.model_dump(mode="json")),
-                        ),
-                    )
-                for event in events:
-                    conn.execute(
-                        "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,created_at,"
-                        "event_type,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                        (
-                            event.id, run.id, event.task_id, run.workspace_id,
-                            event.created_at, event.event_type.value,
-                            Jsonb(event.model_dump(mode="json")),
-                        ),
-                    )
-                conn.execute(
-                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
-                    "event_type,actor,details,created_at,payload) "
-                    "VALUES(%s,%s,NULL,'agent_run',%s,%s,%s,%s,%s,%s)",
-                    (
-                        audit.id, run.workspace_id, run.id, audit.event_type, audit.actor,
-                        Jsonb(audit.details), audit.created_at, Jsonb(audit.model_dump(mode="json")),
-                    ),
-                )
-                if scheduled_audit is not None:
-                    conn.execute(
-                        "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
-                        "event_type,actor,details,created_at,payload) "
-                        "VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
-                        (
-                            scheduled_audit.id,
-                            scheduled_audit.workspace_id,
-                            scheduled_audit.entity_id,
-                            scheduled_audit.event_type,
-                            scheduled_audit.actor,
-                            Jsonb(scheduled_audit.details),
-                            scheduled_audit.created_at,
-                            Jsonb(scheduled_audit.model_dump(mode="json")),
-                        ),
-                    )
         except psycopg.errors.UniqueViolation as error:
             raise AgentRunRepositoryConflict("AgentRun creation conflicts with existing durable state") from error
+
+    def create_in_transaction(
+        self,
+        conn: Connection,
+        *,
+        run: AgentRun,
+        steps: list[AgentRunStep],
+        events: list[AgentRunEvent],
+        audit: AuditEvent,
+        scheduled_audit: AuditEvent | None = None,
+    ) -> None:
+        """Create a scheduled run and its evidence inside a caller-owned transaction."""
+        _validate_run_creation(
+            run=run,
+            steps=steps,
+            events=events,
+            audit=audit,
+            scheduled_audit=scheduled_audit,
+        )
+        if not run.workspace_id or not run.project_id or not run.approval_request_id:
+            raise AgentRunRepositoryConflict(
+                "PostgreSQL AgentRun creation requires project, workspace, and approval scope"
+            )
+        parent = conn.execute(
+            "SELECT task.payload,project.payload,approval.payload "
+            "FROM agent_tasks AS task "
+            "JOIN projects AS project ON project.project_id=task.project_id "
+            "AND project.workspace_id=task.workspace_id "
+            "JOIN approval_requests AS approval ON approval.approval_id=%s "
+            "AND approval.project_id=project.project_id "
+            "AND approval.workspace_id=project.workspace_id "
+            "WHERE task.task_id=%s AND task.workspace_id=%s "
+            "AND task.project_id=%s FOR UPDATE OF task FOR KEY SHARE OF project,approval",
+            (run.approval_request_id, run.task_id, run.workspace_id, run.project_id),
+        ).fetchone()
+        if parent is None:
+            raise AgentRunRepositoryConflict("Approved task/project/approval scope is missing")
+        _validate_created_task_scope(
+            run=run,
+            task_payload=parent[0],
+            project_payload=parent[1],
+            approval_payload=parent[2],
+        )
+        conn.execute(
+            "INSERT INTO agent_runs(run_id,task_id,project_id,workspace_id,approval_id,status,"
+            "current_step_id,lease_owner,lease_token,lease_expires_at,updated_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                run.id, run.task_id, run.project_id, run.workspace_id,
+                run.approval_request_id, run.status.value, run.current_step_id,
+                run.lease_owner, run.lease_token, run.lease_expires_at,
+                run.updated_at, Jsonb(run.model_dump(mode="json")),
+            ),
+        )
+        for step in sorted(steps, key=lambda item: item.sequence):
+            conn.execute(
+                "INSERT INTO agent_run_steps(step_id,run_id,task_id,workspace_id,sequence,"
+                "status,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    step.id, run.id, step.task_id, run.workspace_id, step.sequence,
+                    step.status.value, step.updated_at, Jsonb(step.model_dump(mode="json")),
+                ),
+            )
+        for event in events:
+            conn.execute(
+                "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,created_at,"
+                "event_type,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    event.id, run.id, event.task_id, run.workspace_id,
+                    event.created_at, event.event_type.value,
+                    Jsonb(event.model_dump(mode="json")),
+                ),
+            )
+        conn.execute(
+            "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
+            "event_type,actor,details,created_at,payload) "
+            "VALUES(%s,%s,NULL,'agent_run',%s,%s,%s,%s,%s,%s)",
+            (
+                audit.id, run.workspace_id, run.id, audit.event_type, audit.actor,
+                Jsonb(audit.details), audit.created_at, Jsonb(audit.model_dump(mode="json")),
+            ),
+        )
+        if scheduled_audit is not None:
+            conn.execute(
+                "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
+                "event_type,actor,details,created_at,payload) "
+                "VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                (
+                    scheduled_audit.id,
+                    scheduled_audit.workspace_id,
+                    scheduled_audit.entity_id,
+                    scheduled_audit.event_type,
+                    scheduled_audit.actor,
+                    Jsonb(scheduled_audit.details),
+                    scheduled_audit.created_at,
+                    Jsonb(scheduled_audit.model_dump(mode="json")),
+                ),
+            )

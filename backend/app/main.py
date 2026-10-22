@@ -1123,6 +1123,11 @@ def decide_approval(
         # Commit the decision and all linked side effects through the selected
         # repository transaction. Compatibility maps are only projections for
         # the explicitly local SQLite adapter.
+        selected_run_repository = (
+            agent_run_repository_for_request(http_request)
+            if http_request is not None
+            else None
+        )
         try:
             committed = repository.commit_decision(
                 approval_id=approval.id,
@@ -1137,6 +1142,7 @@ def decide_approval(
                     entity_id=candidate.id,
                     workspace_id=decision_workspace_id,
                 ),
+                run_repository=selected_run_repository,
             )
             if publish_compatibility_state:
                 store.approval_requests[candidate.id] = candidate
@@ -1176,9 +1182,7 @@ def decide_approval(
         ),
         approval_repository=repository,
         run_repository=(
-            agent_run_repository_for_request(http_request)
-            if http_request is not None
-            else None
+            selected_run_repository
         ),
     )
     if publish_compatibility_state and committed.linked_task is not None:

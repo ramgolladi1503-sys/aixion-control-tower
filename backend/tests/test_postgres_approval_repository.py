@@ -15,6 +15,7 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app.agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from app.agent_run_repository import AgentRunRepositoryConflict, PostgresAgentRunRepository
 from app import approval_expiry
 from app.approval_integrity import compute_approval_payload_hash
 from app.approval_repository import (
@@ -1422,6 +1423,7 @@ def test_postgres_commit_updates_approval_task_audit_and_outbox_atomically(
         updated_approval=updated,
         audit_event=decision_audit,
         decision_notification=_notification(approval, "atomic"),
+        run_repository=PostgresAgentRunRepository(connect),
     )
 
     assert result.linked_task is not None
@@ -1430,6 +1432,9 @@ def test_postgres_commit_updates_approval_task_audit_and_outbox_atomically(
     assert result.linked_task_event.event_type == AgentTaskEventType.APPROVED
     assert result.linked_task_audit_event is not None
     assert result.linked_task_notification is not None
+    assert result.linked_run is not None
+    assert result.linked_run.task_id == task.id
+    assert result.linked_run.approval_request_id == approval.id
     assert repository.get(approval.id) == updated
     assert repository.latest_decision_audit(
         approval_id=approval.id,
@@ -1476,6 +1481,55 @@ def test_postgres_commit_updates_approval_task_audit_and_outbox_atomically(
                 "UPDATE audit_events SET actor = 'changed' WHERE approval_id = %s",
                 (approval.id,),
             )
+
+
+def test_postgres_approval_rolls_back_when_linked_run_creation_fails(
+    postgres_repository: tuple[
+        PostgresApprovalDecisionRepository, Callable[[], Connection]
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, connect = postgres_repository
+    _, _, approval, task = _seed(connect, with_task=True)
+    assert task is not None
+    updated = _updated_approval(approval, ApprovalStatus.APPROVED)
+    run_repository = PostgresAgentRunRepository(connect)
+
+    def fail_run_creation(*_args, **_kwargs) -> None:
+        raise AgentRunRepositoryConflict("simulated run persistence failure")
+
+    monkeypatch.setattr(run_repository, "create_in_transaction", fail_run_creation)
+    with pytest.raises(ApprovalDecisionConflict, match="could not be scheduled"):
+        repository.commit_decision(
+            approval_id=approval.id,
+            expected_status=ApprovalStatus.REQUESTED,
+            expected_approval=approval,
+            updated_approval=updated,
+            audit_event=_audit(approval, updated, "run_rollback"),
+            decision_notification=_notification(approval, "run_rollback"),
+            run_repository=run_repository,
+        )
+
+    assert repository.get(approval.id) == approval
+    with connect() as conn:
+        task_status = conn.execute(
+            "SELECT status FROM agent_tasks WHERE task_id=%s", (task.id,)
+        ).fetchone()
+        assert task_status == (AgentTaskStatus.WAITING_FOR_APPROVAL.value,)
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s AND event_type='APPROVED'",
+            (task.id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE approval_id=%s", (approval.id,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s OR task_id=%s",
+            (approval.id, task.id),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM agent_runs WHERE task_id=%s", (task.id,)
+        ).fetchone()[0] == 0
 
 
 def test_postgres_decision_refuses_to_overwrite_linked_task_outside_approval_wait(

@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from .agent_run_models import AgentRunCreate
-from .agent_run_repository import AgentRunRepository
+from .agent_run_repository import AgentRunRepository, PostgresAgentRunRepository
 from .agent_run_supervisor import create_agent_run
 from .agent_task_cancel import (
     AgentTaskCancelRequest,
@@ -311,19 +311,30 @@ def propagate_approval_decision_to_agent_task(
         )
 
     if task_status == AgentTaskStatus.APPROVED:
-        run = create_agent_run(
-            AgentRunCreate(
-                task_id=task.id,
-                metadata={
-                    "scheduled_from": "approval_decision",
-                    "approval_decision_actor": actor,
-                },
-            ),
-            actor=actor,
-            task_repository=task_repository,
-            approval_repository=approval_repository,
-            run_repository=run_repository,
-        )
+        if committed is not None and committed.linked_run is not None:
+            run = committed.linked_run
+            if run.task_id != task.id or run.approval_request_id != approval_request.id:
+                raise ApprovalDecisionConflict(
+                    "Committed AgentRun is outside the linked task approval scope."
+                )
+        else:
+            if isinstance(run_repository, PostgresAgentRunRepository):
+                raise ApprovalDecisionConflict(
+                    "PostgreSQL approval commit did not atomically create the linked AgentRun."
+                )
+            run = create_agent_run(
+                AgentRunCreate(
+                    task_id=task.id,
+                    metadata={
+                        "scheduled_from": "approval_decision",
+                        "approval_decision_actor": actor,
+                    },
+                ),
+                actor=actor,
+                task_repository=task_repository,
+                approval_repository=approval_repository,
+                run_repository=run_repository,
+            )
         if committed is None:
             decision_event.metadata = {
                 **decision_event.metadata,
