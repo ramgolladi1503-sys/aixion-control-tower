@@ -8,7 +8,7 @@ from .agent_task_repository import AgentTaskRepository
 from .agent_run_repository import AgentRunRepository
 from .agent_auth_repository import ExternalAgentAuthenticationRepository
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
-from .approval_repository import ApprovalDecisionRepository
+from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
 from .project_repository import ProjectRepository
 from .connector_repository import ConnectorRepository, PostgresConnectorRepository
 from .postgres_external_agent_auth_repository import PostgresExternalAgentAuthRepository
@@ -45,14 +45,26 @@ def approval_decision_repository_for_request(
 ) -> ApprovalDecisionRepository:
     """Return the approval repository explicitly bound to this FastAPI app.
 
-    This app-scoped accessor is separate from the diagnostic PostgreSQL bundle:
-    a PostgreSQL probe must never switch approval routes independently from the
-    rest of the application. The local/test app binds its SQLite adapter here;
-    a future application-store cutover must bind the complete compatible
-    runtime before changing this selection.
+    PostgreSQL auth mode selects the approval adapter from the same lifespan-
+    owned repository bundle. A diagnostic probe without PostgreSQL auth never
+    switches the local/test app away from its explicit SQLite binding.
     """
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        runtime = getattr(state, "postgres_runtime", None)
+        repository = getattr(repositories, "approval_decisions", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(repository, PostgresApprovalDecisionRepository)
+        ):
+            raise RuntimeError(
+                "PostgreSQL approval repository is unavailable or mismatched"
+            )
+        return repository
     repository = getattr(state, "approval_decision_repository", None)
     if repository is None:
         raise RuntimeError("Application approval decision repository is unavailable")

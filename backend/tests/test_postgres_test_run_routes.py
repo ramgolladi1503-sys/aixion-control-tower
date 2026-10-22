@@ -91,9 +91,6 @@ def postgres_test_run_runtime(
             )
         repositories = ApplicationRepositories.from_connector(connect)
         for name, value in {
-            "approval_decision_repository": repositories.approval_decisions,
-            "project_repository": repositories.projects,
-            "workspace_membership_repository": repositories.workspace_membership,
             "postgres_runtime": SimpleNamespace(repositories=repositories),
             "postgres_repositories": repositories,
         }.items():

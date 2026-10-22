@@ -14,6 +14,7 @@ from app.application_repository_access import (
 )
 from app.models import AuthUser, User, UserRole
 from app.application_repositories import ApplicationRepositories
+from app.approval_repository import PostgresApprovalDecisionRepository
 from app.test_run_repository import PostgresTestRunRepository
 from app.workspace_membership_repository import WorkspaceMembershipSnapshot
 
@@ -93,6 +94,59 @@ def test_approval_decision_repository_access_fails_closed_without_binding(
 ) -> None:
     with pytest.raises(RuntimeError, match="approval decision repository is unavailable"):
         approval_decision_repository_for_request(test_request)  # type: ignore[arg-type]
+
+
+def test_approval_repository_uses_matching_postgres_runtime_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PostgresApprovalDecisionRepository(lambda: None)  # type: ignore[arg-type]
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "approval_decisions", repository)
+    runtime = SimpleNamespace(repositories=repositories)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=runtime,
+                postgres_repositories=repositories,
+                approval_decision_repository=object(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert approval_decision_repository_for_request(request) is repository
+
+
+def test_approval_repository_rejects_mismatched_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(
+        repositories,
+        "approval_decisions",
+        PostgresApprovalDecisionRepository(lambda: None),  # type: ignore[arg-type]
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=object()),
+                postgres_repositories=repositories,
+                approval_decision_repository=object(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable or mismatched"):
+        approval_decision_repository_for_request(request)
 
 
 def test_project_repository_access_returns_app_binding() -> None:
