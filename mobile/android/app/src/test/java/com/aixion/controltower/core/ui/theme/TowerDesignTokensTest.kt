@@ -16,6 +16,24 @@ class TowerDesignTokensTest {
     }
 
     @Test
+    fun supportingTypographyMatchesItsRoleAndKeepsLabelsReadable() {
+        val bodySmall = TowerTypography.bodySmall
+        val labelMedium = TowerTypography.labelMedium
+        val labelSmall = TowerTypography.labelSmall
+
+        assertEquals(13.sp, bodySmall.fontSize)
+        assertEquals(19.sp, bodySmall.lineHeight)
+        assertEquals(13.sp, labelMedium.fontSize)
+        assertEquals(18.sp, labelMedium.lineHeight)
+        assertEquals(12.sp, labelSmall.fontSize)
+        assertEquals(16.sp, labelSmall.lineHeight)
+        assertTrue("Labels must remain at least 12sp", labelMedium.fontSize >= 12.sp)
+        assertTrue("Labels must remain at least 12sp", labelSmall.fontSize >= 12.sp)
+        assertTrue("Supporting styles must retain distinct hierarchy", bodySmall != labelMedium)
+        assertTrue("Supporting styles must retain distinct hierarchy", labelMedium != labelSmall)
+    }
+
+    @Test
     fun releaseOneCardAndSpacingTokensFollowTheDesignContract() {
         assertEquals(16.dp, TowerRadius.md)
         assertEquals(16.dp, TowerSpacing.lg)

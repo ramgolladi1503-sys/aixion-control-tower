@@ -108,6 +108,35 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
+    fun historyFiltersWrapWithinNarrowLargeTextLayout() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
+                    ApprovalInboxContent(state = ApprovalsUiState(loading = false, historyLoaded = true))
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+        val filters = listOf("All", "Approved", "Rejected", "Revision requested")
+            .map(composeRule::onNodeWithText)
+        filters.forEach { it.assertExists() }
+
+        composeRule.runOnIdle {
+            filters.forEachIndexed { index, filter ->
+                val bounds = filter.fetchSemanticsNode().boundsInRoot
+                assertTrue("History filter ${index + 1} should be within the narrow viewport", bounds.left >= 0f)
+                assertTrue("History filter ${index + 1} should fit within the narrow viewport", bounds.right <= 240f)
+                assertTrue("History filter ${index + 1} should be visible vertically", bounds.top >= 0f)
+            }
+            assertTrue(
+                "History filters should wrap onto additional rows at narrow width",
+                filters.map { it.fetchSemanticsNode().boundsInRoot.top }.distinct().size > 1
+            )
+        }
+    }
+
+    @Test
     fun readOnlyInboxCardsDoNotShowReviewAffordance() {
         composeRule.setContent {
             ApprovalInboxContent(
