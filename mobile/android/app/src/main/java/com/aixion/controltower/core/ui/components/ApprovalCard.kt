@@ -12,10 +12,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
+import com.aixion.controltower.core.ui.theme.TowerSpacing
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -39,7 +39,7 @@ fun ApprovalCard(
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
             Text(
                 text = approval.projectName,
@@ -51,7 +51,7 @@ fun ApprovalCard(
             )
             RiskBadge(risk = approval.risk, readable = true)
         }
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text(
             text = approval.title,
             color = palette.ink,
@@ -59,9 +59,9 @@ fun ApprovalCard(
             fontWeight = FontWeight.SemiBold,
             lineHeight = 22.sp
         )
-        Spacer(modifier = Modifier.height(7.dp))
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(text = approval.summary, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
-        Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
         val expiryLabel = formatApprovalExpiry(approval.expiresAt)
         Text(
             text = expiryLabel,
@@ -70,10 +70,10 @@ fun ApprovalCard(
             fontWeight = FontWeight.Medium,
             lineHeight = 20.sp
         )
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(TowerSpacing.lg))
         FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
             StatusBadge(
                 label = approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() },

@@ -1,5 +1,7 @@
 package com.aixion.controltower.navigation
 
+import com.aixion.controltower.ConnectLinkIcon
+import com.aixion.controltower.primaryRouteIcon
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -31,6 +33,19 @@ class NavigationDestinationsTest {
         assertEquals(Route.Inbox, primaryRouteFor(Route.Diff.value))
         assertEquals(Route.Connectors, primaryRouteFor(Route.AgentAccess.value))
         assertNull(primaryRouteFor(Route.Command.value))
+    }
+
+    @Test
+    fun protectedDetailRoutesHaveSpecificPageTitles() {
+        assertEquals("Approval Detail", routeTitleFor(Route.ApprovalDetail.value))
+        assertEquals("File changes", routeTitleFor(Route.Diff.value))
+        assertEquals("Agent Access", routeTitleFor("agent_access/antigravity"))
+    }
+
+    @Test
+    fun connectDestinationUsesLinkIcon() {
+        assertEquals(ConnectLinkIcon, primaryRouteIcon(Route.Connectors.value))
+        assertEquals("ConnectLink", primaryRouteIcon(Route.Connectors.value).name)
     }
 
     @Test

@@ -29,7 +29,7 @@ fun TowerPanel(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val palette = LocalTowerPalette.current
-    val shape = RoundedCornerShape(TowerRadius.lg)
+    val shape = RoundedCornerShape(TowerRadius.md)
     val background = if (elevated) palette.surfaceRaised else palette.surface
 
     Column(
@@ -86,8 +86,8 @@ fun TowerSectionHeader(
             Text(
                 text = subtitle,
                 color = palette.inkMuted,
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
+                fontSize = 14.sp,
+                lineHeight = 21.sp,
                 modifier = Modifier.padding(top = 4.dp)
             )
         }

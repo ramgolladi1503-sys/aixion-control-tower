@@ -1,9 +1,12 @@
 package com.aixion.controltower.feature.connectors
 
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -38,6 +41,24 @@ class ConnectorsScreenTest {
         composeRule.onAllNodesWithText("Webhook task intake").assertCountEquals(0)
         composeRule.onAllNodesWithText("Choose a webhook integration").assertCountEquals(0)
         composeRule.onAllNodesWithText("Create connection").assertCountEquals(0)
+    }
+
+    @Test
+    fun setupStepSupportingCopyIsExposedAsReadableSemanticText() {
+        val details = listOf(
+            "Install its Control Tower hook on the computer running your project.",
+            "The computer must stay online so the same agent task can resume.",
+            "Review the exact request, then approve or deny it in the app."
+        )
+        composeRule.setContent { ConnectorsContent() }
+
+        details.forEach { detail ->
+            composeRule.onNodeWithText(detail, useUnmergedTree = true)
+                .performScrollTo()
+                .assertExists()
+                .assertTextEquals(detail)
+                .assertIsDisplayed()
+        }
     }
 
     @Test

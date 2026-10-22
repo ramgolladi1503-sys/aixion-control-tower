@@ -8,7 +8,7 @@ class HomeScreenCopyTest {
     @Test
     fun backendBadgeReportsApiStateWithoutClaimingAgentConnection() {
         assertEquals(
-            "SYNCING",
+            "Syncing",
             homeBackendStatusLabel(
                 loading = true,
                 refreshing = false,
@@ -17,7 +17,7 @@ class HomeScreenCopyTest {
             )
         )
         assertEquals(
-            "SYNC ERROR",
+            "Sync error",
             homeBackendStatusLabel(
                 loading = false,
                 refreshing = false,
@@ -26,7 +26,7 @@ class HomeScreenCopyTest {
             )
         )
         assertEquals(
-            "NOT VERIFIED",
+            "Not verified",
             homeBackendStatusLabel(
                 loading = false,
                 refreshing = false,
@@ -35,7 +35,7 @@ class HomeScreenCopyTest {
             )
         )
         assertEquals(
-            "SYNCING",
+            "Syncing",
             homeBackendStatusLabel(
                 loading = false,
                 refreshing = true,
@@ -44,7 +44,7 @@ class HomeScreenCopyTest {
             )
         )
         assertEquals(
-            "SYNCED",
+            "Synced",
             homeBackendStatusLabel(
                 loading = false,
                 refreshing = false,

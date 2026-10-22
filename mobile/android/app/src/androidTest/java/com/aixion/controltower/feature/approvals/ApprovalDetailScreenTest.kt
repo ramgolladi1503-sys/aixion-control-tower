@@ -195,6 +195,161 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun exactToolReviewAcknowledgementResetsWhenRevisionRequestReopens() {
+        val original = approval(ApprovalStatus.REQUESTED).copy(
+            files = listOf(
+                FileChangeSummary(
+                    path = "codex://tool/shell",
+                    changeType = "tool_call",
+                    diff = "{\"command\":\"echo unchanged\"}",
+                    risk = RiskLevel.HIGH
+                )
+            )
+        )
+        val currentApproval = androidx.compose.runtime.mutableStateOf(original)
+        composeRule.setContent {
+            ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+        }
+
+        composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+
+        composeRule.runOnIdle {
+            currentApproval.value = original.copy(status = ApprovalStatus.REVISION_REQUESTED)
+        }
+        composeRule.onNodeWithText("Approve request").assertDoesNotExist()
+
+        composeRule.runOnIdle { currentApproval.value = original }
+
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+        composeRule.onNodeWithText("Reject").assertIsEnabled()
+    }
+
+    @Test
+    fun highRiskFileApprovalRequiresOpeningAndAcknowledgingFullDiff() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            risk = RiskLevel.HIGH,
+            files = listOf(
+                FileChangeSummary("src/payment.kt", "update", "- old\n+ new", RiskLevel.HIGH)
+            )
+        )
+        var fullDiffOpenCount = 0
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = request,
+                lastActionMessage = null,
+                onOpenDiff = { fullDiffOpenCount += 1 },
+                onApprove = {},
+                onReject = {}
+            )
+        }
+
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+        composeRule.onNodeWithText("Reject").assertIsEnabled()
+        composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement")
+            .performScrollTo()
+            .assertIsNotEnabled()
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+
+        composeRule.onNodeWithTag("approval-full-diff-review")
+            .performScrollTo()
+            .performClick()
+        composeRule.runOnIdle { assertEquals(1, fullDiffOpenCount) }
+        composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement")
+            .performScrollTo()
+            .performClick()
+
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+        composeRule.onNodeWithText("Reject").assertIsEnabled()
+    }
+
+    @Test
+    fun fullDiffReviewAcknowledgementResetsWhenPayloadRiskOrStatusChanges() {
+        val original = approval(ApprovalStatus.REQUESTED).copy(
+            risk = RiskLevel.HIGH,
+            files = listOf(FileChangeSummary("src/payment.kt", "update", "+first", RiskLevel.HIGH))
+        )
+        val currentApproval = androidx.compose.runtime.mutableStateOf(original)
+        composeRule.setContent {
+            ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+        }
+
+        fun openAndAcknowledge() {
+            composeRule.onNodeWithTag("approval-full-diff-review")
+                .performScrollTo()
+                .performClick()
+            composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement")
+                .performScrollTo()
+                .performClick()
+        }
+
+        openAndAcknowledge()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+
+        composeRule.runOnIdle {
+            currentApproval.value = original.copy(
+                files = original.files.map { it.copy(diff = "+changed payload") }
+            )
+        }
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+        openAndAcknowledge()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+
+        composeRule.runOnIdle { currentApproval.value = currentApproval.value.copy(risk = RiskLevel.CRITICAL) }
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+        openAndAcknowledge()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+
+        composeRule.runOnIdle {
+            currentApproval.value = currentApproval.value.copy(status = ApprovalStatus.REVISION_REQUESTED)
+        }
+        composeRule.onNodeWithText("Approve request").assertDoesNotExist()
+        composeRule.runOnIdle { currentApproval.value = currentApproval.value.copy(status = ApprovalStatus.REQUESTED) }
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+        composeRule.onNodeWithText("Reject").assertIsEnabled()
+
+        openAndAcknowledge()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+        composeRule.runOnIdle {
+            currentApproval.value = currentApproval.value.copy(id = "approval-next-invocation")
+        }
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+    }
+
+    @Test
+    fun highRiskToolConfirmationShowsExactToolAndArguments() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            title = "Codex permission: shell",
+            sourceProvider = "CODEX",
+            risk = RiskLevel.HIGH,
+            files = listOf(
+                FileChangeSummary(
+                    path = "codex://tool/shell",
+                    changeType = "tool_call",
+                    diff = "{\"command\":\"echo exact confirmation\"}",
+                    risk = RiskLevel.HIGH
+                )
+            )
+        )
+        composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
+
+        composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText("Approve request").performClick()
+
+        composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
+        composeRule.onNodeWithTag("approval-high-risk-confirmation").assertExists()
+        composeRule.onNodeWithTag("approval-confirmation-tool-path")
+            .assertTextContains("codex://tool/shell")
+        composeRule.onNodeWithTag("approval-confirmation-tool-arguments")
+            .assertTextContains("{\"command\":\"echo exact confirmation\"}")
+        composeRule.onNodeWithText("Approve this request").assertIsEnabled()
+    }
+
+    @Test
     fun ordinaryFileApprovalRetainsFileChangesSection() {
         val request = approval(ApprovalStatus.REQUESTED)
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
@@ -415,6 +570,7 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("main").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Show technical details").performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithText("Approval ID: approval-detail-test", substring = true).assertCountEquals(0)
+        composeRule.onNodeWithText("antigravity:session-codex-42:tool-19").assertExists()
         composeRule.onNodeWithText("Show technical details").performClick()
         composeRule.onNodeWithText("Approval ID: approval-detail-test", substring = true).assertExists()
         composeRule.onNodeWithText("Project ID: project-production", substring = true).assertExists()
@@ -431,11 +587,12 @@ class ApprovalDetailScreenTest {
 
     @Test
     fun approvalDecisionContextIsReachableFromSummaryBeforeDecision() {
+        val longInvocationId = "antigravity:" + "session-42:tool-19/".repeat(12)
         val request = approval(ApprovalStatus.REQUESTED).copy(
             projectName = "Payments service",
             targetBranch = "release/production",
             sourceProvider = "ANTIGRAVITY",
-            sourceInvocationId = "antigravity:session-42:tool-19",
+            sourceInvocationId = longInvocationId,
             verifiedSource = true,
             expiresAt = "2026-10-22T14:30:00Z",
             riskReasons = listOf(
@@ -460,8 +617,7 @@ class ApprovalDetailScreenTest {
             .assertIsDisplayed()
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").performScrollTo()
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").assertIsDisplayed()
-        composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
-        composeRule.onNodeWithText("antigravity:session-42:tool-19").assertIsDisplayed()
+        composeRule.onNodeWithText(longInvocationId).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("2026-10-22T14:30:00Z").performScrollTo()
         composeRule.onNodeWithText("2026-10-22T14:30:00Z").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
@@ -479,11 +635,10 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
-        composeRule.onAllNodesWithText("Not provided").assertCountEquals(3)
+        composeRule.onAllNodesWithText("Not provided").assertCountEquals(4)
         composeRule.onNodeWithText("ANTIGRAVITY · Source not verified").assertExists()
         composeRule.onNodeWithText("No risk rationale was supplied.").assertExists()
-        composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
-        composeRule.onNodeWithText("Source invocation ID: Not provided", substring = true).assertExists()
+        composeRule.onNodeWithText("Invocation").performScrollTo().assertIsDisplayed()
     }
 
     @Test

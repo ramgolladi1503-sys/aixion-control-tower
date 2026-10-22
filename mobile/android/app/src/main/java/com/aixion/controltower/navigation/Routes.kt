@@ -54,6 +54,14 @@ val laterReleaseRoutes = listOf(
 
 val allNavigationRoutes = primaryRoutes + laterReleaseRoutes
 
+/** Title for the current destination, including protected detail routes. */
+fun routeTitleFor(currentRoute: String): String = when {
+    currentRoute == Route.ApprovalDetail.value -> Route.ApprovalDetail.label
+    currentRoute == Route.Diff.value -> "File changes"
+    currentRoute.startsWith("agent_access/") -> Route.AgentAccess.label
+    else -> allNavigationRoutes.firstOrNull { it.value == currentRoute }?.label ?: "Control Tower"
+}
+
 fun primaryRouteFor(currentRoute: String): Route? = when (currentRoute) {
     Route.ApprovalDetail.value, Route.Diff.value -> Route.Inbox
     Route.AgentAccess.value -> Route.Connectors

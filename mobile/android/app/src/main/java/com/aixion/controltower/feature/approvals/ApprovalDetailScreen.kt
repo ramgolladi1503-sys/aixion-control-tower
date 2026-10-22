@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -33,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -41,6 +44,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -193,8 +197,20 @@ fun ApprovalDetailContent(
         !isBlocked && !hasUnsupportedData && decisionBlockReason == null
     val hasRequiredActions = approval.requiredActions.isNotEmpty()
     val hasExactToolRequest = approval.hasExactToolRequestPayload()
-    var exactToolRequestReviewed by remember(approval.id, approval.files) { mutableStateOf(false) }
-    val canApprove = canDecide && !hasRequiredActions && (!hasExactToolRequest || exactToolRequestReviewed)
+    var exactToolRequestReviewed by remember(approval.id, approval.files, approval.risk, approval.status) {
+        mutableStateOf(false)
+    }
+    val requiresFullDiffReview = requiresExplicitRiskConfirmation(approval.risk) &&
+        !hasExactToolRequest && approval.files.isNotEmpty()
+    var fullDiffOpened by rememberSaveable(approval.id, approval.files, approval.risk, approval.status) {
+        mutableStateOf(false)
+    }
+    var fullDiffReviewed by rememberSaveable(approval.id, approval.files, approval.risk, approval.status) {
+        mutableStateOf(false)
+    }
+    val canApprove = canDecide && !hasRequiredActions &&
+        (!hasExactToolRequest || exactToolRequestReviewed) &&
+        (!requiresFullDiffReview || (fullDiffOpened && fullDiffReviewed))
     val requiresRiskConfirmation = requiresExplicitRiskConfirmation(approval.risk)
     var showRiskConfirmation by remember(approval.id) { mutableStateOf(false) }
     var showTechnicalDetails by remember(approval.id) { mutableStateOf(false) }
@@ -301,9 +317,15 @@ fun ApprovalDetailContent(
 
             item {
                 Button(
-                    onClick = onOpenDiff,
+                    onClick = {
+                        if (requiresFullDiffReview) {
+                            fullDiffOpened = true
+                            fullDiffReviewed = false
+                        }
+                        onOpenDiff()
+                    },
                     colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.canvas),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().testTag("approval-full-diff-review")
                 ) { Text("Review Full Diff") }
             }
 
@@ -319,12 +341,24 @@ fun ApprovalDetailContent(
                 items(approval.files) { file -> DiffBlock(file = file) }
             }
 
+            if (requiresFullDiffReview) {
+                item {
+                    FullDiffReviewAcknowledgement(
+                        opened = fullDiffOpened,
+                        checked = fullDiffReviewed,
+                        onCheckedChange = { fullDiffReviewed = it }
+                    )
+                }
+            }
+
         }
 
         if (canDecide || decisionInFlight || decisionNeedsReconciliation) {
             DecisionPanel(
                 canApprove = canApprove,
                 exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
+                fullDiffReviewNeedsReview = requiresFullDiffReview && (!fullDiffOpened || !fullDiffReviewed),
+                fullDiffOpened = fullDiffOpened,
                 canDecide = canDecide,
                 isBlocked = isBlocked,
                 hasUnsupportedData = hasUnsupportedData,
@@ -351,11 +385,36 @@ fun ApprovalDetailContent(
             onDismissRequest = { showRiskConfirmation = false },
             title = { Text("Confirm high-risk approval") },
             text = {
-                Text(
-                    "Action: ${approval.title}\n${approval.summary}\n\n" +
+                Column(
+                    modifier = Modifier
+                        .testTag("approval-high-risk-confirmation")
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text("Action: ${approval.title}\n${approval.summary}")
+                    if (hasExactToolRequest) {
+                        Spacer(modifier = Modifier.height(TowerSpacing.md))
+                        Text("Exact requested tool action", fontWeight = FontWeight.SemiBold)
+                        approval.files.forEach { file ->
+                            Spacer(modifier = Modifier.height(TowerSpacing.xs))
+                            Text(
+                                file.path,
+                                modifier = Modifier.testTag("approval-confirmation-tool-path"),
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                file.diff,
+                                modifier = Modifier.testTag("approval-confirmation-tool-arguments"),
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Text(
                         "Target: ${approval.projectName} · ${approval.targetBranch.ifBlank { "Not provided" }}\n" +
-                        "Risk: ${approval.risk.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}"
-                )
+                            "Risk: ${approval.risk.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}"
+                    )
+                }
             },
             confirmButton = {
                 Button(
@@ -427,6 +486,41 @@ private fun ExactToolRequestReviewAcknowledgement(
         )
         Text(
             text = "I reviewed the exact tool name and arguments above.",
+            color = palette.ink,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
+    }
+}
+
+@Composable
+private fun FullDiffReviewAcknowledgement(
+    opened: Boolean,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val palette = LocalTowerPalette.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("approval-full-diff-review-acknowledgement")
+            .toggleable(
+                value = checked,
+                enabled = opened,
+                role = Role.Checkbox,
+                onValueChange = onCheckedChange
+            )
+            .padding(vertical = TowerSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = null,
+            enabled = opened,
+            modifier = Modifier.testTag("approval-full-diff-reviewed")
+        )
+        Text(
+            text = if (opened) "I reviewed the full file diff above." else "Open the full diff before acknowledging review.",
             color = palette.ink,
             fontSize = 14.sp,
             lineHeight = 20.sp
@@ -545,6 +639,7 @@ private fun ApprovalHeroPanel(
             DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
             DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
             DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
+            DecisionContextLine("Invocation", approval.sourceInvocationId?.ifBlank { null } ?: "Not provided")
             DecisionContextLine("Expires", approval.expiresAt?.ifBlank { null } ?: "Not provided")
         }
     }
@@ -653,6 +748,8 @@ private fun RequiredActionsPanel(actions: List<String>) {
 private fun DecisionPanel(
     canApprove: Boolean,
     exactToolRequestNeedsReview: Boolean,
+    fullDiffReviewNeedsReview: Boolean,
+    fullDiffOpened: Boolean,
     canDecide: Boolean,
     isBlocked: Boolean,
     hasUnsupportedData: Boolean,
@@ -679,6 +776,8 @@ private fun DecisionPanel(
                 decisionInFlight -> "Sending the decision and waiting for the server."
                 isBlocked -> "This request is blocked by policy. No decision can be recorded from mobile."
                 !canDecide -> "This request is no longer waiting for a decision."
+                fullDiffReviewNeedsReview && !fullDiffOpened -> "Open the full file diff, then acknowledge that you reviewed it before approving."
+                fullDiffReviewNeedsReview -> "Acknowledge that you reviewed the full file diff before approving."
                 exactToolRequestNeedsReview -> "Review the exact tool name and arguments above, then acknowledge before approving."
                 canApprove -> "Approval is available. Confirm only after reviewing diff, tests, and rollback."
                 else -> "Approval is disabled until safety requirements are satisfied."
@@ -713,7 +812,7 @@ private fun DecisionPanel(
                 Button(
                     onClick = onApprove,
                     enabled = canApprove,
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.positive, contentColor = palette.canvas),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.onBrand),
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                 ) { Text("Approve request") }
             }

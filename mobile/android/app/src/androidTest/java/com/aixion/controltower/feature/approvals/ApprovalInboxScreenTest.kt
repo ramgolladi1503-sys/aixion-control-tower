@@ -43,7 +43,7 @@ class ApprovalInboxScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Approvals").assertExists()
+        composeRule.onAllNodesWithText("Approvals").assertCountEquals(0)
         composeRule.onNodeWithText("Review pending requests and see the decisions recorded for each one.").assertExists()
         composeRule.onNodeWithText("Needs review 2").assertExists()
         composeRule.onNodeWithText("Status blocked 1").assertExists()

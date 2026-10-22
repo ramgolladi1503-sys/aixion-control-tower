@@ -76,12 +76,12 @@ fun HomeScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         StatusBadge(
                             label = when {
-                                state.hasError -> "BACKEND ERROR"
-                                !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "NOT VERIFIED"
-                                state.unsupportedApprovals.isNotEmpty() -> "UNSUPPORTED APPROVAL"
-                                state.actionRequiredCount > 0 -> "APPROVAL QUEUE"
-                                state.refreshing -> "SYNCING"
-                                else -> "COMMAND STATE"
+                                state.hasError -> "Backend error"
+                                !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "Not verified"
+                                state.unsupportedApprovals.isNotEmpty() -> "Unsupported approval"
+                                state.actionRequiredCount > 0 -> "Approval queue"
+                                state.refreshing -> "Syncing"
+                                else -> "Command state"
                             },
                             color = when {
                                 state.hasError -> palette.danger
@@ -89,7 +89,9 @@ fun HomeScreen(
                                 state.actionRequiredCount > 0 -> palette.caution
                                 state.refreshing -> palette.caution
                                 else -> palette.positive
-                            }
+                            },
+                            fontSize = 14.sp,
+                            uppercase = false
                         )
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         Text(
@@ -247,7 +249,9 @@ private fun HomeHeader(
                     hasError -> palette.danger
                     loading || refreshing || !hasSuccessfulSync -> palette.caution
                     else -> palette.positive
-                }
+                },
+                fontSize = 14.sp,
+                uppercase = false
             )
         }
         lastSuccessfulSyncAt?.let { syncedAt -> HomeSyncTimestamp(syncedAt) }
@@ -270,7 +274,7 @@ internal fun HomeSyncTimestamp(syncedAt: Instant) {
 private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEnabled: Boolean) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        StatusBadge(label = "REAL DATA REQUIRED", color = palette.danger)
+        StatusBadge(label = "Real data required", color = palette.danger, fontSize = 14.sp, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = title,

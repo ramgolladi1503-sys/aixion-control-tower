@@ -105,7 +105,7 @@ private fun SetupStep(number: String, title: String, detail: String) {
         StatusBadge(label = number, color = palette.brand)
         Column(modifier = Modifier.weight(1f)) {
             Text(title, color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, lineHeight = 20.sp)
-            Text(detail, color = palette.inkMuted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text(detail, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
         }
     }
 }

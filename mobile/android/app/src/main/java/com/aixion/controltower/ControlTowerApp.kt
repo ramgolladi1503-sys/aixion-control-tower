@@ -20,7 +20,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -32,7 +36,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Settings
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.feature.agentruns.AgentRunsScreen
@@ -57,9 +60,9 @@ import com.aixion.controltower.feature.tests.TestRunsScreen
 import com.aixion.controltower.feature.workorders.WorkOrdersScreen
 import com.aixion.controltower.navigation.AuthSessionGate
 import com.aixion.controltower.navigation.Route
-import com.aixion.controltower.navigation.allNavigationRoutes
 import com.aixion.controltower.navigation.primaryRouteFor
 import com.aixion.controltower.navigation.primaryRoutes
+import com.aixion.controltower.navigation.routeTitleFor
 import com.aixion.controltower.navigation.shouldPopBackToInbox
 import com.aixion.controltower.notifications.NotificationDeepLink
 
@@ -153,8 +156,7 @@ fun ControlTowerApp(
                     TopAppBar(
                         title = {
                             Text(
-                                allNavigationRoutes.firstOrNull { it.value == currentRoute }?.label
-                                    ?: "Control Tower",
+                                routeTitleFor(currentRoute),
                                 style = MaterialTheme.typography.titleLarge
                             )
                         },
@@ -298,13 +300,56 @@ fun ControlTowerApp(
     }
 }
 
-private fun primaryRouteIcon(route: String): ImageVector = when (route) {
+internal fun primaryRouteIcon(route: String): ImageVector = when (route) {
     Route.Home.value -> Icons.Filled.Home
     Route.Inbox.value -> Icons.Filled.Notifications
-    Route.Connectors.value -> Icons.Filled.Settings
+    Route.Connectors.value -> ConnectLinkIcon
     Route.Account.value -> Icons.Filled.AccountCircle
     else -> Icons.Filled.Home
 }
+
+/** A small local link glyph keeps the Connect destination semantic without pulling in the
+ * much larger optional Material extended icon artifact. */
+internal val ConnectLinkIcon: ImageVector = ImageVector.Builder(
+    name = "ConnectLink",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f
+).apply {
+    path(fill = SolidColor(Color.Black)) {
+        moveTo(3.9f, 12f)
+        curveTo(3.9f, 10.84f, 4.84f, 9.9f, 6f, 9.9f)
+        horizontalLineTo(10f)
+        verticalLineTo(8f)
+        horizontalLineTo(6f)
+        curveTo(3.79f, 8f, 2f, 9.79f, 2f, 12f)
+        reflectiveCurveToRelative(1.79f, 4f, 4f, 4f)
+        horizontalLineToRelative(4f)
+        verticalLineToRelative(-1.9f)
+        horizontalLineTo(6f)
+        curveTo(4.84f, 14.1f, 3.9f, 13.16f, 3.9f, 12f)
+        close()
+        moveTo(8f, 13f)
+        horizontalLineToRelative(8f)
+        verticalLineToRelative(-2f)
+        horizontalLineTo(8f)
+        verticalLineToRelative(2f)
+        close()
+        moveTo(18f, 8f)
+        horizontalLineTo(14f)
+        verticalLineTo(9.9f)
+        horizontalLineTo(18f)
+        curveTo(19.16f, 9.9f, 20.1f, 10.84f, 20.1f, 12f)
+        reflectiveCurveTo(19.16f, 14.1f, 18f, 14.1f)
+        horizontalLineTo(14f)
+        verticalLineTo(16f)
+        horizontalLineTo(18f)
+        curveTo(20.21f, 16f, 22f, 14.21f, 22f, 12f)
+        reflectiveCurveTo(20.21f, 8f, 18f, 8f)
+        close()
+    }
+}.build()
 
 internal fun releaseOneNotificationDestination(link: NotificationDeepLink?): Route? =
     when (link) {

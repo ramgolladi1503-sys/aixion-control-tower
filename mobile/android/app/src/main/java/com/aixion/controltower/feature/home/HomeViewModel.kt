@@ -72,10 +72,10 @@ internal fun homeBackendStatusLabel(
     hasError: Boolean,
     hasSuccessfulSync: Boolean
 ): String = when {
-    loading || refreshing -> "SYNCING"
-    hasError -> "SYNC ERROR"
-    hasSuccessfulSync -> "SYNCED"
-    else -> "NOT VERIFIED"
+    loading || refreshing -> "Syncing"
+    hasError -> "Sync error"
+    hasSuccessfulSync -> "Synced"
+    else -> "Not verified"
 }
 
 internal fun homeRefreshFailureState(state: HomeUiState, message: String): HomeUiState = state.copy(

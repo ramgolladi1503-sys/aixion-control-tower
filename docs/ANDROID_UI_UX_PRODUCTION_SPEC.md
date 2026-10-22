@@ -2,9 +2,11 @@
 
 **Status:** Design contract for the production-readiness program
 **Scope:** Existing Aixion Control Tower Android app
-**Implementation status (2026-10-22):** Partially implemented. The current compact-phone shell has four destinations (Home, Approvals, Connect, Account), no More menu, a warm light palette, an approval inbox/history split, a persistent approve/reject footer with high-risk confirmation, and Home-to-Connect navigation. The theme uses Android system sans for UI and monospace for payloads; it is light-only. Source-level presence is not device certification. Unless a paragraph says otherwise, screen contracts below describe the target design; they are not claims that every detail is implemented.
+**Implementation status (2026-10-22):** Partially implemented. The compact-phone shell has four locked destinations (Home, Approvals, Connect, Account) and keeps later-release technical/admin routes hidden; release one has no More destination. The app has a warm-paper/olive visual system, an approval inbox/history split, a persistent approve/reject footer with high-risk confirmation, Home-to-Connect navigation, and source-level light and dark semantic palettes. Local UI polish now uses a custom Link glyph for Connect, route-specific detail titles, visible invocation identity in decision context, a full-diff acknowledgement gate for high/critical file approvals, 14sp section subtitles, and 16dp cards. The theme uses Android system sans for UI and monospace for payloads. These source changes are not device or visual certification. Unless a paragraph says otherwise, screen contracts below describe the target design; they are not claims that every detail is implemented.
 
-Current gaps include dark mode and adaptive navigation, provider liveness/last-seen health on Home, authoritative reviewer/decision-time/delivery history, full high-risk confirmation interaction coverage, password reset, and TalkBack/large-font/device visual validation. Home sync timestamp and password show/hide are implemented in source but still need device and accessibility validation. The current Connect surface provides setup guidance; it does not establish a live provider session. Native Codex Desktop approval interception and same-invocation resume are not verified.
+Current gaps include adaptive navigation, provider liveness/last-seen health on Home, delivery-outcome history, password reset, and TalkBack/large-font/device visual validation. Source-level dark palette selection and high-risk confirmation checks exist, but dark rendering, composed contrast, and those interactions still need device validation. Home sync timestamp and password show/hide are implemented in source but still need device and accessibility validation. The current Connect surface provides setup guidance; it does not establish a live provider session. Native Codex Desktop approval interception and same-invocation resume are not verified.
+
+**Code-only UI audit checkpoint (2026-10-22; pre-polish snapshot):** The Android UI/UX audit scored the then-current implementation **16/24** across copywriting, visuals, color, typography, spacing, and experience design. This is a pre-polish code-only score, not a visual score or release certification. Subsequent local polish includes the Connect Link icon, route-specific detail titles, 14sp core Home/history text, and 16dp card corners. Local Android JVM UI tests passed and Android instrumentation sources compiled; instrumentation was not run on hardware. Screenshots, physical-device rendering, TalkBack, 200% font scaling, final composited contrast, and adaptive-window behavior remain unverified; ADB reported no connected device during the audit. The audit did not authorize broader navigation: the four-destination release-one contract remains locked and secondary technical/admin screens remain hidden.
 
 **Scope lock:** this is a design contract for release one only. User-facing destinations are Home, Approvals (including History and request detail), Connect, and Account (including sign-in/register/logout). Agent Work, projects, command chat, MCP, technical audit, diagnostics, and administration remain outside release-one navigation. Billing and cloud deployment are outside this document. The UI must not imply that a local computer is online or that an agent resumed unless the backend/connector provides fresh evidence.
 
@@ -42,7 +44,7 @@ Use a real, consistent icon per destination with visible text labels; never use 
 
 ### Large windows
 
-Target behavior: on expanded window widths, replace the bottom bar with a navigation rail and use list-detail layouts where they reduce navigation overhead (approval list beside approval detail). On compact and medium widths retain one content pane and bottom navigation. Choose based on current app window size class, including resized/foldable states, not device model. Adaptive rail/list-detail behavior is not implemented yet; the current app keeps its compact four-destination bottom bar. These recommendations follow Android's adaptive navigation model.
+Target behavior: on expanded window widths, replace the bottom bar with a navigation rail and use list-detail layouts where they reduce navigation overhead (approval list beside approval detail). On compact and medium widths retain one content pane and bottom navigation. Choose based on current app window size class, including resized/foldable states, not device model. The compact four-destination bottom bar is implemented; adaptive rail/list-detail behavior is not implemented and has not been visually/device-verified. These recommendations follow Android's adaptive navigation model.
 
 ## 3. Visual system
 
@@ -52,7 +54,7 @@ The interface should feel like a calm, trustworthy instrument panel: warm, ink-l
 
 ### Color tokens
 
-The current release-one implementation is light-only because legacy static color tokens would otherwise mix custom light surfaces with dark Material controls. Dark mode is future work. Do not use wallpaper dynamic color for approval, risk, or decision semantics, because those meanings must remain consistent. The following are initial design tokens; calculate and verify actual contrast ratios in implementation before release.
+The current theme selects semantic light or dark palettes from the Android system appearance. Both palettes exist in source; rendered dark-mode consistency and contrast have not been device-verified. Do not use wallpaper dynamic color for approval, risk, or decision semantics, because those meanings must remain consistent. The following are design tokens; verify actual composited contrast ratios for both appearances before release.
 
 | Token | Light | Dark | Use |
 |---|---:|---:|---|
@@ -73,7 +75,7 @@ The current release-one implementation is light-only because legacy static color
 
 Neutral surfaces should occupy roughly 85–90% of the screen. Brand olive is reserved for the primary action, selected navigation, and connection CTA. Positive, caution, and danger colors are reserved for explicit semantic states; do not use them as decoration. Pair every semantic color with text/icon/shape, never color alone.
 
-**Contrast baseline:** calculated ratios for the current solid light token pairs are `ink/canvas 14.07:1`, `inkMuted/canvas 5.80:1`, `inkDisabled/canvas 4.90:1`, `onBrand/brand 6.22:1`, `positive/canvas 6.32:1`, `caution/canvas 5.77:1`, `danger/canvas 5.69:1`, and `info/canvas 5.92:1`. These ratios do not establish that every rendered component passes. At implementation time verify composited backgrounds, focus indicators, borders, disabled controls, and dark palette values; change token values where needed. Do not use `line` as the only boundary for a meaningful control unless its contrast is independently verified. Dark values are design targets only; dark appearance remains unimplemented.
+**Contrast baseline:** calculated ratios for the current solid light token pairs are `ink/canvas 14.07:1`, `inkMuted/canvas 5.80:1`, `inkDisabled/canvas 4.90:1`, `onBrand/brand 6.22:1`, `positive/canvas 6.32:1`, `caution/canvas 5.77:1`, `danger/canvas 5.69:1`, and `info/canvas 5.92:1`. These ratios do not establish that every rendered component passes. Both light and dark semantic palettes are implemented in source; verify composited backgrounds, focus indicators, borders, disabled controls, and semantic overlays on device, then change token values where needed. Do not use `line` as the only boundary for a meaningful control unless its contrast is independently verified. Rendered contrast and dark-mode consistency remain release gates.
 
 ### Typography
 
@@ -93,7 +95,7 @@ Body and labels wrap naturally. Never ellipsize, horizontally clip, or silently 
 
 ### Spacing, shape, and elevation
 
-Use a 4dp base scale: `4, 8, 12, 16, 24, 32, 40, 48`. Screen content uses 20dp horizontal padding on compact widths, 24dp on medium widths, and a centered 720dp maximum readable column on expanded widths. Cards use 16dp inner padding and 16dp corner radius; dialogs/sheets use 24dp radius; fields and buttons use 12dp radius. Prefer one-pixel tonal borders and spacing over shadows. Use elevation only to clarify modal hierarchy.
+Use a 4dp base scale: `4, 8, 12, 16, 24, 32, 40, 48`. Screen content uses 20dp horizontal padding on compact widths, 24dp on medium widths, and a centered 720dp maximum readable column on expanded widths. Cards use 16dp inner padding and 16dp corner radius; dialogs/sheets use 24dp radius; fields and buttons use 12dp radius. The local card implementation now uses the 16dp corner radius, but its rendered geometry remains unverified on device. Prefer one-pixel tonal borders and spacing over shadows. Use elevation only to clarify modal hierarchy.
 
 ## 4. Screen contracts
 
@@ -114,7 +116,7 @@ Target Home is a short status summary, not an analytics dashboard:
 1. Top app bar with page title and no More menu.
 2. A single status header: “2 approvals waiting” or “All clear”, with a small, explicit sync state and last successful sync time.
 3. Pending approvals preview: up to three compact cards, each with provider, project or target, concise action summary, risk label, and time/expiry; **Review** opens the exact request. **See all** opens Approvals.
-4. Connection card: connected provider(s), connector last-seen state, and **Connect an agent** if none are active. Current Home instead offers a truthful **Open Connect** entry and availability reminder; it does not claim a provider is connected or display heartbeat/last-seen health.
+4. Connection card: connected provider(s), connector last-seen state, and **Connect an agent** if none are active. Current Home offers a **Connect an agent** section and **Connect platform** action plus the computer-availability reminder; it does not claim a provider is connected or display heartbeat/last-seen health.
 5. Short availability reminder only when useful: “Your computer and agent connector need to stay online for work to resume.”
 
 If backend sync fails, show the last successful sync time and a persistent “Could not refresh” panel with Retry. Clearly mark data as stale; disable decisions for stale approvals according to repository decision policy. Never say “All clear” when freshness cannot be established. The current Home shows the last successful sync timestamp, a backend-sync error, and hides fallback/mock data; device validation is still pending.
@@ -123,13 +125,13 @@ If backend sync fails, show the last successful sync time and a persistent “Co
 
 ### 4.3 Approval inbox and decision history
 
-Top area has two labeled filters: **Needs review** and **History**. Current implementation filters by current approval status and supports All, Approved, Rejected, and Expired. It does not yet have authoritative reviewer/time/delivery outcome fields, so it must not imply a complete decision or delivery history. Keep `Pending` count visible without making it a separate tab. Sort pending by earliest known expiry first, with missing expiry values last; creation-time tie breaking is future work because the list model does not currently expose creation time.
+Top area has two labeled filters: **Needs review** and **History**. Current implementation offers All, Approved, Rejected, and Revision requested history filters. History events include reviewer and decision time and may include a verified request snapshot; delivery/resume outcome is not part of the displayed record. Keep the UI explicit that a decision record does not prove delivery or execution. Keep `Pending` count visible without making it a separate tab. Sort pending by earliest known expiry first, with missing expiry values last; creation-time tie breaking is future work because the list model does not currently expose creation time.
 
 Every card shows provider badge (Antigravity/Codex/other explicitly supported), project/workspace, readable action summary, risk and state labels, expiry/countdown where applicable, and a text affordance “Review request”. Show the status through a labeled icon and text; never color-only dots. Do not show approve/reject buttons inside list cards; decisions require opening the full details.
 
-The target design for history entries is decision, reviewer, date/time with timezone, exact request title, and delivery outcome as separate fields (e.g., “Approved · Delivery not confirmed”). Current API/list models do not provide all of those fields. Until that contract exists, label the list as current-status-based and do not imply that an approved request proves local agent continuation.
+The target design for history entries is decision, reviewer, date/time with timezone, exact request title, and delivery outcome as separate fields (e.g., “Approved · Delivery not confirmed”). The current history UI renders decision, reviewer, decision time, reason, and a verified request snapshot when available. It does not show connector delivery/resume outcome; do not imply that an approved request proves local agent continuation.
 
-**List interaction:** retain the selected tab and history filter when opening a detail and returning. Each row is one clear tap target with a concise accessible name; do not put nested decision buttons in a row. Needs review is sorted by earliest known expiry, with missing expiry last. History offers the existing All/Approved/Rejected/Expired filters and clearly states that it represents current statuses until authoritative audit events are available. An empty state links to Connect only when no connector has been configured; otherwise explain that new approvals appear here.
+**List interaction:** retain the selected tab and history filter when opening a detail and returning. Each row is one clear tap target with a concise accessible name; do not put nested decision buttons in a row. Needs review is sorted by earliest known expiry, with missing expiry last. History offers All/Approved/Rejected/Revision requested filters and labels each entry as a decision record without delivery or execution confirmation. An empty state links to Connect only when no connector has been configured; otherwise explain that new approvals appear here.
 
 ### 4.4 Approval detail and decision interaction
 
@@ -142,6 +144,8 @@ Use a clear vertical review sequence:
 5. Sticky action footer only when decision is currently valid: secondary outlined **Reject** and primary **Approve request**. On narrow screens, stack full-width buttons with reject first and approve last. Both controls at least 48dp high; 12dp separation.
 
 For high/critical risk, require an explicit confirmation sheet that repeats the exact action summary, target and risk. User confirms **Approve this request**; the confirm action stays disabled while in flight. Reject may use a short optional reason, but cannot become a destructive swipe action. Avoid one-tap gestures and notification quick actions for approving/rejecting.
+
+For high/critical file-change approvals, require the reviewer to open the dedicated full-diff view and explicitly acknowledge reviewing it before enabling **Approve request**. Keep **Reject** available. Bind the acknowledgement to approval identity, exact file payload, risk, and pending status; any change to those values or a transition away from pending resets it. This is a client-side review safeguard and does not replace server-side request hash, expiry, connector, or authorization checks.
 
 Target behavior after a decision is a terminal state and transition timeline: “Decision recorded”, server timestamp, request identity/hash short reference, and one of “Connector delivered decision”, “Delivery pending”, or “Delivery failed/unknown”. If delivery is unknown, say “We can’t confirm that the agent received this decision. Do not retry this invocation unless the connector reports it is safe.” The current screen surfaces its last action and decision reconciliation state; it does not yet render the complete delivery timeline described here. The product API's reconciliation guidance remains authoritative.
 
@@ -247,7 +251,7 @@ Use only short, functional transitions: 150–220ms fade/size change for list up
 5. Stale, offline, expired, blocked, unsupported, mismatched, or uncertain requests have no enabled approve/reject action.
 6. After a decision, the app separately reports server decision recording and connector delivery/resume confirmation.
 7. Every loading, empty, error, offline, stale, and terminal state above has an intentional UI and accessible announcement.
-8. App supports light and dark appearance, 200% font scaling, TalkBack, 48dp minimum targets, and adaptive window layouts. Current release-one implementation has light appearance and 48dp decision targets only; the remaining criteria require implementation and device/accessibility validation.
+8. App supports light and dark appearance, 200% font scaling, TalkBack, 48dp minimum targets, and adaptive window layouts. Light/dark palettes and 48dp decision targets exist in source. Dark rendering, 200% scaling, TalkBack, full-screen target coverage, and adaptive layouts still require device/accessibility validation.
 9. Color contrast is measured and documented for every foreground/background token pair; no semantic meaning depends only on color.
 10. Product copy makes clear that a user’s computer and connector must remain running/connected for local work to continue.
 
@@ -265,8 +269,8 @@ Any failed gate blocks that surface from release. Record unverified provider int
 
 ## 11. Rollout sequence
 
-1. **Token and component foundation:** add light/dark semantic theme, typography, status/risk chips, loading/error/empty panels, buttons/fields, and accessibility labels; retain existing approval policies.
-2. **Navigation and shell:** implement exactly Home, Approvals, Connect, and Account as the four destinations, no More menu, responsive navigation rail, and stable approval deep links from notifications.
+1. **Token and component foundation:** maintain the light/dark semantic theme, typography, status/risk chips, loading/error/empty panels, buttons/fields, and accessibility labels; verify both appearances and retain existing approval policies.
+2. **Navigation and shell:** preserve exactly Home, Approvals, Connect, and Account as the four compact destinations, no More menu, and stable approval deep links from notifications; implement and verify responsive navigation rail/list-detail behavior for expanded windows.
 3. **Approval-first workflows:** Home summary, Inbox/History split, detail review hierarchy, high-risk confirmation, and decision/delivery timeline. Keep decision backend semantics unchanged.
 4. **Connect and account:** simplify sign-in/register, provider-specific setup, honest connection health, account/logout.
 5. **Scope cleanup:** keep Agent Work and all admin/ops/MCP/audit routes hidden from release-one navigation; retain only the four locked destinations.

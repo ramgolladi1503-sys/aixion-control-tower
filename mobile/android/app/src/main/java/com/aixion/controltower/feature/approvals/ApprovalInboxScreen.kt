@@ -164,15 +164,14 @@ fun ApprovalInboxContent(
             .fillMaxSize()
             .background(palette.canvas)
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.End,
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
             ) {
-                Text("Approvals", color = palette.ink, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 TextButton(onClick = onRetry, enabled = !state.loading && !state.refreshing) {
                     Text(if (state.refreshing) "Refreshing…" else "Refresh")
                 }
@@ -216,7 +215,10 @@ fun ApprovalInboxContent(
         }
 
         if (!state.hasError && selectedSection == ApprovalInboxSection.NEEDS_REVIEW) item {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+            ) {
                 StatusBadge("Needs review $pendingCount", palette.caution, fontSize = 14.sp, uppercase = false)
                 StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = 14.sp, uppercase = false)
             }
@@ -295,8 +297,8 @@ fun ApprovalInboxContent(
                     Text(
                         "Showing the latest ${state.historyLimit} decisions. Older entries are not loaded in this view yet.",
                         color = palette.inkMuted,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp
                     )
                 }
             }
@@ -436,8 +438,8 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
             uppercase = false
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, fontSize = 13.sp)
-        Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, fontSize = 13.sp)
+        Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, fontSize = 14.sp)
+        Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, fontSize = 14.sp)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text("Reason", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Text(event.reason ?: "No reason was provided.", color = palette.inkMuted, fontSize = 14.sp, lineHeight = 20.sp)
@@ -448,8 +450,8 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
             Text(
                 "This older or unverifiable record is shown without request details.",
                 color = palette.inkMuted,
-                fontSize = 13.sp,
-                lineHeight = 19.sp
+                fontSize = 14.sp,
+                lineHeight = 21.sp
             )
         } else {
             VerifiedRequestSnapshot(snapshot)
@@ -458,8 +460,8 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
         Text(
             "Decision record only. Delivery to the agent and execution are not confirmed here.",
             color = palette.inkMuted,
-            fontSize = 12.sp,
-            lineHeight = 18.sp
+            fontSize = 14.sp,
+            lineHeight = 21.sp
         )
     }
 }
@@ -474,28 +476,28 @@ private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
         snapshot.sourceAgentName?.takeIf(String::isNotBlank) ?: snapshot.agentName?.takeIf(String::isNotBlank),
         snapshot.sourceProvider?.takeIf(String::isNotBlank)
     ).distinct().joinToString(" · ")
-    if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, fontSize = 13.sp)
+    if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, fontSize = 14.sp)
     val risk = snapshot.riskLevel.name.lowercase().replaceFirstChar { it.uppercase() }
     StatusBadge(
         if (snapshot.riskLevel == RiskLevel.UNKNOWN) "Risk unavailable" else "$risk risk",
         color = if (snapshot.riskLevel == RiskLevel.UNKNOWN) palette.caution else palette.brand,
-        fontSize = 13.sp,
+        fontSize = 14.sp,
         uppercase = false
     )
     snapshot.targetBranch?.takeIf(String::isNotBlank)?.let { branch ->
-        Text("Target branch · $branch", color = palette.inkMuted, fontSize = 13.sp)
+        Text("Target branch · $branch", color = palette.inkMuted, fontSize = 14.sp)
     }
     if (snapshot.files.isNotEmpty()) {
         Text("Affected files", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, fontSize = 13.sp, lineHeight = 19.sp) }
+        snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp) }
     }
     if (snapshot.testPlan.isNotEmpty()) {
         Text("Test plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, fontSize = 13.sp, lineHeight = 19.sp) }
+        snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp) }
     }
     snapshot.rollbackPlan?.takeIf(String::isNotBlank)?.let { plan ->
         Text("Rollback plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text(plan, color = palette.inkMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text(plan, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
     }
 }
 
