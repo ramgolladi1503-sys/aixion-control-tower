@@ -218,7 +218,12 @@ Terraform CLI environment variables, remote state, provider schema, computed
 values, or effective IAM; it does not contact GCP or verify APIs, billing, or live
 resources. Run `terraform fmt -check` and `terraform validate` with the reviewed
 provider configuration before any separately authorized staging apply. The
-production PostgreSQL application gate still blocks deployment. The one-shot workers now have strict worker-scoped
+repository CI now runs those checks with Terraform CLI 1.17.0 and a read-only
+lockfile; `terraform init -backend=false` downloads the locked provider but does
+not configure remote state or contact GCP. The lock currently selects Google
+provider 7.46.1 and records Linux amd64 and macOS arm64 checksums. Provider
+upgrades require a reviewed lockfile update. The production PostgreSQL application
+gate still blocks deployment. The one-shot workers now have strict worker-scoped
 production settings validation: each requires PostgreSQL and only its own provider
 configuration, while the API-wide production settings validator still refuses
 startup until the complete app is PostgreSQL-authoritative. This permits isolated

@@ -61,6 +61,30 @@ jobs:
       - name: Run backend tests
         run: python -m pytest
 
+  terraform-staging-preflight:
+    name: Staging Terraform validation (no cloud access)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/gcp
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.17.0
+
+      - name: Check Terraform formatting
+        run: terraform fmt -check -diff cloud-scheduler-staging.tf
+
+      - name: Initialize locked provider without a backend
+        run: terraform init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate Terraform configuration
+        run: terraform validate -no-color
+
   android:
     name: Android validation
     runs-on: ubuntu-latest
