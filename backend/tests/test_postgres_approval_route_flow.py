@@ -639,8 +639,17 @@ def test_postgres_reviewer_inbox_expiry_is_scoped_once_for_list_and_grouped_rout
     postgres_approval_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _connect, workspace, _project, _user, _repositories, _agent, _agent_token, _schema = (
+    _connect, workspace, _project, _user, repositories, _agent, _agent_token, _schema = (
         postgres_approval_route_runtime
+    )
+    # Lifespan recovery requires approval, task, and run repositories from one
+    # supported persistence profile, even though this test only exercises the
+    # reviewer inbox routes.
+    monkeypatch.setattr(
+        main.app.state,
+        "agent_run_repository",
+        repositories.agent_runs,
+        raising=False,
     )
     requested_scopes: list[str | None] = []
 
