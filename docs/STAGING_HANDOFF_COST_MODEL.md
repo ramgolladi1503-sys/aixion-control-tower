@@ -141,7 +141,7 @@ change record.
 | Cloud Logging API (`logging.googleapis.com`) | Managed services export logs or an operator queries configured log sinks | Enforce payload redaction and approved retention; no credentials or raw tool arguments |
 | Cloud Monitoring API (`monitoring.googleapis.com`) | The approved alert matrix and metrics policies are implemented | Alert policy administration is separate from runtime metric-write permissions |
 | Cloud Scheduler API (`cloudscheduler.googleapis.com`) | A reviewed Cloud Scheduler job triggers the one-shot worker | Scheduler uses an invoker identity scoped to the target only; do not use API-process polling loops for correctness-critical work |
-| Firebase Cloud Messaging API (`fcm.googleapis.com`) | The approved mobile push path sends FCM messages | Sender identity receives only required FCM send permission; mobile tokens remain protected data |
+| Firebase Cloud Messaging API (`fcm.googleapis.com`) | The approved mobile push path sends FCM messages | The sender needs `cloudmessaging.messages.create` in the target Firebase project. Firebase documents `roles/firebasecloudmessaging.admin`; a custom role containing only that send permission is the least-privilege candidate because Google lists it as supported for custom roles. Validate the binding against the actual target project and delivery path before granting; mobile tokens remain protected data. |
 | Service Usage API (`serviceusage.googleapis.com`) | A named administrator must enable the specifically approved APIs | Restricted to the human/platform provisioning principal; never grant API-enablement permission to runtime or ordinary CI |
 
 #### Post-authorization sequence
