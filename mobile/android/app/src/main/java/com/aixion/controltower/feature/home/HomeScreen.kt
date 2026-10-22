@@ -42,7 +42,8 @@ import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel = viewModel(),
-    onApprovalSelected: (ApprovalSummary) -> Unit = {}
+    onApprovalSelected: (ApprovalSummary) -> Unit = {},
+    onOpenConnect: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
     ForegroundRefreshEffect(onRefresh = viewModel::refreshInForeground)
@@ -113,6 +114,28 @@ fun HomeScreen(
                         )
                     }
                     ForgedLogoMark(size = 56.dp, color = TowerTextPrimary.copy(alpha = 0.82f))
+                }
+            }
+        }
+
+        item {
+            TowerPanel(elevated = false) {
+                Text(
+                    text = "Agent connections",
+                    color = TowerTextPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                Text(
+                    text = "Set up or review a local hook for Antigravity or Codex. The computer and agent need to stay available while an approval is waiting.",
+                    color = TowerTextMuted,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.md))
+                Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
+                    Text("Open Connect")
                 }
             }
         }

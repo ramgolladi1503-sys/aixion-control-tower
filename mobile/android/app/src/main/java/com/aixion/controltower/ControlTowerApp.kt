@@ -63,7 +63,11 @@ import com.aixion.controltower.notifications.NotificationDeepLink
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
+fun ControlTowerApp(
+    notificationDeepLink: NotificationDeepLink? = null,
+    notificationEventId: Long = 0L,
+    onNotificationConsumed: (Long) -> Unit = {}
+) {
     ControlTowerTheme {
         val navController = rememberNavController()
         val authViewModel: AuthViewModel = viewModel()
@@ -121,24 +125,21 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
             }
         }
 
-        LaunchedEffect(notificationDeepLink, authState.authenticated, authState.sessionChecked) {
+        LaunchedEffect(notificationDeepLink, notificationEventId, authState.authenticated, authState.sessionChecked) {
             if (!AuthSessionGate.canOpenProtectedRoute(authState.authenticated, authState.sessionChecked)) {
                 return@LaunchedEffect
             }
-            when (notificationDeepLink) {
-                is NotificationDeepLink.AgentTask -> {
-                    navController.navigate(Route.AgentTasks.value) {
-                        launchSingleTop = true
-                        popUpTo(Route.Home.value) { saveState = true }
-                        restoreState = true
-                    }
-                }
-                is NotificationDeepLink.ApprovalRequest -> {
-                    approvalsViewModel.openApprovalById(notificationDeepLink.entityId)
+            when (releaseOneNotificationDestination(notificationDeepLink)) {
+                Route.ApprovalDetail -> {
+                    val approvalLink = notificationDeepLink as? NotificationDeepLink.ApprovalRequest
+                        ?: return@LaunchedEffect
+                    approvalsViewModel.openApprovalById(approvalLink.entityId)
                     navController.navigate(Route.ApprovalDetail.value) { launchSingleTop = true }
                 }
-                is NotificationDeepLink.Unknown,
-                null -> Unit
+                else -> Unit
+            }
+            if (notificationDeepLink != null) {
+                onNotificationConsumed(notificationEventId)
             }
         }
 
@@ -206,6 +207,11 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                             onApprovalSelected = { approval ->
                                 approvalsViewModel.selectApproval(approval)
                                 navController.navigate(Route.ApprovalDetail.value)
+                            },
+                            onOpenConnect = {
+                                navController.navigate(Route.Connectors.value) {
+                                    launchSingleTop = true
+                                }
                             }
                         )
                     }
@@ -284,3 +290,11 @@ private fun primaryRouteIcon(route: String): ImageVector = when (route) {
     Route.Account.value -> Icons.Filled.AccountCircle
     else -> Icons.Filled.Home
 }
+
+internal fun releaseOneNotificationDestination(link: NotificationDeepLink?): Route? =
+    when (link) {
+        is NotificationDeepLink.ApprovalRequest -> Route.ApprovalDetail
+        is NotificationDeepLink.AgentTask,
+        is NotificationDeepLink.Unknown,
+        null -> null
+    }

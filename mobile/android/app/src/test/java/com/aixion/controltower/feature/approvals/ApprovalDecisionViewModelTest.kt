@@ -14,6 +14,7 @@ import com.aixion.controltower.data.repository.BaseFakeControlTowerApi
 import com.aixion.controltower.data.repository.toUiSummary
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
@@ -27,6 +28,31 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ApprovalDecisionViewModelTest {
+    @Test
+    fun inboxSelectionIsRejectedUntilInitialRefreshFinishes() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val refreshResult = CompletableDeferred<List<ApprovalRequestDto>>()
+            val api = RecordingApprovalApi().apply {
+                listResult = { refreshResult.await() }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+
+            assertTrue(viewModel.state.value.refreshing)
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+            assertEquals(null, viewModel.state.value.selectedApproval)
+
+            refreshResult.complete(listOf(approvalDto(REQUEST_ID, "REQUESTED")))
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            assertEquals(REQUEST_ID, viewModel.state.value.selectedApproval?.id)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     @Test
     fun quickDuplicateTapsDispatchOnlyOneDecision() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -374,8 +400,9 @@ class ApprovalDecisionViewModelTest {
             })
         }
         var getResult: suspend (String, Int) -> ApprovalRequestDto = { id, _ -> approvalDto(id, "REQUESTED") }
+        var listResult: suspend () -> List<ApprovalRequestDto> = { emptyList() }
 
-        override suspend fun listApprovals(): List<ApprovalRequestDto> = emptyList()
+        override suspend fun listApprovals(): List<ApprovalRequestDto> = listResult()
 
         override suspend fun getApproval(approvalId: String): ApprovalRequestDto {
             statusApprovalIds += approvalId

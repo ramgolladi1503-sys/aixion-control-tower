@@ -51,6 +51,7 @@ internal fun retainDecisionInHistory(
 
 data class ApprovalsUiState(
     val loading: Boolean = true,
+    val refreshing: Boolean = false,
     val approvals: List<ApprovalSummary> = emptyList(),
     val selectedApproval: ApprovalSummary? = null,
     val openingApprovalId: String? = null,
@@ -64,6 +65,9 @@ data class ApprovalsUiState(
 ) {
     val hasError: Boolean = errorMessage != null
 }
+
+internal fun canSelectApprovalFromInbox(state: ApprovalsUiState): Boolean =
+    !state.loading && !state.refreshing && !state.hasError
 
 internal fun reconcileApprovalsAfterRefresh(
     current: ApprovalsUiState,
@@ -127,9 +131,11 @@ class ApprovalsViewModel internal constructor(
     private suspend fun refresh(showLoading: Boolean): Boolean? {
         if (refreshInFlight) return null
         refreshInFlight = true
-        if (showLoading) {
-            _state.value = _state.value.copy(loading = true, errorMessage = null)
-        }
+        _state.value = _state.value.copy(
+            loading = showLoading,
+            refreshing = true,
+            errorMessage = null
+        )
         try {
             val approvals = repository.listApprovals()
             _state.value = reconcileApprovalsAfterRefresh(_state.value, approvals)
@@ -144,11 +150,18 @@ class ApprovalsViewModel internal constructor(
             return false
         } finally {
             refreshInFlight = false
+            _state.value = _state.value.copy(
+                loading = if (showLoading && _state.value.loading) false else _state.value.loading,
+                refreshing = false
+            )
         }
     }
 
     fun selectApproval(approval: ApprovalSummary) {
-        if (_state.value.decisionInFlight || _state.value.decisionNeedsReconciliation) return
+        if (!canSelectApprovalFromInbox(_state.value) ||
+            _state.value.decisionInFlight ||
+            _state.value.decisionNeedsReconciliation
+        ) return
         openApprovalRequestSequence += 1
         _state.value = _state.value.copy(
             selectedApproval = approval,

@@ -8,11 +8,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.OutlinedButton
@@ -101,13 +103,6 @@ fun ApprovalDetailScreen(
                 onCompleted = onDecisionSubmitted
             )
         },
-        onRevise = {
-            viewModel.decide(
-                decision = "revise",
-                reason = "Revision requested from mobile detail review.",
-                onCompleted = onDecisionSubmitted
-            )
-        }
     )
 }
 
@@ -165,7 +160,6 @@ fun ApprovalDetailContent(
     onOpenDiff: () -> Unit,
     onApprove: () -> Unit,
     onReject: () -> Unit,
-    onRevise: () -> Unit,
     lastActionApprovalId: String? = null,
     decisionInFlight: Boolean = false,
     decisionNeedsReconciliation: Boolean = false,
@@ -193,117 +187,126 @@ fun ApprovalDetailContent(
         !isBlocked && !hasUnsupportedData && decisionBlockReason == null
     val hasRequiredActions = approval.requiredActions.isNotEmpty()
     val canApprove = canDecide && !hasRequiredActions
+    val requiresRiskConfirmation = requiresExplicitRiskConfirmation(approval.risk)
+    var showRiskConfirmation by remember(approval.id) { mutableStateOf(false) }
 
-    LazyColumn(
+    Column(
         modifier = Modifier
-            .testTag("approval-detail-list")
             .fillMaxSize()
             .background(TowerBackground)
-            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
-        item {
-            ApprovalHeroPanel(
-                approval = approval,
-                canApprove = canApprove,
-                canDecide = canDecide,
-                isBlocked = isBlocked,
-                hasUnsupportedData = hasUnsupportedData,
-                hasRequiredActions = hasRequiredActions
-            )
-        }
-
-        if (lastActionMessage != null && lastActionApprovalId == approval.id) {
-            item { DetailPanel(title = "Last Action", body = lastActionMessage) }
-        }
-
-        if (hasUnsupportedData) {
+        LazyColumn(
+            modifier = Modifier
+                .testTag("approval-detail-list")
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
+        ) {
             item {
-                WarningPanel(
-                    title = "Unsupported approval data",
-                    body = "The backend returned a status or risk value this app does not recognize. Decisions are disabled until the app and backend versions are compatible."
+                ApprovalHeroPanel(
+                    approval = approval,
+                    canApprove = canApprove,
+                    canDecide = canDecide,
+                    isBlocked = isBlocked,
+                    hasUnsupportedData = hasUnsupportedData,
+                    hasRequiredActions = hasRequiredActions
                 )
             }
-        } else if (isBlocked) {
+
+            if (lastActionMessage != null && lastActionApprovalId == approval.id) {
+                item { DetailPanel(title = "Last Action", body = lastActionMessage) }
+            }
+
+            if (hasUnsupportedData) {
+                item {
+                    WarningPanel(
+                        title = "Unsupported approval data",
+                        body = "The backend returned a status or risk value this app does not recognize. Decisions are disabled until the app and backend versions are compatible."
+                    )
+                }
+            } else if (isBlocked) {
+                item {
+                    WarningPanel(
+                        title = "Approval blocked",
+                        body = "This request violates a hard safety rule. It cannot be approved from mobile."
+                    )
+                }
+            } else if (decisionBlockReason != null) {
+                item {
+                    WarningPanel(
+                        title = "Decision blocked",
+                        body = decisionBlockReason
+                    )
+                }
+            } else if (!canDecide && !decisionNeedsReconciliation && !decisionInFlight) {
+                item {
+                    WarningPanel(
+                        title = "Decision closed",
+                        body = "This approval is ${approval.status.name}. Decisions are available only while it is pending."
+                    )
+                }
+            }
+
+            if (hasRequiredActions) {
+                item { RequiredActionsPanel(actions = approval.requiredActions) }
+            }
+
             item {
-                WarningPanel(
-                    title = "Approval blocked",
-                    body = "This request violates a hard safety rule. It cannot be approved from mobile."
+                TowerSectionHeader(
+                    title = "Safety Context",
+                    subtitle = "Review source, branch, test plan, and rollback before making a decision."
                 )
             }
-        } else if (decisionBlockReason != null) {
+
             item {
-                WarningPanel(
-                    title = "Decision blocked",
-                    body = decisionBlockReason
+                DetailPanel(
+                    title = "Request Identity",
+                    body = buildList {
+                        add("Approval ID: ${approval.id}")
+                        add("Project: ${approval.projectName}")
+                        if (approval.projectId.isNotBlank()) add("Project ID: ${approval.projectId}")
+                        add("Agent: ${approval.agentName}")
+                        add("Provider: ${approval.sourceProvider}")
+                        add("Source agent ID: ${approval.sourceAgentId ?: "Not provided"}")
+                        add("Session ID: ${approval.sourceSessionId ?: "Not provided"}")
+                        add("Source invocation ID: ${approval.sourceInvocationId ?: "Not provided"}")
+                        add("Expires at: ${approval.expiresAt ?: "Not provided"}")
+                        add("Source verified: ${if (approval.verifiedSource) "Yes" else "No"}")
+                    }.joinToString("\n")
                 )
             }
-        } else if (!canDecide) {
             item {
-                WarningPanel(
-                    title = "Decision closed",
-                    body = "This approval is ${approval.status.name}. Decisions are available only while it is pending."
+                DetailPanel(
+                    title = "Risk Rationale",
+                    body = approval.riskReasons.ifEmpty {
+                        listOf("No risk rationale was supplied by the backend.")
+                    }.joinToString("\n")
                 )
             }
+            item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
+            item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
+
+            item {
+                Button(
+                    onClick = onOpenDiff,
+                    colors = ButtonDefaults.buttonColors(containerColor = TowerAccent, contentColor = TowerBackground),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Review Full Diff") }
+            }
+
+            item {
+                TowerSectionHeader(
+                    title = "File Changes",
+                    subtitle = "Inline preview only. Open the full diff before approving risky changes."
+                )
+            }
+
+            items(approval.files) { file -> DiffBlock(file = file) }
+
         }
 
-        if (hasRequiredActions) {
-            item { RequiredActionsPanel(actions = approval.requiredActions) }
-        }
-
-        item {
-            TowerSectionHeader(
-                title = "Safety Context",
-                subtitle = "Review source, branch, test plan, and rollback before making a decision."
-            )
-        }
-
-        item {
-            DetailPanel(
-                title = "Request Identity",
-                body = buildList {
-                    add("Approval ID: ${approval.id}")
-                    add("Project: ${approval.projectName}")
-                    if (approval.projectId.isNotBlank()) add("Project ID: ${approval.projectId}")
-                    add("Agent: ${approval.agentName}")
-                    add("Provider: ${approval.sourceProvider}")
-                    add("Source agent ID: ${approval.sourceAgentId ?: "Not provided"}")
-                    add("Session ID: ${approval.sourceSessionId ?: "Not provided"}")
-                    add("Source invocation ID: ${approval.sourceInvocationId ?: "Not provided"}")
-                    add("Expires at: ${approval.expiresAt ?: "Not provided"}")
-                    add("Source verified: ${if (approval.verifiedSource) "Yes" else "No"}")
-                }.joinToString("\n")
-            )
-        }
-        item {
-            DetailPanel(
-                title = "Risk Rationale",
-                body = approval.riskReasons.ifEmpty {
-                    listOf("No risk rationale was supplied by the backend.")
-                }.joinToString("\n")
-            )
-        }
-        item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
-        item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
-
-        item {
-            Button(
-                onClick = onOpenDiff,
-                colors = ButtonDefaults.buttonColors(containerColor = TowerAccent, contentColor = TowerBackground),
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Review Full Diff") }
-        }
-
-        item {
-            TowerSectionHeader(
-                title = "File Changes",
-                subtitle = "Inline preview only. Open the full diff before approving risky changes."
-            )
-        }
-
-        items(approval.files) { file -> DiffBlock(file = file) }
-
-        item {
+        if (canDecide || decisionInFlight || decisionNeedsReconciliation) {
             DecisionPanel(
                 canApprove = canApprove,
                 canDecide = canDecide,
@@ -312,13 +315,54 @@ fun ApprovalDetailContent(
                 decisionInFlight = decisionInFlight,
                 decisionNeedsReconciliation = decisionNeedsReconciliation,
                 onReconcileDecision = onReconcileDecision,
-                onApprove = onApprove,
+                onApprove = {
+                    if (requiresRiskConfirmation) {
+                        showRiskConfirmation = true
+                    } else {
+                        onApprove()
+                    }
+                },
                 onReject = onReject,
-                onRevise = onRevise
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.sm)
             )
         }
     }
+
+    if (showRiskConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showRiskConfirmation = false },
+            title = { Text("Confirm high-risk approval") },
+            text = {
+                Text(
+                    "Action: ${approval.title}\n${approval.summary}\n\n" +
+                        "Target: ${approval.projectName} · ${approval.targetBranch.ifBlank { "Not provided" }}\n" +
+                        "Risk: ${approval.risk.name}"
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRiskConfirmation = false
+                        onApprove()
+                    },
+                    enabled = canApprove && !decisionInFlight,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) { Text("Approve this request") }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showRiskConfirmation = false },
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) { Text("Go back") }
+            }
+        )
+    }
 }
+
+internal fun requiresExplicitRiskConfirmation(risk: RiskLevel): Boolean =
+    risk == RiskLevel.HIGH || risk == RiskLevel.CRITICAL
 
 @Composable
 private fun ApprovalHeroPanel(
@@ -434,9 +478,9 @@ private fun DecisionPanel(
     onReconcileDecision: () -> Unit,
     onApprove: () -> Unit,
     onReject: () -> Unit,
-    onRevise: () -> Unit
+    modifier: Modifier = Modifier
 ) {
-    TowerPanel(elevated = true) {
+    TowerPanel(modifier = modifier, elevated = true) {
         Text(
             text = "Decision Gate",
             color = TowerTextPrimary,
@@ -459,12 +503,6 @@ private fun DecisionPanel(
             lineHeight = 21.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.lg))
-        Button(
-            onClick = onApprove,
-            enabled = canApprove,
-            colors = ButtonDefaults.buttonColors(containerColor = RiskLow, contentColor = TowerBackground),
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("Approve") }
         if (decisionNeedsReconciliation) {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
             OutlinedButton(
@@ -473,18 +511,21 @@ private fun DecisionPanel(
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Check server status") }
         }
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(
-                onClick = onReject,
-                modifier = Modifier.weight(1f),
-                enabled = canDecide
-            ) { Text("Reject", color = RiskCritical) }
-            OutlinedButton(
-                onClick = onRevise,
-                modifier = Modifier.weight(1f),
-                enabled = canDecide
-            ) { Text("Revise", color = TowerTextPrimary) }
+        if (canDecide) {
+            Spacer(modifier = Modifier.height(TowerSpacing.md))
+            Row(horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = onReject,
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                    enabled = canDecide
+                ) { Text("Reject", color = RiskCritical) }
+                Button(
+                    onClick = onApprove,
+                    enabled = canApprove,
+                    colors = ButtonDefaults.buttonColors(containerColor = RiskLow, contentColor = TowerBackground),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                ) { Text("Approve request") }
+            }
         }
     }
 }
