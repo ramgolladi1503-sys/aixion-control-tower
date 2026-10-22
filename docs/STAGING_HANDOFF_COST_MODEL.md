@@ -198,8 +198,27 @@ This document does not satisfy Slice 7's exit gate yet. Before the billing bound
 The new Jobs and Scheduler files close only the account-independent manifest
 design omission. Their templates intentionally retain unresolved project, region,
 image digest, secret identity, and schedule values, so the offline validator must
-report **NOT APPLY-READY**. The validator does not contact GCP or verify Terraform
-provider schema/effective IAM. The one-shot workers now have strict worker-scoped
+report **NOT APPLY-READY**. The validator can resolve explicit string overrides
+passed as `--tfvars FILE` or repeatable `-var name=value` arguments and checks the
+effective project and region against the Job manifest. Later tfvars files and
+later `-var` arguments take precedence. It accepts only literal string values
+for these reviewed inputs and rejects interpolation or non-literal expressions.
+For example:
+
+```sh
+python backend/scripts/validate_cloud_run_jobs_manifest.py \
+  --jobs deploy/gcp/cloud-run-jobs-staging.yaml \
+  --scheduler deploy/gcp/cloud-scheduler-staging.tf \
+  --tfvars /secure/reviewed/staging.tfvars \
+  -var project_id=aixion-staging-123
+```
+
+This is a bounded static resolver, not Terraform's evaluator. It does not read
+Terraform CLI environment variables, remote state, provider schema, computed
+values, or effective IAM; it does not contact GCP or verify APIs, billing, or live
+resources. Run `terraform fmt -check` and `terraform validate` with the reviewed
+provider configuration before any separately authorized staging apply. The
+production PostgreSQL application gate still blocks deployment. The one-shot workers now have strict worker-scoped
 production settings validation: each requires PostgreSQL and only its own provider
 configuration, while the API-wide production settings validator still refuses
 startup until the complete app is PostgreSQL-authoritative. This permits isolated

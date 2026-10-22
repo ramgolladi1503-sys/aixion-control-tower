@@ -192,3 +192,111 @@ def test_scheduler_schedule_placeholders_are_required_inputs() -> None:
     jobs, scheduler = _valid_inputs()
     scheduler = scheduler.replace('default     = "*/5 * * * *"', 'default     = "REPLACE_WITH_PUSH_CRON"', 1)
     assert any("unresolved" in issue for issue in _issues(jobs, scheduler))
+
+
+def test_explicit_effective_terraform_overrides_resolve_placeholders() -> None:
+    from scripts.validate_cloud_run_jobs_manifest import validate_manifest_text
+
+    jobs, scheduler = _valid_inputs()
+    scheduler = scheduler.replace(
+        'default     = "aixion-staging-123"',
+        'default     = "REPLACE_WITH_PROJECT_ID"',
+        1,
+    ).replace(
+        'default     = "asia-south1"',
+        'default     = "REPLACE_WITH_REGION"',
+        1,
+    )
+    issues = validate_manifest_text(
+        jobs,
+        scheduler,
+        terraform_overrides={
+            "project_id": ["aixion-staging-123"],
+            "cloud_run_region": ["asia-south1"],
+            "scheduler_region": ["asia-south1"],
+            "push_schedule": ["*/5 * * * *"],
+            "email_schedule": ["*/5 * * * *"],
+            "scheduler_timezone": ["UTC"],
+            "scheduler_service_account_id": ["aixion-scheduler"],
+        },
+    )
+    assert issues == []
+
+
+def test_effective_terraform_project_override_must_match_jobs() -> None:
+    from scripts.validate_cloud_run_jobs_manifest import validate_manifest_text
+
+    jobs, scheduler = _valid_inputs()
+    issues = validate_manifest_text(
+        jobs,
+        scheduler,
+        terraform_overrides={"project_id": ["aixion-other-123"]},
+    )
+    assert any("project_id must match the Job" in issue for issue in issues)
+
+
+def test_later_terraform_override_takes_precedence() -> None:
+    from scripts.validate_cloud_run_jobs_manifest import validate_manifest_text
+
+    jobs, scheduler = _valid_inputs()
+    issues = validate_manifest_text(
+        jobs,
+        scheduler,
+        terraform_overrides={"project_id": ["aixion-other-123", "aixion-staging-123"]},
+    )
+    assert not any("project_id must match the Job" in issue for issue in issues)
+
+
+def test_tfvars_non_literal_string_fails_closed() -> None:
+    from scripts.validate_cloud_run_jobs_manifest import _terraform_string_assignments
+
+    try:
+        _terraform_string_assignments('project_id = var.shared_project\n', "project_id")
+    except ValueError as error:
+        assert "must be a literal string" in str(error)
+    else:
+        raise AssertionError("non-literal tfvars values must fail closed")
+
+
+def test_cli_resolves_explicit_tfvars_without_changing_template_files(tmp_path: Path) -> None:
+    from scripts.validate_cloud_run_jobs_manifest import main
+
+    jobs, scheduler = _valid_inputs()
+    scheduler = scheduler.replace(
+        'default     = "aixion-staging-123"',
+        'default     = "REPLACE_WITH_PROJECT_ID"',
+        1,
+    ).replace(
+        'default     = "asia-south1"',
+        'default     = "REPLACE_WITH_REGION"',
+        1,
+    )
+    jobs_path = tmp_path / "jobs.yaml"
+    scheduler_path = tmp_path / "scheduler.tf"
+    tfvars_path = tmp_path / "candidate.tfvars"
+    jobs_path.write_text(jobs, encoding="utf-8")
+    scheduler_path.write_text(scheduler, encoding="utf-8")
+    tfvars_path.write_text(
+        '\n'.join(
+            (
+                'project_id = "aixion-staging-123"',
+                'cloud_run_region = "asia-south1"',
+                'scheduler_region = "asia-south1"',
+                'push_schedule = "*/5 * * * *"',
+                'email_schedule = "*/5 * * * *"',
+                'scheduler_timezone = "UTC"',
+                'scheduler_service_account_id = "aixion-scheduler"',
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    result = main(
+        [
+            "--jobs", str(jobs_path),
+            "--scheduler", str(scheduler_path),
+            "--tfvars", str(tfvars_path),
+        ]
+    )
+
+    assert result == 0

@@ -7,6 +7,7 @@ does not authorize or perform any Google Cloud operation.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -32,17 +33,6 @@ COMMAND_BY_JOB = {
     "aixion-push-dispatch": "scripts/run_postgres_push_dispatch_once.py",
     "aixion-email-dispatch": "scripts/run_postgres_email_dispatch_once.py",
 }
-SCHEDULE_DEFAULTS = (
-    "REPLACE_WITH_PUSH_CRON",
-    "REPLACE_WITH_EMAIL_CRON",
-    "REPLACE_WITH_IANA_TIMEZONE",
-    "REPLACE_WITH_REGION",
-    "REPLACE_WITH_SCHEDULER_REGION",
-    "REPLACE_WITH_PROJECT_ID",
-    "REPLACE_WITH_SCHEDULER_SERVICE_ACCOUNT_ID",
-)
-
-
 def _walk_strings(value: Any):
     if isinstance(value, str):
         yield value
@@ -70,6 +60,61 @@ def _terraform_string_default(text: str, variable: str) -> str | None:
         return None
     default = re.search(r'\bdefault\s*=\s*"([^"\n]*)"', block.group("body"))
     return default.group(1) if default else None
+
+
+def _terraform_string_assignments(text: str, variable: str) -> list[str]:
+    """Read explicit `-var`/tfvars-style string assignments for one variable."""
+    values: list[str] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("//"):
+            continue
+        match = re.fullmatch(rf'{re.escape(variable)}\s*=\s*("(?:[^"\\]|\\.)*")\s*(?:#.*)?', stripped)
+        if match is None:
+            if re.match(rf"{re.escape(variable)}\s*=", stripped):
+                raise ValueError(
+                    f"{variable} assignment at line {line_number} must be a literal string"
+                )
+            continue
+        try:
+            value = json.loads(match.group(1))
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"{variable} assignment at line {line_number} is not valid quoted string syntax"
+            ) from error
+        if not isinstance(value, str):
+            raise ValueError(f"{variable} assignment at line {line_number} must be a string")
+        if "${" in value or "%{" in value:
+            raise ValueError(
+                f"{variable} assignment at line {line_number} must not use Terraform interpolation"
+            )
+        values.append(value)
+    return values
+
+
+def _effective_terraform_string(
+    text: str,
+    variable: str,
+    overrides: list[str],
+    issues: list[str],
+) -> str | None:
+    default = _terraform_string_default(text, variable)
+    if default is None:
+        issues.append(f"Cloud Scheduler must declare literal {variable} input")
+        return None
+    selected = overrides[-1] if overrides else default
+    if any(marker in selected for marker in PLACEHOLDER_MARKERS):
+        issues.append(f"Terraform {variable} remains unresolved after applying overrides")
+        return None
+    if variable == "project_id" and not re.fullmatch(PROJECT_ID_RE, selected):
+        issues.append("Terraform project_id must be a valid concrete GCP project ID")
+        return None
+    if variable in {"cloud_run_region", "scheduler_region"} and not re.fullmatch(
+        r"[a-z]+-[a-z]+[0-9]", selected
+    ):
+        issues.append(f"Terraform {variable} must be a concrete region")
+        return None
+    return selected
 
 
 def _parse_jobs(text: str, issues: list[str]) -> list[dict[str, Any]]:
@@ -307,24 +352,24 @@ def _validate_scheduler(
     *,
     job_projects: set[str],
     job_regions: set[str],
+    terraform_overrides: dict[str, list[str]],
 ) -> None:
-    if any(marker in text for marker in PLACEHOLDER_MARKERS):
-        issues.append("Cloud Scheduler Terraform contains unresolved project, region, or schedule inputs")
-    for marker in SCHEDULE_DEFAULTS:
-        if marker in text:
-            issues.append("Cloud Scheduler Terraform has unresolved required variables")
-            break
-    terraform_project = _terraform_string_default(text, "project_id")
-    terraform_region = _terraform_string_default(text, "cloud_run_region")
-    if terraform_project is None or terraform_region is None:
-        issues.append("Cloud Scheduler must declare literal project_id and cloud_run_region inputs")
-    else:
-        if job_projects and job_projects != {terraform_project}:
-            issues.append("Cloud Scheduler project_id must match the Job image and Cloud SQL project")
-        if job_regions and job_regions != {terraform_region}:
-            issues.append("Cloud Scheduler cloud_run_region must match the Job image and location")
+    effective: dict[str, str | None] = {}
+    for variable in (
+        "project_id", "cloud_run_region", "scheduler_region", "push_schedule",
+        "email_schedule", "scheduler_timezone", "scheduler_service_account_id",
+    ):
+        effective[variable] = _effective_terraform_string(
+            text, variable, terraform_overrides.get(variable, []), issues
+        )
+    terraform_project = effective["project_id"]
+    terraform_region = effective["cloud_run_region"]
+    if terraform_project is not None and job_projects and job_projects != {terraform_project}:
+        issues.append("Cloud Scheduler project_id must match the Job image and Cloud SQL project")
+    if terraform_region is not None and job_regions and job_regions != {terraform_region}:
+        issues.append("Cloud Scheduler cloud_run_region must match the Job image and location")
 
-    scheduler_account_id = _terraform_string_default(text, "scheduler_service_account_id")
+    scheduler_account_id = effective["scheduler_service_account_id"]
     if scheduler_account_id is not None and not re.fullmatch(
         r"[a-z][a-z0-9-]{4,28}[a-z0-9]", scheduler_account_id
     ):
@@ -378,7 +423,12 @@ def _validate_scheduler(
             issues.append(f"{expected_job} must use the dedicated scheduler OAuth identity")
 
 
-def validate_manifest_text(jobs_text: str, scheduler_text: str) -> list[str]:
+def validate_manifest_text(
+    jobs_text: str,
+    scheduler_text: str,
+    *,
+    terraform_overrides: dict[str, list[str]] | None = None,
+) -> list[str]:
     """Return detected blockers; empty means local shape checks passed only."""
     issues: list[str] = []
     jobs = _parse_jobs(jobs_text, issues)
@@ -418,6 +468,7 @@ def validate_manifest_text(jobs_text: str, scheduler_text: str) -> list[str]:
         issues,
         job_projects=cloudsql_projects,
         job_regions=regions,
+        terraform_overrides=terraform_overrides or {},
     )
     return issues
 
@@ -426,13 +477,40 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jobs", type=Path, default=DEFAULT_JOBS)
     parser.add_argument("--scheduler", type=Path, default=DEFAULT_SCHEDULER)
+    parser.add_argument(
+        "--tfvars", type=Path, action="append", default=[],
+        help="Explicit .tfvars input to statically resolve (repeatable)",
+    )
+    parser.add_argument(
+        "-var", dest="var_assignments", action="append", default=[], metavar="NAME=VALUE",
+        help="Explicit Terraform string override (repeatable; later values take precedence)",
+    )
     args = parser.parse_args(argv)
     try:
+        scheduler_text = args.scheduler.read_text(encoding="utf-8")
+        overrides: dict[str, list[str]] = {}
+        supported = {
+            "project_id", "cloud_run_region", "scheduler_region", "push_schedule",
+            "email_schedule", "scheduler_timezone", "scheduler_service_account_id",
+        }
+        for path in args.tfvars:
+            tfvars_text = path.read_text(encoding="utf-8")
+            for variable in supported:
+                overrides.setdefault(variable, []).extend(
+                    _terraform_string_assignments(tfvars_text, variable)
+                )
+        for assignment in args.var_assignments:
+            name, separator, value = assignment.partition("=")
+            if not separator or name not in supported or not value:
+                raise ValueError(f"unsupported Terraform string override: {assignment!r}")
+            overrides.setdefault(name, []).append(value)
         issues = validate_manifest_text(
-            args.jobs.read_text(encoding="utf-8"), args.scheduler.read_text(encoding="utf-8")
+            args.jobs.read_text(encoding="utf-8"),
+            scheduler_text,
+            terraform_overrides=overrides,
         )
-    except OSError as exc:
-        print(f"NOT APPLY-READY: cannot read deployment preflight input: {exc}", file=sys.stderr)
+    except (OSError, ValueError) as exc:
+        print(f"NOT APPLY-READY: invalid deployment preflight input: {exc}", file=sys.stderr)
         return 2
     if issues:
         print("NOT APPLY-READY:")
