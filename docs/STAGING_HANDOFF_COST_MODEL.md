@@ -2,7 +2,7 @@
 
 **Status:** Proposed architecture only; no Google Cloud resource, API, billing account, or deployment has been changed.
 **Prepared:** 2026-10-21
-**Pricing references last checked:** 2026-10-21 (official Google Cloud pricing pages)
+**Pricing references last checked:** 2026-10-22 (official Google Cloud pricing pages)
 **Scope:** Draft input to Slice 7 in [PRE_BILLING_WORK_LOCK.md](PRE_BILLING_WORK_LOCK.md)
 
 ## Current local artifact status — 2026-10-22
@@ -46,6 +46,13 @@ key.
 Do not add a load balancer, Cloud NAT, Redis, multi-region database, or high-availability database to this first staging footprint unless a measured requirement justifies the recurring cost. Use the Cloud Run HTTPS endpoint directly and Cloud SQL's supported authenticated connector path; do not open PostgreSQL to `0.0.0.0/0`.
 
 ## Indicative monthly cost envelope
+
+Three workload-only Cloud Run scenarios, including the one-minute minimum billed
+duration for each Job invocation and separate free-tier/exhausted-free-tier cases,
+are recorded in [`STAGING_COST_SCENARIOS.md`](STAGING_COST_SCENARIOS.md). They
+exclude the always-on Cloud SQL instance and supporting services, so they are not
+all-in estimates and do not establish that the proposed `$75/month` exposure is
+adequate.
 
 The following is a planning estimate, **not a quote or a billing cap**. The Cloud SQL page's displayed default price table has listed `db-g1-small` at **$0.035/hour**; 720 hours would be **$25.20/month for database compute alone** at that displayed rate. The page does not establish that as the `asia-south1` rate. This is a shared-core staging candidate only and is excluded from the Cloud SQL SLA. Storage, backups, network, logs, taxes, and regional price differences are extra. Treat the database cost as **unpriced for Mumbai** until a dated calculator export records the exact edition, tier, region, storage, backup retention, and network assumptions. [Cloud SQL pricing](https://cloud.google.com/sql/pricing)
 
