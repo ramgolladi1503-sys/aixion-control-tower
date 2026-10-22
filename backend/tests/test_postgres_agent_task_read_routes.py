@@ -17,8 +17,9 @@ from app.approval_decisions import agent_task_repository as sqlite_agent_task_re
 from app.agent_task_models import AgentTaskStatus
 from app.agent_task_routes import MaintainerDependency, ReviewerDependency
 from app.approval_recovery import reconcile_linked_approval_tasks
+from app.approval_integrity import compute_approval_payload_hash
 from app.application_repositories import ApplicationRepositories
-from app.models import AuthUser, Project, User, UserRole, Workspace
+from app.models import ApprovalRequest, ApprovalStatus, AuthUser, Project, User, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
 from app.settings import get_settings
@@ -567,6 +568,25 @@ def test_postgres_retry_summary_and_transition_use_durable_retry_history(
     client = TestClient(main.app)
     task, _approval_id = _create_postgres_task_with_pending_approval(client, project)
     task_id = task["id"]
+
+    # A retry is only valid after the linked failed approval has been approved
+    # again. Model that explicit re-approval before exercising retry history.
+    with connect() as conn:
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s",
+            (_approval_id,),
+        ).fetchone()
+        assert approval_row is not None
+        approval = ApprovalRequest.model_validate(approval_row[0]).model_copy(
+            update={"status": ApprovalStatus.APPROVED}
+        )
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET status=%s,payload=%s "
+            "WHERE approval_id=%s AND workspace_id=%s",
+            (ApprovalStatus.APPROVED.value, Jsonb(approval.model_dump(mode="json")),
+             _approval_id, workspace.id),
+        )
 
     def mark_task_failed() -> None:
         # Seed the worker's terminal task state directly; this test focuses on

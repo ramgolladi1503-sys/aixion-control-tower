@@ -593,10 +593,17 @@ def get_agent_task_retry_summary(
 ) -> AgentTaskRetrySummary:
     task_repository = _task_repository_for_route(http_request)
     task = _task_for_user(task_id, user, task_repository, http_request)
+    approval = (
+        _approval_repository_for_route(http_request).get(task.approval_request_id)
+        if task.approval_request_id
+        else None
+    )
     return retry_summary(
         task,
         max_retries=max_retries,
         repository=task_repository,
+        approval=approval,
+        require_approved_linked_approval=http_request is not None,
     )
 
 
@@ -609,10 +616,17 @@ def retry_agent_task(
 ) -> AgentTaskEvent:
     task_repository = _task_repository_for_route(http_request)
     expected_task = _task_for_user(task_id, user, task_repository, http_request)
+    approval = (
+        _approval_repository_for_route(http_request).get(expected_task.approval_request_id)
+        if expected_task.approval_request_id
+        else None
+    )
     summary = retry_summary(
         expected_task,
         max_retries=payload.max_retries,
         repository=task_repository,
+        approval=approval,
+        require_approved_linked_approval=http_request is not None,
     )
     if not summary.retry_allowed:
         raise HTTPException(status_code=409, detail=summary.reason)

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -24,10 +25,31 @@ from app.auth import require_owner
 from app.connector_models import AgentConnector
 from app.connector_repository import PostgresConnectorRepository
 from app.connector_credentials import hash_connector_secret
-from app.connector_webhook import expected_hmac_v1_signature
+from app.connector_webhook import (
+    _assert_hmac_v1_not_replayed,
+    expected_hmac_v1_signature,
+)
 from app.models import AuditEvent, AuthUser, Project, User, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
 from app.store import store
+
+
+def test_hmac_nonce_history_retains_unexpired_nonce_beyond_200_entries() -> None:
+    now_epoch = int(time.time())
+    first_nonce = f"first_{uuid.uuid4().hex}"
+    connector = AgentConnector(
+        name="Nonce retention",
+        config={"hmac_nonce_history": {first_nonce: now_epoch}},
+    )
+
+    for index in range(201):
+        _assert_hmac_v1_not_replayed(connector, f"fresh_{index}_{uuid.uuid4().hex}", now_epoch)
+
+    assert first_nonce in connector.config["hmac_nonce_history"]
+    with pytest.raises(HTTPException) as replay_error:
+        _assert_hmac_v1_not_replayed(connector, first_nonce, now_epoch)
+
+    assert replay_error.value.status_code == 401
 
 
 @pytest.fixture

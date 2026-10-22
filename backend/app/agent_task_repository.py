@@ -9,6 +9,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from .approval_integrity import compute_approval_payload_hash
 from .models import (
     AgentProvider, ApprovalRequest, ApprovalStatus, AuditEvent, Notification, Project,
     new_id,
@@ -705,6 +706,44 @@ class SQLiteAgentTaskRepository:
                 durable = AgentTask.model_validate_json(row[1])
                 if durable != expected:
                     raise AgentTaskRepositoryConflict("AgentTask changed before retry committed.")
+                approval_row = conn.execute(
+                    "SELECT entity_id,payload FROM kv_store "
+                    "WHERE entity_type='approval_request' AND entity_id=?",
+                    (expected.approval_request_id,),
+                ).fetchone()
+                if approval_row is None:
+                    raise AgentTaskRepositoryConflict("Linked approval request was not found.")
+                durable_approval = ApprovalRequest.model_validate_json(approval_row[1])
+                if (
+                    durable_approval.id != approval_row[0]
+                    or durable_approval.id != expected.approval_request_id
+                    or durable_approval.status != ApprovalStatus.APPROVED
+                    or durable_approval.project_id != expected.project_id
+                    or durable_approval.workspace_id != expected.workspace_id
+                    or not durable_approval.approved_payload_hash
+                    or durable_approval.approved_payload_hash
+                    != compute_approval_payload_hash(durable_approval)
+                ):
+                    raise AgentTaskRepositoryConflict(
+                        "Linked approval must remain approved and match the AgentTask scope before retry."
+                    )
+                if expected.project_id:
+                    project_row = conn.execute(
+                        "SELECT entity_id,payload FROM kv_store "
+                        "WHERE entity_type='project' AND entity_id=?",
+                        (expected.project_id,),
+                    ).fetchone()
+                    if project_row is None:
+                        raise AgentTaskRepositoryConflict("AgentTask project is missing.")
+                    project = Project.model_validate_json(project_row[1])
+                    if (
+                        project.id != project_row[0]
+                        or project.workspace_id != expected.workspace_id
+                        or durable_approval.workspace_id != project.workspace_id
+                    ):
+                        raise AgentTaskRepositoryConflict(
+                            "Linked approval, AgentTask, and project scope do not match."
+                        )
                 retry_count = conn.execute(
                     "SELECT COUNT(*) FROM kv_store WHERE entity_type='agent_task_event' "
                     "AND json_extract(payload,'$.task_id')=? "
@@ -1197,6 +1236,40 @@ class PostgresAgentTaskRepository:
             raise ValueError("PostgreSQL AgentTask retry requires persisted workspace ownership.")
         try:
             with self._connect() as conn:
+                # Match approval decision and cancellation lock order:
+                # approval first, then its linked task.
+                approval_row = conn.execute(
+                    "SELECT approval_id,project_id,workspace_id,status,payload "
+                    "FROM approval_requests WHERE approval_id=%s FOR UPDATE",
+                    (expected.approval_request_id,),
+                ).fetchone()
+                if approval_row is None:
+                    raise AgentTaskRepositoryConflict("Linked approval request was not found.")
+                durable_approval = ApprovalRequest.model_validate(approval_row[4])
+                if (
+                    approval_row[0] != expected.approval_request_id
+                    or durable_approval.id != approval_row[0]
+                    or approval_row[1] != expected.project_id
+                    or durable_approval.project_id != expected.project_id
+                    or approval_row[2] != expected.workspace_id
+                    or durable_approval.workspace_id != expected.workspace_id
+                    or approval_row[3] != ApprovalStatus.APPROVED.value
+                    or durable_approval.status != ApprovalStatus.APPROVED
+                    or not durable_approval.approved_payload_hash
+                    or durable_approval.approved_payload_hash
+                    != compute_approval_payload_hash(durable_approval)
+                ):
+                    raise AgentTaskRepositoryConflict(
+                        "Linked approval must remain approved and match the AgentTask scope before retry."
+                    )
+                project_row = conn.execute(
+                    "SELECT workspace_id FROM projects WHERE project_id=%s FOR KEY SHARE",
+                    (expected.project_id,),
+                ).fetchone()
+                if project_row is None or project_row[0] != expected.workspace_id:
+                    raise AgentTaskRepositoryConflict(
+                        "Linked approval, AgentTask, and project scope do not match."
+                    )
                 row = conn.execute(
                     "SELECT workspace_id,project_id,payload FROM agent_tasks "
                     "WHERE task_id=%s FOR UPDATE",

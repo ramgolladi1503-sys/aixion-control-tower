@@ -51,7 +51,6 @@ MAX_WEBHOOK_METADATA_KEYS = 50
 HMAC_SIGNATURE_VERSION = "v1"
 HMAC_TIMESTAMP_TOLERANCE_SECONDS = 300
 HMAC_NONCE_TTL_SECONDS = 600
-HMAC_MAX_TRACKED_NONCES = 200
 
 
 class ConnectorWebhookPayload(BaseModel):
@@ -194,8 +193,6 @@ def _clean_hmac_nonce_history(connector: AgentConnector, now_epoch: int) -> dict
             continue
         if now_epoch - seen_at_int <= HMAC_NONCE_TTL_SECONDS:
             cleaned[str(nonce)] = seen_at_int
-    if len(cleaned) > HMAC_MAX_TRACKED_NONCES:
-        cleaned = dict(sorted(cleaned.items(), key=lambda item: item[1])[-HMAC_MAX_TRACKED_NONCES:])
     return cleaned
 
 

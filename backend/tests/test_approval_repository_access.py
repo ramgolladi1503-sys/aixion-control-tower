@@ -38,4 +38,10 @@ def test_approval_list_route_uses_repository_bound_to_fastapi_app(monkeypatch) -
 
     assert response.status_code == 200
     assert response.json() == []
-    assert repository.workspace_reads == ["workspace-test", None, "workspace-test"]
+    # Expiration is request-triggered maintenance and must stay within the
+    # authenticated workspace, including grouped inbox reads.
+    assert repository.workspace_reads == [
+        "workspace-test",
+        "workspace-test",
+        "workspace-test",
+    ]

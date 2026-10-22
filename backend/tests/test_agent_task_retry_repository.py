@@ -18,6 +18,7 @@ from app.agent_task_repository import (
     SQLiteAgentTaskRepository,
 )
 from app.agent_task_retry import append_retry_requested_event, audit_retry_requested
+from app.approval_integrity import compute_approval_payload_hash
 from app.models import ApprovalRequest, ApprovalStatus, AuditEvent, Project, RiskAssessment, RiskLevel, Workspace
 from app.postgres_database import run_postgres_migrations
 from app.store import store
@@ -69,9 +70,26 @@ def _task_records(task: AgentTask, *, workspace_id: str | None = None):
 def test_sqlite_retry_is_atomic_and_limit_is_rechecked_under_lock() -> None:
     store.reset()
     repository = SQLiteAgentTaskRepository(store._connect)
+    workspace = Workspace(
+        id="workspace_retry_atomic", name="Retry workspace", owner_user_id="owner"
+    )
+    project = Project(
+        id="project_retry_atomic", name="Retry project", workspace_id=workspace.id
+    )
+    approval = ApprovalRequest(
+        id="approval_retry_atomic", project_id=project.id, workspace_id=workspace.id,
+        title="Approved work", summary="Safe retry target", target_branch="feature/retry",
+        files=[], risk=RiskAssessment(level=RiskLevel.LOW), status=ApprovalStatus.APPROVED,
+    )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
+    store.workspaces[workspace.id] = workspace
+    store.projects[project.id] = project
+    store.approval_requests[approval.id] = approval
+    store.persist()
     task = AgentTask(
-        id="task_retry_atomic", title="Retry", goal="Retry atomically",
-        status=AgentTaskStatus.FAILED, approval_request_id="approval_retry_atomic",
+        id="task_retry_atomic", project_id=project.id, workspace_id=workspace.id,
+        title="Retry", goal="Retry atomically", status=AgentTaskStatus.FAILED,
+        approval_request_id=approval.id,
     )
     created_event, created_audit = _task_records(task)
     repository.create(task=task, event=created_event, audit=created_audit)
@@ -139,6 +157,59 @@ def test_sqlite_retry_is_atomic_and_limit_is_rechecked_under_lock() -> None:
     assert repository.count_retries(task.id) == 2
 
 
+def test_sqlite_retry_requires_current_approval_and_matching_scope() -> None:
+    store.reset()
+    workspace = Workspace(
+        id="workspace_retry_authority", name="Retry workspace", owner_user_id="owner"
+    )
+    project = Project(
+        id="project_retry_authority", name="Retry project", workspace_id=workspace.id
+    )
+    approval = ApprovalRequest(
+        id="approval_retry_authority", project_id=project.id, workspace_id=workspace.id,
+        title="Previously approved work", summary="Retry authority check",
+        target_branch="feature/retry", files=[], risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.FAILED,
+    )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
+    store.workspaces[workspace.id] = workspace
+    store.projects[project.id] = project
+    store.approval_requests[approval.id] = approval
+    store.persist()
+    repository = SQLiteAgentTaskRepository(store._connect)
+    task = AgentTask(
+        id="task_retry_authority", project_id=project.id, workspace_id=workspace.id,
+        title="Retry", goal="Require a still-approved action",
+        status=AgentTaskStatus.FAILED, approval_request_id=approval.id,
+    )
+    created_event, created_audit = _task_records(task, workspace_id=workspace.id)
+    repository.create(task=task, event=created_event, audit=created_audit)
+    expected = repository.get(task.id)
+    assert expected is not None
+    updated, event, audit = _retry_records(expected, 0, 3)
+
+    with pytest.raises(AgentTaskRepositoryConflict, match="Linked approval must remain approved"):
+        repository.commit_retry(
+            expected=expected, updated=updated, event=event, audit=audit, max_retries=3,
+        )
+
+    assert repository.get(task.id) == expected
+    assert repository.count_retries(task.id) == 0
+    assert repository.list_events(task.id) == [created_event]
+
+    mismatched_approval = approval.model_copy(
+        update={"status": ApprovalStatus.APPROVED, "workspace_id": "other_workspace"}
+    )
+    store.approval_requests[approval.id] = mismatched_approval
+    store.persist()
+    with pytest.raises(AgentTaskRepositoryConflict, match="Linked approval must remain approved"):
+        repository.commit_retry(
+            expected=expected, updated=updated, event=event, audit=audit, max_retries=3,
+        )
+    assert repository.get(task.id) == expected
+    assert repository.count_retries(task.id) == 0
+
+
 def test_postgres_retry_commits_scope_and_rechecks_retry_limit(postgres_agent_tasks) -> None:
     repository, connect = postgres_agent_tasks
     suffix = uuid.uuid4().hex
@@ -149,6 +220,7 @@ def test_postgres_retry_commits_scope_and_rechecks_retry_limit(postgres_agent_ta
         title="Approved work", summary="Safe retry target", target_branch="feature/retry",
         files=[], risk=RiskAssessment(level=RiskLevel.LOW), status=ApprovalStatus.APPROVED,
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     task = AgentTask(
         id=f"task_{suffix}", project_id=project.id, workspace_id=workspace.id,
         approval_request_id=approval.id, title="Retry", goal="Retry atomically",
@@ -229,4 +301,32 @@ def test_postgres_retry_commits_scope_and_rechecks_retry_limit(postgres_agent_ta
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(lambda _: attempt_postgres_retry(), range(2)))
     assert sorted(results) == ["committed", "conflict"]
+    assert repository.count_retries(task.id) == 2
+
+    # A stale task status alone is insufficient: its linked approval must still
+    # be approved in the same authority before a new retry can be committed.
+    with connect() as conn:
+        durable_task = repository.get(task.id)
+        assert durable_task is not None
+        failed_again = durable_task.model_copy(update={"status": AgentTaskStatus.FAILED})
+        failed_approval = approval.model_copy(update={"status": ApprovalStatus.FAILED})
+        conn.execute(
+            "UPDATE agent_tasks SET status=%s,payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (failed_again.status.value, Jsonb(failed_again.model_dump(mode="json")),
+             task.id, workspace.id),
+        )
+        conn.execute(
+            "UPDATE approval_requests SET status=%s,payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (failed_approval.status.value, Jsonb(failed_approval.model_dump(mode="json")),
+             approval.id, workspace.id),
+        )
+    expected = repository.get(task.id)
+    assert expected is not None
+    rejected_update, rejected_event, rejected_audit = _retry_records(expected, 2, 3)
+    with pytest.raises(AgentTaskRepositoryConflict, match="Linked approval must remain approved"):
+        repository.commit_retry(
+            expected=expected, updated=rejected_update, event=rejected_event,
+            audit=rejected_audit, max_retries=3,
+        )
+    assert repository.get(task.id) == expected
     assert repository.count_retries(task.id) == 2

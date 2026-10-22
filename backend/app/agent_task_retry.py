@@ -5,7 +5,8 @@ from pydantic import BaseModel, Field
 from .approval_decisions import agent_task_repository
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from .agent_task_repository import AgentTaskRepository
-from .models import AuditEvent, now_utc
+from .approval_integrity import compute_approval_payload_hash
+from .models import ApprovalRequest, ApprovalStatus, AuditEvent, now_utc
 from .agent_task_repository import RETRY_REQUESTED_OPERATION
 
 DEFAULT_MAX_RETRIES = 3
@@ -42,6 +43,8 @@ def retry_summary(
     *,
     max_retries: int = DEFAULT_MAX_RETRIES,
     repository: AgentTaskRepository | None = None,
+    approval: ApprovalRequest | None = None,
+    require_approved_linked_approval: bool = False,
 ) -> AgentTaskRetrySummary:
     retry_count = count_retry_requests(task.id, repository=repository)
     if task.status != AgentTaskStatus.FAILED:
@@ -60,6 +63,48 @@ def retry_summary(
             retry_allowed=False,
             reason="Agent task has no linked approval request.",
         )
+    if require_approved_linked_approval:
+        if approval is None:
+            return AgentTaskRetrySummary(
+                task_id=task.id,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                retry_allowed=False,
+                reason="Linked approval request was not found.",
+            )
+        if (
+            approval.id != task.approval_request_id
+            or approval.project_id != task.project_id
+            or approval.workspace_id != task.workspace_id
+        ):
+            return AgentTaskRetrySummary(
+                task_id=task.id,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                retry_allowed=False,
+                reason="Linked approval scope does not match the AgentTask.",
+            )
+        if approval.status != ApprovalStatus.APPROVED:
+            return AgentTaskRetrySummary(
+                task_id=task.id,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                retry_allowed=False,
+                reason=(
+                    "Linked approval is not approved; obtain approval again before retrying."
+                ),
+            )
+        if (
+            not approval.approved_payload_hash
+            or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+        ):
+            return AgentTaskRetrySummary(
+                task_id=task.id,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                retry_allowed=False,
+                reason="Linked approval is missing a valid frozen action hash.",
+            )
     if retry_count >= max_retries:
         return AgentTaskRetrySummary(
             task_id=task.id,
