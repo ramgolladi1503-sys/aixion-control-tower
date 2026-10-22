@@ -6,6 +6,8 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
+from app.connector_models import AgentConnector
+from app.connector_routes import _audit
 from app.main import app
 from app.models import Project
 from app.store import store
@@ -61,6 +63,15 @@ def test_create_connector_records_owner_visible_config_and_audit() -> None:
     assert body["config"]["profile"] == "openclaw"
     assert body["id"] in store.agent_connectors
     assert any(event.event_type == "connector.created" for event in store.audit_events)
+
+
+def test_connector_audit_uses_persisted_connector_workspace_scope() -> None:
+    connector = AgentConnector(name="Scoped connector", workspace_id="workspace_scoped")
+    store.agent_connectors[connector.id] = connector
+
+    event = _audit("connector.updated", connector.id, {"status": "DISABLED"}, actor="owner@example.com")
+
+    assert event.workspace_id == connector.workspace_id
 
 
 def test_list_and_get_connectors() -> None:
