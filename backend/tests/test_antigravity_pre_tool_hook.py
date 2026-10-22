@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
-from email.message import Message
-import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
-import urllib.error
-import urllib.request
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -38,25 +35,20 @@ ENV = {
 
 
 def test_http_request_advertises_approval_protocol_v1() -> None:
-    captured = {}
+    captured: dict[str, object] = {}
 
-    class Response:
-        def __enter__(self):
-            return self
+    def deadline_request(method, url, headers, body, timeout, *, max_response_bytes):
+        captured.update(
+            method=method,
+            url=url,
+            headers=headers,
+            body=body,
+            timeout=timeout,
+            max_response_bytes=max_response_bytes,
+        )
+        return SimpleNamespace(status=200, headers={}, body=b"{}")
 
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _limit: int) -> bytes:
-            return b"{}"
-
-    class Opener:
-        def open(self, request, timeout: int):
-            captured["request"] = request
-            captured["timeout"] = timeout
-            return Response()
-
-    with patch.object(hook.urllib.request, "build_opener", return_value=Opener()):
+    with patch.object(hook, "deadline_request", side_effect=deadline_request):
         assert hook._request(
             "GET",
             "http://127.0.0.1:8012/agents/approvals/id/decision",
@@ -64,8 +56,11 @@ def test_http_request_advertises_approval_protocol_v1() -> None:
             ENV["AIXION_AGENT_TOKEN"],
         ) == {}
 
-    assert captured["request"].get_header("X-aixion-approval-protocol") == "1"
+    assert captured["method"] == "GET"
+    assert captured["url"] == "http://127.0.0.1:8012/agents/approvals/id/decision"
+    assert captured["headers"]["X-Aixion-Approval-Protocol"] == "1"
     assert captured["timeout"] == 10
+    assert captured["max_response_bytes"] == hook.MAX_RESPONSE_BYTES
 
 
 @pytest.mark.parametrize("timeout", ["invalid", "0", "-1", "901"])
@@ -789,21 +784,8 @@ def test_rate_limited_decision_poll_retries_after_server_delay() -> None:
 
 
 def test_http_429_retry_after_header_is_parsed() -> None:
-    headers = Message()
-    headers["Retry-After"] = "17"
-    error = urllib.error.HTTPError(
-        "http://127.0.0.1:8012/agents/approvals/test/decision",
-        429,
-        "Too Many Requests",
-        headers,
-        io.BytesIO(b"rate limited"),
-    )
-
-    class RateLimitedOpener:
-        def open(self, request: urllib.request.Request, timeout: int) -> object:
-            raise error
-
-    with patch.object(hook.urllib.request, "build_opener", return_value=RateLimitedOpener()):
+    response = SimpleNamespace(status=429, headers={"retry-after": "17"}, body=b"rate limited")
+    with patch.object(hook, "deadline_request", return_value=response):
         with pytest.raises(hook.RateLimitError) as caught:
             hook._request("GET", "http://127.0.0.1:8012/decision", "agent-test", "test-token")
 
@@ -1015,41 +997,34 @@ def test_preflight_health_omits_token_then_authenticates_connector_identity() ->
         "project_id": "project-test",
     }
 
-    class PreflightOpener:
-        def open(self, request: urllib.request.Request, timeout: int) -> object:
-            if request.full_url.endswith("/health"):
-                assert request.get_header("X-aixion-agent-token") is None
-                assert request.get_header("X-aixion-agent-id") is None
-                assert timeout == 5
-                body = b'{"status":"ok"}'
-            else:
-                assert request.full_url == (
-                    "https://control.example.test/agents/identity?provider=ANTIGRAVITY&project_id=project-test"
-                )
-                assert request.get_header("X-aixion-agent-token") == "must-not-be-sent"
-                assert request.get_header("X-aixion-agent-id") == "agent-test"
-                assert request.get_header("X-aixion-approval-protocol") == "1"
-                assert timeout == 10
-                body = b'{"agent_id":"agent-test","provider":"ANTIGRAVITY",' \
-                    b'"workspace_id":"workspace-test","project_id":"project-test"}'
-
-            class Response:
-                def __enter__(self) -> "Response":
-                    return self
-
-                def __exit__(self, *args: object) -> None:
-                    return None
-
-                def read(self, size: int) -> bytes:
-                    assert size in {64 * 1024 + 1, 256 * 1024 + 1}
-                    return body
-
-            return Response()
+    def deadline_request(method, url, headers, body, timeout, *, max_response_bytes):
+        assert method == "GET"
+        assert body is None
+        if url.endswith("/health"):
+            assert "X-Aixion-Agent-Token" not in headers
+            assert "X-Aixion-Agent-Id" not in headers
+            assert timeout == 5
+            assert max_response_bytes == hook.MAX_HEALTH_RESPONSE_BYTES
+            content = b'{"status":"ok"}'
+            status = 200
+        else:
+            assert url == (
+                "https://control.example.test/agents/identity?provider=ANTIGRAVITY&project_id=project-test"
+            )
+            assert headers["X-Aixion-Agent-Token"] == "must-not-be-sent"
+            assert headers["X-Aixion-Agent-Id"] == "agent-test"
+            assert headers["X-Aixion-Approval-Protocol"] == "1"
+            assert timeout == 10
+            assert max_response_bytes == hook.MAX_RESPONSE_BYTES
+            content = b'{"agent_id":"agent-test","provider":"ANTIGRAVITY",' \
+                b'"workspace_id":"workspace-test","project_id":"project-test"}'
+            status = 200
+        return SimpleNamespace(status=status, headers={}, body=content)
 
     with (
         patch.object(hook, "_configuration", return_value=config),
         patch.object(hook, "_agent_token", return_value="must-not-be-sent"),
-        patch.object(hook.urllib.request, "build_opener", return_value=PreflightOpener()),
+        patch.object(hook, "deadline_request", side_effect=deadline_request),
     ):
         result = hook.check_connection(ENV)
 
@@ -1067,25 +1042,14 @@ def test_preflight_rejects_authenticated_identity_mismatch() -> None:
         "project_id": "project-test",
     }
 
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _size: int) -> bytes:
-            return b'{"status":"ok"}'
-
-    class HealthOnlyOpener:
-        def open(self, request, timeout):
-            assert request.full_url.endswith("/health")
-            return Response()
-
     with (
         patch.object(hook, "_configuration", return_value=config),
         patch.object(hook, "_agent_token", return_value="test-token"),
-        patch.object(hook.urllib.request, "build_opener", return_value=HealthOnlyOpener()),
+        patch.object(
+            hook,
+            "deadline_request",
+            return_value=SimpleNamespace(status=200, headers={}, body=b'{"status":"ok"}'),
+        ),
         patch.object(hook, "_request", return_value={
             "agent_id": "agent-other",
             "provider": "ANTIGRAVITY",

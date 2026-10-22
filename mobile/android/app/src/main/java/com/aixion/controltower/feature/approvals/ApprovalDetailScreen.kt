@@ -17,10 +17,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -189,7 +192,9 @@ fun ApprovalDetailContent(
         approval.status in setOf(ApprovalStatus.REQUESTED, ApprovalStatus.PENDING_REVIEW) &&
         !isBlocked && !hasUnsupportedData && decisionBlockReason == null
     val hasRequiredActions = approval.requiredActions.isNotEmpty()
-    val canApprove = canDecide && !hasRequiredActions
+    val hasExactToolRequest = approval.hasExactToolRequestPayload()
+    var exactToolRequestReviewed by remember(approval.id, approval.files) { mutableStateOf(false) }
+    val canApprove = canDecide && !hasRequiredActions && (!hasExactToolRequest || exactToolRequestReviewed)
     val requiresRiskConfirmation = requiresExplicitRiskConfirmation(approval.risk)
     var showRiskConfirmation by remember(approval.id) { mutableStateOf(false) }
     var showTechnicalDetails by remember(approval.id) { mutableStateOf(false) }
@@ -216,6 +221,19 @@ fun ApprovalDetailContent(
                     hasUnsupportedData = hasUnsupportedData,
                     hasRequiredActions = hasRequiredActions
                 )
+            }
+
+            if (hasExactToolRequest) {
+                item {
+                    ExactToolRequestHeader()
+                }
+                items(approval.files) { file -> DiffBlock(file = file) }
+                item {
+                    ExactToolRequestReviewAcknowledgement(
+                        checked = exactToolRequestReviewed,
+                        onCheckedChange = { exactToolRequestReviewed = it }
+                    )
+                }
             }
 
             if (lastActionMessage != null && lastActionApprovalId == approval.id) {
@@ -289,20 +307,24 @@ fun ApprovalDetailContent(
                 ) { Text("Review Full Diff") }
             }
 
-            item {
-                TowerSectionHeader(
-                    title = "File Changes",
-                    subtitle = "Inline preview only. Open the full diff before approving risky changes."
-                )
-            }
+            if (!hasExactToolRequest) {
+                item {
+                    TowerSectionHeader(
+                        title = "File Changes",
+                        subtitle = "Inline preview only. Open the full diff before approving risky changes.",
+                        modifier = Modifier.testTag("approval-file-changes")
+                    )
+                }
 
-            items(approval.files) { file -> DiffBlock(file = file) }
+                items(approval.files) { file -> DiffBlock(file = file) }
+            }
 
         }
 
         if (canDecide || decisionInFlight || decisionNeedsReconciliation) {
             DecisionPanel(
                 canApprove = canApprove,
+                exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
                 canDecide = canDecide,
                 isBlocked = isBlocked,
                 hasUnsupportedData = hasUnsupportedData,
@@ -353,6 +375,71 @@ fun ApprovalDetailContent(
             }
         )
     }
+}
+
+@Composable
+private fun ExactToolRequestHeader() {
+    val palette = LocalTowerPalette.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("approval-exact-tool-request"),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+    ) {
+        Text(
+            text = "Exact requested tool action",
+            color = palette.ink,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 24.sp
+        )
+        Text(
+            text = "Review the tool name and arguments below before deciding.",
+            color = palette.inkMuted,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
+    }
+}
+
+@Composable
+private fun ExactToolRequestReviewAcknowledgement(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val palette = LocalTowerPalette.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("approval-exact-tool-review-acknowledgement")
+            .toggleable(
+                value = checked,
+                role = Role.Checkbox,
+                onValueChange = onCheckedChange
+            )
+            .padding(vertical = TowerSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = null,
+            modifier = Modifier.testTag("approval-exact-tool-reviewed")
+        )
+        Text(
+            text = "I reviewed the exact tool name and arguments above.",
+            color = palette.ink,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
+    }
+}
+
+internal fun ApprovalSummary.hasExactToolRequestPayload(): Boolean = files.any { file ->
+    file.changeType.equals("tool_call", ignoreCase = true) ||
+        file.changeType.equals("mcp_tool_call", ignoreCase = true) ||
+        file.path.startsWith("mcp://", ignoreCase = true) ||
+        file.path.startsWith("antigravity://tool/", ignoreCase = true) ||
+        file.path.startsWith("codex://tool/", ignoreCase = true)
 }
 
 internal fun requiresExplicitRiskConfirmation(risk: RiskLevel): Boolean =
@@ -565,6 +652,7 @@ private fun RequiredActionsPanel(actions: List<String>) {
 @Composable
 private fun DecisionPanel(
     canApprove: Boolean,
+    exactToolRequestNeedsReview: Boolean,
     canDecide: Boolean,
     isBlocked: Boolean,
     hasUnsupportedData: Boolean,
@@ -591,6 +679,7 @@ private fun DecisionPanel(
                 decisionInFlight -> "Sending the decision and waiting for the server."
                 isBlocked -> "This request is blocked by policy. No decision can be recorded from mobile."
                 !canDecide -> "This request is no longer waiting for a decision."
+                exactToolRequestNeedsReview -> "Review the exact tool name and arguments above, then acknowledge before approving."
                 canApprove -> "Approval is available. Confirm only after reviewing diff, tests, and rollback."
                 else -> "Approval is disabled until safety requirements are satisfied."
             },

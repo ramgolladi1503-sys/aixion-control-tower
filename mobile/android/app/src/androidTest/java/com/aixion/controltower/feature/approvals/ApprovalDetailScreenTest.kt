@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.approvals
 
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasText
@@ -119,6 +120,90 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("+test").assertExists()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
         composeRule.onNodeWithText("Reject").assertIsEnabled()
+    }
+
+    @Test
+    fun providerAndMcpToolApprovalsUseExplicitExactActionSection() {
+        val toolRequests = listOf(
+            Triple("ANTIGRAVITY", "tool_call", "antigravity://tool/run_command"),
+            Triple("CODEX", "tool_call", "codex://tool/shell"),
+            Triple("OTHER", "mcp_tool_call", "mcp://workspace/update")
+        )
+
+        toolRequests.forEach { (provider, changeType, path) ->
+            val request = approval(ApprovalStatus.REQUESTED).copy(
+                sourceProvider = provider,
+                files = listOf(
+                    FileChangeSummary(
+                        path = path,
+                        changeType = changeType,
+                        diff = "{\"command\":\"echo exact\"}",
+                        risk = RiskLevel.HIGH
+                    )
+                )
+            )
+            composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
+
+            composeRule.onNodeWithTag("approval-exact-tool-request").assertExists()
+            composeRule.onNodeWithText("Exact requested tool action").assertExists()
+            composeRule.onNodeWithText("Review the tool name and arguments below before deciding.").assertExists()
+            composeRule.onNodeWithText("{\"command\":\"echo exact\"}")
+                .performScrollTo()
+                .assertIsDisplayed()
+            composeRule.onNodeWithTag("approval-file-changes").assertDoesNotExist()
+            composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+            composeRule.onNodeWithText("Reject").assertIsEnabled()
+            composeRule.onNodeWithText("Review the exact tool name and arguments above, then acknowledge before approving.")
+                .assertExists()
+            composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
+                .performScrollTo()
+                .performClick()
+            composeRule.onNodeWithText("Approve request").assertIsEnabled()
+        }
+    }
+
+    @Test
+    fun exactToolReviewAcknowledgementResetsWhenPayloadChanges() {
+        val original = approval(ApprovalStatus.REQUESTED).copy(
+            files = listOf(
+                FileChangeSummary(
+                    path = "codex://tool/shell",
+                    changeType = "tool_call",
+                    diff = "{\"command\":\"echo first\"}",
+                    risk = RiskLevel.HIGH
+                )
+            )
+        )
+        val currentApproval = androidx.compose.runtime.mutableStateOf(original)
+        composeRule.setContent {
+            ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+        }
+
+        composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+
+        composeRule.runOnIdle {
+            currentApproval.value = original.copy(
+                files = original.files.map { it.copy(diff = "{\"command\":\"echo changed\"}") }
+            )
+        }
+
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+        composeRule.onNodeWithText("Reject").assertIsEnabled()
+    }
+
+    @Test
+    fun ordinaryFileApprovalRetainsFileChangesSection() {
+        val request = approval(ApprovalStatus.REQUESTED)
+        composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
+
+        composeRule.onNodeWithTag("approval-exact-tool-request").assertDoesNotExist()
+        composeRule.onNodeWithTag("approval-file-changes").performScrollTo().assertExists()
+        composeRule.onNodeWithText("File Changes").assertExists()
+        composeRule.onNodeWithText("+test").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
     }
 
     @Test
