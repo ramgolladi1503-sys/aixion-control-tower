@@ -421,6 +421,68 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
     assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
 
 
+def test_postgres_scope_validation_blocks_approval_changed_after_run_creation(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, _workspace, _project, other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][other_workspace.id]
+    state["current_user"]["value"] = state["users"][1]
+    with connect() as conn:
+        task_row = conn.execute(
+            "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, other_workspace.id),
+        ).fetchone()
+        task = AgentTask.model_validate(task_row[0])
+        task.repository = "owner/approved-repository"
+        task.branch_preference = "feature/approved-branch"
+        conn.execute(
+            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (Jsonb(task.model_dump(mode="json")), task_id, other_workspace.id),
+        )
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (task.approval_request_id, other_workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+        approval.test_plan = ["python -c 'print(1)'"]
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, other_workspace.id),
+        )
+
+    client = TestClient(main.app)
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+
+    approval.summary = "Changed after the AgentRun was created."
+    with connect() as conn:
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, other_workspace.id),
+        )
+
+    executed = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
+    )
+
+    assert executed.status_code == 200, executed.text
+    assert executed.json()["run"]["status"] == AgentRunStatus.BLOCKED.value
+    assert executed.json()["steps"][0]["status"] == AgentRunStepStatus.BLOCKED.value
+    assert "approved payload hash" in executed.json()["steps"][0]["reason"].lower()
+    assert repositories.agent_runs.get(run_id).status == AgentRunStatus.BLOCKED
+    assert repositories.agent_tasks.get(task_id).status == AgentTaskStatus.APPROVED
+    assert any(
+        event.event_type == AgentRunEventType.STEP_BLOCKED
+        for event in repositories.agent_runs.list_events_for_run(run_id)
+    )
+
+
 def _create_run_with_postgres_capability_lease(
     *,
     connect: Callable[[], Connection],
