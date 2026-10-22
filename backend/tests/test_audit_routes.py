@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import timedelta
+from types import SimpleNamespace
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -16,6 +17,7 @@ client = TestClient(app)
 
 def setup_function() -> None:
     store.reset()
+    app.state.postgres_runtime = None
 
 
 def _normalize_utc_text(value: str) -> str:
@@ -213,3 +215,18 @@ def test_get_audit_event_by_id_and_missing_404() -> None:
     assert response.status_code == 200
     assert response.json()["event_type"] == "approval.created"
     assert missing.status_code == 404
+
+
+def test_audit_and_recovery_reads_fail_closed_when_postgres_runtime_is_partial() -> None:
+    app.state.postgres_runtime = SimpleNamespace()
+
+    responses = [
+        client.get("/audit/events"),
+        client.get("/audit/export"),
+        client.get("/audit/events/nonexistent"),
+        client.get("/audit/recovery/export"),
+        client.post("/audit/recovery/validate", json={"snapshot": {}}),
+    ]
+
+    assert [response.status_code for response in responses] == [503] * 5
+    assert all("unified audit writer" in response.json()["detail"] for response in responses)

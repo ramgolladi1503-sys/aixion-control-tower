@@ -96,7 +96,20 @@ def redact_audit_event(event: AuditEvent) -> AuditEvent:
 def _audit_repository_for_route(request: Request | None) -> AuditEventRepository:
     if request is None:
         return _local_audit_repository
+    _require_authoritative_audit_runtime(request)
     return audit_event_repository_for_request(request)
+
+
+def _require_authoritative_audit_runtime(request: Request) -> None:
+    """Fail closed while PostgreSQL is present without a complete audit cutover."""
+    if getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Audit reads are unavailable while PostgreSQL is configured without "
+                "a unified audit writer and recovery repository."
+            ),
+        )
 
 
 def _workspace_for_route(user: AuthUser, request: Request | None) -> str | None:
@@ -263,13 +276,16 @@ def get_audit_event(
 
 
 @router.get("/recovery/export", response_model=RecoverySnapshot)
-def export_recovery(_: AuthUser = OwnerDependency) -> RecoverySnapshot:
+def export_recovery(request: Request, _: AuthUser = OwnerDependency) -> RecoverySnapshot:
+    _require_authoritative_audit_runtime(request)
     return export_recovery_snapshot(_)
 
 
 @router.post("/recovery/validate", response_model=RecoveryValidationResponse)
 def validate_recovery(
+    request: Request,
     payload: RecoveryValidationRequest,
     _: AuthUser = OwnerDependency,
 ) -> RecoveryValidationResponse:
+    _require_authoritative_audit_runtime(request)
     return validate_recovery_snapshot(payload.snapshot)
