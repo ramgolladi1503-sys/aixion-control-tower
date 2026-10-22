@@ -14,7 +14,7 @@ object AuthUxCopy {
 
     fun heroSubtitle(state: AuthUiState): String {
         return when {
-            state.authenticated -> "This phone can now review approvals, agent tasks, and owner controls."
+            state.authenticated -> "This phone can now review and respond to approval requests."
             state.verificationRequired -> "Registration is created, but app access stays locked until this email is verified."
             state.emailVerified -> "Now log in with the same password to open the Control Tower."
             else -> "Register once, verify your email, then log in before using the app shell."

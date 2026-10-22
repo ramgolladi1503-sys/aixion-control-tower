@@ -114,7 +114,7 @@ private fun SetupStep(number: String, title: String, detail: String) {
 private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        StatusBadge(label = "PHONE FLOW NOT VERIFIED", color = palette.caution)
+        StatusBadge(label = "Phone flow not verified", color = palette.caution, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text("Antigravity", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
@@ -131,7 +131,7 @@ private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
     }
 
     TowerPanel {
-        StatusBadge(label = "PHONE FLOW NOT VERIFIED", color = palette.caution)
+        StatusBadge(label = "Phone flow not verified", color = palette.caution, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text("Codex", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))

@@ -64,6 +64,10 @@ class AuthUxCopyTest {
 
         assertEquals("You are connected", AuthUxCopy.heroTitle(state))
         assertEquals("Session active", AuthUxCopy.sessionLabel(state))
+        assertEquals(
+            "This phone can now review and respond to approval requests.",
+            AuthUxCopy.heroSubtitle(state)
+        )
     }
 
     @Test
