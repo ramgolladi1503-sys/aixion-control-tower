@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import socket
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
-from integrations import aixion_deadline_http
-from integrations.aixion_deadline_http import HttpResponse, request
+# The provider hook suites are launched from backend/ in CI, which places this
+# test's directory (rather than the repository root) on sys.path.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from integrations import aixion_deadline_http  # noqa: E402
+from integrations.aixion_deadline_http import HttpResponse, request  # noqa: E402
 
 
 class LoopbackServer:

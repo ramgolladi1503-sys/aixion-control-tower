@@ -492,29 +492,16 @@ def test_ambiguous_consume_skips_failure_report_after_deadline(
     assert calls[-1][1] == pytest.approx(2.0)
 
 
-def test_http_request_applies_capped_socket_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    observed: list[float] = []
+def test_http_request_applies_capped_deadline_and_response_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, str, dict, bytes | None, float, int]] = []
 
-    class Response:
-        def __enter__(self):
-            return self
+    def request(method, url, headers, body, timeout_seconds, *, max_response_bytes):
+        observed.append((method, url, headers, body, timeout_seconds, max_response_bytes))
+        return SimpleNamespace(status=200, headers={}, body=b'{"ok":true}')
 
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _size: int) -> bytes:
-            return b'{"ok":true}'
-
-    class Opener:
-        def open(self, _request, *, timeout: float):
-            observed.append(timeout)
-            return Response()
-
-    monkeypatch.setattr(
-        hook.urllib.request,
-        "build_opener",
-        lambda *_handlers: Opener(),
-    )
+    monkeypatch.setattr(hook, "deadline_request", request)
     config = {"agent_id": "agent-123"}
 
     assert hook._request(
@@ -523,7 +510,10 @@ def test_http_request_applies_capped_socket_timeout(monkeypatch: pytest.MonkeyPa
     assert hook._request(
         "GET", "https://example.test/decision", config, "test-token", timeout_seconds=90
     ) == {"ok": True}
-    assert observed == [2.5, hook.MAX_REQUEST_TIMEOUT_SECONDS]
+    assert [call[4] for call in observed] == [2.5, hook.MAX_REQUEST_TIMEOUT_SECONDS]
+    assert all(call[0] == "GET" and call[1] == "https://example.test/decision" for call in observed)
+    assert all(call[5] == hook.MAX_RESPONSE_BYTES for call in observed)
+    assert observed[0][2]["X-Aixion-Approval-Protocol"] == "1"
 
 
 def test_run_exhausted_reconnect_wait_expires_and_never_consumes(

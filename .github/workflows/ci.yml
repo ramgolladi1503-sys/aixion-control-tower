@@ -57,6 +57,7 @@ jobs:
           python -m pytest
           ../integrations/antigravity/test_antigravity_hook_cli.py
           ../integrations/codex/test_codex_hook_cli.py
+          ../integrations/test_aixion_deadline_http.py
 
       - name: Run backend tests
         run: python -m pytest
