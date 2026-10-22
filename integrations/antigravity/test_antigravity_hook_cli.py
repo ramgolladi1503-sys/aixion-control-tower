@@ -345,6 +345,128 @@ def _invocation_heartbeat(approval: dict) -> dict:
     }
 
 
+def test_invocation_heartbeat_retries_one_transport_failure_within_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    attempts: list[float] = []
+    diagnostics = {
+        "correlation_id": "0123456789abcdef",
+        "approval_id": "approval_abcdef123456",
+    }
+
+    def request(_method: str, _url: str, _agent_id: str, _token: str,
+                _body: dict, **kwargs: object) -> dict:
+        attempts.append(float(kwargs["timeout_seconds"]))
+        if len(attempts) == 1:
+            try:
+                raise TimeoutError("transient transport interruption")
+            except TimeoutError as cause:
+                raise hook.AmbiguousRequestError("heartbeat transport failed") from cause
+        return {
+            "approval_id": "approval-1",
+            "source_agent_id": "agent-1",
+            "source_invocation_id": "invocation-1",
+            "heartbeat_at": "2026-10-23T00:00:00+00:00",
+            "expires_at": "2026-10-23T00:01:00+00:00",
+            "live": True,
+        }
+
+    monkeypatch.setattr(hook, "_request", request)
+    next_at, live = hook._refresh_invocation_lease_if_due(
+        api_base="https://control.example",
+        approval_id="approval-1",
+        agent_id="agent-1",
+        token="test-token",
+        source_invocation_id="invocation-1",
+        deadline=clock.now + 2.0,
+        next_heartbeat_at=clock.now,
+        diagnostics=diagnostics,
+    )
+
+    assert live is True
+    assert next_at == clock.now + hook.INVOCATION_HEARTBEAT_INTERVAL_SECONDS
+    assert len(attempts) == 2
+    assert attempts[1] < attempts[0]
+    assert clock.sleeps == [hook.INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS]
+    diagnostic = capsys.readouterr().err.strip()
+    assert json.loads(diagnostic) == {
+        "component": "aixion_approval_hook",
+        "provider": "ANTIGRAVITY",
+        "event": "invocation_heartbeat_retry",
+        "correlation_id": "0123456789abcdef",
+        "approval_id": "approval_abcdef123456",
+        "attempt": 2,
+        "decision": None,
+    }
+    assert "test-token" not in diagnostic
+    assert "invocation-1" not in diagnostic
+    assert "approval-1" not in diagnostic
+
+
+def test_invocation_heartbeat_does_not_retry_when_deadline_cannot_cover_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    attempts = 0
+
+    def request(*_args: object, **_kwargs: object) -> dict:
+        nonlocal attempts
+        attempts += 1
+        try:
+            raise OSError("transient transport interruption")
+        except OSError as cause:
+            raise hook.AmbiguousRequestError("heartbeat transport failed") from cause
+
+    monkeypatch.setattr(hook, "_request", request)
+    next_at, live = hook._refresh_invocation_lease_if_due(
+        api_base="https://control.example",
+        approval_id="approval-1",
+        agent_id="agent-1",
+        token="test-token",
+        source_invocation_id="invocation-1",
+        deadline=clock.now + hook.INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS,
+        next_heartbeat_at=clock.now,
+    )
+
+    assert live is False
+    assert next_at == clock.now
+    assert attempts == 1
+    assert clock.sleeps == []
+
+
+def test_invocation_heartbeat_denies_after_transport_retry_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    attempts = 0
+
+    def request(*_args: object, **_kwargs: object) -> dict:
+        nonlocal attempts
+        attempts += 1
+        try:
+            raise TimeoutError("transport remains unavailable")
+        except TimeoutError as cause:
+            raise hook.AmbiguousRequestError("heartbeat transport failed") from cause
+
+    monkeypatch.setattr(hook, "_request", request)
+    next_at, live = hook._refresh_invocation_lease_if_due(
+        api_base="https://control.example",
+        approval_id="approval-1",
+        agent_id="agent-1",
+        token="test-token",
+        source_invocation_id="invocation-1",
+        deadline=clock.now + 2.0,
+        next_heartbeat_at=clock.now,
+    )
+
+    assert live is False
+    assert next_at == clock.now - hook.INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS
+    assert attempts == 2
+    assert clock.sleeps == [hook.INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS]
+
+
 def test_long_wait_refreshes_exact_invocation_lease_before_same_call_is_consumed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -390,7 +512,7 @@ def test_long_wait_refreshes_exact_invocation_lease_before_same_call_is_consumed
 
 @pytest.mark.parametrize(
     "failure",
-    ["unauthorized", "timeout", "mismatch", "not_live", "malformed", "late"],
+    ["unauthorized", "conflict", "timeout", "mismatch", "not_live", "malformed", "late"],
 )
 def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
     monkeypatch: pytest.MonkeyPatch,
@@ -414,6 +536,8 @@ def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
             assert body == {"source_invocation_id": created["source_invocation_id"]}
             if failure == "unauthorized":
                 raise hook.GateError("HTTP 401")
+            if failure == "conflict":
+                raise hook.GateError("HTTP 409")
             if failure == "timeout":
                 raise hook.AmbiguousRequestError("heartbeat timed out")
             if failure == "late":

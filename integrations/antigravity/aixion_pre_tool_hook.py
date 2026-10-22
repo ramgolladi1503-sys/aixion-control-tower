@@ -28,6 +28,7 @@ MAX_CONFIG_BYTES = 16 * 1024
 MAX_POLL_SECONDS = 15 * 60
 POLL_INTERVAL_SECONDS = 2
 INVOCATION_HEARTBEAT_INTERVAL_SECONDS = 15
+INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS = 0.1
 REQUEST_TIMEOUT_SECONDS = 10
 EXPIRY_CLEANUP_GRACE_SECONDS = 1
 MAX_RECONNECT_BACKOFF_SECONDS = 10
@@ -279,6 +280,7 @@ def _refresh_invocation_lease_if_due(
     source_invocation_id: str,
     deadline: float,
     next_heartbeat_at: float,
+    diagnostics: dict[str, str | None] | None = None,
     now: float | None = None,
 ) -> tuple[float, bool]:
     """Renew the invocation lease when due, without extending the hook deadline."""
@@ -288,18 +290,41 @@ def _refresh_invocation_lease_if_due(
     remaining_seconds = deadline - now
     if remaining_seconds <= 0:
         return next_heartbeat_at, False
-    try:
-        heartbeat = _request(
-            "POST",
-            f"{api_base}/agents/approvals/{approval_id}/heartbeat",
-            agent_id,
-            token,
-            {"source_invocation_id": source_invocation_id},
-            timeout_seconds=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds),
-            expected_status=200,
-        )
-    except GateError:
-        return next_heartbeat_at, False
+    heartbeat: Any
+    for attempt in range(2):
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            return next_heartbeat_at, False
+        try:
+            heartbeat = _request(
+                "POST",
+                f"{api_base}/agents/approvals/{approval_id}/heartbeat",
+                agent_id,
+                token,
+                {"source_invocation_id": source_invocation_id},
+                timeout_seconds=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds),
+                expected_status=200,
+            )
+            break
+        except GateError as exc:
+            # Only retry a transport failure whose original exception is
+            # preserved. HTTP errors and malformed/ambiguous responses remain
+            # fail-closed; the retry repeats the same idempotent invocation ID.
+            transport_failure = isinstance(exc, AmbiguousRequestError) and isinstance(
+                exc.__cause__, (TimeoutError, OSError)
+            )
+            if attempt != 0 or not transport_failure:
+                return next_heartbeat_at, False
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS:
+                return next_heartbeat_at, False
+            if diagnostics is not None:
+                _emit_diagnostic(
+                    context=diagnostics,
+                    event="invocation_heartbeat_retry",
+                    attempt=attempt + 2,
+                )
+            time.sleep(INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS)
     if time.monotonic() >= deadline:
         return next_heartbeat_at, False
     if not isinstance(heartbeat, dict):
@@ -684,6 +709,7 @@ def _run(
             source_invocation_id=invocation_id,
             deadline=deadline,
             next_heartbeat_at=next_heartbeat_at,
+            diagnostics=diagnostics,
             now=now,
         )
         if not lease_live:
@@ -741,6 +767,7 @@ def _run(
                 source_invocation_id=invocation_id,
                 deadline=deadline,
                 next_heartbeat_at=next_heartbeat_at,
+                diagnostics=diagnostics,
             )
             if not lease_live:
                 return _decision("deny", "Connector liveness could not be confirmed")
