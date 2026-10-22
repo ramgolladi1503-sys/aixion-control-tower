@@ -170,6 +170,63 @@ def test_installer_refuses_symlinked_hooks_file(tmp_path: Path) -> None:
         )
 
 
+def test_installer_refuses_symlinked_agents_directory_without_external_writes(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external_agents = tmp_path / "external-agents"
+    external_agents.mkdir()
+    external_hooks = external_agents / "hooks.json"
+    external_hooks.write_text('{"external-hook": true}')
+    (workspace / ".agents").symlink_to(external_agents, target_is_directory=True)
+    home = tmp_path / "home"
+
+    with pytest.raises(setup.SetupError, match=r"\.agents path must be a real directory"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://control.example.test",
+            agent_id="agent-1",
+            project_id="project-1",
+            home=home,
+            hook_script=HOOK_PATH,
+        )
+
+    assert external_hooks.read_text() == '{"external-hook": true}'
+    assert not (home / ".config").exists()
+
+
+def test_remove_refuses_symlinked_agents_directory_without_external_unlink(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    original_hooks = hooks_path.read_bytes()
+    external_agents = tmp_path / "external-agents"
+    external_agents.mkdir()
+    external_hooks = external_agents / "hooks.json"
+    external_hooks.write_bytes(original_hooks)
+    hooks_path.unlink()
+    hooks_path.parent.rmdir()
+    hooks_path.parent.symlink_to(external_agents, target_is_directory=True)
+
+    with pytest.raises(setup.SetupError, match=r"\.agents path must be a real directory"):
+        setup.remove_workspace(workspace, home=home, hook_script=HOOK_PATH)
+
+    assert external_hooks.read_bytes() == original_hooks
+    assert config_path.is_file()
+
+
 def test_installer_refuses_symlinked_config_root(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

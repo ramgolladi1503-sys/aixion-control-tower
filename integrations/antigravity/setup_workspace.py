@@ -67,8 +67,13 @@ def _read_json(path: Path, *, allow_missing: bool) -> dict:
 
 def _atomic_write(path: Path, data: bytes, mode: int) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.parent.is_symlink() or not path.parent.is_dir():
-        raise SetupError(f"Parent must be a real directory: {path.parent}")
+    parent = path.parent.lstat()
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != os.getuid()
+    ):
+        raise SetupError(f"Parent must be a real directory owned by this user: {path.parent}")
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp_path = Path(temp_name)
     try:
@@ -136,6 +141,18 @@ def _paths(workspace: Path, home: Path, hook_script: Path) -> tuple[Path, Path, 
     return resolved, config, hooks_file
 
 
+def _validate_workspace_hooks_directory(path: Path) -> None:
+    if not os.path.lexists(path):
+        return
+    metadata = path.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+    ):
+        raise SetupError("Workspace .agents path must be a real directory owned by this user")
+
+
 def _hook_entry(config: Path, hook_script: Path, python: str) -> dict:
     command = " ".join(shlex.quote(part) for part in (
         python, str(hook_script), "--config", str(config)
@@ -161,6 +178,7 @@ def install_workspace(
     home = home or Path.home()
     hook_script = hook_script or Path(__file__).with_name("aixion_pre_tool_hook.py")
     workspace, config_path, hooks_path = _paths(workspace, home, hook_script)
+    _validate_workspace_hooks_directory(hooks_path.parent)
     if config_path.parent != _ensure_config_directory(home):
         raise SetupError("Unexpected workspace config path")
 
@@ -203,6 +221,7 @@ def remove_workspace(
     hook_script = hook_script or Path(__file__).with_name("aixion_pre_tool_hook.py")
     _validate_config_root(home)
     workspace, config_path, hooks_path = _paths(workspace, home, hook_script)
+    _validate_workspace_hooks_directory(hooks_path.parent)
     hooks = _read_json(hooks_path, allow_missing=True)
     entry = hooks.get(HOOK_NAME)
     if entry is None:
