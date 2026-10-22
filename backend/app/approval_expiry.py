@@ -183,6 +183,7 @@ def expire_due_approvals(
     *,
     actor: str = "system",
     repository: ApprovalDecisionRepository | None = None,
+    workspace_id: str | None = None,
 ) -> int:
     active_repository = (
         repository if repository is not None else approval_decision_repository
@@ -191,7 +192,7 @@ def expire_due_approvals(
         changed = 0
         # The repository is authoritative; a missed or stale compatibility
         # cache entry must not leave a durable pending approval unexpired.
-        for approval in active_repository.list_for_workspace():
+        for approval in active_repository.list_for_workspace(workspace_id):
             expired = expire_approval(
                 approval,
                 actor=actor,

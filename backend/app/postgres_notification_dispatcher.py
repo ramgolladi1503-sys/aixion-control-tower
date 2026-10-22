@@ -18,6 +18,27 @@ logger = logging.getLogger(__name__)
 PushSender = Callable[..., str | None]
 
 
+async def _drain_postgres_dispatch_task(dispatch_task: asyncio.Task[object]) -> None:
+    """Wait for a thread-backed dispatch attempt despite repeated cancellation."""
+    while not dispatch_task.done():
+        try:
+            await asyncio.shield(dispatch_task)
+        except asyncio.CancelledError:
+            # A repeated cancellation targets this loop task. Shielding keeps
+            # asyncio from cancelling the wrapper while its worker thread runs.
+            if dispatch_task.done():
+                break
+        except Exception:
+            logger.warning("PostgreSQL push dispatch iteration failed during shutdown")
+            break
+
+    if dispatch_task.done() and not dispatch_task.cancelled():
+        try:
+            dispatch_task.result()
+        except Exception:
+            logger.warning("PostgreSQL push dispatch iteration failed during shutdown")
+
+
 def dispatch_one_postgres_push(
     repository: PostgresNotificationOutboxRepository,
     *,
@@ -164,10 +185,7 @@ async def postgres_notification_dispatch_loop(
         except asyncio.CancelledError:
             # The thread cannot be cancelled safely. Wait for its bounded DB and
             # FCM operations to finish before lifespan closes the shared pool.
-            try:
-                await dispatch_task
-            except Exception:
-                logger.warning("PostgreSQL push dispatch iteration failed during shutdown")
+            await _drain_postgres_dispatch_task(dispatch_task)
             raise
         except Exception:
             # Keep the worker alive while excluding secrets and provider details.

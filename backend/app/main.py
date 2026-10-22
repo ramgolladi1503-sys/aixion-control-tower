@@ -1044,7 +1044,8 @@ def list_approval_requests(
     publish_compatibility_state = approval_repository_publishes_compatibility_state(repository)
     if publish_compatibility_state:
         _sync_approval_cache(requests, workspace_id)
-    expire_due_approvals(repository=repository)
+    if workspace_id is not None:
+        expire_due_approvals(repository=repository, workspace_id=workspace_id)
     requests = repository.list_for_workspace(workspace_id)
     if publish_compatibility_state:
         _sync_approval_cache(requests, workspace_id)
@@ -1207,8 +1208,6 @@ def list_grouped_approval_requests(
     user: AuthUser = ReviewerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ApprovalGroups:
-    repository = _approval_repository_for_route(http_request)
-    expire_due_approvals(repository=repository)
     requests = list_approval_requests(user, http_request)
     return ApprovalGroups(**grouped_approvals(requests))
 

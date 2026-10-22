@@ -232,12 +232,27 @@ def test_postgres_dispatch_loop_drains_inflight_thread_on_cancellation(monkeypat
     )
 
     async def exercise() -> None:
-        task = asyncio.create_task(postgres_dispatcher.postgres_notification_dispatch_loop(object()))
+        pool_closed = Event()
+
+        async def lifespan_owned_worker() -> None:
+            try:
+                await postgres_dispatcher.postgres_notification_dispatch_loop(object())
+            finally:
+                # Models lifespan closing the shared PostgreSQL runtime after
+                # the worker coroutine has drained its executor thread.
+                pool_closed.set()
+
+        task = asyncio.create_task(lifespan_owned_worker())
         started_ready = await asyncio.to_thread(started.wait, 2)
         assert started_ready
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not pool_closed.is_set()
+        assert not finished.is_set()
         release.set()
         try:
             await task
@@ -246,6 +261,7 @@ def test_postgres_dispatch_loop_drains_inflight_thread_on_cancellation(monkeypat
         else:
             raise AssertionError("Cancelled PostgreSQL worker did not propagate cancellation")
         assert finished.is_set()
+        assert pool_closed.is_set()
 
     asyncio.run(exercise())
 

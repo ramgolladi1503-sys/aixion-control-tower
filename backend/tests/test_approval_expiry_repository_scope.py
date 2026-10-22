@@ -5,7 +5,7 @@ import uuid
 
 import pytest
 
-from app.approval_expiry import expire_approval
+from app.approval_expiry import expire_approval, expire_due_approvals
 from app.approval_repository import ApprovalExpirationCommit
 from app.models import (
     ApprovalRequest,
@@ -37,6 +37,24 @@ class NonSQLiteApprovalRepository:
         assert expected_approval == self.approval
         self.approval = expired_approval
         return ApprovalExpirationCommit(approval=expired_approval)
+
+
+class RecordingExpiryRepository:
+    def __init__(self) -> None:
+        self.list_scopes: list[str | None] = []
+
+    def list_for_workspace(self, workspace_id: str | None = None) -> list[ApprovalRequest]:
+        self.list_scopes.append(workspace_id)
+        return []
+
+
+def test_due_approval_sweep_preserves_explicit_workspace_scope_and_global_maintenance_default() -> None:
+    repository = RecordingExpiryRepository()
+
+    assert expire_due_approvals(repository=repository, workspace_id="workspace-a") == 0  # type: ignore[arg-type]
+    assert expire_due_approvals(repository=repository) == 0  # type: ignore[arg-type]
+
+    assert repository.list_scopes == ["workspace-a", None]
 
 
 def test_non_sqlite_expiry_does_not_lock_or_publish_to_sqlite_store(

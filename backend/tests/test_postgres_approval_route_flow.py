@@ -635,6 +635,29 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     assert set(store.external_agents) == initial_store_agent_ids
 
 
+def test_postgres_reviewer_inbox_expiry_is_scoped_once_for_list_and_grouped_routes(
+    postgres_approval_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect, workspace, _project, _user, _repositories, _agent, _agent_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    requested_scopes: list[str | None] = []
+
+    def record_expiry_scope(*, repository: object, workspace_id: str | None = None) -> int:
+        requested_scopes.append(workspace_id)
+        return 0
+
+    monkeypatch.setattr(main, "expire_due_approvals", record_expiry_scope)
+    with TestClient(main.app) as client:
+        listed = client.get("/approvals")
+        grouped = client.get("/approvals/grouped")
+
+    assert listed.status_code == 200, listed.text
+    assert grouped.status_code == 200, grouped.text
+    assert requested_scopes == [workspace.id, workspace.id]
+
+
 def test_postgres_approval_history_reads_verified_decision_from_runtime_bundle(
     postgres_approval_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
