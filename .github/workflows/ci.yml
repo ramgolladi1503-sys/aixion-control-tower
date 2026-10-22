@@ -114,12 +114,28 @@ jobs:
       - name: Build Android debug APK
         run: ./gradlew assembleDebug
 
-      - name: Build Android release variant
-        # URL-shape compile check only; this is not a deployable API endpoint.
-        run: ./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/
+      - name: Verify Android release blocks missing Firebase config
+        shell: bash
+        run: |
+          set +e
+          output=$(./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/ 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [[ $status -eq 0 ]]; then
+            echo "Release build unexpectedly succeeded without Firebase configuration." >&2
+            exit 1
+          fi
+          if [[ "$output" != *"Release builds require -PAIXION_FIREBASE_CONFIG_ENABLED=true for push notifications."* ]]; then
+            echo "Release build failed for a reason other than the missing Firebase configuration guard." >&2
+            exit 1
+          fi
 
       - name: Verify release API URL guard
         run: ./gradlew :app:verifyReleaseApiUrlGuard
+
+      - name: Verify release Firebase config guard
+        run: ./gradlew :app:verifyReleaseFirebaseConfigGuard
 
   mission-control-container:
     name: Mission Control container validation

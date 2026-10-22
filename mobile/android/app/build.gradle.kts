@@ -164,6 +164,16 @@ fun releaseApiUrlProblem(rawUrl: String): String? {
     return null
 }
 
+fun releaseFirebaseConfigProblem(configEnabled: Boolean, configExists: Boolean): String? {
+    if (!configEnabled) {
+        return "Release builds require -PAIXION_FIREBASE_CONFIG_ENABLED=true for push notifications."
+    }
+    if (!configExists) {
+        return "AIXION_FIREBASE_CONFIG_ENABLED=true requires mobile/android/app/google-services.json."
+    }
+    return null
+}
+
 tasks.register("verifyReleaseApiUrlGuard") {
     group = "verification"
     description = "Checks accepted and rejected release API base URL examples."
@@ -198,6 +208,29 @@ tasks.register("verifyReleaseApiUrlGuard") {
     }
 }
 
+tasks.register("verifyReleaseFirebaseConfigGuard") {
+    group = "verification"
+    description = "Checks release Firebase configuration requirements without loading credentials."
+    doLast {
+        val accepted = listOf(true to true)
+        val rejected = listOf(false to false, false to true, true to false)
+        accepted.forEach { (enabled, exists) ->
+            val problem = releaseFirebaseConfigProblem(enabled, exists)
+            check(problem == null) {
+                "Release Firebase guard unexpectedly rejected enabled=$enabled exists=$exists: $problem"
+            }
+        }
+        rejected.forEach { (enabled, exists) ->
+            check(releaseFirebaseConfigProblem(enabled, exists) != null) {
+                "Release Firebase guard unexpectedly accepted enabled=$enabled exists=$exists."
+            }
+        }
+        logger.lifecycle(
+            "Release Firebase config guard passed: ${accepted.size} accepted and ${rejected.size} rejected cases."
+        )
+    }
+}
+
 tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     doFirst {
         val rawUrl = configuredApiBaseUrl
@@ -206,6 +239,11 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
             )
         val problem = releaseApiUrlProblem(rawUrl)
         if (problem != null) throw GradleException(problem)
+        val firebaseProblem = releaseFirebaseConfigProblem(
+            firebaseConfigEnabled,
+            firebaseConfigFile.isFile,
+        )
+        if (firebaseProblem != null) throw GradleException(firebaseProblem)
     }
 }
 
