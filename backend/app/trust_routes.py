@@ -318,7 +318,31 @@ def list_leases(
     approval_request_id: str | None = None,
     agent_id: str | None = None,
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> list[CapabilityLeasePublic]:
+    runtime = _postgres_lease_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        with runtime.connect() as conn:
+            with conn.transaction():
+                leases = repositories.trust.list_capability_leases(
+                    conn,
+                    workspace_id=workspace_id,
+                    now=now_utc(),
+                    trust_event_repository=repositories.trust_events,
+                    status=status_filter,
+                    approval_id=approval_request_id,
+                    agent_id=agent_id,
+                )
+        return [_public(item) for item in leases]
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="PostgreSQL lease listing requires the complete durable trust and approval repository bundle",
+        )
     leases = [
         refresh_lease_status(item)
         for item in store.capability_leases.values()
@@ -350,7 +374,37 @@ def list_leases(
 def get_lease(
     lease_id: str,
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> CapabilityLeasePublic:
+    runtime = _postgres_lease_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        with runtime.connect() as conn:
+            with conn.transaction():
+                lease = repositories.trust.get_capability_lease(
+                    conn, lease_id, workspace_id, for_update=True
+                )
+                if lease is None:
+                    raise HTTPException(status_code=404, detail="Capability lease not found")
+                if (
+                    lease.status == CapabilityLeaseStatus.ACTIVE
+                    and lease.expires_at <= now_utc()
+                ):
+                    lease = repositories.trust.expire_active_capability_lease(
+                        conn,
+                        lease=lease,
+                        now=now_utc(),
+                        trust_event_repository=repositories.trust_events,
+                    )
+        return _public(lease)
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="PostgreSQL lease lookup requires the complete durable trust and approval repository bundle",
+        )
     return _public(_lease_or_404(lease_id, user))
 
 

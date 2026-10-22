@@ -279,7 +279,15 @@ class PostgresTrustRepository:
             )
         if not rows:
             return None
-        row = rows[0]
+        lease = self._capability_lease_from_row(rows[0])
+        if lease.approval_request_id != approval_id or lease.workspace_id != workspace_id:
+            raise PostgresTrustRepositoryError(
+                "Capability lease is outside the requested approval scope"
+            )
+        return lease
+
+    @staticmethod
+    def _capability_lease_from_row(row: tuple[Any, ...]) -> CapabilityLease:
         try:
             lease = CapabilityLease.model_validate(row[12])
         except Exception as error:
@@ -305,11 +313,58 @@ class PostgresTrustRepository:
             raise PostgresTrustRepositoryError(
                 "Capability lease payload does not match its indexed columns"
             )
-        if lease.approval_request_id != approval_id or lease.workspace_id != workspace_id:
-            raise PostgresTrustRepositoryError(
-                "Capability lease is outside the requested approval scope"
-            )
         return lease
+
+    def list_capability_leases(
+        self,
+        conn: Connection,
+        *,
+        workspace_id: str,
+        now: datetime,
+        trust_event_repository: PostgresTrustEventRepository,
+        status: CapabilityLeaseStatus | None = None,
+        approval_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> list[CapabilityLease]:
+        """Refresh elapsed leases and list verified records in one transaction."""
+        self._require_scope(workspace_id)
+        filters = ["workspace_id=%s"]
+        values: list[Any] = [workspace_id]
+        if approval_id is not None:
+            filters.append("approval_id=%s")
+            values.append(approval_id)
+        if agent_id is not None:
+            filters.append("payload->>'agent_id'=%s")
+            values.append(agent_id)
+        where = " AND ".join(filters)
+        columns = (
+            "lease_id,approval_id,workspace_id,issued_by_user_id,status,expires_at,"
+            "consumed_pull_requests,consumed_retries,consumed_runtime_seconds,"
+            "consumed_cost_usd,created_at,updated_at,payload"
+        )
+        expired_rows = conn.execute(
+            f"SELECT {columns} FROM capability_leases WHERE {where} "
+            "AND status=%s AND expires_at<=%s ORDER BY lease_id FOR UPDATE",
+            (*values, CapabilityLeaseStatus.ACTIVE.value, now),
+        ).fetchall()
+        for row in expired_rows:
+            lease = self._capability_lease_from_row(row)
+            self.expire_active_capability_lease(
+                conn,
+                lease=lease,
+                now=now,
+                trust_event_repository=trust_event_repository,
+            )
+
+        if status is not None:
+            filters.append("status=%s")
+            values.append(status.value)
+        rows = conn.execute(
+            f"SELECT {columns} FROM capability_leases WHERE {' AND '.join(filters)} "
+            "ORDER BY created_at DESC,lease_id",
+            values,
+        ).fetchall()
+        return [self._capability_lease_from_row(row) for row in rows]
 
     def expire_active_capability_lease(
         self,

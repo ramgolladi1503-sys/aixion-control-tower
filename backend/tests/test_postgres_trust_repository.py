@@ -48,7 +48,9 @@ from app.trust_routes import (
     create_lease,
     decide_exact_action,
     evaluate_manual_action,
+    get_lease,
     get_exact_action_decision,
+    list_leases,
 )
 from app.trust_action_authorization_models import (
     ActionAuthorization,
@@ -1219,6 +1221,9 @@ def test_postgres_lease_issue_route_is_atomic_idempotent_and_not_projected(
     retry = create_lease(payload, user, request)
 
     assert first.id == retry.id
+    listed = list_leases(status_filter=None, user=user, request=request)
+    assert [item.id for item in listed] == [first.id]
+    assert get_lease(first.id, user=user, request=request).id == first.id
     assert "workspace_id" not in first.model_dump()
     assert first.id not in store.capability_leases
     assert PostgresTrustEventRepository(connect).verify().valid is True
@@ -1364,6 +1369,15 @@ def test_postgres_expired_active_lease_is_expired_before_replacement(
 
     replacement = create_lease(payload, user, request)
     assert replacement.id != first.id
+    expired = get_lease(first.id, user=user, request=request)
+    assert expired.status == CapabilityLeaseStatus.EXPIRED
+    assert [
+        item.id
+        for item in list_leases(status_filter=None, user=user, request=request)
+    ] == [
+        replacement.id,
+        first.id,
+    ]
     with connect() as conn:
         prior = repository.get_capability_lease(conn, first.id, workspace_id)
         assert prior is not None and prior.status == CapabilityLeaseStatus.EXPIRED
