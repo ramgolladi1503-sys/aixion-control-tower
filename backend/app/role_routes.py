@@ -45,6 +45,7 @@ def record_role_update(actor: AuthUser, target: User, previous_role: UserRole) -
             event_type="auth.role_updated",
             actor=actor.email,
             entity_id=target.id,
+            workspace_id=target.workspace_id,
             details={
                 "target_user_id": target.id,
                 "target_email": target.email,

@@ -44,6 +44,7 @@ def test_owner_can_promote_reviewer_to_maintainer() -> None:
     assert updated.role == UserRole.MAINTAINER
     assert store.users[reviewer.id].role == UserRole.MAINTAINER
     assert store.audit_events[-1].event_type == "auth.role_updated"
+    assert store.audit_events[-1].workspace_id == owner.workspace_id
     assert store.audit_events[-1].details["previous_role"] == UserRole.REVIEWER
     assert store.audit_events[-1].details["new_role"] == UserRole.MAINTAINER
 
