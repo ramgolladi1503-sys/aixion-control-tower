@@ -50,9 +50,12 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Connect a platform").assertExists()
         composeRule.onNodeWithText(
-            "Use Antigravity Agent Access for native approval setup. The webhook integrations below submit tasks only; they do not pause or resume a native agent session. Native Codex permission approvals are not connected."
+            "Set up the coding agent running on your computer. The computer must stay on and connected while a request is waiting. Start with Antigravity; Codex setup is not available yet."
         ).assertExists()
-        composeRule.onNodeWithText("Choose an agent platform").assertExists()
+        composeRule.onNodeWithText("Other integrations and webhooks").assertExists()
+        composeRule.onAllNodesWithText("Create connection").assertCountEquals(0)
+        composeRule.onNodeWithText("Other integrations and webhooks").performClick()
+        composeRule.onNodeWithText("Create connection").assertExists()
         composeRule.onNodeWithText("OpenClaw").assertExists()
         composeRule.onNodeWithText("One-time connector credential").assertExists()
         composeRule.onNodeWithText("aixion-secret-once").assertExists()
@@ -79,8 +82,12 @@ class ConnectorsScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Antigravity native approvals").assertExists()
-        composeRule.onNodeWithText("Open Antigravity Agent Access").assertExists().performClick()
+        composeRule.onNodeWithText("Antigravity approval setup").assertExists()
+        composeRule.onNodeWithText("Set up Antigravity").assertExists().performClick()
+        composeRule.onNodeWithText("Codex").assertExists()
+        composeRule.onNodeWithText("Not connected yet. Codex setup will appear here after its native permission flow is verified.").assertExists()
+        composeRule.onAllNodesWithText("Webhook task intake").assertCountEquals(0)
+        composeRule.onNodeWithText("Other integrations and webhooks").performClick()
         composeRule.onNodeWithText("Webhook task intake").assertExists()
         composeRule.onNodeWithText(
             "These integrations submit task requests. They do not install native approval hooks or resume a paused agent session."
@@ -113,6 +120,7 @@ class ConnectorsScreenTest {
         }
         composeRule.waitForIdle()
 
+        composeRule.onNodeWithText("Other integrations and webhooks").performScrollTo().performClick()
         composeRule.onNodeWithText("Copy webhook").performScrollTo().performClick()
         composeRule.onAllNodesWithText("Create connection credential").assertCountEquals(0)
         composeRule.onNodeWithText("Advanced settings").performScrollTo().performClick()
@@ -150,7 +158,8 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Loading connections...").assertExists()
         composeRule.onNodeWithText("Failed to load connectors").assertExists()
-        composeRule.onNodeWithText("Create connection").assertExists()
+        composeRule.onNodeWithText("Other integrations and webhooks").assertExists()
+        composeRule.onAllNodesWithText("Create connection").assertCountEquals(0)
     }
 }
 

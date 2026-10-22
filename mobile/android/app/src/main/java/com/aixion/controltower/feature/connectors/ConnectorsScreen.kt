@@ -94,6 +94,7 @@ fun ConnectorsContent(
     onPreviewMapper: (ConnectorDto) -> Unit = {},
     onOpenAgentAccess: () -> Unit = {}
 ) {
+    var webhookIntakeExpanded by remember { mutableStateOf(false) }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -126,41 +127,52 @@ fun ConnectorsContent(
 
         item { NativeAgentAccessPanel(onOpenAgentAccess = onOpenAgentAccess) }
 
-        item { FirstTimeConnectorGuide() }
-
         item {
-            TemplatePanel(
-                templates = state.templates,
-                selectedTemplateId = state.selectedTemplateId,
-                onTemplateSelected = onTemplateSelected,
-                onCreate = onCreateSelectedTemplateConnector
-            )
+            OutlinedButton(
+                onClick = { webhookIntakeExpanded = !webhookIntakeExpanded },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (webhookIntakeExpanded) "Hide other integrations" else "Other integrations and webhooks")
+            }
         }
 
-        item {
-            TowerSectionHeader(
-                title = "Your connections",
-                subtitle = if (state.connectors.isEmpty()) {
-                    "No platforms connected yet. Choose one above to get started."
-                } else {
-                    "Check each connection's status and follow its next setup step."
-                }
-            )
-        }
+        if (webhookIntakeExpanded) {
+            item { FirstTimeConnectorGuide() }
 
-        items(state.connectors) { connector ->
-            ConnectorCard(
-                connector = connector,
-                selectedTemplate = state.selectedTemplate,
-                webhookUrl = state.webhookUrl(connector),
-                onCopyWebhook = { onCopy("Webhook URL", state.webhookUrl(connector)) },
-                onCopySetup = { onCopy("Connector setup", state.setupText(connector, state.selectedTemplate)) },
-                onToggle = { onToggle(connector) },
-                onIssueSecret = { onIssueSecret(connector) },
-                onRevokeSecret = { onRevokeSecret(connector) },
-                onApplyMapper = { onApplyMapper(connector) },
-                onPreviewMapper = { onPreviewMapper(connector) }
-            )
+            item {
+                TemplatePanel(
+                    templates = state.templates,
+                    selectedTemplateId = state.selectedTemplateId,
+                    onTemplateSelected = onTemplateSelected,
+                    onCreate = onCreateSelectedTemplateConnector
+                )
+            }
+
+            item {
+                TowerSectionHeader(
+                    title = "Webhook connections",
+                    subtitle = if (state.connectors.isEmpty()) {
+                        "No webhook connections yet. Create one to submit task requests."
+                    } else {
+                        "Manage task-intake webhooks. They do not control native agent permissions."
+                    }
+                )
+            }
+
+            items(state.connectors) { connector ->
+                ConnectorCard(
+                    connector = connector,
+                    selectedTemplate = state.selectedTemplate,
+                    webhookUrl = state.webhookUrl(connector),
+                    onCopyWebhook = { onCopy("Webhook URL", state.webhookUrl(connector)) },
+                    onCopySetup = { onCopy("Connector setup", state.setupText(connector, state.selectedTemplate)) },
+                    onToggle = { onToggle(connector) },
+                    onIssueSecret = { onIssueSecret(connector) },
+                    onRevokeSecret = { onRevokeSecret(connector) },
+                    onApplyMapper = { onApplyMapper(connector) },
+                    onPreviewMapper = { onPreviewMapper(connector) }
+                )
+            }
         }
     }
 }
@@ -179,7 +191,7 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
                 Text("Connect a platform", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = if (state.loading) "Loading connections..." else "Use Antigravity Agent Access for native approval setup. The webhook integrations below submit tasks only; they do not pause or resume a native agent session. Native Codex permission approvals are not connected.",
+                    text = if (state.loading) "Loading connections..." else "Set up the coding agent running on your computer. The computer must stay on and connected while a request is waiting. Start with Antigravity; Codex setup is not available yet.",
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
@@ -189,8 +201,8 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
         }
         Spacer(modifier = Modifier.height(TowerSpacing.lg))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            StatusBadge(label = "CONNECTORS ${state.connectors.size}", color = TowerAccent)
-            StatusBadge(label = "TEMPLATES ${state.templates.size}", color = RiskMedium)
+            StatusBadge(label = "ANTIGRAVITY SETUP", color = TowerAccent)
+            StatusBadge(label = "CODEX NOT CONNECTED", color = RiskMedium)
         }
     }
 }
@@ -198,18 +210,24 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
 @Composable
 private fun NativeAgentAccessPanel(onOpenAgentAccess: () -> Unit) {
     TowerPanel(elevated = true) {
-        Text("Antigravity native approvals", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Antigravity approval setup", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            "Set up the Antigravity local hook and agent credentials here. This setup is separate from webhook task intake; the live phone approval round trip is still being verified. Native Codex permission approvals are not connected.",
+            "Connect the local Antigravity hook and its agent credentials. Keep the computer and the same agent session running while you wait for a phone decision.",
             color = TowerTextMuted,
             fontSize = 13.sp,
             lineHeight = 19.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Button(onClick = onOpenAgentAccess, modifier = Modifier.fillMaxWidth()) {
-            Text("Open Antigravity Agent Access")
+            Text("Set up Antigravity")
         }
+    }
+
+    TowerPanel {
+        Text("Codex", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text("Not connected yet. Codex setup will appear here after its native permission flow is verified.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
     }
 }
 
