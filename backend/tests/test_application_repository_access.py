@@ -13,6 +13,8 @@ from app.application_repository_access import (
     workspace_membership_repository_for_request,
 )
 from app.models import AuthUser, User, UserRole
+from app.application_repositories import ApplicationRepositories
+from app.test_run_repository import PostgresTestRunRepository
 from app.workspace_membership_repository import WorkspaceMembershipSnapshot
 
 
@@ -112,6 +114,59 @@ def test_project_repository_access_returns_app_binding() -> None:
 def test_project_repository_access_fails_closed_without_binding(test_request: object) -> None:
     with pytest.raises(RuntimeError, match="project repository is unavailable"):
         project_repository_for_request(test_request)  # type: ignore[arg-type]
+
+
+def test_test_run_repository_uses_matching_postgres_runtime_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PostgresTestRunRepository(lambda: None)  # type: ignore[arg-type]
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "test_runs", repository)
+    runtime = SimpleNamespace(repositories=repositories)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=runtime,
+                postgres_repositories=repositories,
+                test_run_repository=object(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert repository_access.test_run_repository_for_request(request) is repository
+
+
+def test_test_run_repository_rejects_mismatched_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(
+        repositories,
+        "test_runs",
+        PostgresTestRunRepository(lambda: None),  # type: ignore[arg-type]
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=object()),
+                postgres_repositories=repositories,
+                test_run_repository=object(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable or mismatched"):
+        repository_access.test_run_repository_for_request(request)
 
 
 def test_workspace_membership_repository_access_returns_app_binding() -> None:

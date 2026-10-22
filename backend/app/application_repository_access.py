@@ -19,7 +19,7 @@ from .workspace_membership_repository import WorkspaceMembershipRepository
 from .work_order_repository import WorkOrderRepository
 from .models import AuthUser
 from .mcp_child_server_repository import MCPChildServerRepository
-from .test_run_repository import TestRunRepository
+from .test_run_repository import PostgresTestRunRepository, TestRunRepository
 
 
 class _RequestState(Protocol):
@@ -168,9 +168,23 @@ def work_order_repository_for_request(request: _RequestState | None) -> WorkOrde
 
 
 def test_run_repository_for_request(request: _RequestState | None) -> TestRunRepository:
-    """Return the test-run adapter bound to this FastAPI application."""
+    """Return the test-run adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        runtime = getattr(state, "postgres_runtime", None)
+        repository = getattr(repositories, "test_runs", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(repository, PostgresTestRunRepository)
+        ):
+            raise RuntimeError(
+                "PostgreSQL test-run repository is unavailable or mismatched"
+            )
+        return repository
     repository = getattr(state, "test_run_repository", None)
     if repository is None:
         raise RuntimeError("Application test-run repository is unavailable")

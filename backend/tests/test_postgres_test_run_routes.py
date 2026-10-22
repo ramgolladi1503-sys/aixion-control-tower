@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -12,6 +13,9 @@ from psycopg.types.json import Jsonb
 
 from app import main
 from app.agent_task_routes import MaintainerDependency, ReviewerDependency
+from app.application_repository_access import (
+    test_run_repository_for_request as select_test_run_repository,
+)
 from app.application_repositories import ApplicationRepositories
 from app.models import (
     ApprovalRequest,
@@ -50,6 +54,7 @@ def postgres_test_run_runtime(
         return connection
 
     try:
+        monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "true")
         run_postgres_migrations(connect)
         owner = User(
             id=f"user_{uuid.uuid4().hex}",
@@ -89,7 +94,8 @@ def postgres_test_run_runtime(
             "approval_decision_repository": repositories.approval_decisions,
             "project_repository": repositories.projects,
             "workspace_membership_repository": repositories.workspace_membership,
-            "test_run_repository": repositories.test_runs,
+            "postgres_runtime": SimpleNamespace(repositories=repositories),
+            "postgres_repositories": repositories,
         }.items():
             monkeypatch.setattr(main.app.state, name, value, raising=False)
         user = AuthUser(
@@ -138,7 +144,8 @@ def test_postgres_test_run_create_and_list_are_workspace_scoped_and_audited(
     assert created.status_code == 200, created.text
     test_run = created.json()
     assert client.get("/test-runs").json() == [test_run]
-    repository = main.app.state.test_run_repository
+    repository = select_test_run_repository(SimpleNamespace(app=main.app))
+    assert repository is main.app.state.postgres_repositories.test_runs
     assert repository.list_for_workspace("workspace_elsewhere") == []
     rejected = _TestRun(
         approval_request_id=approval_id,
