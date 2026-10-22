@@ -13,6 +13,7 @@ data class ApprovalHistoryEventDto(
     @SerializedName("audit_event_id") val auditEventId: String,
     @SerializedName("approval_id") val approvalId: String,
     val decision: String,
+    @SerializedName("delivery_status") val deliveryStatus: String? = null,
     val reason: String? = null,
     @SerializedName("decided_at") val decidedAt: String? = null,
     @SerializedName("reviewer_label") val reviewerLabel: String? = null,

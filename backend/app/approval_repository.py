@@ -56,6 +56,156 @@ class ApprovalInvocationLeaseRejected(RuntimeError):
     """The connector invocation is not durably live for this approval."""
 
 
+class ApprovalDeliveryEvidenceIntegrityError(RuntimeError):
+    """Stored delivery evidence is malformed or detached from its approval."""
+
+
+class ApprovalDeliveryEvidenceUnavailable(RuntimeError):
+    """The durable delivery evidence store could not be read."""
+
+
+MAX_DELIVERY_EVIDENCE_APPROVAL_IDS = 100
+
+
+def _validate_delivery_evidence_query(
+    *, workspace_id: str, approval_ids: list[str]
+) -> list[str]:
+    if not workspace_id or len(workspace_id) > 256:
+        raise ValueError("Delivery evidence reads require a valid workspace")
+    if len(approval_ids) > MAX_DELIVERY_EVIDENCE_APPROVAL_IDS:
+        raise ValueError("Delivery evidence query exceeds the bounded approval limit")
+    if any(not isinstance(item, str) or not item or len(item) > 256 for item in approval_ids):
+        raise ValueError("Delivery evidence query contains an invalid approval identity")
+    if len(approval_ids) != len(set(approval_ids)):
+        raise ValueError("Delivery evidence query requires unique approval identities")
+    return approval_ids
+
+
+def _delivery_evidence_timestamp(value: object, *, postgres: bool) -> datetime:
+    try:
+        if postgres:
+            if not isinstance(value, datetime):
+                raise ValueError("timestamp type is invalid")
+            timestamp = value
+        else:
+            if not isinstance(value, str):
+                raise ValueError("timestamp type is invalid")
+            timestamp = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as error:
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery evidence timestamp is invalid"
+        ) from error
+    if timestamp.utcoffset() is None:
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery evidence timestamp is not timezone-aware"
+        )
+    return timestamp
+
+
+def _validate_delivery_evidence_row(
+    *,
+    requested_id: str,
+    workspace_id: str,
+    claim_id: object,
+    claim_workspace_id: object,
+    claim_agent_id: object,
+    claim_invocation_id: object,
+    claimed_at: object,
+    failure_id: object,
+    failure_workspace_id: object,
+    failure_agent_id: object,
+    failure_invocation_id: object,
+    failure_reason_code: object,
+    reported_at: object,
+    approval_id: object,
+    approval_workspace_id: object,
+    approval_payload: object,
+    postgres: bool,
+) -> str:
+    claim_values = (
+        claim_id,
+        claim_workspace_id,
+        claim_agent_id,
+        claim_invocation_id,
+        claimed_at,
+    )
+    failure_values = (
+        failure_id,
+        failure_workspace_id,
+        failure_agent_id,
+        failure_invocation_id,
+        failure_reason_code,
+        reported_at,
+    )
+    if claim_id is None:
+        if any(value is not None for value in claim_values) or any(
+            value is not None for value in failure_values
+        ):
+            raise ApprovalDeliveryEvidenceIntegrityError(
+                "Stored delivery failure is detached from its claim"
+            )
+        return "NOT_CONFIRMED"
+    if (
+        claim_id != requested_id
+        or claim_workspace_id != workspace_id
+        or not isinstance(claim_agent_id, str)
+        or not claim_agent_id
+        or not isinstance(claim_invocation_id, str)
+        or not claim_invocation_id
+        or approval_id != requested_id
+        or approval_workspace_id != workspace_id
+        or approval_payload is None
+    ):
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery claim is detached from its workspace approval"
+        )
+    try:
+        approval = (
+            ApprovalRequest.model_validate(approval_payload)
+            if postgres
+            else ApprovalRequest.model_validate_json(approval_payload)
+        )
+    except Exception as error:
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery approval payload is invalid"
+        ) from error
+    if (
+        approval.id != requested_id
+        or approval.workspace_id != workspace_id
+        or approval.source_agent_id != claim_agent_id
+        or approval.source_invocation_id != claim_invocation_id
+        or approval.status != ApprovalStatus.APPROVED
+        or not approval.approved_payload_hash
+        or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+    ):
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery claim identity does not match its approval"
+        )
+    claim_time = _delivery_evidence_timestamp(claimed_at, postgres=postgres)
+    if failure_id is None:
+        if any(value is not None for value in failure_values):
+            raise ApprovalDeliveryEvidenceIntegrityError(
+                "Stored delivery failure identity is incomplete"
+            )
+        return "CLAIM_RECORDED"
+    if (
+        failure_id != requested_id
+        or failure_workspace_id != claim_workspace_id
+        or failure_agent_id != claim_agent_id
+        or failure_invocation_id != claim_invocation_id
+        or failure_reason_code != "CLAIM_RESPONSE_AMBIGUOUS"
+    ):
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery failure identity does not match its claim"
+        )
+    failure_time = _delivery_evidence_timestamp(reported_at, postgres=postgres)
+    if failure_time < claim_time:
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery failure predates its claim"
+        )
+    return "FAILURE_REPORTED"
+
+
 @dataclass(frozen=True)
 class ApprovalInvocationLease:
     approval_id: str
@@ -568,6 +718,10 @@ def _validate_expiry_backfill(
 class ApprovalDecisionRepository(Protocol):
     def get(self, approval_id: str) -> ApprovalRequest | None: ...
 
+    def list_delivery_outcomes(
+        self, *, workspace_id: str, approval_ids: list[str]
+    ) -> dict[str, str]: ...
+
     def heartbeat_invocation(
         self,
         *,
@@ -1002,6 +1156,74 @@ class SQLiteApprovalDecisionRepository:
             )
             conn.commit()
             return True
+
+    def list_delivery_outcomes(
+        self, *, workspace_id: str, approval_ids: list[str]
+    ) -> dict[str, str]:
+        """Batch-read and validate durable delivery evidence for one workspace."""
+        approval_ids = _validate_delivery_evidence_query(
+            workspace_id=workspace_id, approval_ids=approval_ids
+        )
+        outcomes = {approval_id: "NOT_CONFIRMED" for approval_id in approval_ids}
+        if not approval_ids:
+            return outcomes
+        values_sql = ",".join("(?)" for _ in approval_ids)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "WITH requested(approval_id) AS (VALUES "
+                    + values_sql
+                    + ") SELECT requested.approval_id,claim.approval_id,claim.workspace_id,"
+                    "claim.source_agent_id,claim.source_invocation_id,claim.claimed_at,"
+                    "failure.approval_id,failure.workspace_id,failure.source_agent_id,"
+                    "failure.source_invocation_id,failure.reason_code,failure.reported_at,"
+                    "approval.entity_id,"
+                    "json_extract(approval.payload,'$.workspace_id'),approval.payload "
+                    "FROM requested "
+                    "LEFT JOIN approval_delivery_claims AS claim "
+                    "ON claim.approval_id=requested.approval_id "
+                    "LEFT JOIN approval_delivery_failures AS failure "
+                    "ON failure.approval_id=requested.approval_id "
+                    "LEFT JOIN kv_store AS approval ON approval.entity_type='approval_request' "
+                    "AND approval.entity_id=requested.approval_id",
+                    approval_ids,
+                ).fetchall()
+        except sqlite3.Error as error:
+            raise ApprovalDeliveryEvidenceUnavailable(
+                "Delivery evidence storage is unavailable"
+            ) from error
+        if len(rows) != len(approval_ids):
+            raise ApprovalDeliveryEvidenceIntegrityError(
+                "Delivery evidence batch returned an incomplete result"
+            )
+        seen: set[str] = set()
+        for row in rows:
+            requested_id = row[0]
+            if requested_id not in outcomes or requested_id in seen:
+                raise ApprovalDeliveryEvidenceIntegrityError(
+                    "Delivery evidence batch returned an unexpected identity"
+                )
+            seen.add(requested_id)
+            outcomes[requested_id] = _validate_delivery_evidence_row(
+                requested_id=requested_id,
+                workspace_id=workspace_id,
+                claim_id=row[1],
+                claim_workspace_id=row[2],
+                claim_agent_id=row[3],
+                claim_invocation_id=row[4],
+                claimed_at=row[5],
+                failure_id=row[6],
+                failure_workspace_id=row[7],
+                failure_agent_id=row[8],
+                failure_invocation_id=row[9],
+                failure_reason_code=row[10],
+                reported_at=row[11],
+                approval_id=row[12],
+                approval_workspace_id=row[13],
+                approval_payload=row[14],
+                postgres=False,
+            )
+        return outcomes
 
     def list_for_workspace(self, workspace_id: str | None = None) -> list[ApprovalRequest]:
         query = (
@@ -2008,6 +2230,73 @@ class PostgresApprovalDecisionRepository:
             )
             self._insert_audit(conn, approval, audit_event)
             return True
+
+    def list_delivery_outcomes(
+        self, *, workspace_id: str, approval_ids: list[str]
+    ) -> dict[str, str]:
+        """Batch-read delivery claims/failures from the workspace database."""
+        approval_ids = _validate_delivery_evidence_query(
+            workspace_id=workspace_id, approval_ids=approval_ids
+        )
+        outcomes = {approval_id: "NOT_CONFIRMED" for approval_id in approval_ids}
+        if not approval_ids:
+            return outcomes
+        values_sql = ",".join("(%s)" for _ in approval_ids)
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "WITH requested(approval_id) AS (VALUES "
+                    + values_sql
+                    + ") SELECT requested.approval_id,claim.approval_id,claim.workspace_id,"
+                    "claim.source_agent_id,claim.source_invocation_id,claim.claimed_at,"
+                    "failure.approval_id,failure.workspace_id,failure.source_agent_id,"
+                    "failure.source_invocation_id,failure.reason_code,failure.reported_at,"
+                    "approval.approval_id,approval.workspace_id,approval.payload "
+                    "FROM requested "
+                    "LEFT JOIN approval_delivery_claims AS claim "
+                    "ON claim.approval_id=requested.approval_id "
+                    "LEFT JOIN approval_delivery_failures AS failure "
+                    "ON failure.approval_id=requested.approval_id "
+                    "LEFT JOIN approval_requests AS approval "
+                    "ON approval.approval_id=requested.approval_id",
+                    approval_ids,
+                ).fetchall()
+        except psycopg.Error as error:
+            raise ApprovalDeliveryEvidenceUnavailable(
+                "Delivery evidence storage is unavailable"
+            ) from error
+        if len(rows) != len(approval_ids):
+            raise ApprovalDeliveryEvidenceIntegrityError(
+                "Delivery evidence batch returned an incomplete result"
+            )
+        seen: set[str] = set()
+        for row in rows:
+            requested_id = row[0]
+            if requested_id not in outcomes or requested_id in seen:
+                raise ApprovalDeliveryEvidenceIntegrityError(
+                    "Delivery evidence batch returned an unexpected identity"
+                )
+            seen.add(requested_id)
+            outcomes[requested_id] = _validate_delivery_evidence_row(
+                requested_id=requested_id,
+                workspace_id=workspace_id,
+                claim_id=row[1],
+                claim_workspace_id=row[2],
+                claim_agent_id=row[3],
+                claim_invocation_id=row[4],
+                claimed_at=row[5],
+                failure_id=row[6],
+                failure_workspace_id=row[7],
+                failure_agent_id=row[8],
+                failure_invocation_id=row[9],
+                failure_reason_code=row[10],
+                reported_at=row[11],
+                approval_id=row[12],
+                approval_workspace_id=row[13],
+                approval_payload=row[14],
+                postgres=True,
+            )
+        return outcomes
 
     def list_for_workspace(self, workspace_id: str | None = None) -> list[ApprovalRequest]:
         if workspace_id is None:

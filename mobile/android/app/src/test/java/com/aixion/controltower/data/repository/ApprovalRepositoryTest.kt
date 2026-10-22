@@ -13,6 +13,7 @@ import com.aixion.controltower.core.api.dto.LoginRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
 import com.aixion.controltower.core.api.dto.RegistrationResponseDto
+import com.aixion.controltower.core.model.ApprovalDeliveryStatus
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
@@ -136,6 +137,34 @@ class ApprovalRepositoryTest {
     }
 
     @Test
+    fun deliveryStatusMapsKnownAndUnknownValuesConservatively() = runTest {
+        val api = HistoryApprovalApi(
+            ApprovalHistoryResponseDto(
+                events = listOf(
+                    historyStatusDto("not-confirmed", "NOT_CONFIRMED"),
+                    historyStatusDto("claim", "CLAIM_RECORDED"),
+                    historyStatusDto("failure", "FAILURE_REPORTED"),
+                    historyStatusDto("unknown", "FUTURE_STATUS"),
+                    historyStatusDto("missing", null)
+                )
+            )
+        )
+
+        val statuses = ApprovalRepository(api).listApprovalHistory().events.map { it.deliveryStatus }
+
+        assertEquals(
+            listOf(
+                ApprovalDeliveryStatus.NOT_CONFIRMED,
+                ApprovalDeliveryStatus.CLAIM_RECORDED,
+                ApprovalDeliveryStatus.FAILURE_REPORTED,
+                ApprovalDeliveryStatus.NOT_CONFIRMED,
+                ApprovalDeliveryStatus.NOT_CONFIRMED
+            ),
+            statuses
+        )
+    }
+
+    @Test
     fun listApprovalsThrowsWhenBackendListFails() = runTest {
         val repository = ApprovalRepository(FailingApprovalApi())
 
@@ -194,6 +223,13 @@ private suspend fun assertIllegalStateFailure(block: suspend () -> Unit) {
 
     fail("Expected IllegalStateException to be thrown")
 }
+
+private fun historyStatusDto(id: String, deliveryStatus: String?) = ApprovalHistoryEventDto(
+    auditEventId = "audit-$id",
+    approvalId = "approval-$id",
+    decision = "approve",
+    deliveryStatus = deliveryStatus
+)
 
 private class FailingApprovalApi : BaseFakeControlTowerApi() {
     override suspend fun register(payload: RegisterRequestDto): RegistrationResponseDto {

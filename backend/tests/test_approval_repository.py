@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 from threading import Barrier
 
@@ -16,6 +17,8 @@ from app.agent_task_models import (
 from app.approval_integrity import compute_approval_payload_hash
 from app.approval_repository import (
     ApprovalDecisionConflict,
+    ApprovalDeliveryEvidenceIntegrityError,
+    ApprovalDeliveryEvidenceUnavailable,
     SQLiteApprovalDecisionRepository,
 )
 from app.database_migrations import run_migrations
@@ -1502,3 +1505,178 @@ def test_separate_connections_allow_only_one_terminal_decision(tmp_path: Path) -
         ApprovalStatus.DENIED,
     }
     assert audit_count == 1
+
+
+def _delivery_approval(
+    approval_id: str, workspace_id: str, agent_id: str, invocation_id: str
+) -> ApprovalRequest:
+    approval = _approval().model_copy(
+        update={
+            "id": approval_id,
+            "project_id": f"project-{approval_id}",
+            "workspace_id": workspace_id,
+            "source_agent_id": agent_id,
+            "source_invocation_id": invocation_id,
+        }
+    )
+    return _approved_decision(approval)
+
+
+def test_sqlite_delivery_outcomes_are_batched_scoped_and_explicit(tmp_path: Path) -> None:
+    database = tmp_path / "approval_delivery_evidence.sqlite3"
+    claimed = _delivery_approval(
+        "approval-claim", "workspace-a", "agent-a", "invocation-a"
+    )
+    failed = _delivery_approval(
+        "approval-failed", "workspace-a", "agent-a", "invocation-b"
+    )
+    foreign = _delivery_approval(
+        "approval-foreign", "workspace-b", "agent-b", "invocation-c"
+    )
+    _seed_database(database, claimed)
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            (
+                ("approval_request", approval.id, approval.model_dump_json())
+                for approval in (failed, foreign)
+            ),
+        )
+    claimed_at = now_utc()
+    with sqlite3.connect(database) as connection:
+        for approval, agent_id, invocation_id in (
+            (claimed, "agent-a", "invocation-a"),
+            (failed, "agent-a", "invocation-b"),
+            (foreign, "agent-b", "invocation-c"),
+        ):
+            connection.execute(
+                "INSERT INTO approval_delivery_claims "
+                "(approval_id,workspace_id,source_agent_id,source_invocation_id,claimed_at) "
+                "VALUES(?,?,?,?,?)",
+                (
+                    approval.id,
+                    approval.workspace_id,
+                    agent_id,
+                    invocation_id,
+                    claimed_at.isoformat(),
+                ),
+            )
+        connection.execute(
+            "INSERT INTO approval_delivery_failures "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,reason_code,reported_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                failed.id,
+                "workspace-a",
+                "agent-a",
+                "invocation-b",
+                "CLAIM_RESPONSE_AMBIGUOUS",
+                (claimed_at + timedelta(seconds=1)).isoformat(),
+            ),
+        )
+
+    outcomes = _repository(database).list_delivery_outcomes(
+        workspace_id="workspace-a",
+        approval_ids=[claimed.id, failed.id, "approval-without-evidence"],
+    )
+
+    assert outcomes == {
+        claimed.id: "CLAIM_RECORDED",
+        failed.id: "FAILURE_REPORTED",
+        "approval-without-evidence": "NOT_CONFIRMED",
+    }
+    with pytest.raises(ApprovalDeliveryEvidenceIntegrityError, match="workspace approval"):
+        _repository(database).list_delivery_outcomes(
+            workspace_id="workspace-a", approval_ids=[foreign.id]
+        )
+
+
+def test_sqlite_delivery_outcomes_reject_detached_claim_rows(tmp_path: Path) -> None:
+    database = tmp_path / "approval_detached_delivery_evidence.sqlite3"
+    approval = _delivery_approval(
+        "approval-detached", "workspace-detached", "agent-detached", "invocation-original"
+    )
+    _seed_database(database, approval)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO approval_delivery_claims "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,claimed_at) "
+            "VALUES(?,?,?,?,?)",
+            (
+                approval.id,
+                approval.workspace_id,
+                approval.source_agent_id,
+                approval.source_invocation_id,
+                now_utc().isoformat(),
+            ),
+        )
+        connection.execute(
+            "UPDATE approval_delivery_claims SET source_invocation_id=? WHERE approval_id=?",
+            ("detached-invocation", approval.id),
+        )
+
+    with pytest.raises(ApprovalDeliveryEvidenceIntegrityError, match="does not match its approval"):
+        _repository(database).list_delivery_outcomes(
+            workspace_id="workspace-detached", approval_ids=[approval.id]
+        )
+
+
+@pytest.mark.parametrize(
+    "payload_changes",
+    (
+        {"approved_payload_hash": "0" * 64},
+        {"status": ApprovalStatus.REQUESTED},
+    ),
+)
+def test_sqlite_delivery_outcomes_reject_inconsistent_approved_claim(
+    tmp_path: Path, payload_changes: dict[str, object]
+) -> None:
+    database = tmp_path / "approval_changed_delivery_payload.sqlite3"
+    approval = _delivery_approval(
+        "approval-changed-payload", "workspace-payload", "agent-payload", "invocation-payload"
+    )
+    _seed_database(database, approval)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO approval_delivery_claims "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,claimed_at) "
+            "VALUES(?,?,?,?,?)",
+            (
+                approval.id,
+                approval.workspace_id,
+                approval.source_agent_id,
+                approval.source_invocation_id,
+                now_utc().isoformat(),
+            ),
+        )
+        connection.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id=?",
+            (
+                approval.model_copy(update=payload_changes).model_dump_json(),
+                approval.id,
+            ),
+        )
+
+    with pytest.raises(ApprovalDeliveryEvidenceIntegrityError, match="does not match its approval"):
+        _repository(database).list_delivery_outcomes(
+            workspace_id=approval.workspace_id, approval_ids=[approval.id]
+        )
+
+
+def test_sqlite_delivery_outcomes_map_storage_errors_to_unavailable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "approval_delivery_evidence_unavailable.sqlite3"
+    repository = _repository(database)
+
+    def fail_connect():
+        raise sqlite3.OperationalError("private database detail")
+
+    monkeypatch.setattr(repository, "_connect", fail_connect)
+
+    with pytest.raises(ApprovalDeliveryEvidenceUnavailable) as error:
+        repository.list_delivery_outcomes(
+            workspace_id="workspace-one", approval_ids=["approval-one"]
+        )
+
+    assert "private database detail" not in str(error.value)

@@ -23,6 +23,7 @@ from app import approval_expiry, approval_repository as approval_repository_modu
 from app.approval_integrity import compute_approval_payload_hash
 from app.approval_repository import (
     ApprovalDecisionConflict,
+    ApprovalDeliveryEvidenceIntegrityError,
     ApprovalInvocationLeaseRejected,
     PostgresApprovalDecisionRepository,
 )
@@ -667,6 +668,123 @@ def test_postgres_approved_invocation_delivery_claim_is_at_most_once(postgres_re
             "AND entity_id=%s",
             (approved.id,),
         ).fetchone()[0] == 1
+
+
+def test_postgres_delivery_outcomes_are_batched_scoped_and_explicit(
+    postgres_repository,
+) -> None:
+    repository, connect = postgres_repository
+    workspace, _project, approval, _ = _seed(connect)
+    agent = ExternalAgent(
+        id=f"agent_delivery_evidence_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Delivery evidence connector",
+        workspace_id=workspace.id,
+    )
+    agent, _token_hash = _insert_agent_credential(connect, agent)
+    claimed = _persist_live_approved_invocation(
+        connect,
+        approval=approval,
+        agent=agent,
+        source_invocation_id=f"claimed:{uuid.uuid4().hex}",
+    )
+    failed_approval = approval.model_copy(
+        update={"id": f"approval_delivery_failure_{uuid.uuid4().hex}"}
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO approval_requests "
+            "(approval_id,project_id,workspace_id,source_agent_id,status,expires_at,"
+            "created_at,updated_at,payload) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                failed_approval.id,
+                failed_approval.project_id,
+                failed_approval.workspace_id,
+                failed_approval.source_agent_id,
+                failed_approval.status.value,
+                failed_approval.expires_at,
+                failed_approval.created_at,
+                failed_approval.updated_at,
+                Jsonb(failed_approval.model_dump(mode="json")),
+            ),
+        )
+    failed = _persist_live_approved_invocation(
+        connect,
+        approval=failed_approval,
+        agent=agent,
+        source_invocation_id=f"failed:{uuid.uuid4().hex}",
+    )
+    claimed_at = now_utc()
+    with connect() as conn:
+        for item in (claimed, failed):
+            conn.execute(
+                "INSERT INTO approval_delivery_claims "
+                "(approval_id,workspace_id,source_agent_id,source_invocation_id,claimed_at) "
+                "VALUES(%s,%s,%s,%s,%s)",
+                (
+                    item.id,
+                    workspace.id,
+                    agent.id,
+                    item.source_invocation_id,
+                    claimed_at,
+                ),
+            )
+        conn.execute(
+            "INSERT INTO approval_delivery_failures "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,reason_code,reported_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s)",
+            (
+                failed.id,
+                workspace.id,
+                agent.id,
+                failed.source_invocation_id,
+                "CLAIM_RESPONSE_AMBIGUOUS",
+                claimed_at + timedelta(seconds=1),
+            ),
+        )
+
+    outcomes = repository.list_delivery_outcomes(
+        workspace_id=workspace.id,
+        approval_ids=[claimed.id, failed.id, "approval-without-evidence"],
+    )
+
+    assert outcomes == {
+        claimed.id: "CLAIM_RECORDED",
+        failed.id: "FAILURE_REPORTED",
+        "approval-without-evidence": "NOT_CONFIRMED",
+    }
+
+    foreign_workspace, _project, foreign_approval, _ = _seed(connect)
+    foreign_agent = ExternalAgent(
+        id=f"agent_foreign_delivery_evidence_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Foreign delivery evidence connector",
+        workspace_id=foreign_workspace.id,
+    )
+    foreign_agent, _token_hash = _insert_agent_credential(connect, foreign_agent)
+    foreign_approved = _persist_live_approved_invocation(
+        connect,
+        approval=foreign_approval,
+        agent=foreign_agent,
+        source_invocation_id=f"foreign:{uuid.uuid4().hex}",
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO approval_delivery_claims "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,claimed_at) "
+            "VALUES(%s,%s,%s,%s,%s)",
+            (
+                foreign_approved.id,
+                foreign_workspace.id,
+                foreign_agent.id,
+                foreign_approved.source_invocation_id,
+                claimed_at,
+            ),
+        )
+    with pytest.raises(ApprovalDeliveryEvidenceIntegrityError, match="workspace approval"):
+        repository.list_delivery_outcomes(
+            workspace_id=workspace.id, approval_ids=[foreign_approved.id]
+        )
 
 
 @pytest.mark.parametrize("expiry_target", ("approval", "lease"))

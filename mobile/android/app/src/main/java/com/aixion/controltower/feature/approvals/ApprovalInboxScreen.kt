@@ -38,6 +38,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.ApprovalHistoryEvent
+import com.aixion.controltower.core.model.ApprovalDeliveryStatus
 import com.aixion.controltower.core.model.ApprovalHistoryRequestSnapshot
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.ForegroundRefreshEffect
@@ -475,6 +476,27 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
             uppercase = false
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text("Delivery status", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        val (deliveryLabel, deliveryExplanation, deliveryColor) = when (event.deliveryStatus) {
+            ApprovalDeliveryStatus.NOT_CONFIRMED -> Triple(
+                "Delivery not confirmed",
+                "There is no confirmation that the connector received this decision.",
+                palette.caution
+            )
+            ApprovalDeliveryStatus.CLAIM_RECORDED -> Triple(
+                "Connector claim recorded",
+                "The server recorded an at-most-once claim for this decision. Connector receipt and agent execution or resumption remain unconfirmed.",
+                palette.info
+            )
+            ApprovalDeliveryStatus.FAILURE_REPORTED -> Triple(
+                "Claim response ambiguous",
+                "The connector reported an ambiguous claim response. The server may have recorded the claim; connector receipt and agent execution or resumption remain unconfirmed.",
+                palette.danger
+            )
+        }
+        StatusBadge(deliveryLabel, color = deliveryColor, fontSize = 14.sp, uppercase = false)
+        Text(deliveryExplanation, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, fontSize = 14.sp)
         Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, fontSize = 14.sp)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
@@ -494,7 +516,7 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
         }
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            "Decision record only. Delivery to the agent and execution are not confirmed here.",
+            "Decision and delivery are separate records. Agent execution is not confirmed here.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyLarge
         )

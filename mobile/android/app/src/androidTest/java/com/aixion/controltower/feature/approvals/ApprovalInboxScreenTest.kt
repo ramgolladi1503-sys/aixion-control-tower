@@ -22,6 +22,7 @@ import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalHistoryEvent
+import com.aixion.controltower.core.model.ApprovalDeliveryStatus
 import com.aixion.controltower.core.model.ApprovalHistoryFile
 import com.aixion.controltower.core.model.ApprovalHistoryRequestSnapshot
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -337,20 +338,77 @@ class ApprovalInboxScreenTest {
 
         assertEquals(1, loadRequests)
     }
+
+    @Test
+    fun historyShowsDeliveryStatusSeparatelyFromDecisionAndUsesConservativeCopy() {
+        val events = listOf(
+            historyEvent(
+                id = "audit-not-confirmed",
+                decision = "approve",
+                deliveryStatus = ApprovalDeliveryStatus.NOT_CONFIRMED,
+                reviewerLabel = "You",
+                requestSnapshotVerified = false,
+                requestSnapshot = null
+            ),
+            historyEvent(
+                id = "audit-claim",
+                decision = "reject",
+                deliveryStatus = ApprovalDeliveryStatus.CLAIM_RECORDED,
+                reviewerLabel = "You",
+                requestSnapshotVerified = false,
+                requestSnapshot = null
+            ),
+            historyEvent(
+                id = "audit-failure",
+                decision = "approve",
+                deliveryStatus = ApprovalDeliveryStatus.FAILURE_REPORTED,
+                reviewerLabel = "You",
+                requestSnapshotVerified = false,
+                requestSnapshot = null
+            )
+        )
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalInboxContent(
+                    state = ApprovalsUiState(
+                        loading = false,
+                        approvalHistory = events,
+                        historyLoaded = true
+                    )
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+        composeRule.onAllNodesWithText("Approved").assertCountEquals(2)
+        composeRule.onNodeWithText("Denied").assertExists()
+        composeRule.onNodeWithText("Delivery not confirmed").assertExists()
+        composeRule.onNodeWithText("Connector claim recorded").assertExists()
+        composeRule.onNodeWithText("Claim response ambiguous").assertExists()
+        composeRule.onNodeWithText(
+            "The server recorded an at-most-once claim for this decision. Connector receipt and agent execution or resumption remain unconfirmed."
+        ).assertExists()
+        composeRule.onNodeWithText(
+            "The connector reported an ambiguous claim response. The server may have recorded the claim; connector receipt and agent execution or resumption remain unconfirmed."
+        ).assertExists()
+    }
 }
 
 private fun historyEvent(
+    id: String = "audit-event-test-only",
     decision: String,
+    deliveryStatus: ApprovalDeliveryStatus = ApprovalDeliveryStatus.NOT_CONFIRMED,
     reviewerLabel: String,
     requestSnapshotVerified: Boolean,
     requestSnapshot: ApprovalHistoryRequestSnapshot?
 ) = ApprovalHistoryEvent(
-    eventId = "audit-event-test-only",
-    approvalId = "approval-id-test-only",
+    eventId = id,
+    approvalId = "approval-$id",
     decision = decision,
     reason = "Checked the requested changes.",
     decidedAt = "2026-10-22T10:00:00Z",
     reviewerLabel = reviewerLabel,
+    deliveryStatus = deliveryStatus,
     requestSnapshotVerified = requestSnapshotVerified,
     requestSnapshot = requestSnapshot
 )

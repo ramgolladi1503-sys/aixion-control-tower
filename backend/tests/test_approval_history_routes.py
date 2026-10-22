@@ -45,11 +45,31 @@ class FakeAuditRepository:
 
 
 class FakeApprovalRepository:
-    def __init__(self, approvals: list[ApprovalRequest]) -> None:
+    def __init__(
+        self,
+        approvals: list[ApprovalRequest],
+        delivery_outcomes: dict[str, str] | None = None,
+        delivery_queries: list[tuple[str, list[str]]] | None = None,
+        delivery_error: Exception | None = None,
+    ) -> None:
         self.approvals = {approval.id: approval for approval in approvals}
+        self.delivery_outcomes = delivery_outcomes or {}
+        self.delivery_queries = delivery_queries if delivery_queries is not None else []
+        self.delivery_error = delivery_error
 
     def get(self, approval_id: str) -> ApprovalRequest | None:
         return self.approvals.get(approval_id)
+
+    def list_delivery_outcomes(
+        self, *, workspace_id: str, approval_ids: list[str]
+    ) -> dict[str, str]:
+        self.delivery_queries.append((workspace_id, approval_ids))
+        if self.delivery_error is not None:
+            raise self.delivery_error
+        return {
+            approval_id: self.delivery_outcomes.get(approval_id, "NOT_CONFIRMED")
+            for approval_id in approval_ids
+        }
 
 
 class FakeProjectRepository:
@@ -124,10 +144,12 @@ def _request(
     events: list[AuditEvent],
     approvals: list[ApprovalRequest],
     projects: list[Project] | None = None,
+    delivery_outcomes: dict[str, str] | None = None,
     workspace_id: str = "workspace-one",
     user_email: str = "owner@example.test",
 ) -> tuple[TestClient, FakeAuditRepository]:
     audit_repository = FakeAuditRepository(events)
+    delivery_queries: list[tuple[str, list[str]]] = []
     user = AuthUser(
         id="owner-one",
         email=user_email,
@@ -143,7 +165,11 @@ def _request(
     monkeypatch.setattr(
         main,
         "_approval_repository_for_route",
-        lambda _request: FakeApprovalRepository(approvals),
+        lambda _request: FakeApprovalRepository(
+            approvals,
+            delivery_outcomes=delivery_outcomes,
+            delivery_queries=delivery_queries,
+        ),
     )
     monkeypatch.setattr(
         main,
@@ -155,6 +181,7 @@ def _request(
     )
     monkeypatch.setattr(main, "workspace_id_for_request", lambda _user, _request: workspace_id)
     monkeypatch.setitem(main.app.dependency_overrides, main.require_reviewer, lambda: user)
+    audit_repository.delivery_queries = delivery_queries
     return TestClient(main.app), audit_repository
 
 
@@ -181,7 +208,7 @@ def test_history_uses_immutable_decision_audit_and_redacts_reviewer_email(monkey
     assert payload["events"][0]["reviewer_label"] == "You"
     assert payload["events"][0]["request_snapshot"]["title"] == "Review approval-one"
     assert "status" not in payload["events"][0]["request_snapshot"]
-    assert "delivery_outcome" not in payload["events"][0]
+    assert payload["events"][0]["delivery_status"] == "NOT_CONFIRMED"
     assert "actor" not in payload["events"][0]
     assert "owner@example.test" not in response.text
     assert audit_repository.queries == [
@@ -331,13 +358,30 @@ def test_history_cursor_pages_are_stable_and_do_not_overlap(monkeypatch) -> None
         )
         for approval in approvals
     ]
-    client, repository = _request(monkeypatch, events=events, approvals=approvals)
+    first_page_approvals = [
+        event.entity_id
+        for event in sorted(events, key=lambda item: (item.created_at, item.id), reverse=True)[:2]
+    ]
+    client, repository = _request(
+        monkeypatch,
+        events=events,
+        approvals=approvals,
+        delivery_outcomes={
+            first_page_approvals[0]: "CLAIM_RECORDED",
+            first_page_approvals[1]: "FAILURE_REPORTED",
+        },
+    )
 
     first = client.get("/approvals/history?limit=2")
     assert first.status_code == 200, first.text
     first_payload = first.json()
     assert first_payload["has_more"] is True
     assert isinstance(first_payload["next_cursor"], str)
+    first_statuses = {
+        entry["approval_id"]: entry["delivery_status"]
+        for entry in first_payload["events"]
+    }
+    assert set(first_statuses.values()) == {"CLAIM_RECORDED", "FAILURE_REPORTED"}
 
     second = client.get(
         "/approvals/history?limit=2&cursor=" + first_payload["next_cursor"]
@@ -354,6 +398,10 @@ def test_history_cursor_pages_are_stable_and_do_not_overlap(monkeypatch) -> None
     third_payload = third.json()
     assert third_payload["has_more"] is False
     assert third_payload["next_cursor"] is None
+    assert all(
+        entry["delivery_status"] == "NOT_CONFIRMED"
+        for entry in second_payload["events"] + third_payload["events"]
+    )
 
     ids = [
         entry["audit_event_id"]
@@ -370,6 +418,42 @@ def test_history_cursor_pages_are_stable_and_do_not_overlap(monkeypatch) -> None
         events[0].created_at,
         first_payload["events"][-1]["audit_event_id"],
     )
+    assert [workspace for workspace, _ in repository.delivery_queries] == [
+        "workspace-one",
+        "workspace-one",
+        "workspace-one",
+    ]
+    assert [ids for _, ids in repository.delivery_queries] == [
+        [entry["approval_id"] for entry in first_payload["events"]],
+        [entry["approval_id"] for entry in second_payload["events"]],
+        [entry["approval_id"] for entry in third_payload["events"]],
+    ]
+
+
+def test_history_fails_closed_when_delivery_evidence_is_unavailable(monkeypatch) -> None:
+    approval = _approval("approval-delivery-store-unavailable")
+    event = _decision_event(
+        approval,
+        decision="approve",
+        actor="owner@example.test",
+        reviewed_payload_hash=_reviewed_hash(approval),
+    )
+    client, _ = _request(monkeypatch, events=[event], approvals=[approval])
+    monkeypatch.setattr(
+        main,
+        "_approval_repository_for_route",
+        lambda _request: FakeApprovalRepository(
+            [approval], delivery_error=RuntimeError("database connection failed")
+        ),
+    )
+
+    response = client.get("/approvals/history")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "Approval delivery evidence is unavailable for this persistence runtime"
+    )
+    assert "database connection failed" not in response.text
 
 
 def test_history_rejects_malformed_cursor(monkeypatch) -> None:

@@ -27,6 +27,7 @@ from .approval_recovery import reconcile_linked_approval_tasks
 from .approval_repository import (
     ApprovalDecisionConflict,
     ApprovalDecisionRepository,
+    ApprovalDeliveryEvidenceIntegrityError,
     ApprovalRecordMissing,
 )
 from .application_repository_access import (
@@ -1100,6 +1101,16 @@ def list_approval_decision_history(
         raise HTTPException(status_code=422, detail="cursor is invalid") from exc
     has_more = len(audit_events) > limit
     page_events = audit_events[:limit]
+    try:
+        delivery_outcomes = approval_repository.list_delivery_outcomes(
+            workspace_id=workspace_id,
+            approval_ids=list(dict.fromkeys(event.entity_id for event in page_events)),
+        )
+    except (ApprovalDeliveryEvidenceIntegrityError, RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Approval delivery evidence is unavailable for this persistence runtime",
+        ) from exc
     history: list[ApprovalDecisionHistoryEntry] = []
     decision_aliases = {
         "approve": "approve",
@@ -1171,6 +1182,9 @@ def list_approval_decision_history(
                     "You"
                     if event.actor.casefold() == user.email.casefold()
                     else "Workspace reviewer"
+                ),
+                delivery_status=delivery_outcomes.get(
+                    approval_id, "NOT_CONFIRMED"
                 ),
                 request_snapshot_verified=request_snapshot_verified,
                 request_snapshot=request_snapshot,

@@ -4,6 +4,7 @@ import com.aixion.controltower.core.api.ControlTowerApi
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.model.ApprovalHistoryEvent
+import com.aixion.controltower.core.model.ApprovalDeliveryStatus
 import com.aixion.controltower.core.model.ApprovalHistoryFile
 import com.aixion.controltower.core.model.ApprovalHistoryPage
 import com.aixion.controltower.core.model.ApprovalHistoryRequestSnapshot
@@ -70,6 +71,9 @@ class ApprovalRepository(private val api: ControlTowerApi) {
                 reason = event.reason?.takeIf(String::isNotBlank),
                 decidedAt = event.decidedAt,
                 reviewerLabel = event.reviewerLabel.toSafeReviewerLabel(),
+                deliveryStatus = event.deliveryStatus
+                    ?.let { raw -> runCatching { ApprovalDeliveryStatus.valueOf(raw.trim().uppercase()) }.getOrNull() }
+                    ?: ApprovalDeliveryStatus.NOT_CONFIRMED,
                 requestSnapshotVerified = verifiedSnapshot != null,
                 requestSnapshot = verifiedSnapshot
             )

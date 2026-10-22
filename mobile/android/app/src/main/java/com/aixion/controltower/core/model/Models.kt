@@ -123,9 +123,16 @@ data class ApprovalHistoryEvent(
     val reason: String?,
     val decidedAt: String?,
     val reviewerLabel: String,
+    val deliveryStatus: ApprovalDeliveryStatus = ApprovalDeliveryStatus.NOT_CONFIRMED,
     val requestSnapshotVerified: Boolean,
     val requestSnapshot: ApprovalHistoryRequestSnapshot?
 )
+
+enum class ApprovalDeliveryStatus {
+    NOT_CONFIRMED,
+    CLAIM_RECORDED,
+    FAILURE_REPORTED
+}
 
 data class ApprovalHistoryPage(
     val events: List<ApprovalHistoryEvent>,
