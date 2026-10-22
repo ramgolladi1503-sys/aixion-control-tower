@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -10,7 +11,7 @@ from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from app import main
+from app import main, notifications
 from app.application_repositories import ApplicationRepositories
 from app.models import (
     ApprovalRequest,
@@ -205,3 +206,38 @@ def test_postgres_notification_routes_reject_claimed_foreign_workspace(
 
     assert response.status_code == 403
     assert workspace.id != foreign_claim.workspace_id
+
+
+def test_notification_routes_fail_closed_without_postgres_repository_when_auth_uses_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = AuthUser(
+        id=f"user_{uuid.uuid4().hex}",
+        email="postgres-auth@example.test",
+        display_name="PostgreSQL auth user",
+        role=UserRole.OWNER,
+        workspace_id=f"workspace_{uuid.uuid4().hex}",
+    )
+    monkeypatch.setattr(
+        main.app.state,
+        "notification_outbox_repository",
+        None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        notifications,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    monkeypatch.setitem(main.app.dependency_overrides, AuthDependency.dependency, lambda: user)
+    before_notifications = set(store.notifications)
+    before_devices = set(store.device_registrations)
+    before_audits = {event.id for event in store.audit_events}
+
+    response = TestClient(main.app).get("/notifications")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "PostgreSQL notification repository is unavailable"
+    assert set(store.notifications) == before_notifications
+    assert set(store.device_registrations) == before_devices
+    assert {event.id for event in store.audit_events} == before_audits

@@ -31,10 +31,17 @@ PUSH_BODY = "A request is waiting for your review. Open the app to view details.
 def _postgres_notification_repository(
     http_request: Request | None,
 ) -> PostgresNotificationOutboxRepository | None:
-    if http_request is None:
-        return None
-    repository = getattr(http_request.app.state, "notification_outbox_repository", None)
+    repository = (
+        getattr(http_request.app.state, "notification_outbox_repository", None)
+        if http_request is not None
+        else None
+    )
     if repository is None:
+        if get_settings().postgres_auth_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL notification repository is unavailable",
+            )
         return None
     if not isinstance(repository, PostgresNotificationOutboxRepository):
         raise RuntimeError("Application notification repository has an unsupported adapter")
