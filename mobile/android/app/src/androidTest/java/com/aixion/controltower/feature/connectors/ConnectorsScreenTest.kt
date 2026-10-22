@@ -30,8 +30,11 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Set up the agent").assertExists()
         composeRule.onNodeWithText("Keep the session running").assertExists()
         composeRule.onNodeWithText("Decide from your phone").assertExists()
-        composeRule.onNodeWithText("FIRST SUPPORTED").assertExists()
+        composeRule.onNodeWithText("PHONE FLOW NOT VERIFIED").assertExists()
         composeRule.onNodeWithText("Antigravity").assertExists()
+        composeRule.onNodeWithText(
+            "Hook and connector setup is available, but returning a phone decision to the same Antigravity task has not been verified."
+        ).assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
         composeRule.onNodeWithText("PHONE FLOW NOT VERIFIED").assertExists()
         composeRule.onNodeWithText("Codex").assertExists()
@@ -87,5 +90,19 @@ class ConnectorsScreenTest {
             "Setup is available, but returning a phone decision to the same Codex task has not been verified."
         ).assertExists()
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
+    }
+
+    @Test
+    fun antigravityStatusDoesNotClaimVerifiedPhoneApproval() {
+        composeRule.setContent {
+            ConnectorsContent()
+        }
+
+        composeRule.onAllNodesWithText("PHONE FLOW NOT VERIFIED").assertCountEquals(2)
+        composeRule.onNodeWithText(
+            "Hook and connector setup is available, but returning a phone decision to the same Antigravity task has not been verified."
+        ).assertExists()
+        composeRule.onAllNodesWithText("FIRST SUPPORTED").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
     }
 }

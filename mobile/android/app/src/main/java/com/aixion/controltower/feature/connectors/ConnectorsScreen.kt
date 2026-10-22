@@ -114,12 +114,12 @@ private fun SetupStep(number: String, title: String, detail: String) {
 private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        StatusBadge(label = "FIRST SUPPORTED", color = palette.brand)
+        StatusBadge(label = "PHONE FLOW NOT VERIFIED", color = palette.caution)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text("Antigravity", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            "Set up the hook and connector credentials on the computer running Antigravity.",
+            "Hook and connector setup is available, but returning a phone decision to the same Antigravity task has not been verified.",
             color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
