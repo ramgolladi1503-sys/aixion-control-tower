@@ -260,6 +260,64 @@ def test_token_mutation_rejects_stale_snapshot_after_authentication(
         ).fetchone()[0] == 0
 
 
+def test_concurrent_token_rotations_from_same_snapshot_commit_once(agent_repository) -> None:
+    repository, connect, workspace_id, owner_id = agent_repository
+    agent, credential, _ = _agent_and_credential(workspace_id, owner_id)
+    _create_agent(repository, agent, credential)
+    expected_agent = agent.model_copy(deep=True)
+    expected_credential = credential.model_copy(deep=True)
+    start = Barrier(2)
+
+    def rotate(index: int) -> str:
+        rotated_at = now_utc() + timedelta(seconds=index + 1)
+        updated_agent = expected_agent.model_copy(
+            update={
+                "secret_hash": hashlib.sha256(f"replacement-{index}".encode()).hexdigest(),
+                "updated_at": rotated_at,
+            }
+        )
+        updated_credential = expected_credential.model_copy(
+            update={"token_rotated_at": rotated_at, "updated_at": rotated_at}
+        )
+        event = AuditEvent(
+            event_type="agent.token_rotated",
+            actor=f"owner-{index}@example.test",
+            entity_id=agent.id,
+            workspace_id=workspace_id,
+            details={},
+            created_at=rotated_at,
+        )
+        start.wait(timeout=10)
+        try:
+            repository.update(
+                agent=updated_agent,
+                credential=updated_credential,
+                audit_event=event,
+                expected_agent=expected_agent,
+                expected_credential=expected_credential,
+            )
+        except PostgresExternalAgentConflictError:
+            return "conflict"
+        return "committed"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(rotate, (0, 1)))
+
+    assert sorted(outcomes) == ["committed", "conflict"]
+    current = repository.get(agent.id)
+    assert current is not None
+    assert current[0].secret_hash in {
+        hashlib.sha256(b"replacement-0").hexdigest(),
+        hashlib.sha256(b"replacement-1").hexdigest(),
+    }
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent.token_rotated'",
+            (agent.id,),
+        ).fetchone()[0] == 1
+
+
 def test_create_rejects_registration_audit_with_mismatched_agent_details(agent_repository) -> None:
     repository, connect, workspace_id, owner_id = agent_repository
     agent, credential, _ = _agent_and_credential(workspace_id, owner_id)
