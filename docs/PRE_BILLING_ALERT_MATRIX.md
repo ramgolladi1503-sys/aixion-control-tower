@@ -47,7 +47,7 @@ Thresholds below are starting proposals for a low-volume staging environment. Re
 
 ## Missing application-level alerts
 
-The current app metrics do **not** expose complete durable approval delivery health. A PostgreSQL notification outbox aggregate is now available for an explicitly bound repository, but is not active in the default app and does not make the application PostgreSQL-authoritative. Before real approval staging:
+The current app metrics do **not** expose complete durable approval delivery health. A PostgreSQL notification outbox aggregate query exists for an explicitly bound repository, but the scrape endpoint now refuses to combine it with process-local run/trust metrics. It is not active in the default app and does not make the application PostgreSQL-authoritative. Before real approval staging:
 
 1. Oldest pending approval age, with a bounded and non-sensitive label set.
 2. Approval decision transaction conflicts and failures.

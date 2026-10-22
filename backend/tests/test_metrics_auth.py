@@ -61,29 +61,20 @@ def test_scrape_token_authenticates_metrics_for_its_bound_workspace(monkeypatch)
     assert observed == [WORKSPACE_ID]
 
 
-def test_scrape_includes_workspace_scoped_postgres_outbox_metrics_when_bound(monkeypatch) -> None:
+def test_scrape_refuses_mixed_local_and_postgres_metrics_when_outbox_is_bound(monkeypatch) -> None:
     _configure_token(monkeypatch)
     repository = object()
-    observed: list[tuple[object, str | None]] = []
-
-    from app import agent_run_routes
 
     monkeypatch.setattr(app.state, "notification_outbox_repository", repository, raising=False)
-    monkeypatch.setattr(agent_run_routes, "prometheus_agent_run_metrics", lambda _scope: "base_metric 1\n")
-    monkeypatch.setattr(
-        agent_run_routes,
-        "prometheus_postgres_notification_metrics",
-        lambda repo, scope: observed.append((repo, scope)) or "outbox_metric 1\n",
-    )
 
     response = client.get(
         "/agent/runs/metrics",
         headers={"Authorization": f"Bearer {SCRAPE_TOKEN}"},
     )
 
-    assert response.status_code == 200
-    assert response.text == "base_metric 1\noutbox_metric 1\n"
-    assert observed == [(repository, WORKSPACE_ID)]
+    assert response.status_code == 503
+    assert "same durable runtime" in response.json()["detail"]
+    assert "aixion_agent_runs_total" not in response.text
 
 
 def test_invalid_scrape_token_fails_closed(monkeypatch) -> None:
