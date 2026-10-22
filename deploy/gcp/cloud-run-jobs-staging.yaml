@@ -1,7 +1,8 @@
 # PRE-BILLING DRAFT ONLY
-# DO NOT APPLY: Slice 1's production PostgreSQL runtime and owner/account gates
-# are still open. The current worker startup validator also rejects production.
-# These templates document the intended isolated job permissions and inputs.
+# DO NOT APPLY: Slice 1's complete application PostgreSQL runtime and
+# owner/account gates are still open. These templates document the intended
+# isolated job permissions and inputs; worker-scoped settings validation does
+# not certify application-wide persistence or production readiness.
 apiVersion: run.googleapis.com/v1
 kind: Job
 metadata:
