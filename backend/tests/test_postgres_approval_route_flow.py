@@ -19,6 +19,7 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app import main
+from app.agent_auth import revoke_external_agent_token
 from app.agent_credential_models import AgentCredentialRecord
 from app.application_repositories import ApplicationRepositories
 from app.models import (
@@ -927,6 +928,7 @@ def test_postgres_same_invocation_recovers_after_fresh_api_process(
     assert decision.json()["status"] == ApprovalStatus.APPROVED
     client.close()
 
+
     process_context = multiprocessing.get_context("spawn")
     results = process_context.Queue()
     process = process_context.Process(
@@ -990,6 +992,83 @@ def test_postgres_same_invocation_recovers_after_fresh_api_process(
             (approval_id,),
         ).fetchone()[0] == 1
 
+
+def test_postgres_http_consume_rejects_revocation_after_authentication(
+    postgres_approval_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project, _user, repositories, agent, agent_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    client = TestClient(main.app)
+    headers = {
+        "X-Aixion-Agent-Id": agent.id,
+        "X-Aixion-Agent-Token": agent_token,
+        "X-Aixion-Approval-Protocol": "1",
+    }
+    created = client.post(
+        "/agents/approvals",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "title": "Revoke during approval consume",
+            "summary": "A connector revoked after authentication must not claim delivery.",
+            "agent_name": agent.display_name,
+            "target_branch": "feature/revocation-race",
+            "files": [
+                {
+                    "path": "antigravity://tool/run_command",
+                    "change_type": "tool_call",
+                    "diff": '{"command":"echo must-not-be-authorized"}',
+                }
+            ],
+            "source_session_id": "session-revocation-race",
+            "source_invocation_id": f"invocation-{uuid.uuid4().hex}",
+        },
+    )
+    assert created.status_code == 200, created.text
+    approval_id = created.json()["id"]
+    decided = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve"},
+    )
+    assert decided.status_code == 200, decided.text
+
+    auth_repository = repositories.external_agent_auth
+
+    class RevokeImmediatelyAfterAuthentication:
+        def authenticate_and_consume(self, **kwargs):
+            result = auth_repository.authenticate_and_consume(**kwargs)
+            if result.reason is None:
+                assert result.agent is not None and result.credential is not None
+                revoke_external_agent_token(
+                    result.agent,
+                    credential=result.credential,
+                    repository=auth_repository,
+                    actor="test:revoke-between-auth-and-claim",
+                )
+            return result
+
+    monkeypatch.setattr(
+        main.app.state,
+        "external_agent_auth_repository",
+        RevokeImmediatelyAfterAuthentication(),
+    )
+    consumed = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
+
+    assert consumed.status_code == 401, consumed.text
+    assert consumed.json()["detail"] == "External agent credential is no longer active"
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events "
+            "WHERE entity_id=%s AND event_type='approval.delivery_claimed'",
+            (approval_id,),
+        ).fetchone()[0] == 0
+    client.close()
 
 def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
     postgres_approval_route_runtime,
