@@ -5,7 +5,7 @@ from typing import Protocol
 from .application_repositories import ApplicationRepositories
 from .audit_repository import AuditEventRepository
 from .agent_task_repository import AgentTaskRepository, PostgresAgentTaskRepository
-from .agent_run_repository import AgentRunRepository
+from .agent_run_repository import AgentRunRepository, PostgresAgentRunRepository
 from .agent_auth_repository import ExternalAgentAuthenticationRepository
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
 from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
@@ -98,9 +98,21 @@ def agent_task_repository_for_request(request: _RequestState | None) -> AgentTas
 
 
 def agent_run_repository_for_request(request: _RequestState | None) -> AgentRunRepository:
-    """Return the AgentRun adapter bound to this FastAPI application."""
+    """Return the AgentRun adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        runtime = getattr(state, "postgres_runtime", None)
+        repository = getattr(repositories, "agent_runs", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(repository, PostgresAgentRunRepository)
+        ):
+            raise RuntimeError("PostgreSQL AgentRun repository is unavailable or mismatched")
+        return repository
     repository = getattr(state, "agent_run_repository", None)
     if repository is None:
         raise RuntimeError("Application AgentRun repository is unavailable")
