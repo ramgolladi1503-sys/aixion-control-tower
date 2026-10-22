@@ -4,7 +4,7 @@ from typing import Protocol
 
 from .application_repositories import ApplicationRepositories
 from .audit_repository import AuditEventRepository
-from .agent_task_repository import AgentTaskRepository
+from .agent_task_repository import AgentTaskRepository, PostgresAgentTaskRepository
 from .agent_run_repository import AgentRunRepository
 from .agent_auth_repository import ExternalAgentAuthenticationRepository
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
@@ -72,13 +72,25 @@ def approval_decision_repository_for_request(
 
 
 def agent_task_repository_for_request(request: _RequestState | None) -> AgentTaskRepository:
-    """Return the AgentTask adapter bound to this FastAPI application.
+    """Return the AgentTask adapter selected by this application's store mode.
 
-    There is intentionally no repository-bundle fallback here: task routes
-    must not switch persistence independently from their linked approval path.
+    PostgreSQL auth mode selects from the same lifespan-owned bundle as linked
+    approvals. Probe-only PostgreSQL never switches local/test task routes.
     """
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        runtime = getattr(state, "postgres_runtime", None)
+        repository = getattr(repositories, "agent_tasks", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(repository, PostgresAgentTaskRepository)
+        ):
+            raise RuntimeError("PostgreSQL AgentTask repository is unavailable or mismatched")
+        return repository
     repository = getattr(state, "agent_task_repository", None)
     if repository is None:
         raise RuntimeError("Application AgentTask repository is unavailable")

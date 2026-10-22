@@ -38,6 +38,7 @@ def postgres_agent_task_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterat
         return connection
 
     try:
+        monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "true")
         run_postgres_migrations(connect)
         owner = User(
             id=f"user_{uuid.uuid4().hex}", email=f"owner-{uuid.uuid4().hex}@example.test",
@@ -65,6 +66,8 @@ def postgres_agent_task_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterat
             "agent_run_repository": repositories.agent_runs,
             "project_repository": repositories.projects,
             "workspace_membership_repository": repositories.workspace_membership,
+            "postgres_runtime": SimpleNamespace(repositories=repositories),
+            "postgres_repositories": repositories,
         }.items():
             monkeypatch.setattr(main.app.state, name, value, raising=False)
         user = AuthUser(id=owner.id, email=owner.email, display_name=owner.display_name,
