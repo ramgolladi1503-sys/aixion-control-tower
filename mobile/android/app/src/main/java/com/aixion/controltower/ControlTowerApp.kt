@@ -9,6 +9,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -34,6 +35,7 @@ import androidx.navigation.navArgument
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
@@ -64,6 +66,7 @@ import com.aixion.controltower.navigation.Route
 import com.aixion.controltower.navigation.primaryRouteFor
 import com.aixion.controltower.navigation.primaryRoutes
 import com.aixion.controltower.navigation.routeTitleFor
+import com.aixion.controltower.navigation.shouldShowUpButton
 import com.aixion.controltower.navigation.shouldPopBackToInbox
 import com.aixion.controltower.notifications.NotificationDeepLink
 
@@ -155,6 +158,26 @@ fun ControlTowerApp(
             topBar = {
                 if (showMainShell) {
                     TopAppBar(
+                        navigationIcon = {
+                            if (shouldShowUpButton(currentRoute)) {
+                                IconButton(
+                                    onClick = {
+                                        val parentRoute = primaryRouteFor(currentRoute) ?: Route.Home
+                                        if (!navController.popBackStack(parentRoute.value, inclusive = false)) {
+                                            navController.navigate(parentRoute.value) {
+                                                launchSingleTop = true
+                                                popUpTo(currentRoute) { inclusive = true }
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Back"
+                                    )
+                                }
+                            }
+                        },
                         title = {
                             Text(
                                 routeTitleFor(currentRoute),

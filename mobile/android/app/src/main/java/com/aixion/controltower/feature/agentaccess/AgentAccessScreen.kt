@@ -10,6 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -50,17 +52,14 @@ import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
-import com.aixion.controltower.core.ui.theme.RiskBlocked
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerCodeTextStyle
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 @Composable
 fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
+    val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -128,30 +127,33 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
     }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().background(TowerBackground).padding(18.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.canvas)
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
             TowerHeroPanel {
-                StatusBadge(label = if (state.loading) "SYNCING" else "MAC AGENT ACCESS", color = if (state.loading) RiskMedium else RiskLow)
+                StatusBadge(label = if (state.loading) "SYNCING" else "MAC AGENT ACCESS", color = if (state.loading) palette.caution else palette.positive)
                 Spacer(Modifier.height(TowerSpacing.md))
-                Text("Connect ${agentProviderName(state.selectedProvider)}", color = TowerTextPrimary, fontSize = 26.sp)
+                Text("Connect ${agentProviderName(state.selectedProvider)}", color = palette.ink, fontSize = 26.sp)
                 Spacer(Modifier.height(TowerSpacing.sm))
                 Text(
                     "Create a project-limited connector credential here, then install its local hook in that project on your Mac. Approval decisions stay in this phone app.",
-                    color = TowerTextMuted,
+                    color = palette.inkMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
                 )
             }
         }
 
-        if (state.notice.isNotBlank()) item { Text(state.notice, color = RiskLow) }
-        if (state.error.isNotBlank()) item { Text(state.error, color = RiskBlocked) }
+        if (state.notice.isNotBlank()) item { Text(state.notice, color = palette.positive) }
+        if (state.error.isNotBlank()) item { Text(state.error, color = palette.danger) }
 
         item {
             TowerPanel {
-                Text("Choose platform", color = TowerTextPrimary, fontWeight = FontWeight.SemiBold)
+                Text("Choose platform", color = palette.ink, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(TowerSpacing.sm))
                 Box {
                     OutlinedButton(
@@ -257,9 +259,9 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
         if (!state.loading && state.agents.isEmpty()) {
             item {
                 TowerPanel {
-                    Text("No ${agentProviderName(state.selectedProvider)} connector enrolled", color = TowerTextPrimary)
+                    Text("No ${agentProviderName(state.selectedProvider)} connector enrolled", color = palette.ink)
                     Spacer(Modifier.height(TowerSpacing.sm))
-                    Text("Create an agent above to generate a one-time token.", color = TowerTextMuted)
+                    Text("Create an agent above to generate a one-time token.", color = palette.inkMuted)
                 }
             }
         }
@@ -281,11 +283,12 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
 
 @Composable
 internal fun ConnectorPermissionsDisclosure() {
+    val palette = LocalTowerPalette.current
     Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
-        Text("Granted actions", color = TowerTextPrimary, style = MaterialTheme.typography.titleMedium)
+        Text("Granted actions", color = palette.ink, style = MaterialTheme.typography.titleMedium)
         Text(
             "This connector is limited to the selected project and these five approval-only actions:",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
@@ -296,12 +299,12 @@ internal fun ConnectorPermissionsDisclosure() {
                 "REPORT_APPROVAL_DELIVERY_FAILURE",
                 "EXPIRE_OWN_APPROVAL"
             ).forEach { action ->
-                Text("• $action", color = TowerTextMuted, style = TowerCodeTextStyle)
+                Text("• $action", color = palette.inkMuted, style = TowerCodeTextStyle)
             }
         }
         Text(
             "Consume only returns an already-approved decision once. This credential cannot approve requests or start tools; the paused host agent continues only after that decision is returned.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             style = MaterialTheme.typography.bodyLarge
         )
     }
@@ -327,33 +330,39 @@ internal fun authenticatedActivityLabel(credential: AgentCredentialStatusDto?): 
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRotate: () -> Unit, onRevoke: () -> Unit) {
+    val palette = LocalTowerPalette.current
     val agent = agentSummary.agent
     TowerPanel(elevated = true) {
         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
-                Text(agent.display_name, color = TowerTextPrimary, fontWeight = FontWeight.SemiBold)
+                Text(agent.display_name, color = palette.ink, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
-                Text(agent.id, color = TowerTextMuted, fontSize = 11.sp)
+                Text(agent.id, color = palette.inkMuted, fontSize = 11.sp)
             }
             val credentialState = if (agent.enabled) agentSummary.credentialState else "DISABLED"
             val statusColor = when (credentialState) {
-                "ACTIVE" -> RiskLow
-                "UNKNOWN", "EXPIRED" -> RiskMedium
-                else -> RiskBlocked
+                "ACTIVE" -> palette.positive
+                "UNKNOWN", "EXPIRED" -> palette.caution
+                else -> palette.danger
             }
             StatusBadge(label = "TOKEN $credentialState", color = statusColor)
         }
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
             authenticatedActivityLabel(agentSummary.credential),
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             fontSize = 12.sp,
             lineHeight = 17.sp
         )
-        Text("Projects: ${agent.allowed_project_ids.joinToString().ifBlank { "none" }}", color = TowerTextMuted, fontSize = 12.sp)
-        Text("Actions: ${agent.allowed_actions.joinToString()}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Projects: ${agent.allowed_project_ids.joinToString().ifBlank { "none" }}", color = palette.inkMuted, fontSize = 12.sp)
+        Text("Actions: ${agent.allowed_actions.joinToString()}", color = palette.inkMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+        ) {
             OutlinedButton(onClick = onRotate, enabled = !working && agent.enabled) { Text("Rotate token") }
             TextButton(
                 onClick = onRevoke,
@@ -364,6 +373,7 @@ private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRota
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun OneTimeTokenPanel(
     token: String,
     provider: String,
@@ -373,48 +383,53 @@ internal fun OneTimeTokenPanel(
     onCopy: () -> Unit,
     onHide: () -> Unit
 ) {
+    val palette = LocalTowerPalette.current
     val providerName = agentProviderName(provider)
     val hookDirectory = if (provider == "CODEX") "codex" else "antigravity"
     TowerPanel(elevated = true) {
-        StatusBadge(label = "ONE-TIME SECRET", color = RiskMedium)
+        StatusBadge(label = "ONE-TIME SECRET", color = palette.caution)
         Spacer(Modifier.height(TowerSpacing.sm))
-        Text("Save this $providerName token in macOS Keychain now", color = TowerTextPrimary, fontWeight = FontWeight.SemiBold)
+        Text("Save this $providerName token in macOS Keychain now", color = palette.ink, fontWeight = FontWeight.SemiBold)
         Text(
             "It is held only in screen memory and is cleared when you hide it or leave the app.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(Modifier.height(TowerSpacing.sm))
-        Text("Agent: $agentName", color = TowerTextMuted, style = MaterialTheme.typography.bodyMedium)
-        Text("Agent ID: $agentId", color = TowerTextMuted, style = MaterialTheme.typography.bodyMedium)
-        Text("Project ID: $projectId", color = TowerTextMuted, style = MaterialTheme.typography.bodyMedium)
+        Text("Agent: $agentName", color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
+        Text("Agent ID: $agentId", color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
+        Text("Project ID: $projectId", color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.height(TowerSpacing.sm))
-        Text(token, color = TowerTextPrimary, style = TowerCodeTextStyle)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(token, color = palette.ink, style = TowerCodeTextStyle)
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+        ) {
             Button(onClick = onCopy) { Text("Copy sensitive token") }
             TextButton(onClick = onHide) { Text("Hide now") }
         }
         Text(
             "On the Mac, run: security add-generic-password -U -s com.aixion.controltower.agent -a $agentId -w\nThe command prompts for the token; do not put it in command arguments or shell history.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
             "Next, install the $providerName hook only in the project you want to protect. Use the Control Tower API URL reachable from your Mac and that project's absolute folder path. The installer writes project-scoped settings and preserves other hooks.",
-            color = TowerTextMuted,
+            color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Text(
             "python3 /ABSOLUTE/PATH/integrations/$hookDirectory/setup_workspace.py \\\n  --workspace \"/ABSOLUTE/PATH/TO/PROJECT\" \\\n  --api-base-url \"https://CONTROL-TOWER-URL\" \\\n  --agent-id \"$agentId\" \\\n  --project-id \"$projectId\"",
-            color = TowerTextPrimary,
+            color = palette.ink,
             style = TowerCodeTextStyle
         )
         if (provider == "CODEX") {
             Spacer(Modifier.height(TowerSpacing.sm))
             Text(
                 "Open that project in Codex and review/trust the PermissionRequest hook when prompted. It covers local permission prompts only; verify the same paused Codex action continues after approval.",
-                color = TowerTextMuted,
+                color = palette.inkMuted,
                 style = MaterialTheme.typography.bodyMedium
             )
         }

@@ -6,18 +6,18 @@ import org.junit.Test
 class NotificationPermissionPanelTest {
     @Test
     fun deniedStateClearlyExplainsPushIsBlocked() {
-        assertEquals("ALERTS OFF", NotificationPermissionCopy.badge(NotificationPermissionState.DENIED))
+        assertEquals("PERMISSION OFF", NotificationPermissionCopy.badge(NotificationPermissionState.DENIED))
         assertEquals(
-            "Approval alerts are off. Android will not show push notifications until you allow them.",
+            "Android notifications are off. Push notifications cannot appear until you allow them.",
             NotificationPermissionCopy.status(NotificationPermissionState.DENIED)
         )
     }
 
     @Test
     fun grantedStateConfirmsDevicePermission() {
-        assertEquals("ALERTS ENABLED", NotificationPermissionCopy.badge(NotificationPermissionState.GRANTED))
+        assertEquals("PERMISSION ALLOWED", NotificationPermissionCopy.badge(NotificationPermissionState.GRANTED))
         assertEquals(
-            "Approval alerts are enabled on this device.",
+            "Android allows notifications on this device.",
             NotificationPermissionCopy.status(NotificationPermissionState.GRANTED)
         )
     }

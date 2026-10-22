@@ -32,14 +32,25 @@ class NavigationDestinationsTest {
         assertEquals(Route.Inbox, primaryRouteFor(Route.ApprovalDetail.value))
         assertEquals(Route.Inbox, primaryRouteFor(Route.Diff.value))
         assertEquals(Route.Connectors, primaryRouteFor(Route.AgentAccess.value))
+        assertEquals(Route.Connectors, primaryRouteFor(Route.AgentAccess.forProvider("ANTIGRAVITY")))
         assertNull(primaryRouteFor(Route.Command.value))
     }
 
     @Test
     fun protectedDetailRoutesHaveSpecificPageTitles() {
-        assertEquals("Approval Detail", routeTitleFor(Route.ApprovalDetail.value))
-        assertEquals("File changes", routeTitleFor(Route.Diff.value))
+        assertEquals("Review approval", routeTitleFor(Route.ApprovalDetail.value))
+        assertEquals("Review changes", routeTitleFor(Route.Diff.value))
         assertEquals("Agent Access", routeTitleFor("agent_access/antigravity"))
+    }
+
+    @Test
+    fun onlyNestedReleaseOneDestinationsShowAnUpButton() {
+        assertEquals(true, shouldShowUpButton(Route.ApprovalDetail.value))
+        assertEquals(true, shouldShowUpButton(Route.Diff.value))
+        assertEquals(true, shouldShowUpButton(Route.AgentAccess.forProvider("CODEX")))
+        assertEquals(false, shouldShowUpButton(Route.Home.value))
+        assertEquals(false, shouldShowUpButton(Route.Inbox.value))
+        assertEquals(false, shouldShowUpButton(Route.Connectors.value))
     }
 
     @Test

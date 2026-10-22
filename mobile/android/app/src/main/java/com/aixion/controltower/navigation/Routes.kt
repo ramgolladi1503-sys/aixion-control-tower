@@ -2,6 +2,8 @@ package com.aixion.controltower.navigation
 
 import java.util.Locale
 
+private const val AGENT_ACCESS_ROUTE_PREFIX = "agent_access/"
+
 sealed class Route(val value: String, val label: String) {
     data object Auth : Route("auth", "Login")
     data object Home : Route("home", "Home")
@@ -56,16 +58,25 @@ val allNavigationRoutes = primaryRoutes + laterReleaseRoutes
 
 /** Title for the current destination, including protected detail routes. */
 fun routeTitleFor(currentRoute: String): String = when {
-    currentRoute == Route.ApprovalDetail.value -> Route.ApprovalDetail.label
-    currentRoute == Route.Diff.value -> "File changes"
-    currentRoute.startsWith("agent_access/") -> Route.AgentAccess.label
+    currentRoute == Route.ApprovalDetail.value -> "Review approval"
+    currentRoute == Route.Diff.value -> "Review changes"
+    currentRoute.startsWith(AGENT_ACCESS_ROUTE_PREFIX) -> Route.AgentAccess.label
     else -> allNavigationRoutes.firstOrNull { it.value == currentRoute }?.label ?: "Control Tower"
 }
+
+/** Nested release-one destinations expose an explicit app-bar way back to their parent. */
+fun shouldShowUpButton(currentRoute: String): Boolean =
+    currentRoute in setOf(Route.ApprovalDetail.value, Route.Diff.value) ||
+        currentRoute.startsWith(AGENT_ACCESS_ROUTE_PREFIX)
 
 fun primaryRouteFor(currentRoute: String): Route? = when (currentRoute) {
     Route.ApprovalDetail.value, Route.Diff.value -> Route.Inbox
     Route.AgentAccess.value -> Route.Connectors
-    else -> primaryRoutes.firstOrNull { it.value == currentRoute }
+    else -> if (currentRoute.startsWith(AGENT_ACCESS_ROUTE_PREFIX)) {
+        Route.Connectors
+    } else {
+        primaryRoutes.firstOrNull { it.value == currentRoute }
+    }
 }
 
 fun shouldPopBackToInbox(currentRoute: String, targetRoute: Route): Boolean =

@@ -60,14 +60,14 @@ internal enum class NotificationPermissionState {
 
 internal object NotificationPermissionCopy {
     fun status(state: NotificationPermissionState): String = when (state) {
-        NotificationPermissionState.GRANTED -> "Approval alerts are enabled on this device."
-        NotificationPermissionState.DENIED -> "Approval alerts are off. Android will not show push notifications until you allow them."
+        NotificationPermissionState.GRANTED -> "Android allows notifications on this device."
+        NotificationPermissionState.DENIED -> "Android notifications are off. Push notifications cannot appear until you allow them."
         NotificationPermissionState.NOT_REQUIRED -> "This Android version does not require a notification permission prompt."
     }
 
     fun badge(state: NotificationPermissionState): String = when (state) {
-        NotificationPermissionState.GRANTED -> "ALERTS ENABLED"
-        NotificationPermissionState.DENIED -> "ALERTS OFF"
+        NotificationPermissionState.GRANTED -> "PERMISSION ALLOWED"
+        NotificationPermissionState.DENIED -> "PERMISSION OFF"
         NotificationPermissionState.NOT_REQUIRED -> "SYSTEM MANAGED"
     }
 }
