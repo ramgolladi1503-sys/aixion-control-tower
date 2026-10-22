@@ -69,6 +69,14 @@ fun shouldShowUpButton(currentRoute: String): Boolean =
     currentRoute in setOf(Route.ApprovalDetail.value, Route.Diff.value) ||
         currentRoute.startsWith(AGENT_ACCESS_ROUTE_PREFIX)
 
+/** Parent destination for app-bar Up navigation; independent of bottom-tab selection. */
+fun parentRouteFor(currentRoute: String): Route? = when {
+    currentRoute == Route.Diff.value -> Route.ApprovalDetail
+    currentRoute == Route.ApprovalDetail.value -> Route.Inbox
+    currentRoute.startsWith(AGENT_ACCESS_ROUTE_PREFIX) -> Route.Connectors
+    else -> null
+}
+
 fun primaryRouteFor(currentRoute: String): Route? = when (currentRoute) {
     Route.ApprovalDetail.value, Route.Diff.value -> Route.Inbox
     Route.AgentAccess.value -> Route.Connectors

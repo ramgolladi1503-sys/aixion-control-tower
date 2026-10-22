@@ -64,6 +64,7 @@ import com.aixion.controltower.feature.workorders.WorkOrdersScreen
 import com.aixion.controltower.navigation.AuthSessionGate
 import com.aixion.controltower.navigation.Route
 import com.aixion.controltower.navigation.primaryRouteFor
+import com.aixion.controltower.navigation.parentRouteFor
 import com.aixion.controltower.navigation.primaryRoutes
 import com.aixion.controltower.navigation.routeTitleFor
 import com.aixion.controltower.navigation.shouldShowUpButton
@@ -162,7 +163,7 @@ fun ControlTowerApp(
                             if (shouldShowUpButton(currentRoute)) {
                                 IconButton(
                                     onClick = {
-                                        val parentRoute = primaryRouteFor(currentRoute) ?: Route.Home
+                                        val parentRoute = parentRouteFor(currentRoute) ?: Route.Home
                                         if (!navController.popBackStack(parentRoute.value, inclusive = false)) {
                                             navController.navigate(parentRoute.value) {
                                                 launchSingleTop = true

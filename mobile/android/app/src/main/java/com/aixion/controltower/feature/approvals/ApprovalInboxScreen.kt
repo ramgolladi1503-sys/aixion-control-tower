@@ -213,6 +213,17 @@ fun ApprovalInboxContent(
                         fontSize = 14.sp,
                         lineHeight = 21.sp
                     )
+                    if (listOf("demo approvals", "mock approvals", "fallback approvals").none {
+                            message.contains(it, ignoreCase = true)
+                        }
+                    ) {
+                        Text(
+                            text = "Demo approvals are never shown.",
+                            color = palette.inkMuted,
+                            fontSize = 14.sp,
+                            lineHeight = 21.sp
+                        )
+                    }
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
                     Button(onClick = onRetry, enabled = !state.loading && !state.refreshing) {
                         Text("Retry approvals")
@@ -312,25 +323,6 @@ fun ApprovalInboxContent(
                             Text(if (state.historyLoading) "Retrying…" else "Retry history")
                         }
                     }
-                }
-            }
-        }
-
-        if (state.hasError) {
-            item {
-                TowerPanel(elevated = true) {
-                    Text(
-                        text = "No fallback approvals loaded",
-                        color = palette.ink,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Authenticated approval screens now require real backend data instead of silently rendering demo approvals. Use Retry after the backend is reachable.",
-                        color = palette.inkMuted,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp
-                    )
                 }
             }
         }

@@ -208,6 +208,33 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
+    fun approvalLoadErrorShowsOneActionablePanelWithoutDemoApprovals() {
+        var refreshRequested = false
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    approvals = listOf(
+                        approval(id = "approval_unavailable", title = "Must not be shown", status = ApprovalStatus.REQUESTED)
+                    ),
+                    errorMessage = "Backend unavailable: connection refused"
+                ),
+                onRetry = { refreshRequested = true }
+            )
+        }
+
+        composeRule.onAllNodesWithText("Approval data unavailable").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Backend unavailable: connection refused").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Demo approvals are never shown.").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Retry approvals").assertCountEquals(1)
+        composeRule.onAllNodesWithText("No fallback approvals loaded").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Must not be shown").assertCountEquals(0)
+
+        composeRule.onNodeWithText("Retry approvals").performClick()
+        assertEquals(true, refreshRequested)
+    }
+
+    @Test
     fun emptyInboxCanRefreshAndInvokesReload() {
         var refreshRequested = false
         composeRule.setContent {

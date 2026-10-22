@@ -37,6 +37,16 @@ class NavigationDestinationsTest {
     }
 
     @Test
+    fun appBarUpUsesParentRouteIndependentlyFromBottomTabSelection() {
+        assertEquals(Route.ApprovalDetail, parentRouteFor(Route.Diff.value))
+        assertEquals(Route.Inbox, primaryRouteFor(Route.Diff.value))
+        assertEquals(Route.Inbox, parentRouteFor(Route.ApprovalDetail.value))
+        assertEquals(Route.Inbox, primaryRouteFor(Route.ApprovalDetail.value))
+        assertEquals(Route.Connectors, parentRouteFor(Route.AgentAccess.forProvider("ANTIGRAVITY")))
+        assertEquals(Route.Connectors, primaryRouteFor(Route.AgentAccess.forProvider("ANTIGRAVITY")))
+    }
+
+    @Test
     fun protectedDetailRoutesHaveSpecificPageTitles() {
         assertEquals("Review approval", routeTitleFor(Route.ApprovalDetail.value))
         assertEquals("Review changes", routeTitleFor(Route.Diff.value))
