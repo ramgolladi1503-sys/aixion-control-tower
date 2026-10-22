@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -86,8 +87,19 @@ def postgres_agent_task_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterat
 
 def test_postgres_agent_task_create_list_get_are_workspace_scoped_and_do_not_project_to_sqlite(
     postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connect, workspace, project = postgres_agent_task_route_runtime
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_repositories",
+        ApplicationRepositories.from_connector(connect),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "app.application_repository_access.get_settings",
+        lambda: SimpleNamespace(auth_enabled=True, postgres_auth_enabled=True),
+    )
     before_tasks, before_events = set(store.agent_tasks), set(store.agent_task_events)
     before_audits = {event.id for event in store.audit_events}
     client = TestClient(main.app)

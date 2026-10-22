@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.application_repository_access as repository_access
 from app.application_repository_access import (
     agent_task_repository_for_request,
     application_repositories_for_request,
@@ -11,6 +12,8 @@ from app.application_repository_access import (
     project_repository_for_request,
     workspace_membership_repository_for_request,
 )
+from app.models import AuthUser, User, UserRole
+from app.workspace_membership_repository import WorkspaceMembershipSnapshot
 
 
 def test_agent_task_repository_access_returns_app_binding() -> None:
@@ -118,6 +121,145 @@ def test_workspace_membership_repository_access_returns_app_binding() -> None:
     )
 
     assert workspace_membership_repository_for_request(request) is repository
+
+
+def test_workspace_membership_repository_uses_postgres_auth_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    postgres_repository = object()
+    sqlite_repository = object()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_repositories=SimpleNamespace(workspace_membership=postgres_repository),
+                workspace_membership_repository=sqlite_repository,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert workspace_membership_repository_for_request(request) is postgres_repository
+
+
+def test_workspace_membership_postgres_selection_fails_closed_without_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(workspace_membership_repository=object()),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="PostgreSQL application repository runtime is unavailable"):
+        workspace_membership_repository_for_request(request)
+
+
+def test_workspace_id_resolution_requires_request_for_postgres_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(auth_enabled=True, postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="PostgreSQL application repository runtime is unavailable"):
+        repository_access.workspace_id_for_request(
+            AuthUser(
+                id="pg-user",
+                email="pg-user@example.com",
+                display_name="PG User",
+                role=UserRole.OWNER,
+                workspace_id="pg-workspace",
+            ),
+            None,
+        )
+
+
+def test_workspace_membership_resolution_uses_postgres_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = "pg-workspace"
+    user_id = "pg-user"
+
+    class PostgresMembership:
+        def snapshot(self, *, user_id: str, claimed_workspace_id: str | None):
+            assert user_id == "pg-user"
+            assert claimed_workspace_id == workspace_id
+            return WorkspaceMembershipSnapshot(
+                user=User(
+                    id=user_id,
+                    email="pg-user@example.com",
+                    password_hash="hash",
+                    password_salt="salt",
+                    workspace_id=workspace_id,
+                ),
+                workspace_count=1,
+                resolved_workspace_exists=True,
+            )
+
+    class SQLiteMembership:
+        def snapshot(self, **kwargs):
+            raise AssertionError("SQLite membership must not be read for PostgreSQL auth")
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_repositories=SimpleNamespace(
+                    workspace_membership=PostgresMembership(),
+                ),
+                workspace_membership_repository=SQLiteMembership(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(auth_enabled=True, postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        "app.workspace_access.get_settings",
+        lambda: SimpleNamespace(is_production=False),
+    )
+    user = AuthUser(
+        id=user_id,
+        email="pg-user@example.com",
+        display_name="PG User",
+        role=UserRole.OWNER,
+        workspace_id=workspace_id,
+    )
+
+    assert repository_access.workspace_id_for_request(user, request) == workspace_id
+
+
+def test_workspace_membership_repository_keeps_local_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite_repository = object()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_repositories=SimpleNamespace(workspace_membership=object()),
+                workspace_membership_repository=sqlite_repository,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=False),
+    )
+
+    assert workspace_membership_repository_for_request(request) is sqlite_repository
 
 
 @pytest.mark.parametrize(

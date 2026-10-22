@@ -177,7 +177,10 @@ def is_sqlite_external_agent_auth_repository(
 def workspace_membership_repository_for_request(
     request: _RequestState | None,
 ) -> WorkspaceMembershipRepository:
-    """Return membership reads from the same app-owned persistence boundary."""
+    """Return membership reads from the active authentication authority."""
+    if get_settings().postgres_auth_enabled:
+        return application_repositories_for_request(request).workspace_membership
+
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
     repository = getattr(state, "workspace_membership_repository", None)
@@ -187,8 +190,14 @@ def workspace_membership_repository_for_request(
 
 
 def workspace_id_for_request(user: AuthUser, request: _RequestState | None) -> str | None:
-    """Resolve auth-enabled membership from the app bundle; preserve local demo mode."""
-    if request is None or not get_settings().auth_enabled:
+    """Resolve membership from PostgreSQL auth or the local app binding."""
+    settings = get_settings()
+    if settings.postgres_auth_enabled:
+        return resolve_workspace_id_for_user(
+            user,
+            membership_repository=workspace_membership_repository_for_request(request),
+        )
+    if request is None or not settings.auth_enabled:
         return resolve_workspace_id_for_user(user)
     return resolve_workspace_id_for_user(
         user,
