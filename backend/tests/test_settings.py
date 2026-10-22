@@ -42,6 +42,7 @@ def test_local_profile_defaults_to_auth_enabled(monkeypatch: pytest.MonkeyPatch)
     assert settings.postgres_runtime_probe_enabled is False
     assert settings.postgres_auth_rate_limits_enabled is False
     assert settings.postgres_auth_enabled is False
+    assert settings.approval_recovery_poll_seconds == 60
     assert str(settings.db_path) == "runtime/aixion_control_tower.sqlite3"
     assert settings.agent_approval_ttl_seconds == 600
     assert settings.outbox_dispatch_mode == "inline"
@@ -231,6 +232,17 @@ def test_agent_approval_ttl_must_be_within_supported_bounds(
     monkeypatch.setenv("AIXION_AGENT_APPROVAL_TTL_SECONDS", value)
 
     with pytest.raises(ValueError, match="AIXION_AGENT_APPROVAL_TTL_SECONDS"):
+        get_settings()
+
+
+@pytest.mark.parametrize("value", ["0", "301", "not-an-integer"])
+def test_approval_recovery_poll_interval_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("AIXION_APPROVAL_RECOVERY_POLL_SECONDS", value)
+
+    with pytest.raises(ValueError, match="AIXION_APPROVAL_RECOVERY_POLL_SECONDS"):
         get_settings()
 
 

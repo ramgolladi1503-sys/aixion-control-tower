@@ -82,11 +82,16 @@ def test_lifespan_opens_verifies_and_closes_opt_in_postgres_runtime(
         assert runtime.closed is True
         assert application.state.postgres_runtime is None
         assert application.state.postgres_repositories is None
-        assert recovery_calls == [{
-            "approval_repository": sqlite_recovery_repositories["approval_decision_repository"],
-            "task_repository": sqlite_recovery_repositories["agent_task_repository"],
-            "run_repository": sqlite_recovery_repositories["agent_run_repository"],
-        }]
+        assert len(recovery_calls) == 1
+        assert recovery_calls[0]["approval_repository"] is sqlite_recovery_repositories[
+            "approval_decision_repository"
+        ]
+        assert recovery_calls[0]["task_repository"] is sqlite_recovery_repositories[
+            "agent_task_repository"
+        ]
+        assert recovery_calls[0]["run_repository"] is sqlite_recovery_repositories[
+            "agent_run_repository"
+        ]
 
     asyncio.run(exercise())
 
@@ -161,14 +166,56 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
             assert captured == [runtime.email_outbox]
             assert application.state.postgres_runtime is runtime
             assert application.state.postgres_repositories is runtime.repositories
-            assert recovery_calls == [{
-                "approval_repository": runtime.repositories.approval_decisions,
-                "task_repository": runtime.repositories.agent_tasks,
-                "run_repository": runtime.repositories.agent_runs,
-            }]
+            assert len(recovery_calls) == 1
+            assert recovery_calls[0]["approval_repository"] is runtime.repositories.approval_decisions
+            assert recovery_calls[0]["task_repository"] is runtime.repositories.agent_tasks
+            assert recovery_calls[0]["run_repository"] is runtime.repositories.agent_runs
         assert runtime.closed is True
         assert application.state.postgres_runtime is None
         assert application.state.postgres_repositories is None
+
+    asyncio.run(exercise())
+
+
+def test_lifespan_retries_approval_reconciliation_and_cancels_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            outbox_dispatch_mode="scheduled",
+            push_dispatch_enabled=False,
+            email_dispatch_enabled=False,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=False,
+            approval_recovery_poll_seconds=0.001,
+        ),
+    )
+
+    def reconcile(**kwargs):
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(main, "reconcile_linked_approval_tasks", reconcile)
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            approval_decision_repository=object(),
+            agent_task_repository=object(),
+            agent_run_repository=object(),
+        )
+    )
+
+    async def exercise() -> None:
+        async with main.lifespan(application):
+            await asyncio.sleep(0.01)
+            assert len(calls) >= 2
+            assert application.state.approval_recovery_status == "healthy"
+            assert application.state.approval_recovery_failure_count == 0
+            assert application.state.approval_recovery_last_completed_at is not None
+        assert application.state.approval_recovery_status == "healthy"
 
     asyncio.run(exercise())
 

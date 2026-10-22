@@ -123,6 +123,7 @@ def test_recovery_schedule_failure_can_be_retried_without_duplicate_task_event(
     approval_id, task_id = _linked_records()
     original_create_run = approval_recovery.create_agent_run
     attempts = 0
+    observed_failures: list[tuple[str, str, str]] = []
 
     def fail_first_schedule(*args, **kwargs):
         nonlocal attempts
@@ -133,7 +134,11 @@ def test_recovery_schedule_failure_can_be_retried_without_duplicate_task_event(
 
     monkeypatch.setattr(approval_recovery, "create_agent_run", fail_first_schedule)
     with caplog.at_level("ERROR", logger="app.approval_recovery"):
-        assert reconcile_linked_approval_tasks() == 0
+        assert reconcile_linked_approval_tasks(
+            on_failure=lambda approval, task, phase: observed_failures.append(
+                (approval, task, phase)
+            )
+        ) == 0
 
     assert store.agent_tasks[task_id].status == AgentTaskStatus.APPROVED
     assert not [run for run in store.agent_runs.values() if run.task_id == task_id]
@@ -144,6 +149,7 @@ def test_recovery_schedule_failure_can_be_retried_without_duplicate_task_event(
         and "error_type=RuntimeError" in record.message
         for record in caplog.records
     )
+    assert observed_failures == [(approval_id, task_id, "schedule_first_run")]
 
     assert reconcile_linked_approval_tasks() == 1
     task_events = [event for event in store.agent_task_events.values() if event.task_id == task_id]

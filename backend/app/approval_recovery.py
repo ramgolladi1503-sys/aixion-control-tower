@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from contextlib import nullcontext
 
 from .agent_run_models import AgentRunCreate
@@ -50,6 +51,7 @@ def reconcile_linked_approval_tasks(
     approval_repository: ApprovalDecisionRepository | None = None,
     task_repository: AgentTaskRepository | None = None,
     run_repository: AgentRunRepository | None = None,
+    on_failure: Callable[[str, str, str], None] | None = None,
 ) -> int:
     """Repair committed approval propagation and missing first-run scheduling.
 
@@ -100,6 +102,15 @@ def reconcile_linked_approval_tasks(
         )
 
     reconciled = 0
+
+    def report_failure(approval_id: str, task_id: str, phase: str) -> None:
+        if on_failure is None:
+            return
+        try:
+            on_failure(approval_id, task_id, phase)
+        except Exception:
+            logger.exception("Approval recovery failure observer raised unexpectedly")
+
     with (store.atomic() if sqlite_profile else nullcontext()):
         for approval in active_approval_repository.list_for_workspace():
             expected_task_status = _TASK_STATUS_BY_APPROVAL.get(approval.status)
@@ -158,6 +169,7 @@ def reconcile_linked_approval_tasks(
                         task.id,
                         task.status,
                     )
+                    report_failure(approval.id, task.id, "unrecoverable_task_status")
                     continue
                 if not (
                     repair_status
@@ -308,6 +320,7 @@ def reconcile_linked_approval_tasks(
                         recovery_phase,
                         type(error).__name__,
                     )
+                    report_failure(approval.id, task.id, recovery_phase)
                     continue
                 reconciled += 1
     return reconciled

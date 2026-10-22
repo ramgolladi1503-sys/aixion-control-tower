@@ -174,11 +174,13 @@ def test_application_lifespan_workers_are_joined_to_sqlite_accesses() -> None:
     tasks = {item["entrypoint"]: item for item in report["background_tasks"]}
 
     assert set(tasks) == {
+        "app.main:_approval_recovery_loop",
         "app.notifications:notification_dispatch_loop",
         "app.postgres_notification_dispatcher:postgres_notification_dispatch_loop",
         "app.email_delivery:email_dispatch_loop",
         "unresolved:to_thread",
     }
+    assert tasks["app.main:_approval_recovery_loop"]["persistence_access_count"] > 0
     assert tasks["app.notifications:notification_dispatch_loop"]["persistence_access_count"] > 0
     assert tasks["app.email_delivery:email_dispatch_loop"]["persistence_access_count"] > 0
 

@@ -31,6 +31,12 @@ class RuntimeReadinessResponse(BaseModel):
     database_backend: Literal["sqlite"]
     application_store_mode: Literal["sqlite_local", "postgres_probe_only"]
     application_store_ready: bool
+    approval_recovery_status: Literal[
+        "not_started", "starting", "healthy", "degraded", "failed"
+    ] = "not_started"
+    approval_recovery_failure_count: int = 0
+    approval_recovery_last_completed_at: datetime | None = None
+    approval_recovery_poll_seconds: int = 60
     app_state_repository_bindings: dict[
         str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]
     ] = Field(default_factory=dict)
@@ -130,6 +136,19 @@ def build_runtime_readiness(
     settings = get_settings()
     errors = list(settings.validation_errors)
     warnings: list[str] = []
+    recovery_status = getattr(application_state, "approval_recovery_status", "not_started")
+    if recovery_status not in {"not_started", "starting", "healthy", "degraded", "failed"}:
+        recovery_status = "failed"
+    recovery_failure_count = max(
+        0, int(getattr(application_state, "approval_recovery_failure_count", 0) or 0)
+    )
+    recovery_last_completed_at = getattr(
+        application_state, "approval_recovery_last_completed_at", None
+    )
+    if settings.is_production and recovery_status != "healthy":
+        errors.append(
+            "Approval recovery is not healthy: status=" + recovery_status
+        )
     postgres_probe_status: Literal["disabled", "ready", "not_ready"] = "disabled"
     postgres_probe_schema_ready: bool | None = None
     postgres_pool_size = 0
@@ -247,6 +266,12 @@ def build_runtime_readiness(
         database_backend="sqlite",
         application_store_mode=application_store_mode,
         application_store_ready=application_store_ready,
+        approval_recovery_status=recovery_status,
+        approval_recovery_failure_count=recovery_failure_count,
+        approval_recovery_last_completed_at=recovery_last_completed_at,
+        approval_recovery_poll_seconds=getattr(
+            settings, "approval_recovery_poll_seconds", 60
+        ),
         app_state_repository_bindings=application_repository_bindings,
         postgres_probe_enabled=settings.postgres_runtime_probe_enabled,
         postgres_auth_rate_limits_enabled=settings.postgres_auth_rate_limits_enabled,

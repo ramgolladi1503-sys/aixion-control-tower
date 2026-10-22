@@ -44,6 +44,8 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     assert body["database_backend"] == "sqlite"
     assert body["application_store_mode"] == "sqlite_local"
     assert body["application_store_ready"] is True
+    assert body["approval_recovery_status"] in {"not_started", "healthy", "degraded"}
+    assert body["approval_recovery_poll_seconds"] == 60
     assert body["app_state_repository_bindings"]["approval_decisions"] == "sqlite"
     assert body["app_state_repository_bindings"]["projects"] == "sqlite"
     assert body["app_state_repository_bindings"]["notification_outbox"] == "unbound"
@@ -232,6 +234,46 @@ def test_readiness_sanitizes_postgres_probe_failures(monkeypatch) -> None:
     assert readiness.status == "not_ready"
     assert "secret" not in str(readiness.model_dump())
     assert "PostgreSQL runtime probe failed." in readiness.errors
+
+
+def test_production_readiness_fails_closed_when_approval_recovery_is_degraded(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
+    monkeypatch.setenv("AIXION_TRUST_ENFORCEMENT", "true")
+    application_state = type(
+        "State",
+        (),
+        {
+            "approval_recovery_status": "degraded",
+            "approval_recovery_failure_count": 2,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=application_state)
+
+    assert readiness.approval_recovery_status == "degraded"
+    assert readiness.approval_recovery_failure_count == 2
+    assert readiness.status == "not_ready"
+    assert any("Approval recovery is not healthy" in error for error in readiness.errors)
+
+
+def test_readiness_reports_lifecycle_recovery_health() -> None:
+    state = type(
+        "State",
+        (),
+        {
+            "approval_recovery_status": "degraded",
+            "approval_recovery_failure_count": 3,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.approval_recovery_status == "degraded"
+    assert readiness.approval_recovery_failure_count == 3
 
 
 def test_readiness_does_not_claim_fcm_delivery_is_verified(monkeypatch) -> None:

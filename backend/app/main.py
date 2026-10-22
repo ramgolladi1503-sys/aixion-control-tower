@@ -4,7 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
@@ -108,6 +108,59 @@ from .workspace_access import (
 logger = logging.getLogger(__name__)
 
 
+def _set_approval_recovery_state(
+    application: FastAPI,
+    *,
+    failure_count: int,
+    completed_at: datetime,
+) -> None:
+    application.state.approval_recovery_failure_count = failure_count
+    application.state.approval_recovery_last_completed_at = completed_at
+    application.state.approval_recovery_status = "degraded" if failure_count else "healthy"
+
+
+async def _approval_recovery_loop(
+    application: FastAPI,
+    *,
+    approval_repository: object,
+    task_repository: object,
+    run_repository: object,
+    poll_seconds: int,
+) -> None:
+    """Retry idempotent approval-to-task/run reconciliation while the API is alive."""
+    while True:
+        await asyncio.sleep(poll_seconds)
+        failures: list[tuple[str, str, str]] = []
+        try:
+            reconcile_linked_approval_tasks(
+                approval_repository=approval_repository,
+                task_repository=task_repository,
+                run_repository=run_repository,
+                on_failure=lambda approval_id, task_id, phase: failures.append(
+                    (approval_id, task_id, phase)
+                ),
+            )
+            _set_approval_recovery_state(
+                application,
+                failure_count=len(failures),
+                completed_at=now_utc(),
+            )
+            if failures:
+                logger.error(
+                    "Approval recovery pass completed with failures count=%s",
+                    len(failures),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            application.state.approval_recovery_failure_count = 1
+            application.state.approval_recovery_last_completed_at = now_utc()
+            application.state.approval_recovery_status = "failed"
+            logger.exception(
+                "Approval recovery pass failed error_type=%s", type(error).__name__
+            )
+
+
 def _validate_postgres_notification_runtime(
     application: FastAPI,
     *,
@@ -204,6 +257,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             logger.info("PostgreSQL-backed authentication rate limiting enabled")
     dispatch_task: asyncio.Task[None] | None = None
     email_task: asyncio.Task[None] | None = None
+    recovery_task: asyncio.Task[None] | None = None
     try:
         push_worker_repository = (
             notification_repository
@@ -262,10 +316,30 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 "agent_run_repository",
                 agent_run_repository,
             )
+        application.state.approval_recovery_status = "starting"
+        application.state.approval_recovery_failure_count = 0
+        startup_recovery_failures: list[tuple[str, str, str]] = []
         reconcile_linked_approval_tasks(
             approval_repository=recovery_approval_repository,
             task_repository=recovery_task_repository,
             run_repository=recovery_run_repository,
+            on_failure=lambda approval_id, task_id, phase: startup_recovery_failures.append(
+                (approval_id, task_id, phase)
+            ),
+        )
+        _set_approval_recovery_state(
+            application,
+            failure_count=len(startup_recovery_failures),
+            completed_at=now_utc(),
+        )
+        recovery_task = asyncio.create_task(
+            _approval_recovery_loop(
+                application,
+                approval_repository=recovery_approval_repository,
+                task_repository=recovery_task_repository,
+                run_repository=recovery_run_repository,
+                poll_seconds=getattr(settings, "approval_recovery_poll_seconds", 60),
+            )
         )
         logger.info(
             "Outbox dispatch mode=%s; in-process dispatch loops %s",
@@ -293,10 +367,10 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     email_task = asyncio.create_task(email_dispatch_loop())
         yield
     finally:
-        for task in (dispatch_task, email_task):
+        for task in (dispatch_task, email_task, recovery_task):
             if task is not None:
                 task.cancel()
-        for task in (dispatch_task, email_task):
+        for task in (dispatch_task, email_task, recovery_task):
             if task is not None:
                 with suppress(asyncio.CancelledError):
                     await task

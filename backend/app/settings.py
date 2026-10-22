@@ -61,6 +61,7 @@ class Settings:
     postgres_runtime_probe_enabled: bool = False
     postgres_auth_rate_limits_enabled: bool = False
     postgres_auth_enabled: bool = False
+    approval_recovery_poll_seconds: int = 60
     trust_enforcement: bool = False
     github_token_configured: bool = False
     github_app_configured: bool = False
@@ -302,6 +303,12 @@ def get_settings() -> Settings:
             os.getenv("AIXION_POSTGRES_AUTH_ENABLED", "false"),
             field_name="AIXION_POSTGRES_AUTH_ENABLED",
         ),
+        approval_recovery_poll_seconds=parse_bounded_int(
+            os.getenv("AIXION_APPROVAL_RECOVERY_POLL_SECONDS", "60"),
+            field_name="AIXION_APPROVAL_RECOVERY_POLL_SECONDS",
+            minimum=1,
+            maximum=300,
+        ),
         github_token_configured=_env_present(github_env),
         github_app_configured=_github_app_configured(),
         # Keep the response/config field name for existing Android clients.
@@ -536,6 +543,7 @@ def get_settings() -> Settings:
         postgres_runtime_probe_enabled=settings.postgres_runtime_probe_enabled,
         postgres_auth_rate_limits_enabled=settings.postgres_auth_rate_limits_enabled,
         postgres_auth_enabled=settings.postgres_auth_enabled,
+        approval_recovery_poll_seconds=settings.approval_recovery_poll_seconds,
         github_token_configured=settings.github_token_configured,
         github_app_configured=settings.github_app_configured,
         fcm_server_key_configured=settings.fcm_server_key_configured,
