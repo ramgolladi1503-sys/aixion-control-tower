@@ -126,6 +126,7 @@ def test_session_revocation_audit_event_exists(monkeypatch) -> None:
     assert store.audit_events[-1].event_type == "auth.sessions_revoked"
     assert store.audit_events[-1].actor == "owner@example.com"
     assert store.audit_events[-1].entity_id == reviewer.id
+    assert store.audit_events[-1].workspace_id == reviewer.workspace_id
     assert store.audit_events[-1].details["revoked_sessions_count"] == 1
 
 

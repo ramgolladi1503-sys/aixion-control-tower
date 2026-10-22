@@ -49,12 +49,19 @@ def to_session_response(session: SessionToken, user: User | None = None) -> Sess
     )
 
 
-def record_session_revocation(actor: AuthUser, target_user_id: str, target_email: str, revoked_count: int) -> None:
+def record_session_revocation(
+    actor: AuthUser,
+    target_user_id: str,
+    target_email: str,
+    revoked_count: int,
+    workspace_id: str | None,
+) -> None:
     store.audit_events.append(
         AuditEvent(
             event_type="auth.sessions_revoked",
             actor=actor.email,
             entity_id=target_user_id,
+            workspace_id=workspace_id,
             details={
                 "target_user_id": target_user_id,
                 "target_email": target_email,
@@ -128,6 +135,7 @@ def revoke_user_sessions(
         target_user_id=target.id,
         target_email=target.email,
         revoked_count=len(active_sessions),
+        workspace_id=target.workspace_id,
     )
     store.persist()
     return SessionRevokeResponse(
