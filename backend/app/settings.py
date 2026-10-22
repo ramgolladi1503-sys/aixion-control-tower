@@ -585,3 +585,43 @@ def validate_startup_environment() -> Settings:
     if settings.validation_errors:
         raise RuntimeError("Invalid Aixion production environment: " + "; ".join(settings.validation_errors))
     return settings
+
+
+def validate_outbox_worker_environment(worker_kind: str) -> Settings:
+    """Validate only the scoped production contract for a one-shot outbox job.
+
+    This deliberately does not weaken ``validate_startup_environment``: the API
+    must continue to reject production until the complete application store is
+    PostgreSQL-authoritative. The isolated push/email jobs may run only against
+    PostgreSQL and only with the secrets required by their own dispatch path.
+    """
+    if worker_kind not in {"push", "email"}:
+        raise ValueError("worker_kind must be 'push' or 'email'")
+
+    settings = get_settings()
+    errors: list[str] = []
+    if not settings.is_production:
+        errors.append("AIXION_PROFILE=production is required for one-shot outbox workers")
+    if settings.outbox_dispatch_mode != "scheduled":
+        errors.append("AIXION_OUTBOX_DISPATCH_MODE=scheduled is required for one-shot outbox workers")
+    if _env_present("AIXION_DB_PATH"):
+        errors.append("AIXION_DB_PATH is SQLite-only and must not be configured for outbox workers")
+
+    enabled = settings.push_dispatch_enabled if worker_kind == "push" else settings.email_dispatch_enabled
+    if enabled:
+        if not settings.postgres_dsn_configured:
+            errors.append("AIXION_POSTGRES_DSN is required for one-shot outbox workers")
+        if worker_kind == "push":
+            if not settings.fcm_project_id:
+                errors.append("AIXION_FCM_PROJECT_ID is required for push dispatch")
+        else:
+            if not settings.email_smtp_host or not settings.email_from:
+                errors.append("AIXION_EMAIL_SMTP_HOST and AIXION_EMAIL_FROM are required for email dispatch")
+            if not settings.email_smtp_credentials_configured:
+                errors.append("AIXION_EMAIL_SMTP_USERNAME and AIXION_EMAIL_SMTP_PASSWORD are required for email dispatch")
+            if not settings.email_outbox_key_configured:
+                errors.append("AIXION_EMAIL_OUTBOX_KEY is required for email dispatch")
+
+    if errors:
+        raise RuntimeError("Invalid outbox worker environment: " + "; ".join(errors))
+    return settings

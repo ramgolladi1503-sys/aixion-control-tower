@@ -12,7 +12,7 @@ from app.application_repositories import ApplicationRepositories
 from app.email_delivery import dispatch_one_due_email_postgres
 from app.postgres_email_outbox_repository import PostgresEmailOutboxRepository
 from app.postgres_runtime import PostgresRuntime, PostgresRuntimeProbe
-from app.settings import validate_startup_environment
+from app.settings import validate_outbox_worker_environment
 
 
 class Runtime(Protocol):
@@ -36,7 +36,7 @@ def run_once(
     dispatcher: Dispatcher = dispatch_one_due_email_postgres,
 ) -> bool:
     """Validate, connect, dispatch no more than one item, and close the pool."""
-    settings = validate_startup_environment()
+    settings = validate_outbox_worker_environment("email")
     if not settings.email_dispatch_enabled:
         return False
     if settings.outbox_dispatch_mode != "scheduled":

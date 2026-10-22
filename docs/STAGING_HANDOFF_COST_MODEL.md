@@ -199,11 +199,13 @@ The new Jobs and Scheduler files close only the account-independent manifest
 design omission. Their templates intentionally retain unresolved project, region,
 image digest, secret identity, and schedule values, so the offline validator must
 report **NOT APPLY-READY**. The validator does not contact GCP or verify Terraform
-provider schema/effective IAM. The current worker scripts use the API-wide
-production settings validator, which refuses production while the whole app is not
-PostgreSQL-authoritative and requires configuration outside each isolated job's
-secret boundary. Add and test worker-scoped production configuration after Slice 1;
-do not bypass the production guard or share every API secret with both Jobs.
+provider schema/effective IAM. The one-shot workers now have strict worker-scoped
+production settings validation: each requires PostgreSQL and only its own provider
+configuration, while the API-wide production settings validator still refuses
+startup until the complete app is PostgreSQL-authoritative. This permits isolated
+worker configuration without weakening the API guard, but does not close Slice 1:
+outbox producer consistency and full app PostgreSQL routing remain prerequisites.
+Do not bypass the production guard or share every API secret with both Jobs.
 
 ## Source pricing references
 

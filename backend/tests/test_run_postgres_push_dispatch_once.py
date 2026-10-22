@@ -27,8 +27,8 @@ class FakeRuntime:
 def test_disabled_dispatch_does_not_create_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         worker,
-        "validate_startup_environment",
-        lambda: SimpleNamespace(push_dispatch_enabled=False),
+        "validate_outbox_worker_environment",
+        lambda _worker_kind: SimpleNamespace(push_dispatch_enabled=False),
     )
 
     def unexpected_runtime() -> FakeRuntime:
@@ -40,10 +40,10 @@ def test_disabled_dispatch_does_not_create_runtime(monkeypatch: pytest.MonkeyPat
 def test_startup_guard_refusal_happens_before_runtime_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def reject_startup() -> SimpleNamespace:
+    def reject_startup(_worker_kind: str) -> SimpleNamespace:
         raise RuntimeError("production persistence guard is active")
 
-    monkeypatch.setattr(worker, "validate_startup_environment", reject_startup)
+    monkeypatch.setattr(worker, "validate_outbox_worker_environment", reject_startup)
     runtime_created = False
 
     def create_runtime() -> FakeRuntime:
@@ -62,8 +62,8 @@ def test_inline_mode_refuses_one_shot_worker_before_runtime_creation(
 ) -> None:
     monkeypatch.setattr(
         worker,
-        "validate_startup_environment",
-        lambda: SimpleNamespace(outbox_dispatch_mode="inline", push_dispatch_enabled=True),
+        "validate_outbox_worker_environment",
+        lambda _worker_kind: SimpleNamespace(outbox_dispatch_mode="inline", push_dispatch_enabled=True),
     )
 
     def unexpected_runtime() -> FakeRuntime:
@@ -78,8 +78,8 @@ def test_ready_dispatch_processes_at_most_one_item_and_closes_runtime(
 ) -> None:
     monkeypatch.setattr(
         worker,
-        "validate_startup_environment",
-        lambda: SimpleNamespace(outbox_dispatch_mode="scheduled", push_dispatch_enabled=True),
+        "validate_outbox_worker_environment",
+        lambda _worker_kind: SimpleNamespace(outbox_dispatch_mode="scheduled", push_dispatch_enabled=True),
     )
     runtime = FakeRuntime()
     calls: list[object] = []
@@ -99,8 +99,8 @@ def test_schema_readiness_failure_closes_runtime_without_dispatch(
 ) -> None:
     monkeypatch.setattr(
         worker,
-        "validate_startup_environment",
-        lambda: SimpleNamespace(outbox_dispatch_mode="scheduled", push_dispatch_enabled=True),
+        "validate_outbox_worker_environment",
+        lambda _worker_kind: SimpleNamespace(outbox_dispatch_mode="scheduled", push_dispatch_enabled=True),
     )
     runtime = FakeRuntime(ready=False)
     dispatched = False
@@ -122,8 +122,8 @@ def test_empty_outbox_returns_idle_and_closes_runtime(
 ) -> None:
     monkeypatch.setattr(
         worker,
-        "validate_startup_environment",
-        lambda: SimpleNamespace(outbox_dispatch_mode="scheduled", push_dispatch_enabled=True),
+        "validate_outbox_worker_environment",
+        lambda _worker_kind: SimpleNamespace(outbox_dispatch_mode="scheduled", push_dispatch_enabled=True),
     )
     runtime = FakeRuntime()
     calls: list[object] = []
