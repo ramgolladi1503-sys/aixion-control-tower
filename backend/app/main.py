@@ -231,22 +231,41 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 raise RuntimeError(
                     "PostgreSQL email dispatch requires the lifespan-owned PostgreSQL outbox"
                 )
-        reconcile_linked_approval_tasks(
-            approval_repository=getattr(
+        if getattr(settings, "postgres_auth_enabled", False):
+            recovery_repositories = getattr(
+                application.state, "postgres_repositories", None
+            )
+            if (
+                postgres_runtime is None
+                or recovery_repositories is None
+                or recovery_repositories is not postgres_runtime.repositories
+            ):
+                raise RuntimeError(
+                    "PostgreSQL approval recovery requires the lifespan-owned runtime repository bundle"
+                )
+            recovery_approval_repository = recovery_repositories.approval_decisions
+            recovery_task_repository = recovery_repositories.agent_tasks
+            recovery_run_repository = recovery_repositories.agent_runs
+        else:
+            recovery_approval_repository = getattr(
                 application.state,
                 "approval_decision_repository",
                 approval_decision_repository,
-            ),
-            task_repository=getattr(
+            )
+            recovery_task_repository = getattr(
                 application.state,
                 "agent_task_repository",
                 agent_task_repository,
-            ),
-            run_repository=getattr(
+            )
+            recovery_run_repository = getattr(
                 application.state,
                 "agent_run_repository",
                 agent_run_repository,
-            ),
+            )
+        reconcile_linked_approval_tasks(
+            approval_repository=recovery_approval_repository,
+            task_repository=recovery_task_repository,
+            run_repository=recovery_run_repository,
         )
         logger.info(
             "Outbox dispatch mode=%s; in-process dispatch loops %s",

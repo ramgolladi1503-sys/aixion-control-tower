@@ -23,6 +23,9 @@ class FakeRuntime:
         self.repositories = SimpleNamespace(
             email_outbox=self.email_outbox,
             notification_outbox=self.notification_outbox,
+            approval_decisions=object(),
+            agent_tasks=object(),
+            agent_runs=object(),
         )
 
     def open(self, *, wait: bool = False) -> None:
@@ -40,6 +43,12 @@ def test_lifespan_opens_verifies_and_closes_opt_in_postgres_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = FakeRuntime()
+    sqlite_recovery_repositories = {
+        "approval_decision_repository": object(),
+        "agent_task_repository": object(),
+        "agent_run_repository": object(),
+    }
+    recovery_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         main,
         "get_settings",
@@ -56,7 +65,12 @@ def test_lifespan_opens_verifies_and_closes_opt_in_postgres_runtime(
         "from_environment",
         staticmethod(lambda: runtime),
     )
-    application = SimpleNamespace(state=SimpleNamespace())
+    monkeypatch.setattr(
+        main,
+        "reconcile_linked_approval_tasks",
+        lambda **kwargs: recovery_calls.append(kwargs) or 0,
+    )
+    application = SimpleNamespace(state=SimpleNamespace(**sqlite_recovery_repositories))
 
     async def exercise() -> None:
         async with main.lifespan(application):
@@ -68,6 +82,11 @@ def test_lifespan_opens_verifies_and_closes_opt_in_postgres_runtime(
         assert runtime.closed is True
         assert application.state.postgres_runtime is None
         assert application.state.postgres_repositories is None
+        assert recovery_calls == [{
+            "approval_repository": sqlite_recovery_repositories["approval_decision_repository"],
+            "task_repository": sqlite_recovery_repositories["agent_task_repository"],
+            "run_repository": sqlite_recovery_repositories["agent_run_repository"],
+        }]
 
     asyncio.run(exercise())
 
@@ -110,6 +129,7 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
 ) -> None:
     runtime = FakeRuntime()
     captured: list[object] = []
+    recovery_calls: list[dict[str, object]] = []
     dispatched = asyncio.Event()
     settings = SimpleNamespace(
         outbox_dispatch_mode="inline",
@@ -121,6 +141,11 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
     )
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main.PostgresRuntime, "from_environment", staticmethod(lambda: runtime))
+    monkeypatch.setattr(
+        main,
+        "reconcile_linked_approval_tasks",
+        lambda **kwargs: recovery_calls.append(kwargs) or 0,
+    )
 
     async def dispatch_loop(*, postgres_repository=None) -> None:
         captured.append(postgres_repository)
@@ -136,6 +161,11 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
             assert captured == [runtime.email_outbox]
             assert application.state.postgres_runtime is runtime
             assert application.state.postgres_repositories is runtime.repositories
+            assert recovery_calls == [{
+                "approval_repository": runtime.repositories.approval_decisions,
+                "task_repository": runtime.repositories.agent_tasks,
+                "run_repository": runtime.repositories.agent_runs,
+            }]
         assert runtime.closed is True
         assert application.state.postgres_runtime is None
         assert application.state.postgres_repositories is None
