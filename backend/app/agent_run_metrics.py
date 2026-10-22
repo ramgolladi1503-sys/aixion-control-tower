@@ -30,13 +30,14 @@ def build_agent_run_summary(
     *,
     repository: AgentRunRepository | None = None,
 ) -> AgentRunSummary:
-    runs = _workspace_runs(workspace_id)
     if repository is not None:
         runs = repository.list_for_workspace(workspace_id=workspace_id, limit=500)
         if len(runs) == 500:
             raise RuntimeError(
                 "AgentRun summary exceeded the repository page limit; refusing to report partial totals."
             )
+    else:
+        runs = _workspace_runs(workspace_id)
     run_ids = {run.id for run in runs}
     steps = (
         repository.list_steps_for_runs(runs)

@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from app import main
+from app import agent_run_metrics, main
 from app.agent_run_models import (
     AgentRunEvent,
     AgentRunEventType,
@@ -311,6 +311,34 @@ def test_postgres_agent_run_http_routes_create_read_and_scope_durable_records(
     assert scoped_list.status_code == 200
     assert [run["id"] for run in scoped_list.json()] == [run_id]
     assert hidden_detail.status_code == 404
+
+
+def test_postgres_agent_run_summary_never_reads_sqlite_maps(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    current_user = state["current_user"]
+    current_user["value"] = state["users"][0]
+    client = TestClient(main.app)
+
+    created = client.post(
+        "/agent/runs",
+        json={"task_id": state["task_ids_by_workspace"][workspace.id]},
+    )
+    assert created.status_code == 200, created.text
+
+    def reject_sqlite_fallback(_workspace_id: str | None):
+        raise AssertionError("PostgreSQL AgentRun summary must not read SQLite maps")
+
+    monkeypatch.setattr(agent_run_metrics, "_workspace_runs", reject_sqlite_fallback)
+
+    summary = client.get("/agent/runs/summary")
+
+    assert summary.status_code == 200, summary.text
+    assert summary.json()["total"] == 1
 
 
 def test_postgres_agent_run_metrics_use_one_workspace_scoped_durable_snapshot(

@@ -93,9 +93,22 @@ validly shaped job-specific service-account IDs, secret boundaries, one task, ze
 task retries, OAuth target, and job-level invoker grants. It does not validate
 Terraform variable overrides, provider schema, effective IAM, service-agent
 permissions, project/billing state, secret existence, worker startup, schedule
-adequacy, cloud cost, or actual delivery. `terraform fmt -check` and the organization's
-normal IaC review are still required once Terraform is installed; do not initialize
-or apply Terraform during this pre-billing phase.
+adequacy, cloud cost, or actual delivery. Local formatting and provider-schema checks
+are allowed during pre-billing with the committed, read-only provider lockfile:
+
+```bash
+cd deploy/gcp
+terraform fmt -check cloud-scheduler-staging.tf
+terraform init -backend=false -input=false -lockfile=readonly
+terraform validate -no-color
+```
+
+The backendless initialization downloads the locked provider but does not configure
+remote state or require cloud credentials. It is the same no-cloud validation run by
+repository CI. Do not run `terraform plan`, `terraform apply`, authenticate to a
+cloud account, enable APIs, or perform paid resource operations during this
+pre-billing phase. These local checks do not make the unresolved templates
+apply-ready.
 
 **Worker validation status (2026-10-22):** both dispatcher scripts now use a
 strict worker-scoped production validator. It requires the production profile and
