@@ -172,16 +172,51 @@ class PostgresTrustEventRepository:
         with self._connect() as conn:
             return self.verify_in_transaction(conn)
 
-    def verify_in_transaction(self, conn: Connection) -> FlightRecorderVerification:
-        """Verify the ledger using the caller's snapshot and transaction."""
+    def list_workspace_events(
+        self,
+        conn: Connection,
+        *,
+        workspace_id: str,
+        entity_type: str | None = None,
+        entity_id: str | None = None,
+        correlation_id: str | None = None,
+        limit: int = 500,
+    ) -> list[TrustEvent]:
+        """Return verified event records from one workspace in sequence order."""
+        if not workspace_id:
+            raise ValueError("Trust event listing requires workspace scope")
+        if not 1 <= limit <= 5000:
+            raise ValueError("Trust event listing limit is outside the supported range")
+        filters = ["workspace_id=%s"]
+        values: list[Any] = [workspace_id]
+        for column, value in (
+            ("entity_type", entity_type),
+            ("entity_id", entity_id),
+            ("correlation_id", correlation_id),
+        ):
+            if value is not None:
+                filters.append(f"{column}=%s")
+                values.append(value)
         rows = conn.execute(
             "SELECT event_id,sequence,workspace_id,event_type,entity_type,entity_id,actor,"
-            "correlation_id,previous_hash,event_hash,created_at,payload "
-            "FROM trust_events ORDER BY sequence"
+            "correlation_id,previous_hash,event_hash,created_at,payload FROM trust_events "
+            f"WHERE {' AND '.join(filters)} ORDER BY sequence LIMIT %s",
+            (*values, limit),
         ).fetchall()
-        head = conn.execute(
-            "SELECT sequence,event_hash FROM trust_event_heads WHERE singleton=TRUE"
-        ).fetchone()
+        return [self._decode(row) for row in rows]
+
+    def verify_in_transaction(self, conn: Connection) -> FlightRecorderVerification:
+        """Verify events and sequence head from one statement-level snapshot."""
+        snapshot = conn.execute(
+            "SELECT event.event_id,event.sequence,event.workspace_id,event.event_type,"
+            "event.entity_type,event.entity_id,event.actor,event.correlation_id,"
+            "event.previous_hash,event.event_hash,event.created_at,event.payload,"
+            "head.sequence,head.event_hash FROM trust_event_heads AS head "
+            "LEFT JOIN trust_events AS event ON TRUE WHERE head.singleton=TRUE "
+            "ORDER BY event.sequence NULLS FIRST"
+        ).fetchall()
+        rows = [row[:12] for row in snapshot if row[0] is not None]
+        head = snapshot[0][12:14] if snapshot else None
         expected_sequence = 1
         expected_previous: str | None = None
         for row in rows:

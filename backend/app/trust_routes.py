@@ -990,7 +990,29 @@ def list_flight_recorder_events(
     correlation_id: str | None = None,
     limit: int = Query(default=500, ge=1, le=5000),
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> list[TrustEvent]:
+    runtime = _postgres_trust_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        with runtime.connect() as conn:
+            with conn.transaction():
+                return repositories.trust_events.list_workspace_events(
+                    conn,
+                    workspace_id=workspace_id,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    correlation_id=correlation_id,
+                    limit=limit,
+                )
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL flight recorder requires the complete durable trust repository bundle",
+        )
     events = list(store.trust_events.values())
     workspace_id = workspace_id_for_user(user)
     if workspace_id is not None:
@@ -1010,6 +1032,21 @@ def list_flight_recorder_events(
 )
 def verify_flight_recorder_chain(
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> FlightRecorderVerification:
+    runtime = _postgres_trust_runtime(request)
+    if runtime is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repositories = request.app.state.postgres_repositories
+        with runtime.connect() as conn:
+            with conn.transaction():
+                return repositories.trust_events.verify_in_transaction(conn)
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL flight recorder verification requires the complete durable trust repository bundle",
+        )
     workspace_id_for_user(user)
     return verify_flight_recorder()

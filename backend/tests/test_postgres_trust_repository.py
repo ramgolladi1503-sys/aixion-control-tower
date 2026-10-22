@@ -54,6 +54,8 @@ from app.trust_routes import (
     get_lease,
     get_exact_action_decision,
     list_leases,
+    list_flight_recorder_events,
+    verify_flight_recorder_chain,
 )
 from app.trust_action_authorization_models import (
     ActionAuthorization,
@@ -1345,6 +1347,42 @@ def test_postgres_external_agent_action_consumption_is_durable_and_workspace_bou
             (TrustEventType.ACTION_CONSUMED.value, action.id),
         ).fetchone()[0] == 1
     assert PostgresTrustEventRepository(connect).verify().valid is True
+
+
+def test_postgres_flight_recorder_routes_read_the_durable_workspace_ledger(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, connect, workspace_id, _approval_id, request, user, _payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    events = request.app.state.postgres_repositories.trust_events
+    workspace_event = events.append(
+        TrustEventType.ACTION_RECEIVED,
+        entity_type="proposed_action",
+        entity_id="action_current_workspace",
+        actor="agent:current",
+        workspace_id=workspace_id,
+    )
+    events.append(
+        TrustEventType.ACTION_RECEIVED,
+        entity_type="proposed_action",
+        entity_id="action_unscoped_system_event",
+        actor="system",
+    )
+
+    listed = list_flight_recorder_events(
+        limit=500, user=user, request=request
+    )
+    assert [event.id for event in listed] == [workspace_event.id]
+    assert verify_flight_recorder_chain(user=user, request=request).valid is True
+
+    bound_event_repository = request.app.state.trust_event_repository
+    request.app.state.trust_event_repository = object()
+    with pytest.raises(HTTPException) as partial_binding:
+        list_flight_recorder_events(limit=500, user=user, request=request)
+    assert partial_binding.value.status_code == 503
+    request.app.state.trust_event_repository = bound_event_repository
 
 
 def test_postgres_concurrent_identical_lease_issues_resolve_once(
