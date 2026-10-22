@@ -1,6 +1,6 @@
 # PostgreSQL Runtime Gap Audit
 
-**Date:** 2026-10-21 (refreshed against the current checkout)
+**Date:** 2026-10-22 (inventory refreshed against the current checkout)
 
 **Scope:** Slice 1 in [PRE_BILLING_WORK_LOCK.md](PRE_BILLING_WORK_LOCK.md)
 
@@ -14,17 +14,17 @@ The application cannot safely activate PostgreSQL by toggling the current probe 
 
 ## Static inventory snapshot
 
-Generated with `backend/scripts/inventory_persistence.py --backend-root .` from `backend/` against the current checkout on 2026-10-21; the v7 AST report attaches callable ownership, follows direct imported/same-module calls from FastAPI routes, resolves common `Depends` aliases and literal `APIRouter` prefixes, joins lifespan `asyncio.create_task` workers through same-module dispatch calls, and enumerates direct entrypoints plus unresolved bare calls under conventional backend script `__main__` guards. This exact-checkout JSON is retained locally at `/tmp/aixion-current-persistence-inventory.json`. Earlier snapshots in this document and progress log are historical and should not be treated as current:
+Generated with `backend/.venv/bin/python backend/scripts/inventory_persistence.py --backend-root backend` on 2026-10-22; the v7 AST report attaches callable ownership, follows direct imported/same-module calls from FastAPI routes, resolves common `Depends` aliases and literal `APIRouter` prefixes, joins lifespan `asyncio.create_task` workers through same-module dispatch calls, and enumerates direct entrypoints plus unresolved bare calls under conventional backend script `__main__` guards. This exact-checkout JSON is retained locally at `/tmp/aixion-persistence-inventory-20261022-latest.json`. Earlier snapshots in this document and progress log are historical and should not be treated as current:
 
 | Call-site action | Count |
 | --- | ---: |
-| Reads | 295 |
+| Reads | 296 |
 | Writes | 164 |
 | Persistence calls | 94 |
 | Direct persistence-boundary accesses | 33 |
 | Modules represented | 53 |
 
-The current report finds **145 decorated route entries**, **143** with reachable SQLite persistence, and **586 unique static SQLite access sites** across application modules. Those calls are attributed **1,454 times across route call graphs**, because shared helpers are counted once per route that reaches them; these route references cover **453 unique access sites**. The report identifies **31 process-local maps** on `SQLiteBackedStore`, **5 scheduled-task entries** (including mutually exclusive email worker branches and an unresolved `asyncio.to_thread` target), and **24 guarded Python script entrypoints**. The 2 routes with no statically reachable persistence access are not thereby proven persistence-free. These counts describe static paths, not runtime coverage or unique records.
+The refreshed report finds **146 decorated route entries**, **144** with reachable SQLite persistence, and **587 unique static SQLite access sites** across application modules. Those calls are attributed **1,459 times across route call graphs**, because shared helpers are counted once per route that reaches them; these route references cover **453 unique access sites**. The report identifies **31 process-local maps** on `SQLiteBackedStore`, **5 lifespan worker entries** (including mutually exclusive email worker branches and one unresolved `asyncio.to_thread` target), and **26 guarded Python script entrypoints**. The 2 routes with no statically reachable persistence access are not thereby proven persistence-free. These counts describe static paths, not runtime coverage or unique records.
 
 The approval decision route and other high-risk endpoints should be re-extracted from the current JSON report before implementation; historical per-route access counts below are not current authority. The scanner limitations remain: it does not resolve dynamic dispatch, arbitrary callbacks, every dependency factory, indirect mutation through returned objects, or all external/shell schedulers.
 
@@ -123,18 +123,21 @@ The PostgreSQL auth repository has operations for bootstrap registration, invite
 
 ## Lifespan worker persistence joins
 
-The v7 inventory resolves two distinct workers created by `backend/app/main.py::lifespan` through their imported loop functions and local calls passed to `asyncio.to_thread`. It reports three source call sites because the email worker is started in mutually exclusive PostgreSQL-auth-enabled and SQLite-default branches; those are not three concurrent workers:
+The refreshed v7 inventory reports five lifespan worker entries: the SQLite notification loop, the PostgreSQL notification loop, two mutually exclusive email-loop call sites, and one unresolved `asyncio.to_thread` target. These are call-site inventory entries, not five concurrent workers:
 
 | Lifespan entrypoint | Reachable SQLite accesses | Resources/direct boundaries | Cutover implication |
 | --- | ---: | --- | --- |
 | `app.notifications:notification_dispatch_loop` | 17 | `notifications`, `users`, `device_registrations`, `audit_events`, `store.atomic`, and `store.persist` | The push dispatcher and device/audit mutation path must use the same PostgreSQL runtime/outbox bundle as notification creation and device registration. |
-| `app.email_delivery:email_dispatch_loop` | 3 | Direct SQLite `_connect` accesses from `dispatch_one_due_email` | Despite a PostgreSQL one-item dispatcher existing, lifespan calls the SQLite loop. Registration/outbox insertion and the worker must switch together. |
+| `app.postgres_notification_dispatcher:postgres_notification_dispatch_loop` | 0 | No statically detected SQLite access | This worker is PostgreSQL-backed but remains selected only when an explicitly bound notification repository is passed to lifespan logic. The complete producer/runtime alignment is still required. |
+| `app.email_delivery:email_dispatch_loop` (PostgreSQL-auth branch) | 3 | SQLite `dispatch_one_due_email` fallback remains reachable in the loop | The branch also supports the PostgreSQL outbox path; do not interpret this static count as proof that the whole email delivery vertical is PostgreSQL-bound. |
+| `app.email_delivery:email_dispatch_loop` (SQLite-default branch) | 3 | Direct SQLite `_connect` accesses from `dispatch_one_due_email` | Registration/outbox insertion and worker selection must switch together for a complete application runtime. |
+| `unresolved:to_thread` | 0 | Target not resolved by static analysis | Manually inspect the source callback before changing worker selection. |
 
 These counts are transitive only across direct imports at the scheduled entrypoint and same-module calls, including function references passed to `asyncio.to_thread`. They do not represent unique records or prove all callback/dynamic paths. The report still requires manual call-site review before a runtime selection change.
 
 ## Backend Python script entrypoints
 
-The v7 report resolves 20 Python scripts under `backend/scripts/` with a conventional `if __name__ == "__main__"` guard. Twelve reach SQLite access sites through the direct imported/same-module call graph. The report also lists unresolved bare calls inside those guards; a name in that list has not been proven to be a persistence caller. Access counts below are call-site counts attributed to each script entrypoint, not executed reads/writes or unique records.
+The refreshed v7 report resolves 26 Python scripts under `backend/scripts/` with a conventional `if __name__ == "__main__"` guard. Twelve reach SQLite access sites through the direct imported/same-module call graph. The report also lists unresolved bare calls inside those guards; a name in that list has not been proven to be a persistence caller. Access counts below are call-site counts attributed to each script entrypoint, not executed reads/writes or unique records.
 
 | Script module | Reachable SQLite access sites |
 | --- | ---: |
@@ -143,21 +146,27 @@ The v7 report resolves 20 Python scripts under `backend/scripts/` with a convent
 | `scripts.generate_release_validation_summary` | 7 |
 | `scripts.import_approval_slice_to_postgres` | 0 |
 | `scripts.inventory_persistence` | 0 |
+| `scripts.migrate_postgres` | 0 |
 | `scripts.print_phase0_real_device_smoke` | 0 |
 | `scripts.run_agent_worker_branch_plan` | 7 |
 | `scripts.run_agent_worker_container_plan` | 6 |
 | `scripts.run_agent_worker_dry_run` | 7 |
 | `scripts.run_agent_worker_file_plan` | 8 |
-| `scripts.run_agent_worker_github_branch` | 8 |
-| `scripts.run_agent_worker_github_files` | 9 |
-| `scripts.run_agent_worker_github_pr` | 9 |
-| `scripts.run_agent_worker_orchestrator` | 31 |
+| `scripts.run_agent_worker_github_branch` | 5 |
+| `scripts.run_agent_worker_github_files` | 5 |
+| `scripts.run_agent_worker_github_pr` | 5 |
+| `scripts.run_agent_worker_orchestrator` | 16 |
 | `scripts.run_agent_worker_validation_plan` | 8 |
 | `scripts.run_agent_worker_validation_runner` | 8 |
 | `scripts.run_demo_smoke_validation` | 0 |
 | `scripts.run_mission_control_worker` | 0 |
+| `scripts.run_postgres_email_dispatch_once` | 0 |
+| `scripts.run_postgres_push_dispatch_once` | 0 |
+| `scripts.validate_cloud_run_jobs_manifest` | 0 |
+| `scripts.validate_cloud_run_manifest` | 0 |
 | `scripts.validate_live_external_agent` | 0 |
 | `scripts.validate_mcp_approval_demo` | 0 |
+| `scripts.validate_postgres_server_restart` | 0 |
 
 This inventory does not yet enumerate shell wrappers, external scheduler configuration, package entrypoint metadata, dynamic imports, or arbitrary top-level script effects. Scripts with zero detected sites are not thereby proven persistence-free at runtime.
 

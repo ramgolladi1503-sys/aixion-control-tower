@@ -1,5 +1,11 @@
 # Pre-Billing Progress — 2026-10-22
 
+### Current AST persistence inventory refresh — 2026-10-22
+
+- Re-ran the read-only v7 persistence inventory against the current checkout. The JSON report is at `/tmp/aixion-persistence-inventory-20261022-latest.json`. It reports 296 reads, 164 writes, 94 explicit persistence calls, 33 direct persistence-boundary accesses, 587 static access sites across 53 modules, 146 routes (144 with reachable SQLite access), 1,459 route-graph references over 453 unique sites, 31 store maps, 5 lifespan worker entries, and 26 guarded Python script entrypoints.
+- `/agent/runs/{run_id}/execute-next` remains the largest attributed route graph (74 references) and still fails closed with HTTP 409 under PostgreSQL because authorization/trust and worker effects are not bound to one durable transaction. This is inventory evidence, not execution coverage. No source/runtime behavior changed.
+- No config keys, tests, schema migrations, cloud actions, billing changes, or rollout steps were added by this inventory refresh.
+
 ### PostgreSQL push outcome and invalid-token transaction — 2026-10-22
 
 - The PostgreSQL push dispatcher previously removed an FCM-unregistered device and appended its audit event in a separate transaction from recording the notification outcome. It now passes the observed device ID/token pairs into the active claim's outcome transaction. A matching device deletion, hash/audit row insertion, and notification outcome commit together; a stale lease performs none of them. The exact-token predicate preserves a device re-registered while an FCM request is in flight.
