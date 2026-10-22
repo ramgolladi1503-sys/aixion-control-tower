@@ -91,7 +91,7 @@ def test_sqlite_retry_is_atomic_and_limit_is_rechecked_under_lock() -> None:
         title="Retry", goal="Retry atomically", status=AgentTaskStatus.FAILED,
         approval_request_id=approval.id,
     )
-    created_event, created_audit = _task_records(task)
+    created_event, created_audit = _task_records(task, workspace_id=workspace.id)
     repository.create(task=task, event=created_event, audit=created_audit)
     expected = repository.get(task.id)
     assert expected is not None
@@ -200,8 +200,11 @@ def test_sqlite_retry_requires_current_approval_and_matching_scope() -> None:
     mismatched_approval = approval.model_copy(
         update={"status": ApprovalStatus.APPROVED, "workspace_id": "other_workspace"}
     )
-    store.approval_requests[approval.id] = mismatched_approval
-    store.persist()
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id=?",
+            (mismatched_approval.model_dump_json(), approval.id),
+        )
     with pytest.raises(AgentTaskRepositoryConflict, match="Linked approval must remain approved"):
         repository.commit_retry(
             expected=expected, updated=updated, event=event, audit=audit, max_retries=3,
