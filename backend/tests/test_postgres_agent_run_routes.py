@@ -36,6 +36,7 @@ from app.agent_task_models import (
     AgentTaskEventType,
     AgentTaskStatus,
 )
+from app.approval_repository import SQLiteApprovalDecisionRepository
 from app.approval_integrity import compute_approval_payload_hash
 from app.application_repositories import ApplicationRepositories
 from app.auth import require_maintainer, require_owner, require_reviewer
@@ -813,6 +814,53 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
     assert "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps" in rejected.json()["detail"]
     assert repositories.agent_runs.get(run_id) == durable_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
+
+
+def test_postgres_scope_validation_rejects_sqlite_approval_authority(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    durable_run = repositories.agent_runs.get(run_id)
+    durable_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    durable_events = repositories.agent_runs.list_events_for_run(run_id)
+    assert durable_run is not None
+
+    # Simulate a mixed runtime: the run/task repositories are PostgreSQL, but
+    # the linked approval reader is the local SQLite adapter. The supervisor
+    # must reject before the default executor can inspect process-local tasks.
+    monkeypatch.setattr(
+        main.app.state,
+        "approval_decision_repository",
+        SQLiteApprovalDecisionRepository(store._connect),
+    )
+
+    class RejectProcessTaskReads(dict):
+        def __getitem__(self, key):
+            raise AssertionError(f"Process-local AgentTask fallback read: {key}")
+
+        def get(self, key, default=None):
+            raise AssertionError(f"Process-local AgentTask fallback read: {key}")
+
+    monkeypatch.setattr(store, "agent_tasks", RejectProcessTaskReads())
+    rejected = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
+    )
+
+    assert rejected.status_code == 409
+    assert "repository-bound task and approval reads" in rejected.json()["detail"]
+    assert repositories.agent_runs.get(run_id) == durable_run
+    assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
+    assert repositories.agent_runs.list_events_for_run(run_id) == durable_events
 
 
 def test_postgres_agent_run_verifies_run_bound_durable_evidence_once(

@@ -582,12 +582,16 @@ def execute_next_step(
                 "PostgreSQL AgentRun execution currently supports only the "
                 "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps."
             )
-        if current_step.step_type == AgentRunStepType.VERIFY_RESULT and (
+        if current_step.step_type in {
+            AgentRunStepType.VALIDATE_SCOPE,
+            AgentRunStepType.VERIFY_RESULT,
+        } and (
             not isinstance(task_repository, PostgresAgentTaskRepository)
             or not isinstance(approval_repository, PostgresApprovalDecisionRepository)
         ):
             raise AgentRunConflict(
-                "PostgreSQL VERIFY_RESULT requires repository-bound task and approval reads."
+                "PostgreSQL scope validation and result verification require "
+                "repository-bound task and approval reads."
             )
         if current_step.step_type == AgentRunStepType.VERIFY_RESULT and [
             step.step_type for step in active_run_repository.list_steps_for_run(run.id)
