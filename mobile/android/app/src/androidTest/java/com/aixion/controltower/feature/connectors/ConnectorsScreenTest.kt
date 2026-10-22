@@ -50,7 +50,7 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Connect a platform").assertExists()
         composeRule.onNodeWithText(
-            "Set up the coding agent running on your computer. The computer must stay on and connected while a request is waiting. Start with Antigravity; Codex setup is not available yet."
+            "Set up the coding agent running on your computer. The computer must stay on and connected while a request is waiting. Antigravity is the first verified target; Codex hook setup is available, but its live approval flow is not verified."
         ).assertExists()
         composeRule.onNodeWithText("Other integrations and webhooks").assertExists()
         composeRule.onAllNodesWithText("Create connection").assertCountEquals(0)
@@ -84,8 +84,9 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Antigravity approval setup").assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists().performClick()
-        composeRule.onNodeWithText("Codex").assertExists()
-        composeRule.onNodeWithText("Not connected yet. Codex setup will appear here after its native permission flow is verified.").assertExists()
+        composeRule.onNodeWithText("Codex permission setup").assertExists()
+        composeRule.onNodeWithText("A local PermissionRequest hook can be configured. Same-invocation phone approve/deny has not been verified yet.").assertExists()
+        composeRule.onNodeWithText("Open platform setup").assertExists().performClick()
         composeRule.onAllNodesWithText("Webhook task intake").assertCountEquals(0)
         composeRule.onNodeWithText("Other integrations and webhooks").performClick()
         composeRule.onNodeWithText("Webhook task intake").assertExists()

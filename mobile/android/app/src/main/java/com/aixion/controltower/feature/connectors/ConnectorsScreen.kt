@@ -191,7 +191,7 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
                 Text("Connect a platform", color = TowerTextPrimary, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = if (state.loading) "Loading connections..." else "Set up the coding agent running on your computer. The computer must stay on and connected while a request is waiting. Start with Antigravity; Codex setup is not available yet.",
+                    text = if (state.loading) "Loading connections..." else "Set up the coding agent running on your computer. The computer must stay on and connected while a request is waiting. Antigravity is the first verified target; Codex hook setup is available, but its live approval flow is not verified.",
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
@@ -202,7 +202,7 @@ private fun ConnectorsHero(state: ConnectorsUiState) {
         Spacer(modifier = Modifier.height(TowerSpacing.lg))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             StatusBadge(label = "ANTIGRAVITY SETUP", color = TowerAccent)
-            StatusBadge(label = "CODEX NOT CONNECTED", color = RiskMedium)
+            StatusBadge(label = "CODEX FLOW UNVERIFIED", color = RiskMedium)
         }
     }
 }
@@ -225,9 +225,13 @@ private fun NativeAgentAccessPanel(onOpenAgentAccess: () -> Unit) {
     }
 
     TowerPanel {
-        Text("Codex", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text("Codex permission setup", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text("Not connected yet. Codex setup will appear here after its native permission flow is verified.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("A local PermissionRequest hook can be configured. Same-invocation phone approve/deny has not been verified yet.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        OutlinedButton(onClick = onOpenAgentAccess, modifier = Modifier.fillMaxWidth()) {
+            Text("Open platform setup")
+        }
     }
 }
 
