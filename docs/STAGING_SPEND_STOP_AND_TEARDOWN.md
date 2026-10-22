@@ -6,6 +6,9 @@
 **Gate:** Do not use until the owner confirms the exact project, billing association,
 region, operators, data-retention decision, and maximum uncapped-service exposure.
 The manifests remain `DO NOT APPLY` until Slice 1 and all Slice 7 gates pass.
+**Related artifacts:** [Pre-billing work lock](PRE_BILLING_WORK_LOCK.md),
+[cloud prework status](CLOUD_PREWORK_STATUS_2026-10-22.md), and
+[staging handoff cost model](STAGING_HANDOFF_COST_MODEL.md).
 
 This checklist has two distinct outcomes:
 
