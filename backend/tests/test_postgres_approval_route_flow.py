@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -569,6 +570,27 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     assert heartbeat.json()["live"] is True
     assert isinstance(heartbeat.json()["heartbeat_at"], str) and heartbeat.json()["heartbeat_at"]
     assert isinstance(heartbeat.json()["expires_at"], str) and heartbeat.json()["expires_at"]
+
+    # Model a lost first HTTP response: retry the identical heartbeat for the
+    # still-live invocation and verify the response remains bound to that scope.
+    heartbeat_retry = client.post(
+        f"/agents/approvals/{approval['id']}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": invocation_id},
+    )
+    assert heartbeat_retry.status_code == 200, heartbeat_retry.text
+    retry_body = heartbeat_retry.json()
+    assert retry_body["approval_id"] == approval["id"]
+    assert retry_body["source_agent_id"] == agent.id
+    assert retry_body["source_invocation_id"] == invocation_id
+    assert retry_body["live"] is True
+    assert datetime.fromisoformat(retry_body["heartbeat_at"]) >= datetime.fromisoformat(
+        heartbeat.json()["heartbeat_at"]
+    )
+    assert datetime.fromisoformat(retry_body["expires_at"]) >= datetime.fromisoformat(
+        heartbeat.json()["expires_at"]
+    )
+
     mismatched_heartbeat = client.post(
         f"/agents/approvals/{approval['id']}/heartbeat",
         headers=headers,
