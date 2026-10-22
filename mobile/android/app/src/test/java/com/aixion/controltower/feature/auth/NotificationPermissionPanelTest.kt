@@ -78,4 +78,40 @@ class NotificationPermissionPanelTest {
             PushRegistrationCopy.status(PushRegistrationUiState.PERMISSION_REQUIRED)
         )
     }
+
+    @Test
+    fun permissionActionAppearsOnlyWhenFirebaseIsConfiguredAndPermissionIsTheBlocker() {
+        assertEquals(
+            true,
+            shouldShowNotificationPermissionAction(
+                NotificationPermissionState.DENIED,
+                PushRegistrationUiState.PERMISSION_REQUIRED,
+                firebaseConfigured = true
+            )
+        )
+        assertEquals(
+            false,
+            shouldShowNotificationPermissionAction(
+                NotificationPermissionState.DENIED,
+                PushRegistrationUiState.FIREBASE_NOT_CONFIGURED,
+                firebaseConfigured = false
+            )
+        )
+        assertEquals(
+            false,
+            shouldShowNotificationPermissionAction(
+                NotificationPermissionState.DENIED,
+                PushRegistrationUiState.CHECKING,
+                firebaseConfigured = true
+            )
+        )
+        assertEquals(
+            false,
+            shouldShowNotificationPermissionAction(
+                NotificationPermissionState.GRANTED,
+                PushRegistrationUiState.PERMISSION_REQUIRED,
+                firebaseConfigured = true
+            )
+        )
+    }
 }

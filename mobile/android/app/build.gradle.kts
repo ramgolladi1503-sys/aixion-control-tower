@@ -76,6 +76,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "AIXION_API_BASE_URL", "\"$aixionApiBaseUrl\"")
         buildConfigField("int", "AIXION_APPROVAL_REFRESH_INTERVAL_SECONDS", approvalRefreshIntervalSeconds.get().toString())
+        buildConfigField("boolean", "AIXION_FIREBASE_CONFIG_ENABLED", firebaseConfigEnabled.toString())
         manifestPlaceholders["cleartextTrafficAllowed"] = "false"
     }
 

@@ -58,7 +58,7 @@ class HomeScreenCopyTest {
     fun allClearRequiresACompletedSuccessfulSync() {
         assertEquals("Status not verified", homeHeroTitle(HomeUiState(loading = false)))
         assertEquals(
-            "Refreshing command state",
+            "Refreshing approvals",
             homeHeroTitle(
                 HomeUiState(
                     loading = false,
@@ -68,8 +68,26 @@ class HomeScreenCopyTest {
             )
         )
         assertEquals(
-            "All clear",
+            "No approvals waiting",
             homeHeroTitle(
+                HomeUiState(
+                    loading = false,
+                    lastSuccessfulSyncAt = Instant.parse("2026-10-22T00:00:00Z")
+                )
+            )
+        )
+        assertEquals(
+            "Backend synced",
+            homeHeroStatusLabel(
+                HomeUiState(
+                    loading = false,
+                    lastSuccessfulSyncAt = Instant.parse("2026-10-22T00:00:00Z")
+                )
+            )
+        )
+        assertEquals(
+            "A fresh backend sync found no requests awaiting your decision. Agent connection status is not available here.",
+            homeHeroSubtitle(
                 HomeUiState(
                     loading = false,
                     lastSuccessfulSyncAt = Instant.parse("2026-10-22T00:00:00Z")

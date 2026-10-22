@@ -45,9 +45,27 @@ fun HomeScreen(
     onOpenConnect: () -> Unit = {},
     onOpenApprovals: () -> Unit = {}
 ) {
-    val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
     ForegroundRefreshEffect(onRefresh = viewModel::refreshInForeground)
+
+    HomeContent(
+        state = state,
+        onApprovalSelected = onApprovalSelected,
+        onOpenConnect = onOpenConnect,
+        onOpenApprovals = onOpenApprovals,
+        onRetry = viewModel::refresh
+    )
+}
+
+@Composable
+internal fun HomeContent(
+    state: HomeUiState,
+    onApprovalSelected: (ApprovalSummary) -> Unit = {},
+    onOpenConnect: () -> Unit = {},
+    onOpenApprovals: () -> Unit = {},
+    onRetry: () -> Unit = {}
+) {
+    val palette = LocalTowerPalette.current
 
     LazyColumn(
         modifier = Modifier
@@ -75,19 +93,12 @@ fun HomeScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         StatusBadge(
-                            label = when {
-                                state.hasError -> "Backend error"
-                                !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "Not verified"
-                                state.unsupportedApprovals.isNotEmpty() -> "Unsupported approval"
-                                state.actionRequiredCount > 0 -> "Approval queue"
-                                state.refreshing -> "Syncing"
-                                else -> "Command state"
-                            },
+                            label = homeHeroStatusLabel(state),
                             color = when {
                                 state.hasError -> palette.danger
                                 state.unsupportedApprovals.isNotEmpty() -> palette.danger
                                 state.actionRequiredCount > 0 -> palette.caution
-                                state.refreshing -> palette.caution
+                                state.loading || state.refreshing || !state.hasSuccessfulSync -> palette.caution
                                 else -> palette.positive
                             },
                             fontSize = 14.sp,
@@ -119,7 +130,7 @@ fun HomeScreen(
                 ErrorPanel(
                     title = "Live backend data unavailable",
                     body = message,
-                    onRetry = viewModel::refresh,
+                    onRetry = onRetry,
                     retryEnabled = !state.loading
                 )
             }
@@ -140,13 +151,6 @@ fun HomeScreen(
                     onOpenApprovals = onOpenApprovals
                 )
             }
-        } else if (!state.refreshing && state.hasSuccessfulSync && state.unsupportedApprovals.isEmpty()) {
-            item {
-                EmptyHomePanel(
-                    title = "No approvals waiting",
-                    body = "The approval queue is clear. New requests will appear here when an agent needs your decision."
-                )
-            }
         }
 
         if (!state.hasError && !state.refreshing && state.hasSuccessfulSync && state.unsupportedApprovals.isNotEmpty()) {
@@ -154,7 +158,7 @@ fun HomeScreen(
                 ErrorPanel(
                     title = "Approval data is not recognized",
                     body = "Update the app or backend before deciding. These requests remain visible but cannot be approved.",
-                    onRetry = viewModel::refresh,
+                    onRetry = onRetry,
                     retryEnabled = !state.loading
                 )
             }

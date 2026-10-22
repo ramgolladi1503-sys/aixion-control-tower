@@ -88,4 +88,23 @@ class HomeScreenTest {
         composeRule.onNodeWithText("Connect platform").performClick()
         composeRule.runOnIdle { assertTrue(opened) }
     }
+
+    @Test
+    fun successfulEmptyHomeShowsOneBackendOnlyQueueState() {
+        composeRule.setContent {
+            HomeContent(
+                state = HomeUiState(
+                    loading = false,
+                    lastSuccessfulSyncAt = Instant.parse("2026-10-22T10:00:00Z")
+                )
+            )
+        }
+
+        composeRule.onNodeWithText("Backend synced").assertExists()
+        composeRule.onAllNodesWithText("No approvals waiting").assertCountEquals(1)
+        composeRule.onAllNodesWithText("All clear").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Command state").assertCountEquals(0)
+        composeRule.onNodeWithText("Agent connection status is not available here.", substring = true)
+            .assertExists()
+    }
 }

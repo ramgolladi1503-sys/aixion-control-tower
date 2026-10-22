@@ -2,9 +2,15 @@ package com.aixion.controltower.feature.approvals
 
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -23,9 +29,12 @@ import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.components.formatApprovalExpiry
 import com.aixion.controltower.core.ui.ForegroundRefreshEffect
+import com.aixion.controltower.core.ui.theme.ControlTowerTheme
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import kotlin.math.roundToInt
 
 class ApprovalInboxScreenTest {
     @get:Rule
@@ -148,6 +157,50 @@ class ApprovalInboxScreenTest {
         composeRule.onNodeWithText("Refresh").performClick()
 
         assertEquals(true, refreshRequested)
+    }
+
+    @Test
+    fun emptyInboxOmitsDangerBadgeWhenNoRequestsAreBlocked() {
+        composeRule.setContent {
+            ApprovalInboxContent(state = ApprovalsUiState(loading = false))
+        }
+
+        composeRule.onAllNodesWithText("Status blocked 0").assertCountEquals(0)
+        composeRule.onNodeWithText("Needs review 0").assertExists()
+    }
+
+    @Test
+    fun selectedInboxAndHistoryFiltersUseBrandFill() {
+        var expectedBrand = Color.Unspecified
+        composeRule.setContent {
+            ControlTowerTheme {
+                expectedBrand = LocalTowerPalette.current.brand
+                ApprovalInboxContent(
+                    state = ApprovalsUiState(loading = false, historyLoaded = true)
+                )
+            }
+        }
+
+        val needsReview = composeRule.onNodeWithText("Needs review")
+        needsReview.assertIsSelected()
+        assertSelectedFilterFillMatchesBrand("Needs review", expectedBrand)
+
+        composeRule.onNodeWithText("History").performClick()
+        composeRule.onNodeWithText("History").assertIsSelected()
+        assertSelectedFilterFillMatchesBrand("History", expectedBrand)
+
+        composeRule.onNodeWithText("All").assertIsSelected()
+        assertSelectedFilterFillMatchesBrand("All", expectedBrand)
+    }
+
+    private fun assertSelectedFilterFillMatchesBrand(label: String, expectedBrand: Color) {
+        val chip = composeRule.onNodeWithText(label)
+        val bounds = chip.fetchSemanticsNode().boundsInRoot
+        val image = composeRule.onRoot().captureToImage().toPixelMap()
+        val sampleX = (bounds.left + bounds.width * 0.05f).roundToInt().coerceIn(0, image.width - 1)
+        val sampleY = (bounds.top + bounds.height * 0.5f).roundToInt().coerceIn(0, image.height - 1)
+
+        assertEquals(expectedBrand.toArgb(), image[sampleX, sampleY].toArgb())
     }
 
     @Test

@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -221,7 +222,9 @@ fun ApprovalInboxContent(
                 verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
             ) {
                 StatusBadge("Needs review $pendingCount", palette.caution, fontSize = 14.sp, uppercase = false)
-                StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = 14.sp, uppercase = false)
+                if (blocked.isNotEmpty()) {
+                    StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = 14.sp, uppercase = false)
+                }
             }
         }
 
@@ -241,7 +244,11 @@ fun ApprovalInboxContent(
                                     ApprovalInboxSection.HISTORY -> "History"
                                 }
                             )
-                        }
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = palette.brand,
+                            selectedLabelColor = palette.onBrand
+                        )
                     )
                 }
             }
@@ -274,7 +281,11 @@ fun ApprovalInboxContent(
                                         ApprovalHistoryFilter.REVISION_REQUESTED -> "Revision requested"
                                     }
                                 )
-                            }
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = palette.brand,
+                                selectedLabelColor = palette.onBrand
+                            )
                         )
                     }
                 }

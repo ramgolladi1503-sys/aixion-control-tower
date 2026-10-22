@@ -45,14 +45,23 @@ data class HomeUiState(
 }
 
 internal fun homeHeroTitle(state: HomeUiState): String = when {
-    state.loading -> "Loading command state"
-    state.refreshing -> "Refreshing command state"
+    state.loading -> "Loading approvals"
+    state.refreshing -> "Refreshing approvals"
     state.hasError -> "Backend sync failed"
     state.unsupportedApprovals.isNotEmpty() -> "${state.unsupportedApprovals.size} approvals need an app update"
     state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"
     state.blockedCount > 0 -> "${state.blockedCount} blocked actions need attention"
-    state.hasSuccessfulSync -> "All clear"
+    state.hasSuccessfulSync -> "No approvals waiting"
     else -> "Status not verified"
+}
+
+internal fun homeHeroStatusLabel(state: HomeUiState): String = when {
+    state.hasError -> "Backend error"
+    state.loading || state.refreshing -> "Syncing"
+    !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "Not verified"
+    state.unsupportedApprovals.isNotEmpty() -> "Unsupported approval"
+    state.actionRequiredCount > 0 -> "Approval queue"
+    else -> "Backend synced"
 }
 
 internal fun homeHeroSubtitle(state: HomeUiState): String = when {
@@ -62,7 +71,7 @@ internal fun homeHeroSubtitle(state: HomeUiState): String = when {
     state.unsupportedApprovals.isNotEmpty() -> "The app cannot safely interpret some approval status or risk values. No decisions are enabled for them."
     state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, reject, or request revision."
     state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
-    state.hasSuccessfulSync -> "No approvals are waiting. Connect your agent and keep its computer running so work can resume after a phone decision."
+    state.hasSuccessfulSync -> "A fresh backend sync found no requests awaiting your decision. Agent connection status is not available here."
     else -> "A successful backend sync is required before approval status can be shown."
 }
 

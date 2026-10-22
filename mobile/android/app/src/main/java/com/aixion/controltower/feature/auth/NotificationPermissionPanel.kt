@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.aixion.controltower.BuildConfig
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.notifications.PushDeviceRegistrationRepository
@@ -90,7 +91,11 @@ internal fun NotificationPermissionPanel() {
     var registrationState by remember {
         mutableStateOf(
             if (initialState == NotificationPermissionState.DENIED) {
-                PushRegistrationUiState.PERMISSION_REQUIRED
+                if (BuildConfig.AIXION_FIREBASE_CONFIG_ENABLED) {
+                    PushRegistrationUiState.PERMISSION_REQUIRED
+                } else {
+                    PushRegistrationUiState.FIREBASE_NOT_CONFIGURED
+                }
             } else {
                 PushRegistrationUiState.CHECKING
             }
@@ -108,7 +113,15 @@ internal fun NotificationPermissionPanel() {
 
     LaunchedEffect(permissionState, registrationRefresh) {
         registrationState = PushRegistrationUiState.CHECKING
-        registrationState = PushDeviceRegistrationRepository(context).registerCurrentDevice().toUiState()
+        val result = PushDeviceRegistrationRepository(context).registerCurrentDevice().toUiState()
+        registrationState = if (
+            !BuildConfig.AIXION_FIREBASE_CONFIG_ENABLED &&
+            result == PushRegistrationUiState.PERMISSION_REQUIRED
+        ) {
+            PushRegistrationUiState.FIREBASE_NOT_CONFIGURED
+        } else {
+            result
+        }
     }
 
     androidx.compose.runtime.DisposableEffect(lifecycleOwner, requiresRuntimePermission) {
@@ -140,7 +153,12 @@ internal fun NotificationPermissionPanel() {
         Text("Approval notifications", color = palette.ink)
         Text(NotificationPermissionCopy.status(permissionState), color = palette.inkMuted)
         Text(PushRegistrationCopy.status(registrationState), color = palette.inkMuted)
-        if (permissionState == NotificationPermissionState.DENIED) {
+        if (shouldShowNotificationPermissionAction(
+                permissionState = permissionState,
+                registrationState = registrationState,
+                firebaseConfigured = BuildConfig.AIXION_FIREBASE_CONFIG_ENABLED
+            )
+        ) {
             Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = {
@@ -155,6 +173,14 @@ internal fun NotificationPermissionPanel() {
         }
     }
 }
+
+internal fun shouldShowNotificationPermissionAction(
+    permissionState: NotificationPermissionState,
+    registrationState: PushRegistrationUiState,
+    firebaseConfigured: Boolean
+): Boolean = permissionState == NotificationPermissionState.DENIED &&
+    firebaseConfigured &&
+    registrationState == PushRegistrationUiState.PERMISSION_REQUIRED
 
 private fun PushRegistrationResult.toUiState(): PushRegistrationUiState = when (this) {
     PushRegistrationResult.REGISTERED -> PushRegistrationUiState.REGISTERED
