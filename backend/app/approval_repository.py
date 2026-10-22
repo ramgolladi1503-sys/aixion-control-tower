@@ -16,6 +16,10 @@ from .agent_task_models import (
 )
 from .approval_integrity import compute_approval_payload_hash
 from .approval_lifecycle import can_transition
+from .mcp_pending_repository import (
+    MCPPendingRepositoryError,
+    apply_postgres_approval_state_transition,
+)
 from .models import (
     ApprovalRequest,
     ApprovalStatus,
@@ -1726,6 +1730,12 @@ class PostgresApprovalDecisionRepository:
             durable, version = self._approval_from_row(row, approval_id)
             if durable != expected_approval:
                 raise ApprovalDecisionConflict("Approval changed before expiration could commit.")
+            try:
+                apply_postgres_approval_state_transition(conn, expired_approval)
+            except MCPPendingRepositoryError as exc:
+                raise ApprovalDecisionConflict(
+                    "Linked MCP pending request changed before approval expiration committed."
+                ) from exc
             linked_rows = conn.execute(
                 "SELECT task_id,workspace_id,project_id,approval_request_id,payload "
                 "FROM agent_tasks WHERE approval_request_id=%s ORDER BY task_id FOR UPDATE",
@@ -1874,6 +1884,13 @@ class PostgresApprovalDecisionRepository:
                 raise ApprovalDecisionConflict("Approval workspace does not match its project.")
             if decision_notification.workspace_id != durable.workspace_id:
                 raise ValueError("Approval notification workspace must match the durable approval scope")
+
+            try:
+                apply_postgres_approval_state_transition(conn, updated_approval)
+            except MCPPendingRepositoryError as exc:
+                raise ApprovalDecisionConflict(
+                    "Linked MCP pending request changed before the approval decision committed."
+                ) from exc
 
             linked_rows = conn.execute(
                 "SELECT task_id, workspace_id, status, payload FROM agent_tasks "

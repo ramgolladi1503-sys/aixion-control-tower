@@ -6,6 +6,7 @@ import uuid
 from dataclasses import replace
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from datetime import timedelta
 from threading import Barrier
 
 import psycopg
@@ -20,6 +21,7 @@ from app.approval_repository import (
     ApprovalDecisionConflict,
     PostgresApprovalDecisionRepository,
 )
+from app.mcp_pending_repository import PostgresMCPPendingRepository
 from app.models import (
     AgentAuthType,
     AgentProvider,
@@ -29,6 +31,8 @@ from app.models import (
     ExternalAgent,
     FileChange,
     Notification,
+    MCPPendingRequest,
+    MCPPendingStatus,
     Project,
     RiskAssessment,
     RiskLevel,
@@ -196,6 +200,218 @@ def _seed(
                 ),
             )
     return workspace, project, approval, task
+
+
+def _seed_mcp_pending(
+    connect: Callable[[], Connection], approval: ApprovalRequest
+) -> MCPPendingRequest:
+    pending = MCPPendingRequest(
+        id=f"mcp_pending_{uuid.uuid4().hex}",
+        project_id=approval.project_id,
+        workspace_id=approval.workspace_id,
+        approval_request_id=approval.id,
+        server_name="test-child",
+        tool_name="write_file",
+        arguments={"path": "README.md"},
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO mcp_pending_requests(pending_id,approval_id,project_id,workspace_id,"
+            "status,attempts,lease_expires_at,created_at,updated_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                pending.id,
+                approval.id,
+                approval.project_id,
+                approval.workspace_id,
+                pending.status.value,
+                pending.attempts,
+                pending.lease_expires_at,
+                pending.created_at,
+                pending.updated_at,
+                Jsonb(pending.model_dump(mode="json")),
+            ),
+        )
+    return pending
+
+
+@pytest.mark.parametrize(
+    ("decision_status", "pending_status"),
+    [
+        (ApprovalStatus.APPROVED, MCPPendingStatus.WAITING_FOR_APPROVAL),
+        (ApprovalStatus.DENIED, MCPPendingStatus.BLOCKED_BY_DECISION),
+        (ApprovalStatus.REVISION_REQUESTED, MCPPendingStatus.BLOCKED_BY_DECISION),
+    ],
+)
+def test_postgres_mcp_pending_tracks_approval_decision_atomically(
+    postgres_repository,
+    decision_status: ApprovalStatus,
+    pending_status: MCPPendingStatus,
+) -> None:
+    repository, connect = postgres_repository
+    _, _, approval, _ = _seed(connect)
+    pending = _seed_mcp_pending(connect, approval)
+    updated = _updated_approval(approval, decision_status)
+
+    repository.commit_decision(
+        approval_id=approval.id,
+        expected_status=ApprovalStatus.REQUESTED,
+        expected_approval=approval,
+        updated_approval=updated,
+        audit_event=_audit(approval, updated, f"mcp-{decision_status.value}"),
+        decision_notification=_notification(approval, f"mcp-{decision_status.value}"),
+    )
+
+    with connect() as conn:
+        approval_row = conn.execute(
+            "SELECT status FROM approval_requests WHERE approval_id=%s", (approval.id,)
+        ).fetchone()
+        pending_row = conn.execute(
+            "SELECT status,payload FROM mcp_pending_requests WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
+    assert approval_row == (decision_status.value,)
+    assert pending_row[0] == pending_status.value
+    assert MCPPendingRequest.model_validate(pending_row[1]).status == pending_status
+
+
+def test_postgres_mcp_pending_decision_update_failure_rolls_back_approval(
+    postgres_repository,
+) -> None:
+    repository, connect = postgres_repository
+    _, _, approval, _ = _seed(connect)
+    pending = _seed_mcp_pending(connect, approval)
+    updated = _updated_approval(approval, ApprovalStatus.DENIED)
+    with connect() as conn:
+        conn.execute(
+            "CREATE FUNCTION reject_mcp_pending_decision_update() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected pending update failure'; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_mcp_pending_decision_update BEFORE UPDATE "
+            "ON mcp_pending_requests FOR EACH ROW EXECUTE FUNCTION reject_mcp_pending_decision_update()"
+        )
+
+    with pytest.raises(psycopg.errors.RaiseException, match="injected pending update failure"):
+        repository.commit_decision(
+            approval_id=approval.id,
+            expected_status=ApprovalStatus.REQUESTED,
+            expected_approval=approval,
+            updated_approval=updated,
+            audit_event=_audit(approval, updated, "mcp-pending-rollback"),
+            decision_notification=_notification(approval, "mcp-pending-rollback"),
+        )
+
+    assert repository.get(approval.id) == approval
+    with connect() as conn:
+        pending_row = conn.execute(
+            "SELECT status,payload FROM mcp_pending_requests WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
+        assert pending_row[0] == MCPPendingStatus.WAITING_FOR_APPROVAL.value
+        assert MCPPendingRequest.model_validate(pending_row[1]).status == MCPPendingStatus.WAITING_FOR_APPROVAL
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE approval_id=%s", (approval.id,)
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("mismatch", ["approval_project_scope", "pending_status"])
+def test_postgres_mcp_pending_decision_rejects_inconsistent_link(
+    postgres_repository,
+    mismatch: str,
+) -> None:
+    repository, connect = postgres_repository
+    workspace, _, approval, _ = _seed(connect)
+    pending = _seed_mcp_pending(connect, approval)
+    if mismatch == "approval_project_scope":
+        other_project = Project(
+            id=f"project_other_{uuid.uuid4().hex}",
+            name="Other project in same workspace",
+            workspace_id=workspace.id,
+        )
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+                (other_project.id, workspace.id, Jsonb(other_project.model_dump(mode="json"))),
+            )
+        invalid = pending.model_copy(update={"project_id": other_project.id})
+    else:
+        invalid = pending.model_copy(update={"status": MCPPendingStatus.DEAD_LETTER})
+    with connect() as conn:
+        if mismatch == "approval_project_scope":
+            conn.execute(
+                "UPDATE mcp_pending_requests SET project_id=%s,payload=%s WHERE pending_id=%s",
+                (invalid.project_id, Jsonb(invalid.model_dump(mode="json")), pending.id),
+            )
+        else:
+            conn.execute(
+                "UPDATE mcp_pending_requests SET status=%s,payload=%s WHERE pending_id=%s",
+                (invalid.status.value, Jsonb(invalid.model_dump(mode="json")), pending.id),
+            )
+    updated = _updated_approval(approval, ApprovalStatus.DENIED)
+
+    with pytest.raises(ApprovalDecisionConflict, match="Linked MCP pending request"):
+        repository.commit_decision(
+            approval_id=approval.id,
+            expected_status=ApprovalStatus.REQUESTED,
+            expected_approval=approval,
+            updated_approval=updated,
+            audit_event=_audit(approval, updated, f"mcp-pending-mismatch-{mismatch}"),
+            decision_notification=_notification(approval, f"mcp-pending-mismatch-{mismatch}"),
+        )
+
+    assert repository.get(approval.id) == approval
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE approval_id=%s", (approval.id,)
+        ).fetchone()[0] == 0
+
+
+def test_postgres_mcp_approval_and_forward_claim_race_has_consistent_lock_order(
+    postgres_repository,
+) -> None:
+    repository, connect = postgres_repository
+    _, _, approval, _ = _seed(connect)
+    pending = _seed_mcp_pending(connect, approval)
+    pending_repository = PostgresMCPPendingRepository(connect)
+    barrier = Barrier(2)
+
+    def decide() -> str:
+        updated = _updated_approval(approval, ApprovalStatus.APPROVED)
+        barrier.wait(timeout=10)
+        repository.commit_decision(
+            approval_id=approval.id,
+            expected_status=ApprovalStatus.REQUESTED,
+            expected_approval=approval,
+            updated_approval=updated,
+            audit_event=_audit(approval, updated, "mcp-claim-race"),
+            decision_notification=_notification(approval, "mcp-claim-race"),
+        )
+        return "approved"
+
+    def claim() -> MCPPendingRequest | None:
+        barrier.wait(timeout=10)
+        return pending_repository.claim_forwarding(
+            pending_id=pending.id,
+            owner="test-worker",
+            now=now_utc(),
+            lease_expires_at=now_utc() + timedelta(minutes=1),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        decision_future = executor.submit(decide)
+        claim_future = executor.submit(claim)
+        assert decision_future.result(timeout=10) == "approved"
+        claimed = claim_future.result(timeout=10)
+
+    assert repository.get(approval.id).status == ApprovalStatus.APPROVED
+    durable_pending = pending_repository.get(pending.id)
+    assert durable_pending is not None
+    assert durable_pending.status in {
+        MCPPendingStatus.WAITING_FOR_APPROVAL,
+        MCPPendingStatus.FORWARDING,
+    }
+    assert (claimed is None) == (durable_pending.status == MCPPendingStatus.WAITING_FOR_APPROVAL)
 
 
 def test_postgres_approved_invocation_delivery_claim_is_at_most_once(postgres_repository) -> None:
@@ -1581,6 +1797,7 @@ def test_postgres_expiration_is_atomic_and_rejects_a_late_decision(
 ) -> None:
     repository, connect = postgres_repository
     _, _, approval, _ = _seed(connect)
+    pending = _seed_mcp_pending(connect, approval)
     expired = approval.model_copy(
         update={"status": ApprovalStatus.EXPIRED, "updated_at": now_utc()}
     )
@@ -1609,7 +1826,13 @@ def test_postgres_expiration_is_atomic_and_rejects_a_late_decision(
         audit_count = conn.execute(
             "SELECT count(*) FROM audit_events WHERE approval_id = %s", (approval.id,)
         ).fetchone()[0]
+        pending_row = conn.execute(
+            "SELECT status,payload FROM mcp_pending_requests WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
     assert audit_count == 1
+    assert pending_row[0] == MCPPendingStatus.BLOCKED_BY_DECISION.value
+    assert MCPPendingRequest.model_validate(pending_row[1]).status == MCPPendingStatus.BLOCKED_BY_DECISION
 
 
 def test_postgres_linked_task_expiration_commits_task_effects_atomically(

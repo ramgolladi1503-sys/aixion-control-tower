@@ -148,6 +148,80 @@ def _decode(
     return pending
 
 
+def apply_postgres_approval_state_transition(
+    conn: psycopg.Connection,
+    approval: ApprovalRequest,
+) -> None:
+    """Keep a linked MCP request aligned with its approval in the caller's transaction.
+
+    Approval decisions and forwarding claims both lock the approval row before
+    the pending row. This fixed order prevents the decision/claim deadlock that
+    would result from taking the pending row first in one path.
+    """
+    rows = conn.execute(
+        "SELECT pending_id,approval_id,workspace_id,project_id,payload "
+        "FROM mcp_pending_requests WHERE approval_id=%s FOR UPDATE",
+        (approval.id,),
+    ).fetchall()
+    if len(rows) > 1:
+        raise MCPPendingRepositoryConflict(
+            "Approval is linked to multiple MCP pending requests"
+        )
+    if not rows:
+        return
+    row = rows[0]
+    pending = _decode((row[0], row[4], row[1], row[2], row[3]))
+    if pending is None or (
+        pending.approval_request_id != approval.id
+        or pending.workspace_id != approval.workspace_id
+        or pending.project_id != approval.project_id
+    ):
+        raise MCPPendingRepositoryScopeError(
+            "MCP pending scope does not match its approval"
+        )
+    if pending.status != MCPPendingStatus.WAITING_FOR_APPROVAL:
+        raise MCPPendingRepositoryConflict(
+            "MCP pending request is not waiting for its approval decision"
+        )
+    if approval.status not in {
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.DENIED,
+        ApprovalStatus.REVISION_REQUESTED,
+        ApprovalStatus.EXPIRED,
+    }:
+        raise MCPPendingRepositoryConflict(
+            "MCP pending request received an unsupported approval decision"
+        )
+    if approval.status == ApprovalStatus.APPROVED:
+        # It remains claimable only after the approval transaction commits.
+        return
+
+    updated = pending.model_copy(update={
+        "status": MCPPendingStatus.BLOCKED_BY_DECISION,
+        "lease_owner": None,
+        "lease_expires_at": None,
+        "updated_at": approval.updated_at,
+    })
+    result = conn.execute(
+        "UPDATE mcp_pending_requests SET status=%s,lease_owner=NULL,lease_expires_at=NULL,"
+        "updated_at=%s,payload=%s WHERE pending_id=%s AND approval_id=%s "
+        "AND workspace_id=%s AND status=%s",
+        (
+            updated.status.value,
+            updated.updated_at,
+            Jsonb(updated.model_dump(mode="json")),
+            updated.id,
+            approval.id,
+            approval.workspace_id,
+            MCPPendingStatus.WAITING_FOR_APPROVAL.value,
+        ),
+    )
+    if result.rowcount != 1:
+        raise MCPPendingRepositoryConflict(
+            "MCP pending request changed while committing its approval decision"
+        )
+
+
 class SQLiteMCPPendingRepository:
     """Transactional MCP approval and pending-request persistence for local mode."""
 
@@ -630,6 +704,20 @@ class PostgresMCPPendingRepository:
         if not owner or lease_expires_at <= now:
             raise ValueError("MCP forwarding lease owner and future expiry are required")
         with self._connect() as conn:
+            # Discover the owning approval without locking. The approval lock
+            # is always acquired before the pending row, matching the reviewer
+            # decision transaction's lock order.
+            identity = conn.execute(
+                "SELECT approval_id FROM mcp_pending_requests WHERE pending_id=%s",
+                (pending_id,),
+            ).fetchone()
+            if identity is None:
+                return None
+            approval_row = conn.execute(
+                "SELECT payload,status,workspace_id,project_id FROM approval_requests "
+                "WHERE approval_id=%s FOR UPDATE",
+                (identity[0],),
+            ).fetchone()
             row = conn.execute(
                 "SELECT pending_id,approval_id,workspace_id,project_id,payload "
                 "FROM mcp_pending_requests WHERE pending_id=%s FOR UPDATE",
@@ -640,6 +728,8 @@ class PostgresMCPPendingRepository:
             current = _decode((row[0], row[4], row[1], row[2], row[3]), pending_id)
             if current is None:
                 return None
+            if row[1] != identity[0] or approval_row is None:
+                return None
             if current.status == MCPPendingStatus.FORWARDING and current.lease_expires_at and current.lease_expires_at > now:
                 return None
             if current.status == MCPPendingStatus.FORWARDING:
@@ -647,11 +737,6 @@ class PostgresMCPPendingRepository:
                 return None
             if current.status not in {MCPPendingStatus.WAITING_FOR_APPROVAL, MCPPendingStatus.FORWARDING}:
                 return None
-            approval_row = conn.execute(
-                "SELECT payload,status,workspace_id,project_id FROM approval_requests "
-                "WHERE approval_id=%s FOR KEY SHARE",
-                (current.approval_request_id,),
-            ).fetchone()
             approval = ApprovalRequest.model_validate(approval_row[0]) if approval_row else None
             if (
                 approval is None
