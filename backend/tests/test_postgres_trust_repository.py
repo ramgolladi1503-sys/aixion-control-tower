@@ -238,6 +238,24 @@ def test_postgres_trust_repository_round_trips_workspace_records(trust_repositor
             assert repository.get_action_authorization(conn, authorization.id, workspace_id) == authorization
             assert repository.get_action_consumption(conn, action.id, workspace_id) == consumption
             assert repository.get_credential_grant(conn, grant.id, workspace_id) == grant
+            snapshot = repository.metrics_snapshot(
+                conn,
+                workspace_id=workspace_id,
+                now=now,
+                trust_event_repository=PostgresTrustEventRepository(connect),
+            )
+            assert snapshot.lease_status_counts == {"ACTIVE": 1}
+            assert snapshot.policy_decision_counts == {"REQUIRE_APPROVAL": 1}
+            assert snapshot.provider_decision_counts == {("OTHER", "REQUIRE_APPROVAL"): 1}
+            assert snapshot.authorization_count == 1
+            assert snapshot.consumption_count == 1
+            assert snapshot.active_credential_count == 1
+            assert snapshot.revoked_credential_count == 0
+            assert snapshot.trust_event_count == 0
+            assert snapshot.verification.valid is True
+            assert snapshot.push_status_counts == {}
+            assert snapshot.push_attempt_count == 0
+            assert snapshot.push_queue_depth == 0
         assert repository.get_capability_lease(conn, lease.id, "wrong-workspace") is None
 
 

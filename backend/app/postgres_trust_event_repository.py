@@ -166,14 +166,18 @@ class PostgresTrustEventRepository:
 
     def verify(self) -> FlightRecorderVerification:
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT event_id,sequence,workspace_id,event_type,entity_type,entity_id,actor,"
-                "correlation_id,previous_hash,event_hash,created_at,payload "
-                "FROM trust_events ORDER BY sequence"
-            ).fetchall()
-            head = conn.execute(
-                "SELECT sequence,event_hash FROM trust_event_heads WHERE singleton=TRUE"
-            ).fetchone()
+            return self.verify_in_transaction(conn)
+
+    def verify_in_transaction(self, conn: Connection) -> FlightRecorderVerification:
+        """Verify the ledger using the caller's snapshot and transaction."""
+        rows = conn.execute(
+            "SELECT event_id,sequence,workspace_id,event_type,entity_type,entity_id,actor,"
+            "correlation_id,previous_hash,event_hash,created_at,payload "
+            "FROM trust_events ORDER BY sequence"
+        ).fetchall()
+        head = conn.execute(
+            "SELECT sequence,event_hash FROM trust_event_heads WHERE singleton=TRUE"
+        ).fetchone()
         expected_sequence = 1
         expected_previous: str | None = None
         for row in rows:

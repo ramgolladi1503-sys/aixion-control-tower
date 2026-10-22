@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, TypeVar
@@ -13,6 +15,7 @@ from .trust_action_authorization_models import (
     ActionAuthorizationDecision,
 )
 from .trust_crypto import sha256_hex, verify_payload_signature
+from .models import AgentProvider
 from .trust_models import (
     ActionConsumption,
     CapabilityLease,
@@ -23,6 +26,7 @@ from .trust_models import (
     ProposedAction,
     ReviewerAttestation,
     TrustEventType,
+    FlightRecorderVerification,
 )
 from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .trust_policy import (
@@ -41,6 +45,24 @@ class PostgresTrustRepositoryConflict(RuntimeError):
     """A requested trust operation conflicts with durable policy or scope."""
 
 
+@dataclass(frozen=True)
+class PostgresTrustMetricsSnapshot:
+    """Workspace-scoped trust aggregates from one PostgreSQL snapshot."""
+
+    lease_status_counts: dict[str, int]
+    policy_decision_counts: dict[str, int]
+    provider_decision_counts: dict[tuple[str, str], int]
+    authorization_count: int
+    consumption_count: int
+    active_credential_count: int
+    revoked_credential_count: int
+    trust_event_count: int
+    push_status_counts: dict[str, int]
+    push_attempt_count: int
+    push_queue_depth: int
+    verification: FlightRecorderVerification
+
+
 def _model_payload(record: Any) -> dict[str, Any]:
     return record.model_dump(mode="json")
 
@@ -57,6 +79,103 @@ class PostgresTrustRepository:
     def _require_scope(workspace_id: str) -> None:
         if not workspace_id:
             raise ValueError("PostgreSQL trust operations require a workspace")
+
+    def metrics_snapshot(
+        self,
+        conn: Connection,
+        *,
+        workspace_id: str,
+        now: datetime,
+        trust_event_repository: PostgresTrustEventRepository,
+    ) -> PostgresTrustMetricsSnapshot:
+        """Read trust and notification aggregates in the caller's DB snapshot."""
+        self._require_scope(workspace_id)
+        if now.utcoffset() is None:
+            raise ValueError("Trust metric snapshot time must be timezone-aware")
+
+        lease_status_counts = Counter()
+        for status, count in conn.execute(
+            "SELECT CASE WHEN status='ACTIVE' AND expires_at<=%s THEN 'EXPIRED' "
+            "ELSE status END,COUNT(*) FROM capability_leases "
+            "WHERE workspace_id=%s GROUP BY 1",
+            (now, workspace_id),
+        ).fetchall():
+            if status not in {item.value for item in CapabilityLeaseStatus}:
+                raise PostgresTrustRepositoryError(
+                    "Capability lease metrics contain an unsupported state"
+                )
+            lease_status_counts[status] = int(count)
+
+        policy_decision_counts = Counter()
+        provider_decision_counts = Counter()
+        for decision, provider, count in conn.execute(
+            "SELECT decision,action.payload->>'provider',COUNT(*) "
+            "FROM policy_decisions AS policy "
+            "JOIN proposed_actions AS action "
+            "ON action.action_id=policy.action_id "
+            "AND action.workspace_id=policy.workspace_id "
+            "WHERE policy.workspace_id=%s "
+            "GROUP BY decision,action.payload->>'provider'",
+            (workspace_id,),
+        ).fetchall():
+            if decision not in {item.value for item in PolicyDecisionType}:
+                raise PostgresTrustRepositoryError(
+                    "Policy decision metrics contain an unsupported decision"
+                )
+            if provider not in {item.value for item in AgentProvider}:
+                raise PostgresTrustRepositoryError(
+                    "Policy decision metrics contain an unsupported provider"
+                )
+            policy_decision_counts[decision] += int(count)
+            provider_decision_counts[(provider, decision)] = int(count)
+
+        authorization_count = conn.execute(
+            "SELECT COUNT(*) FROM action_authorizations WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchone()[0]
+        consumption_count = conn.execute(
+            "SELECT COUNT(*) FROM action_consumptions WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchone()[0]
+        active_credentials, revoked_credentials = conn.execute(
+            "SELECT COUNT(*) FILTER (WHERE NOT revoked AND expires_at>%s),"
+            "COUNT(*) FILTER (WHERE revoked) FROM credential_grants "
+            "WHERE workspace_id=%s",
+            (now, workspace_id),
+        ).fetchone()
+        trust_event_count = conn.execute(
+            "SELECT COUNT(*) FROM trust_events WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchone()[0]
+
+        push_status_counts = Counter()
+        push_attempt_count = 0
+        push_queue_depth = 0
+        for status, count, attempts, queued in conn.execute(
+            "SELECT status,COUNT(*),COALESCE(SUM(attempts),0),"
+            "COUNT(*) FILTER (WHERE status IN ('PENDING','RETRY_WAIT','SENDING')) "
+            "FROM notifications WHERE workspace_id=%s GROUP BY status",
+            (workspace_id,),
+        ).fetchall():
+            push_status_counts[status] = int(count)
+            push_attempt_count += int(attempts)
+            push_queue_depth += int(queued)
+
+        verification = trust_event_repository.verify_in_transaction(conn)
+        return PostgresTrustMetricsSnapshot(
+            lease_status_counts=dict(lease_status_counts),
+            policy_decision_counts=dict(policy_decision_counts),
+            provider_decision_counts=dict(provider_decision_counts),
+            authorization_count=int(authorization_count),
+            consumption_count=int(consumption_count),
+            active_credential_count=int(active_credentials),
+            revoked_credential_count=int(revoked_credentials),
+            trust_event_count=int(trust_event_count),
+            push_status_counts=dict(push_status_counts),
+            push_attempt_count=push_attempt_count,
+            push_queue_depth=push_queue_depth,
+            verification=verification,
+        )
 
     @staticmethod
     def _insert(
