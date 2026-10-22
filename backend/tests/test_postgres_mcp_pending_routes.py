@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterator
 from datetime import timedelta
+from threading import Barrier
 from types import SimpleNamespace
 
 import psycopg
@@ -14,7 +16,7 @@ from psycopg.types.json import Jsonb
 
 from app import main, mcp_gateway_routes
 from app.application_repositories import ApplicationRepositories
-from app.models import AuthUser, MCPPendingRequest, MCPPendingStatus, Project, UserRole, Workspace, now_utc
+from app.models import AuthUser, MCPPendingRequest, MCPPendingStatus, Project, User, UserRole, Workspace, now_utc
 from app.postgres_database import run_postgres_migrations
 from app.store import store
 
@@ -130,6 +132,29 @@ def postgres_mcp_pending_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Itera
             role=UserRole.OWNER,
             workspace_id=workspace.id,
         )
+        persisted_user = User(
+            id=user.id,
+            email=user.email,
+            display_name=user.display_name,
+            role=user.role,
+            password_hash="test-password-hash",
+            password_salt="test-password-salt",
+            workspace_id=workspace.id,
+            email_verified=True,
+        )
+        with connect() as connection:
+            connection.execute(
+                "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+                "VALUES(%s,%s,%s,%s,%s,FALSE,TRUE,%s)",
+                (
+                    persisted_user.id,
+                    workspace.id,
+                    persisted_user.email,
+                    persisted_user.email.lower(),
+                    persisted_user.role.value,
+                    Jsonb(persisted_user.model_dump(mode="json")),
+                ),
+            )
         for dependency in (mcp_gateway_routes.ReviewerDependency, mcp_gateway_routes.MaintainerDependency):
             monkeypatch.delitem(
                 main.app.dependency_overrides,
@@ -194,7 +219,7 @@ def test_postgres_mcp_pending_reads_are_workspace_scoped_and_do_not_project_to_s
     assert mcp_gateway_routes.child_received_count_for_test() == before_child_calls
 
 
-def test_postgres_mcp_mutation_routes_fail_closed_without_sqlite_projection(
+def test_postgres_mcp_submission_is_transactional_and_does_not_project_to_sqlite(
     postgres_mcp_pending_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,7 +255,7 @@ def test_postgres_mcp_mutation_routes_fail_closed_without_sqlite_projection(
     before_audits = {event.id for event in store.audit_events}
     before_child_calls = mcp_gateway_routes.child_received_count_for_test()
 
-    submitted = client.post(
+    missing_idempotency_key = client.post(
         "/mcp-gateway/requests",
         json={
             "project_id": project.id,
@@ -243,7 +268,98 @@ def test_postgres_mcp_mutation_routes_fail_closed_without_sqlite_projection(
             },
         },
     )
-    assert submitted.status_code == 503
+    assert missing_idempotency_key.status_code == 400
+    blank_idempotency_key = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": "   "},
+        json={
+            "project_id": project.id,
+            "request": {"server_name": "test-child", "tool_name": "write_file", "mutating": True},
+        },
+    )
+    assert blank_idempotency_key.status_code == 400
+
+    submitted = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": "mcp-call-001"},
+        json={
+            "project_id": project.id,
+            "request": {
+                "server_name": "test-child",
+                "tool_name": "write_file",
+                "arguments": {"path": "README.md"},
+                "requested_by": "test",
+                "mutating": True,
+            },
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+    submitted_body = submitted.json()
+    assert submitted_body["approval_required"] is True
+    assert submitted_body["forwarded"] is False
+    assert submitted_body["status"] == "REQUESTED"
+    assert submitted_body["approval_request_id"]
+
+    repeated = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": "mcp-call-001"},
+        json={
+            "project_id": project.id,
+            "request": {
+                "server_name": "test-child",
+                "tool_name": "write_file",
+                "arguments": {"path": "README.md"},
+                "requested_by": "test",
+                "mutating": True,
+            },
+        },
+    )
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["approval_request_id"] == submitted_body["approval_request_id"]
+    assert repeated.json()["reason"] == "MCP submission already exists for this idempotency key."
+
+    with connect() as connection:
+        approval_payload = connection.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s",
+            (submitted_body["approval_request_id"],),
+        ).fetchone()[0]
+        assert "README.md" in approval_payload["files"][0]["new_content"]
+        notification_payload = connection.execute(
+            "SELECT payload FROM notifications WHERE approval_id=%s",
+            (submitted_body["approval_request_id"],),
+        ).fetchone()[0]
+        audit_details = connection.execute(
+            "SELECT details FROM audit_events WHERE approval_id=%s",
+            (submitted_body["approval_request_id"],),
+        ).fetchone()[0]
+    assert "README.md" not in notification_payload["body"]
+    assert "README.md" not in str(audit_details)
+
+    mismatched_replay = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": "mcp-call-001"},
+        json={
+            "project_id": project.id,
+            "request": {
+                "server_name": "test-child",
+                "tool_name": "write_file",
+                "arguments": {"path": "different.txt"},
+                "requested_by": "test",
+                "mutating": True,
+            },
+        },
+    )
+    assert mismatched_replay.status_code == 409
+
+    foreign_project = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": "mcp-call-foreign-project"},
+        json={
+            "project_id": "project_from_another_workspace",
+            "request": {"server_name": "test-child", "tool_name": "write_file", "mutating": True},
+        },
+    )
+    assert foreign_project.status_code == 404
 
     # Retrying an already waiting request is an idempotent read-like no-op.
     retried = client.post(f"/mcp-gateway/pending-requests/{pending.id}/retry", json={})
@@ -253,14 +369,248 @@ def test_postgres_mcp_mutation_routes_fail_closed_without_sqlite_projection(
     assert resolved.status_code == 503
 
     with connect() as connection:
-        assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 1
-        assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 1
-        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 0
-        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 2
+        assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 2
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 1
     assert store.mcp_pending_requests == before_pending
     assert store.approval_requests == before_approvals
     assert {event.id for event in store.audit_events} == before_audits
     assert mcp_gateway_routes.child_received_count_for_test() == before_child_calls
+
+
+def test_postgres_mcp_oversized_arguments_are_rejected_before_repository_access(
+    postgres_mcp_pending_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, _workspace, project, _user, _pending = postgres_mcp_pending_route_runtime
+    with connect() as connection:
+        before_counts = {
+            table: connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in ("mcp_pending_requests", "approval_requests", "audit_events", "notifications")
+        }
+    before_sqlite_pending = dict(store.mcp_pending_requests)
+    before_sqlite_approvals = dict(store.approval_requests)
+    monkeypatch.setattr(
+        mcp_gateway_routes,
+        "_postgres_pending_repository_for_request",
+        lambda _request: pytest.fail("oversized arguments reached PostgreSQL repository selection"),
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": "oversized-call"},
+        json={
+            "project_id": project.id,
+            "request": {
+                "server_name": "test-child",
+                "tool_name": "write_file",
+                "arguments": {"large": "x" * mcp_gateway_routes.MAX_MCP_ARGUMENTS_BYTES},
+                "mutating": True,
+            },
+        },
+    )
+    assert response.status_code == 413, response.text
+    with connect() as connection:
+        after_counts = {
+            table: connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in before_counts
+        }
+    assert after_counts == before_counts
+    assert store.mcp_pending_requests == before_sqlite_pending
+    assert store.approval_requests == before_sqlite_approvals
+
+
+@pytest.mark.parametrize("failed_table", ["audit_events", "notifications"])
+def test_postgres_mcp_submission_rolls_back_all_rows_when_audit_or_notification_insert_fails(
+    postgres_mcp_pending_route_runtime,
+    failed_table: str,
+) -> None:
+    connect, _workspace, project, _user, _pending = postgres_mcp_pending_route_runtime
+    # Table is selected from a fixed test-only allowlist above.
+    with connect() as connection:
+        connection.execute(
+            f"CREATE FUNCTION fail_mcp_insert() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            f"BEGIN RAISE EXCEPTION 'forced {failed_table} insert failure'; END $$"
+        )
+        connection.execute(
+            f"CREATE TRIGGER fail_mcp_insert BEFORE INSERT ON {failed_table} "
+            "FOR EACH ROW EXECUTE FUNCTION fail_mcp_insert()"
+        )
+    client = TestClient(main.app)
+    response = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": f"rollback-{failed_table}"},
+        json={
+            "project_id": project.id,
+            "request": {
+                "server_name": "test-child",
+                "tool_name": "write_file",
+                "arguments": {"path": "atomic.txt"},
+                "requested_by": "test",
+                "mutating": True,
+            },
+        },
+    )
+    assert response.status_code == 503
+    with connect() as connection:
+        assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 0
+
+
+def test_postgres_mcp_concurrent_idempotent_submissions_create_one_complete_record_set(
+    postgres_mcp_pending_route_runtime,
+) -> None:
+    connect, _workspace, project, _user, _pending = postgres_mcp_pending_route_runtime
+    barrier = Barrier(2)
+    payload = {
+        "project_id": project.id,
+        "request": {
+            "server_name": "test-child",
+            "tool_name": "write_file",
+            "arguments": {"path": "concurrent.txt"},
+            "requested_by": "test",
+            "mutating": True,
+        },
+    }
+    client = TestClient(main.app)
+
+    def submit() -> object:
+        barrier.wait(timeout=5)
+        return client.post(
+            "/mcp-gateway/requests",
+            headers={"Idempotency-Key": "concurrent-mcp-call"},
+            json=payload,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda _index: submit(), range(2)))
+    assert [response.status_code for response in responses] == [200, 200], [response.text for response in responses]
+    bodies = [response.json() for response in responses]
+    assert bodies[0]["approval_request_id"] == bodies[1]["approval_request_id"]
+    with connect() as connection:
+        assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 2
+        assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 2
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 1
+
+
+def test_postgres_mcp_idempotency_key_isolated_between_workspaces(
+    postgres_mcp_pending_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, _workspace_a, _project_a, user_a, _pending = postgres_mcp_pending_route_runtime
+    workspace_b = Workspace(
+        id=f"workspace_{uuid.uuid4().hex}",
+        name="Second MCP workspace",
+        owner_user_id=f"user_{uuid.uuid4().hex}",
+    )
+    project_b = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Second MCP project",
+        workspace_id=workspace_b.id,
+    )
+    user_b = AuthUser(
+        id=workspace_b.owner_user_id,
+        email=f"mcp-owner-{uuid.uuid4().hex}@example.test",
+        display_name="Second MCP Owner",
+        role=UserRole.OWNER,
+        workspace_id=workspace_b.id,
+    )
+    persisted_user_b = User(
+        id=user_b.id,
+        email=user_b.email,
+        display_name=user_b.display_name,
+        role=user_b.role,
+        password_hash="test-password-hash",
+        password_salt="test-password-salt",
+        workspace_id=workspace_b.id,
+        email_verified=True,
+    )
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+            (workspace_b.id, Jsonb(workspace_b.model_dump(mode="json"))),
+        )
+        connection.execute(
+            "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+            "VALUES(%s,%s,%s,%s,%s,FALSE,TRUE,%s)",
+            (
+                persisted_user_b.id,
+                workspace_b.id,
+                persisted_user_b.email,
+                persisted_user_b.email.lower(),
+                persisted_user_b.role.value,
+                Jsonb(persisted_user_b.model_dump(mode="json")),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project_b.id, workspace_b.id, Jsonb(project_b.model_dump(mode="json"))),
+        )
+    for dependency in (mcp_gateway_routes.ReviewerDependency, mcp_gateway_routes.MaintainerDependency):
+        monkeypatch.setitem(main.app.dependency_overrides, dependency.dependency, lambda: user_a)
+    client = TestClient(main.app)
+    body = {
+        "project_id": _project_a.id,
+        "request": {"server_name": "test-child", "tool_name": "write_file", "arguments": {"path": "same.txt"}, "mutating": True},
+    }
+    first = client.post("/mcp-gateway/requests", headers={"Idempotency-Key": "shared-key"}, json=body)
+    assert first.status_code == 200, first.text
+    for dependency in (mcp_gateway_routes.ReviewerDependency, mcp_gateway_routes.MaintainerDependency):
+        monkeypatch.setitem(main.app.dependency_overrides, dependency.dependency, lambda: user_b)
+    body["project_id"] = project_b.id
+    second = client.post("/mcp-gateway/requests", headers={"Idempotency-Key": "shared-key"}, json=body)
+    assert second.status_code == 200, second.text
+    assert second.json()["approval_request_id"] != first.json()["approval_request_id"]
+    with connect() as connection:
+        assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 3
+        assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 3
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 2
+        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 2
+
+
+def test_postgres_mcp_pending_primary_key_race_rolls_back_the_losing_approval(
+    postgres_mcp_pending_route_runtime,
+) -> None:
+    connect, _workspace, project, _user, _pending = postgres_mcp_pending_route_runtime
+    with connect() as connection:
+        connection.execute(
+            "CREATE FUNCTION duplicate_mcp_pending_before_insert() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ BEGIN "
+            "IF pg_trigger_depth() > 1 THEN RETURN NEW; END IF; "
+            "INSERT INTO mcp_pending_requests(pending_id,approval_id,project_id,workspace_id,status,attempts,"
+            "lease_expires_at,created_at,updated_at,payload) VALUES(NEW.pending_id,NEW.approval_id,"
+            "NEW.project_id,NEW.workspace_id,NEW.status,NEW.attempts,NEW.lease_expires_at,NEW.created_at,"
+            "NEW.updated_at,NEW.payload); RETURN NEW; END $$"
+        )
+        connection.execute(
+            "CREATE TRIGGER duplicate_mcp_pending_before_insert BEFORE INSERT ON mcp_pending_requests "
+            "FOR EACH ROW EXECUTE FUNCTION duplicate_mcp_pending_before_insert()"
+        )
+    client = TestClient(main.app)
+    response = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": "forced-pending-pk-race"},
+        json={
+            "project_id": project.id,
+            "request": {
+                "server_name": "test-child",
+                "tool_name": "write_file",
+                "arguments": {"path": "rollback.txt"},
+                "requested_by": "test",
+                "mutating": True,
+            },
+        },
+    )
+    assert response.status_code == 409, response.text
+    with connect() as connection:
+        assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 0
 
 
 def test_postgres_mcp_retry_dead_letter_is_atomic_and_idempotent(

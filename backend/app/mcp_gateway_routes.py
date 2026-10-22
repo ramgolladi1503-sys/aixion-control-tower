@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from datetime import datetime
 from typing import TypeVar
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 import psycopg
+from psycopg.errors import UniqueViolation
 from pydantic import BaseModel, Field
 
 from .auth import require_maintainer, require_reviewer
 from .approval_decisions import approval_decision_repository
 from .mcp_child_router import MCPChildServerRouter
 from .mcp_gateway import (
+    MCP_MUTATING_TOOL_NAMES,
     MCP_PENDING_FORWARD_OUTCOME_UNKNOWN,
     MCPGatewayApprovalDecisionLayer,
     MCPGatewayDecision,
@@ -22,7 +26,20 @@ from .mcp_pending_repository import (
     MCPPendingRepositoryError,
 )
 from .application_repository_access import workspace_id_for_request
-from .models import AuditEvent, AuthUser, MCPPendingRequest, MCPPendingStatus, now_utc
+from .models import (
+    AgentProvider,
+    ApprovalRequest,
+    ApprovalStatus,
+    AuditEvent,
+    AuthUser,
+    FileChange,
+    MCPPendingRequest,
+    MCPPendingStatus,
+    Notification,
+    RiskAssessment,
+    RiskLevel,
+    now_utc,
+)
 from .store import store
 from .settings import get_settings
 from .workspace_access import (
@@ -40,6 +57,7 @@ _child_router = MCPChildServerRouter()
 _gateways: dict[str, MCPGatewayApprovalDecisionLayer] = {}
 MCP_PENDING_RETRIED = "MCP_PENDING_RETRIED"
 MCP_PENDING_LEASE_RELEASED = "MCP_PENDING_LEASE_RELEASED"
+MAX_MCP_ARGUMENTS_BYTES = 48 * 1024
 
 
 class GatewaySubmitRequest(BaseModel):
@@ -169,10 +187,14 @@ def _postgres_pending_repository_for_request(request: Request):
             detail="PostgreSQL MCP pending repository is not bound to the active runtime",
         )
     repository = getattr(repositories, "mcp_pending_requests", None)
-    if repository is None:
+    if (
+        repository is None
+        or getattr(repositories, "projects", None) is None
+        or getattr(repositories, "approval_decisions", None) is None
+    ):
         raise HTTPException(
             status_code=503,
-            detail="PostgreSQL MCP pending repository is unavailable",
+            detail="PostgreSQL MCP submission repository bundle is incomplete",
         )
     return repository
 
@@ -198,6 +220,181 @@ def _require_local_mcp_write_runtime(request: Request) -> None:
             status_code=503,
             detail="MCP request submission and forwarding are unavailable in PostgreSQL runtime",
         )
+
+
+def _postgres_mcp_submission(
+    *,
+    payload: GatewaySubmitRequest,
+    user: AuthUser,
+    request: Request,
+    idempotency_key: str | None,
+) -> MCPGatewayDecision:
+    repository = _postgres_pending_repository_for_request(request)
+    if repository is None:
+        raise HTTPException(status_code=503, detail="PostgreSQL MCP pending repository is unavailable")
+    if idempotency_key is None or not idempotency_key.strip():
+        raise HTTPException(status_code=400, detail="Idempotency-Key header is required for PostgreSQL MCP submissions")
+    key = idempotency_key.strip()
+    if len(key) > 256:
+        raise HTTPException(status_code=400, detail="Idempotency-Key must contain at most 256 characters")
+
+    call = payload.request
+    mutating = call.mutating if call.mutating is not None else call.tool_name in MCP_MUTATING_TOOL_NAMES
+    if not mutating:
+        # Non-mutating calls are currently forwarded by the process-local test
+        # child router. Never execute them via that projection in PostgreSQL mode.
+        raise HTTPException(status_code=503, detail="PostgreSQL MCP non-mutating forwarding is unavailable")
+
+    try:
+        workspace_id = workspace_id_for_request(user, request)
+    except (RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP submission workspace is unavailable") from error
+    if workspace_id is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        project = request.app.state.postgres_repositories.projects.get(payload.project_id)
+    except (RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP submission project data is unavailable") from error
+    if project is None or project.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # A deterministic pending primary key gives this route an idempotency
+    # constraint without fabricating a source_agent_id: PostgreSQL requires
+    # non-null source_agent_id values to reference a registered external agent.
+    key_digest = hashlib.sha256(f"{workspace_id}\0{user.id}\0{key}".encode()).hexdigest()
+    idempotent_pending_id = f"mcp_pending_{key_digest}"
+
+    def read_existing_submission() -> tuple[ApprovalRequest, MCPPendingRequest] | None:
+        existing_pending = repository.get(idempotent_pending_id)
+        if existing_pending is None:
+            return None
+        existing_approval = request.app.state.postgres_repositories.approval_decisions.get(
+            existing_pending.approval_request_id
+        )
+        if (
+            existing_approval is None
+            or existing_approval.workspace_id != workspace_id
+            or existing_approval.project_id != existing_pending.project_id
+            or existing_pending.workspace_id != workspace_id
+        ):
+            raise MCPPendingRepositoryError("Stored idempotent MCP request has inconsistent approval scope")
+        return existing_approval, existing_pending
+
+    def response_for_existing(
+        existing: tuple[ApprovalRequest, MCPPendingRequest],
+    ) -> MCPGatewayDecision:
+        approval, pending = existing
+        same_call = (
+            approval.project_id == project.id
+            and pending.server_name == call.server_name
+            and pending.tool_name == call.tool_name
+            and pending.arguments == call.arguments
+            and pending.session_id == call.session_id
+            and pending.requested_by == call.requested_by
+        )
+        if not same_call:
+            raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different MCP request")
+        return MCPGatewayDecision(
+            forwarded=False,
+            approval_required=True,
+            approval_request_id=approval.id,
+            status=approval.status,
+            reason="MCP submission already exists for this idempotency key.",
+        )
+
+    try:
+        existing = read_existing_submission()
+    except (MCPPendingRepositoryError, RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP idempotency state is unavailable") from error
+    if existing is not None:
+        return response_for_existing(existing)
+
+    approval = ApprovalRequest(
+        project_id=project.id,
+        workspace_id=workspace_id,
+        title=f"Approve MCP tool call: {call.tool_name}",
+        summary=f"Gateway intercepted mutating MCP call for {call.server_name}.{call.tool_name}",
+        agent_name="mcp-gateway",
+        target_branch=f"mcp-gateway/{call.tool_name}",
+        files=[FileChange(
+            path=f"mcp://{call.server_name}/{call.tool_name}",
+            change_type="mcp_tool_call",
+            diff=f"MCP mutating tool call requires approval: {call.model_dump()}",
+            new_content=str(call.model_dump(mode="json")),
+        )],
+        test_plan=["MCP gateway must forward only after approval."],
+        rollback_plan="Deny or expire the approval; the child MCP server receives nothing.",
+        risk=RiskAssessment(level=RiskLevel.HIGH, reasons=["Mutating MCP tool call intercepted by gateway."]),
+        status=ApprovalStatus.REQUESTED,
+        source_provider=AgentProvider.OTHER,
+        source_agent_name="mcp-gateway",
+        source_session_id=call.session_id,
+        created_by_user_id=user.id,
+        verified_source=True,
+    )
+    pending = MCPPendingRequest(
+        id=idempotent_pending_id,
+        project_id=project.id,
+        workspace_id=workspace_id,
+        approval_request_id=approval.id,
+        server_name=call.server_name,
+        tool_name=call.tool_name,
+        arguments=call.arguments,
+        session_id=call.session_id,
+        requested_by=call.requested_by,
+    )
+    audit_event = AuditEvent(
+        event_type="mcp.approval_requested",
+        actor=user.email,
+        entity_id=approval.id,
+        workspace_id=workspace_id,
+        details={
+            "server_name": call.server_name,
+            "tool_name": call.tool_name,
+            "mutating": True,
+            "mcp_pending_request_id": pending.id,
+            "project_id": project.id,
+            "idempotency_key_present": True,
+        },
+    )
+    notification = Notification(
+        title="MCP approval required",
+        body=f"{call.server_name}.{call.tool_name} is waiting for approval.",
+        entity_type="approval_request",
+        entity_id=approval.id,
+        approval_request_id=approval.id,
+        workspace_id=workspace_id,
+        user_id=user.id,
+    )
+    try:
+        repository.create_request(
+            approval=approval,
+            pending=pending,
+            audit_event=audit_event,
+            notification=notification,
+        )
+    except UniqueViolation as error:
+        # The deterministic pending primary key closes the concurrent
+        # idempotency race. Its enclosing transaction rolls back the approval
+        # insert before we re-read and verify the winning request.
+        try:
+            existing = read_existing_submission()
+        except (MCPPendingRepositoryError, RuntimeError, psycopg.Error) as read_error:
+            raise HTTPException(status_code=503, detail="MCP idempotency state is unavailable") from read_error
+        if existing is None:
+            raise HTTPException(status_code=409, detail="MCP request conflicts with an existing record") from error
+        return response_for_existing(existing)
+    except MCPPendingRepositoryConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except (MCPPendingRepositoryError, RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP approval request could not be persisted") from error
+    return MCPGatewayDecision(
+        forwarded=False,
+        approval_required=True,
+        approval_request_id=approval.id,
+        status=approval.status,
+        reason="Mutating MCP tool call is waiting for mobile approval.",
+    )
 
 
 def _audit_pending_recovery(event_type: str, pending: MCPPendingRequest, details: dict, actor: str) -> None:
@@ -263,9 +460,30 @@ def submit_gateway_request(
     payload: GatewaySubmitRequest,
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> MCPGatewayDecision:
+    try:
+        serialized_arguments = json.dumps(
+            payload.request.arguments,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as error:
+        raise HTTPException(status_code=400, detail="MCP tool arguments must be valid JSON data") from error
+    if len(serialized_arguments) > MAX_MCP_ARGUMENTS_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Serialized MCP tool arguments exceed the 48 KiB approval limit",
+        )
     if request is not None:
-        _require_local_mcp_write_runtime(request)
+        repository = _postgres_pending_repository_for_request(request)
+        if repository is not None:
+            return _postgres_mcp_submission(
+                payload=payload,
+                user=user,
+                request=request,
+                idempotency_key=idempotency_key,
+            )
     workspace_id = workspace_id_for_user(user)
     if workspace_id is not None and project_workspace_id(payload.project_id) != workspace_id:
         raise HTTPException(status_code=404, detail="Project not found")
