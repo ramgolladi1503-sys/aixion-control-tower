@@ -46,7 +46,6 @@ from .agent_run_supervisor import (
 )
 from .agent_run_trust import (
     AgentRunTrustConflict,
-    SIDE_EFFECT_STEPS,
     attach_capability_lease,
     authorize_run_step,
     consume_run_step_actions,
@@ -661,8 +660,12 @@ def execute_run_next_step(
                 ),
             )
         try:
+            postgres_scope_only = (
+                isinstance(run_repository, PostgresAgentRunRepository)
+                and current_step.step_type == AgentRunStepType.VALIDATE_SCOPE
+            )
             trust_actions = []
-            if current_step.step_type in SIDE_EFFECT_STEPS:
+            if not postgres_scope_only:
                 ensure_run_capability(run, user=user)
                 trust_actions = authorize_run_step(
                     run,
