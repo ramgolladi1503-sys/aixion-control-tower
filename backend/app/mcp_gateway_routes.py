@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
+from typing import TypeVar
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+import psycopg
 from pydantic import BaseModel, Field
 
 from .auth import require_maintainer, require_reviewer
@@ -14,8 +17,11 @@ from .mcp_gateway import (
     MCPGatewayDecision,
     MCPGatewayToolCall,
 )
+from .mcp_pending_repository import MCPPendingRepositoryError
+from .application_repository_access import workspace_id_for_request
 from .models import AuditEvent, AuthUser, MCPPendingRequest, MCPPendingStatus, now_utc
 from .store import store
+from .settings import get_settings
 from .workspace_access import (
     approval_scope_is_consistent,
     project_workspace_id,
@@ -25,6 +31,7 @@ from .workspace_access import (
 router = APIRouter(prefix="/mcp-gateway", tags=["mcp-gateway"])
 ReviewerDependency = Depends(require_reviewer)
 MaintainerDependency = Depends(require_maintainer)
+ReadResult = TypeVar("ReadResult")
 
 _child_router = MCPChildServerRouter()
 _gateways: dict[str, MCPGatewayApprovalDecisionLayer] = {}
@@ -131,6 +138,65 @@ def _pending_requests_for_project(project_id: str | None) -> list[MCPPendingRequ
     return requests
 
 
+def _postgres_pending_repository_for_request(request: Request):
+    """Return the app-owned PostgreSQL adapter, or None for local SQLite mode.
+
+    A partially initialized PostgreSQL runtime is an error. Falling through to
+    the process-local store in that state could disclose stale or incomplete
+    approval data.
+    """
+    state = request.app.state
+    runtime = getattr(state, "postgres_runtime", None)
+    repositories = getattr(state, "postgres_repositories", None)
+    if not get_settings().postgres_auth_enabled:
+        if runtime is not None or repositories is not None:
+            raise HTTPException(
+                status_code=503,
+                detail="MCP PostgreSQL reads require PostgreSQL-backed authentication",
+            )
+        return None
+    if runtime is None or repositories is None:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL MCP pending repository runtime is unavailable",
+        )
+    if getattr(runtime, "repositories", None) is not repositories:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL MCP pending repository is not bound to the active runtime",
+        )
+    repository = getattr(repositories, "mcp_pending_requests", None)
+    if repository is None:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL MCP pending repository is unavailable",
+        )
+    return repository
+
+
+def _postgres_pending_read(operation: Callable[[], ReadResult]) -> ReadResult:
+    try:
+        return operation()
+    except (MCPPendingRepositoryError, RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP pending request data is unavailable") from error
+
+
+def _pending_read_workspace_id(user: AuthUser, request: Request | None) -> str | None:
+    try:
+        return workspace_id_for_request(user, request) if request is not None else workspace_id_for_user(user)
+    except (RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP pending request workspace is unavailable") from error
+
+
+def _require_local_mcp_write_runtime(request: Request) -> None:
+    """Keep process-local MCP mutations disabled under a PostgreSQL runtime."""
+    if _postgres_pending_repository_for_request(request) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="MCP request submission and forwarding are unavailable in PostgreSQL runtime",
+        )
+
+
 def _audit_pending_recovery(event_type: str, pending: MCPPendingRequest, details: dict, actor: str) -> None:
     store.audit_events.append(
         AuditEvent(
@@ -193,7 +259,10 @@ def _pending_health_summary(requests: list[MCPPendingRequest]) -> MCPPendingHeal
 def submit_gateway_request(
     payload: GatewaySubmitRequest,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> MCPGatewayDecision:
+    if request is not None:
+        _require_local_mcp_write_runtime(request)
     workspace_id = workspace_id_for_user(user)
     if workspace_id is not None and project_workspace_id(payload.project_id) != workspace_id:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -206,13 +275,26 @@ def list_pending_gateway_requests(
     status: MCPPendingStatus | None = Query(default=None),
     approval_request_id: str | None = Query(default=None),
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> list[MCPPendingRequest]:
-    requests = _pending_requests_for_project(project_id)
-    workspace_id = workspace_id_for_user(user)
+    repository = _postgres_pending_repository_for_request(request) if request is not None else None
+    workspace_id = _pending_read_workspace_id(user, request)
+    if repository is not None:
+        if workspace_id is None:
+            raise HTTPException(status_code=404, detail="MCP pending request not found")
+        requests = _postgres_pending_read(
+            lambda: repository.list_for_workspace(
+                workspace_id,
+                project_id=project_id,
+                status=status,
+                approval_id=approval_request_id,
+            )
+        )
+        return requests
+
     requests = [
-        request
-        for request in requests
-        if _pending_belongs_to_workspace(request, workspace_id)
+        pending for pending in _pending_requests_for_project(project_id)
+        if _pending_belongs_to_workspace(pending, workspace_id)
     ]
     if status is not None:
         requests = [request for request in requests if request.status == status]
@@ -225,8 +307,17 @@ def list_pending_gateway_requests(
 def pending_gateway_health(
     project_id: str | None = Query(default=None),
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> MCPPendingHealthSummary:
-    workspace_id = workspace_id_for_user(user)
+    repository = _postgres_pending_repository_for_request(request) if request is not None else None
+    workspace_id = _pending_read_workspace_id(user, request)
+    if repository is not None:
+        if workspace_id is None:
+            raise HTTPException(status_code=404, detail="MCP pending request not found")
+        requests = _postgres_pending_read(
+            lambda: repository.list_for_workspace(workspace_id, project_id=project_id)
+        )
+        return _pending_health_summary(requests)
     if workspace_id is None and project_id is not None and project_id not in store.projects:
         raise HTTPException(status_code=404, detail="Project not found")
     return _pending_health_summary([
@@ -239,7 +330,17 @@ def pending_gateway_health(
 def get_pending_gateway_request(
     pending_request_id: str,
     user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> MCPPendingRequest:
+    repository = _postgres_pending_repository_for_request(request) if request is not None else None
+    if repository is not None:
+        workspace_id = _pending_read_workspace_id(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=404, detail="MCP pending request not found")
+        pending = _postgres_pending_read(lambda: repository.get(pending_request_id))
+        if pending is None or pending.workspace_id != workspace_id:
+            raise HTTPException(status_code=404, detail="MCP pending request not found")
+        return pending
     return _pending_for_user(pending_request_id, user)
 
 
@@ -248,7 +349,10 @@ def retry_pending_gateway_request(
     pending_request_id: str,
     payload: PendingRetryRequest | None = None,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> MCPPendingRequest:
+    if request is not None:
+        _require_local_mcp_write_runtime(request)
     pending = _pending_for_user(pending_request_id, user)
     payload = payload or PendingRetryRequest()
     previous_status = pending.status
@@ -303,7 +407,10 @@ def retry_pending_gateway_request(
 def resolve_gateway_request(
     approval_request_id: str,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> MCPGatewayDecision:
+    if request is not None:
+        _require_local_mcp_write_runtime(request)
     approval = approval_decision_repository.get(approval_request_id)
     if not approval or not approval_scope_is_consistent(approval):
         raise HTTPException(status_code=404, detail="Approval request not found")

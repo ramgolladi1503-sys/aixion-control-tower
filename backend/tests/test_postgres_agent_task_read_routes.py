@@ -334,3 +334,187 @@ def test_task_linked_approval_fails_closed_for_mixed_repository_profiles(
 
     assert response.status_code == 503
     assert response.json()["detail"] == "Approval and AgentTask persistence adapters are not aligned"
+
+
+def _bind_postgres_agent_task_runtime(
+    connect: Callable[[], Connection],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = ApplicationRepositories.from_connector(connect)
+    monkeypatch.setattr(main.app.state, "postgres_repositories", repositories, raising=False)
+    monkeypatch.setattr(
+        "app.application_repository_access.get_settings",
+        lambda: SimpleNamespace(auth_enabled=True, postgres_auth_enabled=True),
+    )
+
+
+def _create_postgres_task_with_pending_approval(
+    client: TestClient,
+    project: Project,
+) -> tuple[dict, str]:
+    task_response = client.post("/agent/tasks", json={
+        "provider": "MANUAL", "project_id": project.id,
+        "title": "Task to cancel", "goal": "Cancel task and linked approval atomically",
+        "requested_action": "CREATE_WORK_ORDER", "requires_approval": True,
+    })
+    assert task_response.status_code == 200, task_response.text
+    task = task_response.json()
+    approval_response = client.post(f"/agent/tasks/{task['id']}/approval", json={
+        "project_id": project.id,
+        "title": "Approval to cancel",
+        "summary": "The task and approval must be cancelled in one transaction.",
+        "target_branch": "feature/cancel-route-test",
+        "files": [{"path": "src/cancel.txt", "change_type": "modified", "diff": "-old\n+new"}],
+    })
+    assert approval_response.status_code == 200, approval_response.text
+    return task, approval_response.json()["id"]
+
+
+def test_postgres_cancel_route_atomically_cancels_task_approval_audits_and_notification(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    _bind_postgres_agent_task_runtime(connect, monkeypatch)
+    before_task_ids = set(store.agent_tasks)
+    before_event_ids = set(store.agent_task_events)
+    before_approval_ids = set(store.approval_requests)
+    before_audit_ids = {event.id for event in store.audit_events}
+    before_notification_ids = set(store.notifications)
+    client = TestClient(main.app)
+    task, approval_id = _create_postgres_task_with_pending_approval(client, project)
+    with connect() as conn:
+        notifications_before = conn.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s", (approval_id,)
+        ).fetchone()[0]
+
+    response = client.post(f"/agent/tasks/{task['id']}/cancel", json={"reason": "operator request"})
+
+    assert response.status_code == 200, response.text
+    event = response.json()
+    assert event["event_type"] == "CANCELLED"
+    assert event["metadata"]["approval_decision_changed"] is True
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task["id"], workspace.id),
+        ).fetchone() == ("CANCELLED",)
+        assert conn.execute(
+            "SELECT status FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (approval_id, workspace.id),
+        ).fetchone() == ("CANCELLED",)
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s AND event_type='CANCELLED'",
+            (task["id"],),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT event_type,entity_type,entity_id FROM audit_events "
+            "WHERE workspace_id=%s AND entity_id IN (%s,%s) "
+            "AND event_type IN ('approval.cancelled','agent_task.cancelled') ORDER BY entity_type",
+            (workspace.id, task["id"], approval_id),
+        ).fetchall() == [
+            ("agent_task.cancelled", "agent_task", task["id"]),
+            ("approval.cancelled", "approval_request", approval_id),
+        ]
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s AND workspace_id=%s",
+            (approval_id, workspace.id),
+        ).fetchone()[0] == notifications_before + 1
+    assert set(store.agent_tasks) == before_task_ids
+    assert set(store.agent_task_events) == before_event_ids
+    assert set(store.approval_requests) == before_approval_ids
+    assert {event.id for event in store.audit_events} == before_audit_ids
+    assert set(store.notifications) == before_notification_ids
+
+
+def test_postgres_cancel_route_rolls_back_all_records_when_notification_insert_fails(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    _bind_postgres_agent_task_runtime(connect, monkeypatch)
+    client = TestClient(main.app, raise_server_exceptions=False)
+    task, approval_id = _create_postgres_task_with_pending_approval(client, project)
+    with connect() as conn:
+        notifications_before = conn.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s", (approval_id,)
+        ).fetchone()[0]
+        conn.execute("""
+            CREATE FUNCTION reject_cancel_notification() RETURNS trigger AS $$
+            BEGIN
+                IF NEW.payload->>'body' LIKE '%linked agent task was cancelled%' THEN
+                    RAISE EXCEPTION 'injected notification failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
+        conn.execute("""
+            CREATE TRIGGER reject_cancel_notification_insert
+            BEFORE INSERT ON notifications FOR EACH ROW
+            EXECUTE FUNCTION reject_cancel_notification()
+        """)
+
+    response = client.post(f"/agent/tasks/{task['id']}/cancel", json={"reason": "rollback test"})
+
+    assert response.status_code == 500
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task["id"], workspace.id),
+        ).fetchone() == ("WAITING_FOR_APPROVAL",)
+        assert conn.execute(
+            "SELECT status FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (approval_id, workspace.id),
+        ).fetchone() in (("REQUESTED",), ("PENDING_REVIEW",))
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s AND event_type='CANCELLED'",
+            (task["id"],),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id IN (%s,%s) "
+            "AND event_type IN ('agent_task.cancelled','approval.cancelled')",
+            (task["id"], approval_id),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()[0] == notifications_before
+
+
+def test_postgres_cancel_route_refuses_task_with_active_run_without_projection(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    _bind_postgres_agent_task_runtime(connect, monkeypatch)
+    client = TestClient(main.app)
+    task, approval_id = _create_postgres_task_with_pending_approval(client, project)
+    decision = client.post(f"/approvals/{approval_id}/decision", json={"decision": "approve"})
+    assert decision.status_code == 200, decision.text
+    task_repository = main.app.state.agent_task_repository
+    run_repository = main.app.state.agent_run_repository
+    run = run_repository.get_active_for_task(task["id"])
+    assert run is not None
+    before_task = task_repository.get(task["id"])
+    before_event_ids = {event.id for event in task_repository.list_events(task["id"])}
+    before_audit_ids = {event.id for event in store.audit_events}
+
+    response = client.post(f"/agent/tasks/{task['id']}/cancel", json={"reason": "must refuse active run"})
+
+    assert response.status_code == 409
+    assert "Cancel or reconcile the run first" in response.json()["detail"]
+    assert task_repository.get(task["id"]) == before_task
+    assert {event.id for event in task_repository.list_events(task["id"])} == before_event_ids
+    assert run_repository.get_active_for_task(task["id"]) == run
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task["id"], workspace.id),
+        ).fetchone() == ("APPROVED",)
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_type='agent_task' "
+            "AND entity_id=%s AND event_type='agent_task.cancelled'",
+            (workspace.id, task["id"]),
+        ).fetchone()[0] == 0
+    assert {event.id for event in store.audit_events} == before_audit_ids

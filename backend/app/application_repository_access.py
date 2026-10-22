@@ -93,7 +93,17 @@ def audit_event_repository_for_request(request: _RequestState | None) -> AuditEv
 
 
 def project_repository_for_request(request: _RequestState | None) -> ProjectRepository:
-    """Return the project adapter explicitly bound to this FastAPI application."""
+    """Return the project adapter selected by this application's auth runtime.
+
+    PostgreSQL-backed account authentication makes the lifespan-owned durable
+    repository bundle the authority for projects too. There is deliberately no
+    fallback to the legacy app binding in that mode, because that binding may
+    still point at SQLite. Local and test configurations continue to use their
+    explicitly app-bound adapter.
+    """
+    if get_settings().postgres_auth_enabled:
+        return application_repositories_for_request(request).projects
+
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
     repository = getattr(state, "project_repository", None)
