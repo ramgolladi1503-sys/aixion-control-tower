@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
+from .agent_run_models import AgentRun, AgentRunStep
 from .trust_action_authorization_models import (
     ActionAuthorization,
     ActionAuthorizationDecision,
@@ -79,6 +80,106 @@ class PostgresTrustRepository:
     def _require_scope(workspace_id: str) -> None:
         if not workspace_id:
             raise ValueError("PostgreSQL trust operations require a workspace")
+
+    def lock_agent_run_action_binding(
+        self,
+        conn: Connection,
+        *,
+        action_id: str,
+        workspace_id: str,
+        run_id: str,
+        step_id: str,
+    ) -> ProposedAction:
+        """Lock and validate run → step → action identity in one transaction.
+
+        Lock order is run, step, action, policy/authorization, then capability
+        lease. This method validates identity only; it does not authorize or
+        execute a side effect. Callers still need authenticated membership at
+        the route boundary and must keep the AgentRun execution route disabled
+        until all state and worker effects share a reviewed transaction.
+        """
+        self._require_scope(workspace_id)
+        if not run_id or not step_id or conn.autocommit:
+            raise ValueError("AgentRun action binding requires a transaction and exact identity")
+
+        run_row = conn.execute(
+            "SELECT run_id,workspace_id,task_id,project_id,status,current_step_id,updated_at,payload "
+            "FROM agent_runs WHERE run_id=%s AND workspace_id=%s FOR UPDATE",
+            (run_id, workspace_id),
+        ).fetchone()
+        if run_row is None:
+            raise PostgresTrustRepositoryConflict(
+                "AgentRun is not visible in this workspace"
+            )
+        try:
+            run = AgentRun.model_validate(run_row[7])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored AgentRun payload is invalid") from error
+        if (
+            run.id != run_row[0]
+            or run.workspace_id != run_row[1]
+            or run.task_id != run_row[2]
+            or run.project_id != run_row[3]
+            or run.status.value != run_row[4]
+            or run.current_step_id != run_row[5]
+            or run.updated_at != run_row[6]
+        ):
+            raise PostgresTrustRepositoryError(
+                "Stored AgentRun identity or indexed state is inconsistent"
+            )
+        if run.current_step_id != step_id:
+            raise PostgresTrustRepositoryConflict(
+                "AgentRun current step does not match the requested action step"
+            )
+
+        step_row = conn.execute(
+            "SELECT step_id,run_id,task_id,workspace_id,sequence,status,updated_at,payload "
+            "FROM agent_run_steps WHERE step_id=%s AND workspace_id=%s FOR UPDATE",
+            (step_id, workspace_id),
+        ).fetchone()
+        if step_row is None:
+            raise PostgresTrustRepositoryConflict(
+                "AgentRun step is not visible in this workspace"
+            )
+        try:
+            step = AgentRunStep.model_validate(step_row[7])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored AgentRun step payload is invalid") from error
+        if (
+            step.id != step_row[0]
+            or step.run_id != step_row[1]
+            or step.task_id != step_row[2]
+            or step.sequence != step_row[4]
+            or step.status.value != step_row[5]
+            or step.updated_at != step_row[6]
+            or step_row[1] != run.id
+            or step_row[2] != run.task_id
+            or step_row[3] != workspace_id
+        ):
+            raise PostgresTrustRepositoryError(
+                "Stored AgentRun step identity or scope is inconsistent"
+            )
+
+        action = self.get_proposed_action(
+            conn, action_id, workspace_id, for_update=True
+        )
+        if action is None:
+            raise PostgresTrustRepositoryConflict("Proposed action not found")
+        metadata = action.metadata
+        if (
+            action.workspace_id != workspace_id
+            or action.run_id != run.id
+            or action.task_id != run.task_id
+            or action.project_id != run.project_id
+            or action.lease_id != run.capability_lease_id
+            or metadata.get("step_id") != step.id
+            or metadata.get("step_type") != step.step_type.value
+            or metadata.get("idempotency_key") != step.idempotency_key
+        ):
+            raise PostgresTrustRepositoryConflict(
+                "Proposed action does not match the durable AgentRun step identity"
+            )
+        return action
 
     def metrics_snapshot(
         self,
@@ -1277,3 +1378,42 @@ class PostgresTrustRepository:
             },
         )
         return consumption
+
+    def consume_agent_run_action(
+        self,
+        conn: Connection,
+        *,
+        action_id: str,
+        workspace_id: str,
+        run_id: str,
+        step_id: str,
+        consumption: ActionConsumption,
+        actor: str,
+        now: datetime,
+    ) -> ActionConsumption:
+        """Consume an action only when its durable run and step binding matches.
+
+        This primitive deliberately does not advance an AgentRun or authorize a
+        worker side effect. The authenticated route must verify membership.
+        Callers must join it to run transitions and worker effects in a
+        separately reviewed transaction before enabling execution. Locks use
+        run → step → action → policy/authorization → capability lease order.
+        """
+        self._require_scope(workspace_id)
+        if not run_id or not step_id:
+            raise ValueError("AgentRun action consumption requires run and step identity")
+        self.lock_agent_run_action_binding(
+            conn,
+            action_id=action_id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            step_id=step_id,
+        )
+        return self.consume_effective_action(
+            conn,
+            action_id=action_id,
+            workspace_id=workspace_id,
+            consumption=consumption,
+            actor=actor,
+            now=now,
+        )

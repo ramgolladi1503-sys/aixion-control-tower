@@ -97,13 +97,23 @@ def test_real_codex_permission_hook_allows_only_after_durable_phone_decision(
     try:
         _wait_for_api(api_process, base_url)
         with httpx.Client(base_url=base_url, timeout=5) as api:
-            seeded = api.post("/demo/seed")
-            assert seeded.status_code == 200, seeded.text
-            projects_response = api.get("/projects")
-            assert projects_response.status_code == 200, projects_response.text
-            projects = projects_response.json()
-            assert projects
-            project_id = projects[0]["id"]
+            registration = api.post(
+                "/auth/register",
+                json={"email": "codex-process-owner@example.com", "password": "Codex-process-password-123!", "display_name": "Codex process owner"},
+            )
+            assert registration.status_code == 200, registration.text
+            code = registration.json().get("dev_verification_code")
+            assert code
+            verified = api.post(
+                "/auth/verify-email",
+                json={"email": "codex-process-owner@example.com", "code": code},
+            )
+            assert verified.status_code == 200, verified.text
+            project_response = api.post(
+                "/projects", json={"name": "Codex process approval project"}
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
 
             registered = api.post(
                 "/agents",

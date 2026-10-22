@@ -72,6 +72,7 @@ class Settings:
     allow_unauthenticated_external_agent_demo: bool = False
     agent_approval_ttl_seconds: int = 600
     external_agent_token_ttl_seconds: int = 2_592_000
+    external_agent_invocation_lease_ttl_seconds: int = 60
     outbox_dispatch_mode: str = "inline"
     push_dispatch_enabled: bool = False
     push_dispatch_poll_seconds: int = 5
@@ -332,6 +333,12 @@ def get_settings() -> Settings:
             minimum=300,
             maximum=2_592_000,
         ),
+        external_agent_invocation_lease_ttl_seconds=parse_bounded_int(
+            os.getenv("AIXION_EXTERNAL_AGENT_INVOCATION_LEASE_TTL_SECONDS", "60"),
+            field_name="AIXION_EXTERNAL_AGENT_INVOCATION_LEASE_TTL_SECONDS",
+            minimum=30,
+            maximum=300,
+        ),
         outbox_dispatch_mode=parse_outbox_dispatch_mode(
             os.getenv("AIXION_OUTBOX_DISPATCH_MODE", "inline")
         ),
@@ -553,6 +560,7 @@ def get_settings() -> Settings:
         allow_unauthenticated_external_agent_demo=settings.allow_unauthenticated_external_agent_demo,
         agent_approval_ttl_seconds=settings.agent_approval_ttl_seconds,
         external_agent_token_ttl_seconds=settings.external_agent_token_ttl_seconds,
+        external_agent_invocation_lease_ttl_seconds=settings.external_agent_invocation_lease_ttl_seconds,
         outbox_dispatch_mode=settings.outbox_dispatch_mode,
         push_dispatch_enabled=settings.push_dispatch_enabled,
         push_dispatch_poll_seconds=settings.push_dispatch_poll_seconds,

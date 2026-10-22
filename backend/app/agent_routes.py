@@ -60,6 +60,7 @@ from .approval_decisions import (
 from .approval_repository import (
     ApprovalDecisionConflict,
     ApprovalDeliveryCredentialRejected,
+    ApprovalInvocationLeaseRejected,
 )
 from .approval_integrity import compute_approval_payload_hash
 from .idea_repository import IdeaRepository, PostgresIdeaRepository
@@ -171,6 +172,19 @@ class AgentDeliveryFailureReport(BaseModel):
     source_invocation_id: str = Field(min_length=1, max_length=256)
     approved_payload_hash: str = Field(pattern=r"^sha256:(?:v2:)?[0-9a-f]{64}$")
     reason_code: Literal["CLAIM_RESPONSE_AMBIGUOUS"]
+
+
+class AgentInvocationHeartbeatRequest(BaseModel):
+    source_invocation_id: str = Field(min_length=1, max_length=256)
+
+
+class AgentInvocationHeartbeatResponse(BaseModel):
+    approval_id: str
+    source_agent_id: str
+    source_invocation_id: str
+    heartbeat_at: str
+    expires_at: str
+    live: Literal[True]
 
 
 def audit(event_type: str, entity_id: str, details: dict, actor: str = "system") -> AuditEvent:
@@ -312,6 +326,11 @@ def create_agent_approval(
     agent: ExternalAgent = Depends(require_external_agent),
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ApprovalRequest:
+    if not payload.source_invocation_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Connector approval requests require a source_invocation_id",
+        )
     repository = _approval_repository_for_route(http_request)
     work_order_repository = _work_order_repository_for_route(http_request)
     publish_compatibility_state = approval_repository_publishes_compatibility_state(
@@ -326,7 +345,12 @@ def create_agent_approval(
     project = _project_repository_for_route(http_request).get(payload.project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    if agent.workspace_id is not None and project.workspace_id != agent.workspace_id:
+    if not project.workspace_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Connector approvals require a workspace-scoped project",
+        )
+    if not agent.workspace_id or project.workspace_id != agent.workspace_id:
         raise HTTPException(status_code=404, detail="Project not found")
     if agent.workspace_id is None and get_settings().is_production:
         raise HTTPException(status_code=403, detail="Agent workspace is required")
@@ -426,6 +450,11 @@ def create_agent_approval(
             approval=request,
             audit_event=audit_event,
             notification=notification,
+            invocation_lease_ttl_seconds=(
+                get_settings().external_agent_invocation_lease_ttl_seconds
+                if request.source_invocation_id
+                else None
+            ),
         )
     except (ApprovalDecisionConflict, sqlite3.IntegrityError) as exc:
         try:
@@ -490,6 +519,62 @@ def get_agent_approval_decision(
 
 
 @router.post(
+    "/approvals/{approval_id}/heartbeat",
+    response_model=AgentInvocationHeartbeatResponse,
+    dependencies=[Depends(require_approval_protocol_v1)],
+)
+def heartbeat_agent_approval_invocation(
+    approval_id: str,
+    payload: AgentInvocationHeartbeatRequest,
+    agent: ExternalAgent = Depends(require_external_agent),
+    http_request: Request = None,  # type: ignore[assignment]
+    x_aixion_agent_token: str | None = Header(default=None),
+) -> AgentInvocationHeartbeatResponse:
+    """Refresh the short-lived liveness lease for one pending native invocation."""
+    repository = _approval_repository_for_route(http_request)
+    assert_agent_can(agent, AgentAction.READ_APPROVAL_DECISION, http_request=http_request)
+    request = repository.get(approval_id)
+    if request is None:
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    _assert_agent_owns_approval(request, agent)
+    assert_agent_can(
+        agent,
+        AgentAction.READ_APPROVAL_DECISION,
+        project_id=request.project_id,
+        http_request=http_request,
+    )
+    if payload.source_invocation_id != request.source_invocation_id:
+        raise HTTPException(status_code=409, detail="Approval invocation identity did not match")
+    try:
+        lease = repository.heartbeat_invocation(
+            approval_id=approval_id,
+            workspace_id=request.workspace_id or "",
+            source_agent_id=agent.id,
+            source_invocation_id=payload.source_invocation_id,
+            presented_token_hash=hashlib.sha256(
+                (x_aixion_agent_token or "").encode("utf-8")
+            ).hexdigest(),
+            occurred_at=now_utc(),
+            ttl_seconds=get_settings().external_agent_invocation_lease_ttl_seconds,
+        )
+    except ApprovalDeliveryCredentialRejected as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="External agent credential is no longer active",
+        ) from exc
+    except ApprovalInvocationLeaseRejected as exc:
+        raise HTTPException(status_code=409, detail="Approval invocation is no longer live") from exc
+    return AgentInvocationHeartbeatResponse(
+        approval_id=lease.approval_id,
+        source_agent_id=lease.source_agent_id,
+        source_invocation_id=lease.source_invocation_id,
+        heartbeat_at=lease.heartbeat_at.isoformat(),
+        expires_at=lease.expires_at.isoformat(),
+        live=True,
+    )
+
+
+@router.post(
     "/approvals/{approval_id}/consume",
     dependencies=[Depends(require_approval_protocol_v1)],
 )
@@ -548,6 +633,11 @@ def consume_agent_approval_decision(
         raise HTTPException(
             status_code=401,
             detail="External agent credential is no longer active",
+        ) from exc
+    except ApprovalInvocationLeaseRejected as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Approval invocation liveness expired; resume requires a new request",
         ) from exc
     except ApprovalDecisionConflict as exc:
         raise HTTPException(status_code=409, detail="Approval identity or payload changed") from exc

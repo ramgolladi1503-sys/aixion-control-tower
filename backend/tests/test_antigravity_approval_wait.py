@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -158,6 +159,68 @@ def test_approval_decision_is_visible_to_only_owning_scoped_agent() -> None:
     assert denied.status_code == 403
 
 
+def test_invocation_heartbeat_returns_exact_scoped_lease_contract() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+
+    heartbeat = client.post(
+        f"/agents/approvals/{approval_id}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": "antigravity:v1:hook-test"},
+    )
+
+    assert heartbeat.status_code == 200
+    body = heartbeat.json()
+    assert set(body) == {
+        "approval_id", "source_agent_id", "source_invocation_id",
+        "heartbeat_at", "expires_at", "live",
+    }
+    assert body["approval_id"] == approval_id
+    assert body["source_agent_id"] == agent_id
+    assert body["source_invocation_id"] == "antigravity:v1:hook-test"
+    assert isinstance(body["heartbeat_at"], str) and body["heartbeat_at"]
+    assert isinstance(body["expires_at"], str) and body["expires_at"]
+    assert body["live"] is True
+
+
+def test_invocation_heartbeat_rejects_scope_mismatch_and_revoked_credential() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    mismatch = client.post(
+        f"/agents/approvals/{approval_id}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": "another-invocation"},
+    )
+    assert mismatch.status_code == 409
+
+    assert client.post(f"/agents/{agent_id}/token/revoke").status_code == 200
+    revoked = client.post(
+        f"/agents/approvals/{approval_id}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": "antigravity:v1:hook-test"},
+    )
+    assert revoked.status_code == 401
+
+
+def test_invocation_heartbeat_cannot_refresh_a_consumed_approval() -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    assert client.post(
+        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
+    ).status_code == 200
+    assert client.post(f"/agents/approvals/{approval_id}/consume", headers=headers).status_code == 200
+
+    heartbeat = client.post(
+        f"/agents/approvals/{approval_id}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": "antigravity:v1:hook-test"},
+    )
+    assert heartbeat.status_code == 409
+
+
 def test_missing_read_decision_capability_is_denied() -> None:
     project, agent_id, token = _setup_agent(actions=["CREATE_APPROVAL"])
     approval_id = _approval(project.id, _headers(agent_id, token))
@@ -167,6 +230,64 @@ def test_missing_read_decision_capability_is_denied() -> None:
         headers=_headers(agent_id, token),
     )
     assert response.status_code == 403
+
+
+def test_connector_approval_without_invocation_identity_is_rejected() -> None:
+    project, agent_id, token = _setup_agent()
+    response = client.post(
+        "/agents/approvals",
+        headers=_headers(agent_id, token),
+        json={
+            "project_id": project.id,
+            "title": "Missing invocation identity",
+            "summary": "The connector must bind this approval to one invocation.",
+            "agent_name": "Antigravity",
+            "target_branch": "current-workspace",
+            "files": [{
+                "path": "antigravity://tool/run_command",
+                "change_type": "tool_call",
+                "diff": '{"CommandLine":"echo gated"}',
+            }],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Connector approval requests require a source_invocation_id"
+    assert store.approval_requests == {}
+
+
+def test_unscoped_connector_approval_is_rejected_before_persistence() -> None:
+    project, agent_id, token = _setup_agent()
+    unscoped_project = project.model_copy(update={"workspace_id": None})
+    unscoped_agent = store.external_agents[agent_id].model_copy(update={"workspace_id": None})
+    store.projects[project.id] = unscoped_project
+    store.external_agents[agent_id] = unscoped_agent
+    store.persist()
+
+    response = client.post(
+        "/agents/approvals",
+        headers=_headers(agent_id, token),
+        json={
+            "project_id": project.id,
+            "title": "Unscoped connector approval",
+            "summary": "Unscoped connector work must not reach a phone as actionable.",
+            "agent_name": "Antigravity",
+            "target_branch": "current-workspace",
+            "files": [{
+                "path": "antigravity://tool/run_command",
+                "change_type": "tool_call",
+                "diff": '{"CommandLine":"echo gated"}',
+            }],
+            "source_invocation_id": "antigravity:unscoped-test",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Connector approvals require a workspace-scoped project"
+    assert not any(
+        request.source_invocation_id == "antigravity:unscoped-test"
+        for request in store.approval_requests.values()
+    )
 
 
 def test_approved_invocation_delivery_is_claimed_once_and_audited() -> None:
@@ -739,12 +860,18 @@ def _free_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _start_isolated_api(db_path: Path, port: int) -> subprocess.Popen:
+def _start_isolated_api(
+    db_path: Path,
+    port: int,
+    *,
+    access_log_path: Path | None = None,
+    auth_enabled: bool = False,
+) -> subprocess.Popen:
     environment = os.environ.copy()
     environment.update(
         {
             "AIXION_PROFILE": "test",
-            "AIXION_AUTH_ENABLED": "false",
+            "AIXION_AUTH_ENABLED": "true" if auth_enabled else "false",
             "AIXION_DB_PATH": str(db_path),
             "AIXION_POSTGRES_RUNTIME_PROBE_ENABLED": "false",
             "AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED": "false",
@@ -753,7 +880,8 @@ def _start_isolated_api(db_path: Path, port: int) -> subprocess.Popen:
     )
     environment.pop("AIXION_POSTGRES_DSN", None)
     backend_root = Path(__file__).parents[1]
-    return subprocess.Popen(
+    access_log = access_log_path.open("a", encoding="utf-8") if access_log_path else None
+    process = subprocess.Popen(
         [
             sys.executable,
             "-m",
@@ -764,14 +892,18 @@ def _start_isolated_api(db_path: Path, port: int) -> subprocess.Popen:
             "--port",
             str(port),
             "--log-level",
-            "warning",
+            "info",
+            "--access-log",
         ],
         cwd=backend_root,
         env=environment,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=access_log if access_log else subprocess.DEVNULL,
     )
+    if access_log:
+        access_log.close()
+    return process
 
 
 def _wait_for_isolated_api(process: subprocess.Popen, base_url: str) -> None:
@@ -806,23 +938,45 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
     import httpx
 
     db_path = tmp_path / "api-restart.sqlite3"
+    access_log_path = tmp_path / "api-restart-access.log"
     port = _free_loopback_port()
     base_url = f"http://127.0.0.1:{port}"
-    api_process = _start_isolated_api(db_path, port)
+    api_process = _start_isolated_api(
+        db_path, port, access_log_path=access_log_path, auth_enabled=True
+    )
     hook_process: subprocess.Popen | None = None
     restarted_api: subprocess.Popen | None = None
+    owner_headers: dict[str, str] = {}
     try:
         _wait_for_isolated_api(api_process, base_url)
         with httpx.Client(base_url=base_url, timeout=5) as api:
-            seeded = api.post("/demo/seed")
-            assert seeded.status_code == 200, seeded.text
-            projects_response = api.get("/projects")
-            assert projects_response.status_code == 200, projects_response.text
-            projects = projects_response.json()
-            assert projects
-            project_id = projects[0]["id"]
+            email = f"restart-{uuid.uuid4().hex}@example.com"
+            registered_user = api.post(
+                "/auth/register",
+                json={"email": email, "password": "Restart-test-password-123!", "display_name": "Restart owner"},
+            )
+            assert registered_user.status_code == 200, registered_user.text
+            verification_code = registered_user.json().get("dev_verification_code")
+            assert verification_code
+            verified = api.post(
+                "/auth/verify-email", json={"email": email, "code": verification_code}
+            )
+            assert verified.status_code == 200, verified.text
+            logged_in = api.post(
+                "/auth/login", json={"email": email, "password": "Restart-test-password-123!"}
+            )
+            assert logged_in.status_code == 200, logged_in.text
+            owner_headers = {"Authorization": f"Bearer {logged_in.json()['access_token']}"}
+            project_response = api.post(
+                "/projects",
+                headers=owner_headers,
+                json={"name": "Antigravity restart project", "description": "Workspace-scoped hook restart test"},
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
             registered = api.post(
                 "/agents",
+                headers=owner_headers,
                 json={
                     "provider": "ANTIGRAVITY",
                     "display_name": "Antigravity restart integration",
@@ -881,7 +1035,7 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
         deadline = time.monotonic() + 10
         with httpx.Client(base_url=base_url, timeout=5) as api:
             while time.monotonic() < deadline:
-                response = api.get("/approvals")
+                response = api.get("/approvals", headers=owner_headers)
                 assert response.status_code == 200, response.text
                 approval = next(
                     (
@@ -894,7 +1048,12 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
                 )
                 if approval is not None:
                     break
-                assert hook_process.poll() is None, "Hook exited before approval was observed"
+                assert hook_process.poll() is None, (
+                    "Hook exited before approval was observed: "
+                    f"stdout={hook_process.stdout.read() if hook_process.stdout else ''}; "
+                    f"stderr={hook_process.stderr.read() if hook_process.stderr else ''}; "
+                    f"api_access={access_log_path.read_text(encoding='utf-8')[-4000:]}"
+                )
                 time.sleep(0.1)
         assert approval is not None, "Hook did not create an approval through the local API"
         assert hook_process.poll() is None, "Hook did not remain blocked on the pending approval"
@@ -904,12 +1063,15 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
         time.sleep(2.5)
         assert hook_process.poll() is None, "Hook failed open or exited while the API was unavailable"
 
-        restarted_api = _start_isolated_api(db_path, port)
+        restarted_api = _start_isolated_api(
+            db_path, port, access_log_path=access_log_path, auth_enabled=True
+        )
         assert restarted_api.pid != old_pid
         _wait_for_isolated_api(restarted_api, base_url)
         with httpx.Client(base_url=base_url, timeout=5) as api:
             decision = api.post(
                 f"/approvals/{approval['id']}/decision",
+                headers=owner_headers,
                 json={"decision": "approve"},
             )
             assert decision.status_code == 200, decision.text
@@ -1013,6 +1175,7 @@ def test_antigravity_shell_tool_is_never_labeled_medium_or_low_risk() -> None:
             }],
             "test_plan": ["Review the exact command"],
             "rollback_plan": "Deny to stop this command.",
+            "source_invocation_id": "antigravity:risk-shell-1",
         },
     )
     assert response.status_code == 200
@@ -1037,6 +1200,7 @@ def test_antigravity_file_edit_is_labeled_high_risk() -> None:
             }],
             "test_plan": ["Review the requested file change"],
             "rollback_plan": "Deny to stop the file write.",
+            "source_invocation_id": "antigravity:risk-write-1",
         },
     )
     assert response.status_code == 200
@@ -1068,6 +1232,7 @@ def test_antigravity_tool_marker_cannot_bypass_sensitive_path_block() -> None:
             ],
             "test_plan": ["Review the exact command"],
             "rollback_plan": "Deny this request.",
+            "source_invocation_id": "antigravity:risk-sensitive-path-1",
         },
     )
     assert response.status_code == 200
@@ -1092,6 +1257,7 @@ def test_antigravity_tool_marker_cannot_bypass_protected_branch_block() -> None:
             }],
             "test_plan": ["Review the exact command"],
             "rollback_plan": "Deny this request.",
+            "source_invocation_id": "antigravity:risk-protected-branch-1",
         },
     )
     assert response.status_code == 200

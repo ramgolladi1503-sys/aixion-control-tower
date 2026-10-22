@@ -8,21 +8,35 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
+from app.agent_credential_models import DEFAULT_EXTERNAL_AGENT_RATE_LIMIT_PER_MINUTE
 from app.main import app
-from app.models import Project, now_utc
+from app.models import Project, Workspace, now_utc
 from app.store import store
 
 client = TestClient(app)
 REPOSITORY = "ramgolladi1503-sys/aixion-control-tower"
+_test_workspace: Workspace | None = None
 
 
 def setup_function() -> None:
+    global _test_workspace
     store.reset()
+    _test_workspace = None
 
 
 def _project() -> Project:
-    project = Project(name="Token Governance", description="demo")
+    global _test_workspace
+    if _test_workspace is None:
+        _test_workspace = Workspace(name="Token Governance", owner_user_id="token-governance-owner")
+        store.workspaces[_test_workspace.id] = _test_workspace
+        store.persist_records(inserts=[("workspace", _test_workspace.id, _test_workspace)])
+    project = Project(
+        name="Token Governance",
+        description="demo",
+        workspace_id=_test_workspace.id,
+    )
     store.projects[project.id] = project
+    store.persist_records(inserts=[("project", project.id, project)])
     return project
 
 
@@ -47,7 +61,7 @@ def _register_agent(
     *,
     provider: str = "CHATGPT",
     token_expires_at: str | None = None,
-    rate_limit_per_minute: int = 60,
+    rate_limit_per_minute: int = DEFAULT_EXTERNAL_AGENT_RATE_LIMIT_PER_MINUTE,
     allowed_actions: list[str] | None = None,
 ) -> tuple[str, str]:
     payload = {
@@ -271,6 +285,82 @@ def test_agent_registration_exposes_owner_visible_credential_status() -> None:
     assert credentials["token_present"] is True
     assert credentials["token_expires_at"] is not None
     assert credentials["rate_limit_per_minute"] == 3
+
+
+def test_default_connector_quota_supports_four_concurrent_approval_waits() -> None:
+    """Four active waits fit the default 200/min budget without losing auth checks."""
+    project = _project()
+    agent_id, token = _register_agent(
+        project,
+        provider="ANTIGRAVITY",
+        allowed_actions=APPROVAL_CONNECTOR_ACTIONS,
+    )
+    headers = {
+        **_headers(agent_id, token),
+        "X-Aixion-Approval-Protocol": "1",
+    }
+    approvals: list[tuple[str, str]] = []
+    for index in range(4):
+        invocation_id = f"concurrent-wait-{index}"
+        identity = client.get(
+            f"/agents/identity?provider=ANTIGRAVITY&project_id={project.id}",
+            headers=headers,
+        )
+        assert identity.status_code == 200, identity.text
+        created = client.post(
+            "/agents/approvals",
+            headers=headers,
+            json={
+                "project_id": project.id,
+                "title": f"Concurrent approval {index}",
+                "summary": "Exercise the normal polling and heartbeat budget.",
+                "agent_name": "Antigravity",
+                "target_branch": "current-workspace",
+                "files": [{
+                    "path": f"antigravity://tool/run_command/{index}",
+                    "change_type": "tool_call",
+                    "diff": '{"command":"echo safe"}',
+                }],
+                "test_plan": ["Review exact action"],
+                "rollback_plan": "Deny to stop the invocation.",
+                "source_session_id": f"concurrent-session-{index}",
+                "source_invocation_id": invocation_id,
+            },
+        )
+        assert created.status_code == 200, created.text
+        approvals.append((created.json()["id"], invocation_id))
+
+    # A 2 second poll is 30 decision reads/minute per invocation. The current
+    # hook refreshes its 60 second liveness lease every 15 seconds (4/minute).
+    for _ in range(30):
+        for approval_id, _invocation_id in approvals:
+            response = client.get(
+                f"/agents/approvals/{approval_id}/decision", headers=headers
+            )
+            assert response.status_code == 200, response.text
+    for _ in range(4):
+        for approval_id, invocation_id in approvals:
+            response = client.post(
+                f"/agents/approvals/{approval_id}/heartbeat",
+                headers=headers,
+                json={"source_invocation_id": invocation_id},
+            )
+            assert response.status_code == 200, response.text
+
+    for approval_id, _invocation_id in approvals:
+        decision = client.post(
+            f"/approvals/{approval_id}/decision", json={"decision": "approve"}
+        )
+        assert decision.status_code == 200, decision.text
+    for approval_id, _invocation_id in approvals:
+        consumed = client.post(
+            f"/agents/approvals/{approval_id}/consume", headers=headers
+        )
+        assert consumed.status_code == 200, consumed.text
+
+    credentials = client.get(f"/agents/{agent_id}/credentials")
+    assert credentials.status_code == 200, credentials.text
+    assert credentials.json()["rate_limit_per_minute"] == 200
 
 
 def test_successful_external_agent_auth_updates_last_used_timestamp() -> None:

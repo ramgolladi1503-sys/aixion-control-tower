@@ -102,6 +102,14 @@ request uses the remaining approval time and the 10-second per-request maximum
 as one monotonic HTTP deadline. The shared standard-library transport applies it
 to DNS resolution, connection, TLS, response headers, and the complete bounded
 response body; it caps responses at 256 KiB and does not follow redirects. The
+hook refreshes the invocation-scoped liveness lease every 15 seconds during a
+long pending wait. The response must confirm the same approval, connector
+installation, and invocation with `live: true`; an expired, mismatched,
+malformed, unauthorized, or timed-out heartbeat denies before consume. The
+lease never extends the approval expiry, and the server checks it again when
+the connector claims an approved decision. Credential `last_used_at` is not
+treated as liveness. The heartbeat uses the same remaining-time and per-request
+HTTP deadline bounds as the decision wait. The
 hook never returns `allow` if the consume response arrives at or after that
 deadline. After timeout, it makes one best-effort expiry request within a
 1-second cleanup grace; a consume-failure report is skipped when no approval

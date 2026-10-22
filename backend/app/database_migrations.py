@@ -146,6 +146,68 @@ def create_approval_delivery_failures(conn: sqlite3.Connection) -> None:
     )
 
 
+def create_approval_invocation_leases(conn: sqlite3.Connection) -> None:
+    """Persist the last authenticated liveness signal for a connector invocation."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS approval_invocation_leases (
+            approval_id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            source_agent_id TEXT NOT NULL,
+            source_invocation_id TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            UNIQUE (workspace_id, source_agent_id, source_invocation_id),
+            CHECK (length(approval_id) BETWEEN 1 AND 256),
+            CHECK (length(workspace_id) BETWEEN 1 AND 256),
+            CHECK (length(source_agent_id) BETWEEN 1 AND 256),
+            CHECK (length(source_invocation_id) BETWEEN 1 AND 256),
+            CHECK (length(heartbeat_at) > 0),
+            CHECK (length(expires_at) > 0)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_invocation_lease_expiry "
+        "ON approval_invocation_leases(expires_at)"
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS approval_invocation_lease_identity_insert
+        BEFORE INSERT ON approval_invocation_leases
+        WHEN NOT EXISTS (
+            SELECT 1 FROM kv_store AS approval
+            WHERE approval.entity_type='approval_request'
+              AND approval.entity_id=NEW.approval_id
+              AND json_extract(approval.payload,'$.workspace_id')=NEW.workspace_id
+              AND json_extract(approval.payload,'$.source_agent_id')=NEW.source_agent_id
+              AND json_extract(approval.payload,'$.source_invocation_id')=NEW.source_invocation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invocation lease identity must match its approval');
+        END
+        """
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS approval_invocation_lease_identity_update
+        BEFORE UPDATE OF approval_id, workspace_id, source_agent_id, source_invocation_id
+        ON approval_invocation_leases
+        WHEN NOT EXISTS (
+            SELECT 1 FROM kv_store AS approval
+            WHERE approval.entity_type='approval_request'
+              AND approval.entity_id=NEW.approval_id
+              AND json_extract(approval.payload,'$.workspace_id')=NEW.workspace_id
+              AND json_extract(approval.payload,'$.source_agent_id')=NEW.source_agent_id
+              AND json_extract(approval.payload,'$.source_invocation_id')=NEW.source_invocation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'invocation lease identity must match its approval');
+        END
+        """
+    )
+
+
 def enforce_delivery_failure_claim_identity(conn: sqlite3.Connection) -> None:
     """Bind every failure row to all identity columns of its durable claim."""
     inconsistent = conn.execute(
@@ -237,6 +299,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         migration_id="0008_delivery_failure_claim_identity",
         name="Bind delivery failure reports to the complete durable claim identity",
         apply=enforce_delivery_failure_claim_identity,
+    ),
+    Migration(
+        migration_id="0009_approval_invocation_leases",
+        name="Track scoped connector invocation liveness leases",
+        apply=create_approval_invocation_leases,
     ),
 )
 

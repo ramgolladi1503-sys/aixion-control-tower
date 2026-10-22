@@ -27,6 +27,7 @@ def worker_settings(**overrides: object) -> SimpleNamespace:
 def test_push_worker_accepts_only_its_scoped_production_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("AIXION_DB_PATH", raising=False)
     configured = worker_settings(email_dispatch_enabled=False)
     monkeypatch.setattr(settings, "get_settings", lambda: configured)
 
@@ -36,6 +37,7 @@ def test_push_worker_accepts_only_its_scoped_production_configuration(
 def test_email_worker_accepts_only_its_scoped_production_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("AIXION_DB_PATH", raising=False)
     configured = worker_settings(push_dispatch_enabled=False, fcm_project_id=None)
     monkeypatch.setattr(settings, "get_settings", lambda: configured)
 
@@ -45,6 +47,7 @@ def test_email_worker_accepts_only_its_scoped_production_configuration(
 def test_disabled_worker_does_not_require_database_or_provider_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("AIXION_DB_PATH", raising=False)
     configured = worker_settings(
         postgres_dsn_configured=False,
         push_dispatch_enabled=False,

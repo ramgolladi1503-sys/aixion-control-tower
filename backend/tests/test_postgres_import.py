@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -68,6 +69,7 @@ def _snapshot(
     approval = {
         "id": "a1", "project_id": "p1", "title": "Review", "summary": "Inspect change",
         "work_order_id": "w1", "target_branch": "main", "files": [], "risk": {"level": "LOW"},
+        "status": "APPROVED",
         "workspace_id": "ws1", "source_provider": "ANTIGRAVITY",
         "source_agent_id": "agent1", "source_invocation_id": "inv1",
         "created_at": now, "updated_at": now,
@@ -462,6 +464,56 @@ def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
     assert selected["approval_request"]["a1"]["workspace_id"] == "ws1"
     assert plan["planned_counts"]["notification"] == 2
     assert selected["notification"]["n2"]["entity_type"] == "agent_task"
+    assert plan["invocation_drain"] == {
+        "status": "CLEAR",
+        "pending_native_invocation_count": 0,
+        "approval_id_sha256": [],
+    }
+
+
+@pytest.mark.parametrize("status", ["REQUESTED", "PENDING_REVIEW"])
+def test_plan_blocks_pending_native_invocation_approvals_with_safe_summary(
+    tmp_path,
+    monkeypatch,
+    status,
+):
+    path = tmp_path / "pending_native_snapshot.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id='a1'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload.update(
+            {
+                "status": status,
+                "title": "SECRET_APPROVAL_TITLE",
+                "summary": "SECRET_ACTION_PAYLOAD",
+                "source_invocation_id": "SECRET_INVOCATION_ID",
+            }
+        )
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id='a1'",
+            (json.dumps(payload),),
+        )
+
+    def unexpected_target_connection(*_args, **_kwargs):
+        pytest.fail("drain barrier must run before opening a PostgreSQL target")
+
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.psycopg.connect",
+        unexpected_target_connection,
+    )
+
+    with pytest.raises(ImportBlocked, match="1 pending native invocation approval") as exc_info:
+        build_plan(path)
+
+    reason = str(exc_info.value)
+    assert hashlib.sha256(b"a1").hexdigest() in reason
+    assert "SECRET_APPROVAL_TITLE" not in reason
+    assert "SECRET_ACTION_PAYLOAD" not in reason
+    assert "SECRET_INVOCATION_ID" not in reason
+    assert "a1" not in reason
 
 
 def test_delivery_state_is_included_and_requires_matching_invocation_audit(tmp_path):

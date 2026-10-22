@@ -31,6 +31,13 @@ Control Tower prompts may differ by tool and Antigravity configuration.
   limit to at least 60 per minute per active hook; the default two-second poll
   interval uses about 30 decision reads per minute, plus request creation and
   expiry calls. The hook honors the API `Retry-After` response while polling.
+  During a long pending wait, the hook refreshes the invocation-scoped liveness
+  lease every 15 seconds through the approval heartbeat endpoint. The response
+  must confirm the same approval, connector installation, and invocation with
+  `live: true`; an expired, mismatched, malformed, unauthorized, or timed-out
+  heartbeat denies the tool call before consume. The lease never extends the
+  approval expiry, and the server checks it again when the connector claims an
+  approved decision. Credential `last_used_at` is not treated as liveness.
   After an ambiguous network or server failure on the idempotent decision
   `GET`, it retries with exponential delays of 2, 4, then at most 10 seconds,
   bounded by the configured wait deadline. It does not retry approval creation

@@ -14,6 +14,13 @@ from fastapi import HTTPException
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
+from app.agent_run_models import (
+    AgentRun,
+    AgentRunStatus,
+    AgentRunStep,
+    AgentRunStepStatus,
+    AgentRunStepType,
+)
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.application_repositories import ApplicationRepositories
 from app.approval_integrity import compute_approval_payload_hash
@@ -37,6 +44,7 @@ from app.postgres_database import run_postgres_migrations
 from app.postgres_trust_repository import (
     PostgresTrustRepository,
     PostgresTrustRepositoryConflict,
+    PostgresTrustRepositoryError,
 )
 from app.postgres_trust_event_repository import (
     PostgresTrustEventRepository,
@@ -63,6 +71,10 @@ from app.trust_action_authorization_models import (
     ActionAuthorization,
     ActionAuthorizationCreate,
     ActionAuthorizationDecision,
+)
+from app.trust_action_authorization import (
+    ActionAuthorizationConflict,
+    record_agent_run_action_authorization_postgres,
 )
 from app.trust_models import (
     ActionConsumption,
@@ -443,6 +455,481 @@ def _lease_with_runtime_budget(
     )
     lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
     return lease
+
+
+def _run_action_awaiting_review(
+    repository: PostgresTrustRepository,
+    conn: Connection,
+    *,
+    lease: CapabilityLease,
+    workspace_id: str,
+    project_id: str,
+    metadata_overrides: dict[str, str] | None = None,
+    mismatch_action_task: bool = False,
+    mismatch_action_project: bool = False,
+    mismatch_action_lease: bool = False,
+    mismatch_step_task: bool = False,
+) -> ProposedAction:
+    now = now_utc()
+    task = AgentTask(
+        id=f"task_{uuid.uuid4().hex}",
+        provider=AgentProvider.CODEX,
+        project_id=project_id,
+        title="Canonical AgentRun trust fixture",
+        goal="Exercise exact-action authorization without executing work.",
+        workspace_id=workspace_id,
+        approval_request_id=lease.approval_request_id,
+        status=AgentTaskStatus.APPROVED,
+        created_at=now,
+        updated_at=now,
+    )
+    other_task = AgentTask(
+        id=f"task_{uuid.uuid4().hex}",
+        provider=AgentProvider.CODEX,
+        project_id=project_id,
+        title="Foreign task for mismatch regression",
+        goal="Keep a valid same-workspace foreign task row.",
+        workspace_id=workspace_id,
+        status=AgentTaskStatus.APPROVED,
+        created_at=now,
+        updated_at=now,
+    )
+    run_id = f"run_{uuid.uuid4().hex}"
+    current_step_id = f"step_{uuid.uuid4().hex}"
+    prior_step = AgentRunStep(
+        id=f"step_{uuid.uuid4().hex}",
+        run_id=run_id,
+        task_id=task.id,
+        sequence=0,
+        step_type=AgentRunStepType.VALIDATE_SCOPE,
+        status=AgentRunStepStatus.SUCCEEDED,
+        idempotency_key=f"{run_id}:VALIDATE_SCOPE:1",
+    )
+    step = AgentRunStep(
+        id=current_step_id,
+        run_id=run_id,
+        task_id=other_task.id if mismatch_step_task else task.id,
+        sequence=1,
+        step_type=AgentRunStepType.CREATE_BRANCH,
+        status=AgentRunStepStatus.NEEDS_HUMAN,
+        idempotency_key=f"{run_id}:CREATE_BRANCH:1",
+    )
+    run = AgentRun(
+        id=run_id,
+        task_id=task.id,
+        workspace_id=workspace_id,
+        approval_request_id=lease.approval_request_id,
+        capability_lease_id=lease.id,
+        project_id=project_id,
+        repository="owner/repo",
+        status=AgentRunStatus.NEEDS_HUMAN,
+        current_step_id=step.id,
+        current_step_index=1,
+        created_at=now,
+        updated_at=now,
+    )
+    for durable_task in (task, other_task):
+        conn.execute(
+            "INSERT INTO agent_tasks(task_id,project_id,workspace_id,external_agent_id,"
+            "approval_request_id,status,updated_at,payload) VALUES(%s,%s,%s,NULL,%s,%s,%s,%s)",
+            (
+                durable_task.id,
+                project_id,
+                workspace_id,
+                durable_task.approval_request_id,
+                durable_task.status.value,
+                durable_task.updated_at,
+                Jsonb(durable_task.model_dump(mode="json")),
+            ),
+        )
+    conn.execute(
+        "INSERT INTO agent_runs(run_id,task_id,project_id,workspace_id,approval_id,status,"
+        "current_step_id,lease_owner,lease_token,lease_expires_at,updated_at,payload) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,NULL,NULL,NULL,%s,%s)",
+        (
+            run.id,
+            run.task_id,
+            run.project_id,
+            workspace_id,
+            run.approval_request_id,
+            run.status.value,
+            run.current_step_id,
+            run.updated_at,
+            Jsonb(run.model_dump(mode="json")),
+        ),
+    )
+    for durable_step in (prior_step, step):
+        conn.execute(
+            "INSERT INTO agent_run_steps(step_id,run_id,task_id,workspace_id,sequence,"
+            "status,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                durable_step.id,
+                durable_step.run_id,
+                durable_step.task_id,
+                workspace_id,
+                durable_step.sequence,
+                durable_step.status.value,
+                durable_step.updated_at,
+                Jsonb(durable_step.model_dump(mode="json")),
+            ),
+        )
+    metadata = {
+        "step_id": step.id,
+        "step_type": step.step_type.value,
+        "idempotency_key": step.idempotency_key,
+    }
+    metadata.update(metadata_overrides or {})
+    action = ProposedAction(
+        id=f"action_{uuid.uuid4().hex}",
+        lease_id=None if mismatch_action_lease else lease.id,
+        provider=AgentProvider.CODEX,
+        run_id=run.id,
+        task_id=None if mismatch_action_task else task.id,
+        project_id=None if mismatch_action_project else project_id,
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository="owner/repo",
+        branch="feature/trust-test",
+        command="pytest tests/safe.py",
+        metadata=metadata,
+    )
+    repository.insert_proposed_action(conn, action)
+    repository.insert_policy_decision(
+        conn,
+        PolicyDecision(
+            proposed_action_id=action.id,
+            lease_id=action.lease_id,
+            decision=PolicyDecisionType.REQUIRE_APPROVAL,
+            risk_level=RiskLevel.HIGH,
+        ),
+        workspace_id=workspace_id,
+    )
+    return action
+
+
+def _record_run_action_review(
+    repository: PostgresTrustRepository,
+    connect: Callable[[], Connection],
+    *,
+    action: ProposedAction,
+    workspace_id: str,
+    user_id: str,
+    decision: ActionAuthorizationDecision = ActionAuthorizationDecision.ALLOW,
+    reason: str = "Reviewed the exact run action.",
+) -> ActionAuthorization:
+    return record_agent_run_action_authorization_postgres(
+        action.id,
+        ActionAuthorizationCreate(decision=decision, reason=reason),
+        expected_run_id=action.run_id or "",
+        expected_step_id=str(action.metadata["step_id"]),
+        user=AuthUser(
+            id=user_id,
+            email=f"{user_id}@example.test",
+            display_name="Durable run reviewer",
+            role=UserRole.OWNER,
+            workspace_id=workspace_id,
+            email_verified=True,
+        ),
+        workspace_id=workspace_id,
+        connect=connect,
+        trust_repository=repository,
+        trust_event_repository=PostgresTrustEventRepository(connect),
+        now=now_utc(),
+    )
+
+
+def test_postgres_agent_run_action_authorization_is_exact_and_idempotent(
+    trust_repository,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+
+    first = _record_run_action_review(
+        repository, connect, action=action, workspace_id=workspace_id, user_id=user_id
+    )
+    retry = _record_run_action_review(
+        repository, connect, action=action, workspace_id=workspace_id, user_id=user_id
+    )
+    assert first == retry
+    assert first.action_payload_hash
+
+    with pytest.raises(ActionAuthorizationConflict, match="does not match"):
+        _record_run_action_review(
+            repository,
+            connect,
+            action=action,
+            workspace_id=workspace_id,
+            user_id=f"user_{uuid.uuid4().hex}",
+        )
+    with pytest.raises(ActionAuthorizationConflict, match="does not match"):
+        _record_run_action_review(
+            repository,
+            connect,
+            action=action,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            reason="A different decision payload.",
+        )
+
+    with pytest.raises(PostgresTrustRepositoryConflict, match="not visible"):
+        record_agent_run_action_authorization_postgres(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Reviewed the exact run action.",
+            ),
+            expected_run_id=f"run_{uuid.uuid4().hex}",
+            expected_step_id=str(action.metadata["step_id"]),
+            user=AuthUser(
+                id=user_id,
+                email=f"{user_id}@example.test",
+                display_name="Durable run reviewer",
+                role=UserRole.OWNER,
+                workspace_id=workspace_id,
+                email_verified=True,
+            ),
+            workspace_id=workspace_id,
+            connect=connect,
+            trust_repository=repository,
+            trust_event_repository=PostgresTrustEventRepository(connect),
+            now=now_utc(),
+        )
+    with pytest.raises(PostgresTrustRepositoryConflict, match="current step"):
+        record_agent_run_action_authorization_postgres(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Reviewed the exact run action.",
+            ),
+            expected_run_id=action.run_id or "",
+            expected_step_id=f"step_{uuid.uuid4().hex}",
+            user=AuthUser(
+                id=user_id,
+                email=f"{user_id}@example.test",
+                display_name="Durable run reviewer",
+                role=UserRole.OWNER,
+                workspace_id=workspace_id,
+                email_verified=True,
+            ),
+            workspace_id=workspace_id,
+            connect=connect,
+            trust_repository=repository,
+            trust_event_repository=PostgresTrustEventRepository(connect),
+            now=now_utc(),
+        )
+    with pytest.raises(PostgresTrustRepositoryConflict, match="not visible"):
+        record_agent_run_action_authorization_postgres(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Reviewed the exact run action.",
+            ),
+            expected_run_id=action.run_id or "",
+            expected_step_id=str(action.metadata["step_id"]),
+            user=AuthUser(
+                id=user_id,
+                email=f"{user_id}@example.test",
+                display_name="Durable run reviewer",
+                role=UserRole.OWNER,
+                workspace_id="workspace_other",
+                email_verified=True,
+            ),
+            workspace_id="workspace_other",
+            connect=connect,
+            trust_repository=repository,
+            trust_event_repository=PostgresTrustEventRepository(connect),
+            now=now_utc(),
+        )
+
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(
+            conn, action.id, workspace_id
+        ) == first
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s "
+            "AND event_type=%s AND entity_id=%s",
+            (workspace_id, TrustEventType.ACTION_ALLOWED.value, action.id),
+        ).fetchone()[0] == 1
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == PolicyDecisionType.ALLOW
+
+
+@pytest.mark.parametrize(
+    "binding_mismatch",
+    [
+        "step_id",
+        "step_type",
+        "idempotency_key",
+        "task_id",
+        "project_id",
+        "lease_id",
+        "step_task_id",
+        "missing_step",
+    ],
+)
+def test_postgres_agent_run_action_authorization_rejects_noncanonical_binding(
+    trust_repository,
+    binding_mismatch: str,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+                metadata_overrides=(
+                    {binding_mismatch: "not-the-durable-value"}
+                    if binding_mismatch in {"step_id", "step_type", "idempotency_key"}
+                    else None
+                ),
+                mismatch_action_task=binding_mismatch == "task_id",
+                mismatch_action_project=binding_mismatch == "project_id",
+                mismatch_action_lease=binding_mismatch == "lease_id",
+                mismatch_step_task=binding_mismatch == "step_task_id",
+            )
+            if binding_mismatch == "missing_step":
+                conn.execute(
+                    "DELETE FROM agent_run_steps WHERE step_id=%s AND workspace_id=%s",
+                    (action.metadata["step_id"], workspace_id),
+                )
+
+    expected_error = (
+        PostgresTrustRepositoryError
+        if binding_mismatch == "step_task_id"
+        else PostgresTrustRepositoryConflict
+    )
+    with pytest.raises(expected_error):
+        _record_run_action_review(
+            repository, connect, action=action, workspace_id=workspace_id, user_id=user_id
+        )
+
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(
+            conn, action.id, workspace_id
+        ) is None
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == PolicyDecisionType.REQUIRE_APPROVAL
+
+
+def test_postgres_agent_run_action_consumption_is_run_bound_and_replay_safe(
+    trust_repository,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+    _record_run_action_review(
+        repository, connect, action=action, workspace_id=workspace_id, user_id=user_id
+    )
+    consumption = ActionConsumption(
+        actual_runtime_seconds=1,
+        evidence={"run_id": action.run_id, "step_id": action.metadata["step_id"]},
+    )
+
+    def consume(run_id: str, step_id: str, value: ActionConsumption = consumption):
+        with connect() as conn:
+            with conn.transaction():
+                return repository.consume_agent_run_action(
+                    conn,
+                    action_id=action.id,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    step_id=step_id,
+                    consumption=value,
+                    actor=f"run:{action.run_id}",
+                    now=now_utc(),
+                )
+
+    first = consume(action.run_id or "", str(action.metadata["step_id"]))
+    retry = consume(action.run_id or "", str(action.metadata["step_id"]))
+    assert first == retry == consumption
+    with pytest.raises(PostgresTrustRepositoryConflict, match="not visible"):
+        consume(f"run_{uuid.uuid4().hex}", str(action.metadata["step_id"]))
+    with pytest.raises(PostgresTrustRepositoryConflict, match="current step"):
+        consume(action.run_id or "", f"step_{uuid.uuid4().hex}")
+    with pytest.raises(PostgresTrustRepositoryConflict, match="immutable"):
+        consume(
+            action.run_id or "",
+            str(action.metadata["step_id"]),
+            ActionConsumption(actual_runtime_seconds=2),
+        )
+
+    with connect() as conn:
+        assert repository.get_action_consumption(conn, action.id, workspace_id) == consumption
+        persisted_lease = repository.get_capability_lease(conn, lease.id, workspace_id)
+        assert persisted_lease is not None and persisted_lease.consumed_runtime_seconds == 1
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s "
+            "AND event_type=%s AND entity_id=%s",
+            (workspace_id, TrustEventType.ACTION_CONSUMED.value, action.id),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_agent_run_action_authorization_rolls_back_with_ledger_failure(
+    trust_repository,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+        conn.execute(
+            "UPDATE trust_event_heads SET event_hash=%s WHERE singleton=TRUE",
+            ("0" * 64,),
+        )
+
+    with pytest.raises(PostgresTrustEventRepositoryError, match="ledger"):
+        _record_run_action_review(
+            repository, connect, action=action, workspace_id=workspace_id, user_id=user_id
+        )
+
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(
+            conn, action.id, workspace_id
+        ) is None
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == PolicyDecisionType.REQUIRE_APPROVAL
 
 
 def test_postgres_lease_revocation_updates_grants_and_appends_one_event(trust_repository):

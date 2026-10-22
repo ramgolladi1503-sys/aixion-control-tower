@@ -1266,6 +1266,34 @@ POSTGRES_MIGRATIONS = (
             "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11'))",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0027_approval_invocation_leases",
+        name="Track scoped connector invocation liveness leases",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS approval_invocation_leases (
+                approval_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                source_agent_id TEXT NOT NULL,
+                source_invocation_id TEXT NOT NULL,
+                heartbeat_at TIMESTAMPTZ NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                FOREIGN KEY (approval_id, workspace_id)
+                    REFERENCES approval_requests(approval_id, workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (source_agent_id, workspace_id)
+                    REFERENCES external_agents(agent_id, workspace_id) ON DELETE RESTRICT,
+                UNIQUE (workspace_id, source_agent_id, source_invocation_id),
+                CHECK (length(approval_id) BETWEEN 1 AND 256),
+                CHECK (length(workspace_id) BETWEEN 1 AND 256),
+                CHECK (length(source_agent_id) BETWEEN 1 AND 256),
+                CHECK (length(source_invocation_id) BETWEEN 1 AND 256),
+                CHECK (expires_at >= heartbeat_at)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_approval_invocation_lease_expiry "
+            "ON approval_invocation_leases(expires_at)",
+        ),
+    ),
 )
 
 

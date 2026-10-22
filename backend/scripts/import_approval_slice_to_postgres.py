@@ -154,6 +154,35 @@ class ImportBlocked(RuntimeError):
     pass
 
 
+def _pending_native_invocation_drain_summary(
+    approvals: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Return a safe summary for native invocation approvals that must drain.
+
+    A cutover snapshot cannot prove that an old native invocation is still
+    paused. Never synthesize its lease from persisted approval timestamps or
+    connector metadata. Hash approval IDs so operators can correlate a blocked
+    plan without exposing request payloads or credentials in CLI output.
+    """
+    pending_statuses = {
+        ApprovalStatus.REQUESTED.value,
+        ApprovalStatus.PENDING_REVIEW.value,
+    }
+    fingerprints = sorted(
+        hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
+        for approval_id, payload in approvals.items()
+        if payload.get("status", ApprovalStatus.REQUESTED.value) in pending_statuses
+        and isinstance(payload.get("source_agent_id"), str)
+        and bool(payload.get("source_agent_id"))
+        and isinstance(payload.get("source_invocation_id"), str)
+        and bool(payload.get("source_invocation_id"))
+    )
+    return {
+        "pending_native_invocation_count": len(fingerprints),
+        "approval_id_sha256": fingerprints,
+    }
+
+
 def _validate_source(path: Path) -> None:
     if not path.is_file() or path.is_symlink():
         raise ImportBlocked("source must be an existing regular, non-symlink file")
@@ -397,6 +426,16 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     devices = selected.get("device_registration", {})
     derived_workspace_scope_counts: Counter[str] = Counter()
     approvals = selected.get("approval_request", {})
+    invocation_drain = _pending_native_invocation_drain_summary(approvals)
+    if invocation_drain["pending_native_invocation_count"]:
+        safe_fingerprints = ",".join(invocation_drain["approval_id_sha256"])
+        raise ImportBlocked(
+            "source snapshot contains "
+            f"{invocation_drain['pending_native_invocation_count']} pending native invocation "
+            "approval(s); complete or explicitly reject/expire them through the owner flow "
+            "before creating the migration snapshot; approval_id_sha256="
+            f"{safe_fingerprints}"
+        )
     tasks = selected.get("agent_task", {})
     task_events = selected.get("agent_task_event", {})
     runs = selected.get("agent_run", {})
@@ -941,6 +980,10 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         "source_counts": source_counts,
         "planned_counts": imported_counts,
         "derived_workspace_scope_counts": dict(sorted(derived_workspace_scope_counts.items())),
+        "invocation_drain": {
+            "status": "CLEAR",
+            **invocation_drain,
+        },
         "sanitized_terminal_email_ciphertext_count": sanitized_terminal_email_ciphertexts,
         "omitted_counts": dict(sorted(omissions.items())),
         "partial": bool(omissions),

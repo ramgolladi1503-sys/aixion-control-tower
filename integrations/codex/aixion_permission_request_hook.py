@@ -32,6 +32,7 @@ MAX_WAIT_SECONDS = 15 * 60
 MAX_REQUEST_TIMEOUT_SECONDS = 10.0
 EXPIRY_CLEANUP_TIMEOUT_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 2
+INVOCATION_HEARTBEAT_INTERVAL_SECONDS = 15
 MAX_RECONNECT_BACKOFF_SECONDS = 10
 MAX_CREATE_ATTEMPTS = 2
 CREATE_RETRY_DELAY_SECONDS = 0.25
@@ -269,7 +270,8 @@ def _agent_token(env: dict[str, str], config: dict[str, str]) -> str:
 
 def _request(method: str, url: str, config: dict[str, str], token: str,
              body: dict[str, Any] | None = None,
-             timeout_seconds: float = MAX_REQUEST_TIMEOUT_SECONDS) -> dict[str, Any]:
+             timeout_seconds: float = MAX_REQUEST_TIMEOUT_SECONDS,
+             expected_status: int | None = None) -> dict[str, Any]:
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
@@ -306,6 +308,8 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
             raise RateLimitError(delay)
         if response.status >= 500:
             raise AmbiguousRequestError("Control Tower returned an ambiguous server failure")
+        if expected_status is not None and response.status != expected_status:
+            raise GateError(f"Control Tower returned HTTP {response.status}")
         if not 200 <= response.status < 300:
             raise GateError(f"Control Tower returned HTTP {response.status}")
         raw = response.body
@@ -320,6 +324,53 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         return result
     except (TimeoutError, OSError) as exc:
         raise AmbiguousRequestError("Control Tower request outcome is unknown") from exc
+
+
+def _refresh_invocation_lease_if_due(
+    *,
+    api_base: str,
+    approval_id: str,
+    config: dict[str, str],
+    token: str,
+    source_invocation_id: str,
+    deadline: float,
+    next_heartbeat_at: float,
+) -> tuple[float, bool]:
+    """Renew the invocation lease when due, without extending the hook deadline."""
+    now = time.monotonic()
+    if now < next_heartbeat_at:
+        return next_heartbeat_at, True
+    remaining_seconds = deadline - now
+    if remaining_seconds <= 0:
+        return next_heartbeat_at, False
+    try:
+        heartbeat = _request(
+            "POST",
+            f"{api_base}/agents/approvals/{approval_id}/heartbeat",
+            config,
+            token,
+            {"source_invocation_id": source_invocation_id},
+            timeout_seconds=min(MAX_REQUEST_TIMEOUT_SECONDS, remaining_seconds),
+            expected_status=200,
+        )
+    except GateError:
+        return next_heartbeat_at, False
+    if time.monotonic() >= deadline:
+        return next_heartbeat_at, False
+    if not isinstance(heartbeat, dict):
+        return next_heartbeat_at, False
+    if (
+        heartbeat.get("approval_id") != approval_id
+        or heartbeat.get("source_agent_id") != config["agent_id"]
+        or heartbeat.get("source_invocation_id") != source_invocation_id
+        or heartbeat.get("live") is not True
+        or not isinstance(heartbeat.get("heartbeat_at"), str)
+        or not heartbeat["heartbeat_at"]
+        or not isinstance(heartbeat.get("expires_at"), str)
+        or not heartbeat["expires_at"]
+    ):
+        return next_heartbeat_at, False
+    return time.monotonic() + INVOCATION_HEARTBEAT_INTERVAL_SECONDS, True
 
 
 def _snapshot(approval: dict[str, Any]) -> dict[str, Any]:
@@ -508,12 +559,25 @@ def _run(
         return "deny", "Codex approval timeout configuration is invalid"
     if not 1 <= timeout <= MAX_WAIT_SECONDS:
         return "deny", "Codex approval timeout is outside the allowed range"
-    deadline = time.monotonic() + timeout
+    wait_started_at = time.monotonic()
+    deadline = wait_started_at + timeout
+    next_heartbeat_at = wait_started_at + INVOCATION_HEARTBEAT_INTERVAL_SECONDS
     reconnect_backoff_seconds = POLL_INTERVAL_SECONDS
     while time.monotonic() < deadline:
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
             break
+        next_heartbeat_at, lease_live = _refresh_invocation_lease_if_due(
+            api_base=api_base,
+            approval_id=approval_id,
+            config=config,
+            token=token,
+            source_invocation_id=source_invocation_id,
+            deadline=deadline,
+            next_heartbeat_at=next_heartbeat_at,
+        )
+        if not lease_live:
+            return "deny", "Connector liveness could not be confirmed"
         try:
             current = _request(
                 "GET",
@@ -552,6 +616,18 @@ def _run(
             break
         if status in {"DENIED", "REJECTED", "REVISION_REQUESTED", "EXPIRED", "CANCELLED", "BLOCKED", "FAILED"}:
             return "deny", f"Control Tower decision: {status}"
+        if status in {"APPROVED", "PENDING_REVIEW", "REQUESTED"}:
+            next_heartbeat_at, lease_live = _refresh_invocation_lease_if_due(
+                api_base=api_base,
+                approval_id=approval_id,
+                config=config,
+                token=token,
+                source_invocation_id=source_invocation_id,
+                deadline=deadline,
+                next_heartbeat_at=next_heartbeat_at,
+            )
+            if not lease_live:
+                return "deny", "Connector liveness could not be confirmed"
         if status == "APPROVED":
             if current.get("approved_payload_hash") != _hash(current):
                 return "deny", "Approved payload integrity check failed"

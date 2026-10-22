@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import psycopg
 import pytest
@@ -31,6 +32,7 @@ from app.approval_repository import (
     ApprovalDecisionConflict,
     ApprovalDecisionRepository,
     ApprovalDeliveryCredentialRejected,
+    ApprovalInvocationLeaseRejected,
     PostgresApprovalDecisionRepository,
     SQLiteApprovalDecisionRepository,
 )
@@ -146,7 +148,7 @@ def approval_case(request, tmp_path: Path) -> Iterator[ApprovalRepositoryCase]:
 
 
 def _approval(case: ApprovalRepositoryCase, **changes: object) -> ApprovalRequest:
-    return ApprovalRequest(
+    values: dict[str, object] = dict(
         id=f"approval_contract_{uuid.uuid4().hex}",
         project_id=case.project.id,
         workspace_id=case.workspace.id,
@@ -156,8 +158,9 @@ def _approval(case: ApprovalRepositoryCase, **changes: object) -> ApprovalReques
         files=[FileChange(path="README.md", diff="+contract")],
         risk=RiskAssessment(level=RiskLevel.LOW),
         status=ApprovalStatus.REQUESTED,
-        **changes,
     )
+    values.update(changes)
+    return ApprovalRequest(**values)
 
 
 def _create(case: ApprovalRepositoryCase, approval: ApprovalRequest) -> None:
@@ -179,6 +182,7 @@ def _create(case: ApprovalRepositoryCase, approval: ApprovalRequest) -> None:
             workspace_id=approval.workspace_id,
             created_at=created,
         ),
+        invocation_lease_ttl_seconds=(60 if approval.source_invocation_id else None),
     )
 
 
@@ -885,6 +889,8 @@ def test_approved_connector_delivery_claim_is_single_use_across_adapters(approva
         source_provider=AgentProvider.ANTIGRAVITY,
         source_agent_id=agent.id,
         source_invocation_id=invocation_id,
+        status=ApprovalStatus.PENDING_REVIEW,
+        expires_at=now_utc() + timedelta(minutes=5),
     )
     _create(approval_case, approval)
     approved = approval.model_copy(
@@ -895,7 +901,7 @@ def test_approved_connector_delivery_claim_is_single_use_across_adapters(approva
     )
     approval_case.repository.commit_decision(
         approval_id=approval.id,
-        expected_status=ApprovalStatus.REQUESTED,
+        expected_status=ApprovalStatus.PENDING_REVIEW,
         expected_approval=approval,
         updated_approval=approved,
         audit_event=_decision_audit(approval, approved, uuid.uuid4().hex),
@@ -926,6 +932,30 @@ def test_approved_connector_delivery_claim_is_single_use_across_adapters(approva
     }
 
     assert approval_case.repository.claim_approved_delivery(**claim) is True
+    with approval_case.connect() as connection:
+        if approval_case.backend == "sqlite":
+            claimed_at_value = connection.execute(
+                "SELECT claimed_at FROM approval_delivery_claims WHERE approval_id=?",
+                (approval.id,),
+            ).fetchone()[0]
+            audit_created_at_value = connection.execute(
+                "SELECT json_extract(payload,'$.created_at') FROM kv_store "
+                "WHERE entity_type='audit_event' AND entity_id=?",
+                (claim_audit.id,),
+            ).fetchone()[0]
+            claimed_at = datetime.fromisoformat(claimed_at_value)
+            audit_created_at = datetime.fromisoformat(audit_created_at_value)
+        else:
+            claimed_at = connection.execute(
+                "SELECT claimed_at FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval.id,),
+            ).fetchone()[0]
+            audit_created_at = connection.execute(
+                "SELECT created_at FROM audit_events WHERE event_id=%s",
+                (claim_audit.id,),
+            ).fetchone()[0]
+    assert claimed_at == audit_created_at
+    assert claimed_at > claim_audit.created_at
     assert approval_case.repository.claim_approved_delivery(
         **{**claim, "audit_event": claim_audit.model_copy(update={"id": "duplicate_claim_audit"})}
     ) is False
@@ -946,6 +976,8 @@ def test_connector_revoked_after_authentication_cannot_claim_delivery(approval_c
         source_provider=AgentProvider.ANTIGRAVITY,
         source_agent_id=agent.id,
         source_invocation_id=f"connector-revocation:{uuid.uuid4().hex}",
+        status=ApprovalStatus.PENDING_REVIEW,
+        expires_at=now_utc() + timedelta(minutes=5),
     )
     _create(approval_case, approval)
     approved = approval.model_copy(
@@ -956,7 +988,7 @@ def test_connector_revoked_after_authentication_cannot_claim_delivery(approval_c
     )
     approval_case.repository.commit_decision(
         approval_id=approval.id,
-        expected_status=ApprovalStatus.REQUESTED,
+        expected_status=ApprovalStatus.PENDING_REVIEW,
         expected_approval=approval,
         updated_approval=approved,
         audit_event=_decision_audit(approval, approved, uuid.uuid4().hex),
@@ -1035,6 +1067,399 @@ def test_connector_revoked_after_authentication_cannot_claim_delivery(approval_c
             ).fetchone()[0]
     assert claim_count == 0
     assert _count(approval_case, "audit_event") == audit_count_before_claim
+
+
+def test_invocation_heartbeat_is_scoped_and_capped_at_approval_expiry(approval_case) -> None:
+    agent = ExternalAgent(
+        id=f"agent_heartbeat_contract_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Invocation heartbeat connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=approval_case.workspace.id,
+    )
+    presented_token_hash = _store_external_agent(approval_case, agent)
+    invocation_id = f"heartbeat-contract:{uuid.uuid4().hex}"
+    approval_created = now_utc() - timedelta(seconds=5)
+    approval = _approval(
+        approval_case,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+        status=ApprovalStatus.PENDING_REVIEW,
+        created_at=approval_created,
+        expires_at=approval_created + timedelta(seconds=45),
+    )
+    _create(approval_case, approval)
+    with approval_case.connect() as connection:
+        if approval_case.backend == "sqlite":
+            initial = connection.execute(
+                "SELECT workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=?",
+                (approval.id,),
+            ).fetchone()
+        else:
+            initial = connection.execute(
+                "SELECT workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=%s",
+                (approval.id,),
+            ).fetchone()
+    assert initial is not None
+    assert initial[:3] == (approval_case.workspace.id, agent.id, invocation_id)
+    initial_heartbeat_at = (
+        initial[3]
+        if isinstance(initial[3], datetime)
+        else datetime.fromisoformat(initial[3])
+    )
+    initial_expiry = (
+        initial[4]
+        if isinstance(initial[4], datetime)
+        else datetime.fromisoformat(initial[4])
+    )
+    assert initial_heartbeat_at == approval.created_at
+    assert initial_expiry <= approval.expires_at
+    heartbeat_at = now_utc()
+    lease = approval_case.repository.heartbeat_invocation(
+        approval_id=approval.id,
+        workspace_id=approval_case.workspace.id,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+        presented_token_hash=presented_token_hash,
+        occurred_at=heartbeat_at,
+        ttl_seconds=60,
+    )
+    assert lease.approval_id == approval.id
+    assert lease.source_agent_id == agent.id
+    assert lease.source_invocation_id == invocation_id
+    assert lease.expires_at == approval.expires_at
+
+    with pytest.raises((ApprovalInvocationLeaseRejected, ApprovalDeliveryCredentialRejected)):
+        approval_case.repository.heartbeat_invocation(
+            approval_id=approval.id,
+            workspace_id=f"{approval_case.workspace.id}-other",
+            source_agent_id=agent.id,
+            source_invocation_id=invocation_id,
+            presented_token_hash=presented_token_hash,
+            occurred_at=heartbeat_at,
+            ttl_seconds=60,
+        )
+
+
+@pytest.mark.parametrize("lease_state", ("expired", "missing"))
+def test_expired_or_missing_invocation_lease_blocks_heartbeat_and_decision_without_side_effects(
+    approval_case, lease_state: str
+) -> None:
+    agent = ExternalAgent(
+        id=f"agent_expired_lease_fence_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Expired invocation lease fence connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=approval_case.workspace.id,
+    )
+    presented_token_hash = _store_external_agent(approval_case, agent)
+    invocation_id = f"expired-lease-fence:{uuid.uuid4().hex}"
+    approval = _approval(
+        approval_case,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+        status=ApprovalStatus.PENDING_REVIEW,
+        expires_at=now_utc() + timedelta(minutes=5),
+    )
+    _create(approval_case, approval)
+    with approval_case.connect() as connection:
+        if lease_state == "expired":
+            expired_at = now_utc() - timedelta(seconds=2)
+            heartbeat_at = expired_at - timedelta(seconds=1)
+            if approval_case.backend == "sqlite":
+                connection.execute(
+                    "UPDATE approval_invocation_leases SET heartbeat_at=?,expires_at=? WHERE approval_id=?",
+                    (heartbeat_at.isoformat(), expired_at.isoformat(), approval.id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE approval_invocation_leases SET heartbeat_at=%s,expires_at=%s WHERE approval_id=%s",
+                    (heartbeat_at, expired_at, approval.id),
+                )
+        else:
+            if approval_case.backend == "sqlite":
+                connection.execute(
+                    "DELETE FROM approval_invocation_leases WHERE approval_id=?", (approval.id,)
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM approval_invocation_leases WHERE approval_id=%s", (approval.id,)
+                )
+
+    audit_count_before = _count(approval_case, "audit_event")
+    notification_count_before = _count(approval_case, "notification")
+    with pytest.raises(ApprovalInvocationLeaseRejected):
+        approval_case.repository.heartbeat_invocation(
+            approval_id=approval.id,
+            workspace_id=approval_case.workspace.id,
+            source_agent_id=agent.id,
+            source_invocation_id=invocation_id,
+            presented_token_hash=presented_token_hash,
+            occurred_at=now_utc(),
+            ttl_seconds=60,
+        )
+
+    approved = approval.model_copy(
+        update={"status": ApprovalStatus.APPROVED, "approved_payload_hash_version": 2}
+    )
+    approved = approved.model_copy(
+        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+    )
+    with pytest.raises(ApprovalDecisionConflict, match="invocation is no longer live"):
+        approval_case.repository.commit_decision(
+            approval_id=approval.id,
+            expected_status=ApprovalStatus.PENDING_REVIEW,
+            expected_approval=approval,
+            updated_approval=approved,
+            audit_event=_decision_audit(approval, approved, uuid.uuid4().hex),
+            decision_notification=Notification(
+                title="Decision recorded",
+                body="This must not be persisted for a stale invocation.",
+                entity_type="approval_request",
+                entity_id=approval.id,
+                workspace_id=approval.workspace_id,
+            ),
+        )
+
+    persisted = approval_case.repository.get(approval.id)
+    assert persisted == approval
+    assert _count(approval_case, "audit_event") == audit_count_before
+    assert _count(approval_case, "notification") == notification_count_before
+
+
+def test_invocation_heartbeat_without_matching_lease_identity_is_rejected(approval_case) -> None:
+    agent = ExternalAgent(
+        id=f"agent_heartbeat_mismatch_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Invocation heartbeat mismatch connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=approval_case.workspace.id,
+    )
+    presented_token_hash = _store_external_agent(approval_case, agent)
+    invocation_id = f"heartbeat-mismatch:{uuid.uuid4().hex}"
+    approval = _approval(
+        approval_case,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+    )
+    _create(approval_case, approval)
+    with pytest.raises(ApprovalInvocationLeaseRejected):
+        approval_case.repository.heartbeat_invocation(
+            approval_id=approval.id,
+            workspace_id=approval_case.workspace.id,
+            source_agent_id=agent.id,
+            source_invocation_id=f"{invocation_id}-wrong",
+            presented_token_hash=presented_token_hash,
+            occurred_at=now_utc(),
+            ttl_seconds=60,
+        )
+
+
+def test_expired_invocation_lease_cannot_be_consumed(approval_case) -> None:
+    agent = ExternalAgent(
+        id=f"agent_lease_expiry_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Invocation lease expiry connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=approval_case.workspace.id,
+    )
+    presented_token_hash = _store_external_agent(approval_case, agent)
+    invocation_id = f"lease-expiry:{uuid.uuid4().hex}"
+    approval = _approval(
+        approval_case,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+        status=ApprovalStatus.PENDING_REVIEW,
+        expires_at=now_utc() + timedelta(minutes=5),
+    )
+    _create(approval_case, approval)
+    approved = approval.model_copy(
+        update={"status": ApprovalStatus.APPROVED, "approved_payload_hash_version": 2}
+    )
+    approved = approved.model_copy(
+        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+    )
+    approval_case.repository.commit_decision(
+        approval_id=approval.id,
+        expected_status=ApprovalStatus.PENDING_REVIEW,
+        expected_approval=approval,
+        updated_approval=approved,
+        audit_event=_decision_audit(approval, approved, uuid.uuid4().hex),
+        decision_notification=Notification(
+            title="Decision recorded",
+            body="The connector may claim this invocation once.",
+            entity_type="approval_request",
+            entity_id=approval.id,
+            workspace_id=approval.workspace_id,
+        ),
+    )
+    with approval_case.connect() as connection:
+        expired_at = now_utc() - timedelta(seconds=1)
+        heartbeat_at = expired_at - timedelta(seconds=1)
+        if approval_case.backend == "sqlite":
+            connection.execute(
+                "UPDATE approval_invocation_leases SET heartbeat_at=?, expires_at=? WHERE approval_id=?",
+                (heartbeat_at.isoformat(), expired_at.isoformat(), approval.id),
+            )
+        else:
+            connection.execute(
+                "UPDATE approval_invocation_leases SET heartbeat_at=%s, expires_at=%s WHERE approval_id=%s",
+                (heartbeat_at, expired_at, approval.id),
+            )
+    claim_event = AuditEvent(
+        event_type="approval.delivery_claimed",
+        entity_id=approval.id,
+        workspace_id=approval.workspace_id,
+        actor=f"agent:{agent.id}",
+        details={"source_invocation_id": invocation_id},
+    )
+    with pytest.raises(ApprovalInvocationLeaseRejected):
+        approval_case.repository.claim_approved_delivery(
+            approval_id=approval.id,
+            workspace_id=approval_case.workspace.id,
+            source_agent_id=agent.id,
+            source_invocation_id=invocation_id,
+            expected_payload_hash=approved.approved_payload_hash,
+            presented_token_hash=presented_token_hash,
+            audit_event=claim_event,
+        )
+
+
+@pytest.mark.parametrize("expiry_target", ("approval", "lease"))
+def test_sqlite_claim_waiting_on_database_lock_rechecks_approval_and_lease_expiry(
+    approval_case, expiry_target: str
+) -> None:
+    if approval_case.backend != "sqlite":
+        pytest.skip("Controlled database-lock wait is exercised by the PostgreSQL parity test")
+
+    agent = ExternalAgent(
+        id=f"agent_claim_lock_expiry_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Claim lock-expiry connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=approval_case.workspace.id,
+    )
+    presented_token_hash = _store_external_agent(approval_case, agent)
+    invocation_id = f"claim-lock-expiry:{uuid.uuid4().hex}"
+    approval = _approval(
+        approval_case,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+        status=ApprovalStatus.PENDING_REVIEW,
+        expires_at=now_utc() + timedelta(minutes=5),
+    )
+    _create(approval_case, approval)
+    approved = approval.model_copy(
+        update={"status": ApprovalStatus.APPROVED, "approved_payload_hash_version": 2}
+    )
+    approved = approved.model_copy(
+        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+    )
+    approval_case.repository.commit_decision(
+        approval_id=approval.id,
+        expected_status=ApprovalStatus.PENDING_REVIEW,
+        expected_approval=approval,
+        updated_approval=approved,
+        audit_event=_decision_audit(approval, approved, f"claim-lock-decision-{uuid.uuid4().hex}"),
+        decision_notification=Notification(
+            title="Decision recorded",
+            body="The connector may claim this invocation once.",
+            entity_type="approval_request",
+            entity_id=approval.id,
+            workspace_id=approval.workspace_id,
+        ),
+    )
+    deadline = now_utc() + timedelta(seconds=2)
+    approval_expiry = (
+        deadline
+        if expiry_target == "approval"
+        else now_utc() + timedelta(minutes=5)
+    )
+    approved = approved.model_copy(update={"expires_at": approval_expiry})
+    with approval_case.connect() as connection:
+        connection.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id=?",
+            (approved.model_dump_json(), approval.id),
+        )
+        connection.execute(
+            "UPDATE approval_invocation_leases SET expires_at=? WHERE approval_id=?",
+            (deadline.isoformat(), approval.id),
+        )
+
+    claim_started_at = now_utc()
+    assert claim_started_at < deadline
+    claim_event = AuditEvent(
+        id=f"audit_claim_lock_expiry_{uuid.uuid4().hex}",
+        event_type="approval.delivery_claimed",
+        entity_id=approval.id,
+        workspace_id=approval.workspace_id,
+        actor=f"agent:{agent.id}",
+        created_at=claim_started_at,
+        details={"source_invocation_id": invocation_id},
+    )
+    begin_requested = Event()
+
+    class BeginObservedConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def execute(self, statement: str, parameters=()):
+            if statement == "BEGIN IMMEDIATE":
+                begin_requested.set()
+            return self._connection.execute(statement, parameters)
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._connection.__exit__(exc_type, exc_value, traceback)
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+    waiting_repository = SQLiteApprovalDecisionRepository(
+        lambda: BeginObservedConnection(approval_case.connect())
+    )
+    blocker = approval_case.connect()
+    blocker.execute("BEGIN IMMEDIATE")
+    before_claims = _count(approval_case, "audit_event")
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                waiting_repository.claim_approved_delivery,
+                approval_id=approval.id,
+                workspace_id=approval.workspace_id,
+                source_agent_id=agent.id,
+                source_invocation_id=invocation_id,
+                expected_payload_hash=approved.approved_payload_hash,
+                presented_token_hash=presented_token_hash,
+                audit_event=claim_event,
+            )
+            assert begin_requested.wait(timeout=2)
+            assert now_utc() < deadline
+            assert not future.done()
+            time.sleep(max(0.0, (deadline - now_utc()).total_seconds()) + 0.05)
+            assert now_utc() >= deadline
+            blocker.rollback()
+            with pytest.raises(ApprovalInvocationLeaseRejected, match="expired"):
+                future.result(timeout=5)
+    finally:
+        blocker.close()
+
+    assert _count(approval_case, "audit_event") == before_claims
+    with approval_case.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+            (approval.id,),
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(

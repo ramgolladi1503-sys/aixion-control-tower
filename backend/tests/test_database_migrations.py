@@ -37,7 +37,7 @@ def test_fresh_database_gets_baseline_email_and_rate_limit_migrations(tmp_path, 
     assert expiry_index is not None
     assert failure_table is not None
     assert failure_identity_trigger is not None
-    assert len(migration_rows) == 8
+    assert len(migration_rows) == 9
     assert migration_rows[0][0] == "0001_baseline_kv_store"
     assert migration_rows[0][1] == "Create baseline key-value persistence table"
     assert migration_rows[0][2]
@@ -55,6 +55,14 @@ def test_fresh_database_gets_baseline_email_and_rate_limit_migrations(tmp_path, 
     assert migration_rows[6][2]
     assert migration_rows[7][0] == "0008_delivery_failure_claim_identity"
     assert migration_rows[7][2]
+    assert migration_rows[8][0] == "0009_approval_invocation_leases"
+    assert migration_rows[8][2]
+    with sqlite3.connect(db_path) as conn:
+        lease_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'approval_invocation_leases'"
+        ).fetchone()
+    assert lease_table is not None
 
 
 def test_migration_runner_is_idempotent(tmp_path) -> None:
@@ -68,7 +76,7 @@ def test_migration_runner_is_idempotent(tmp_path) -> None:
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'kv_store'"
         ).fetchone()[0]
 
-        assert migration_count == 8
+        assert migration_count == 9
     assert kv_table_count == 1
 
 
@@ -228,6 +236,7 @@ def test_existing_database_state_survives_baseline_migration(tmp_path, monkeypat
         "0006_approval_delivery_claims",
         "0007_approval_delivery_failures",
         "0008_delivery_failure_claim_identity",
+        "0009_approval_invocation_leases",
     ]
 
 
@@ -256,7 +265,7 @@ def test_migration_metadata_persists(tmp_path) -> None:
     with sqlite3.connect(db_path) as conn:
         applied = get_applied_migrations(conn)
 
-    assert len(applied) == 8
+    assert len(applied) == 9
     assert applied[0]["migration_id"] == "0001_baseline_kv_store"
     assert applied[0]["name"] == "Create baseline key-value persistence table"
     assert applied[0]["applied_at"]
@@ -267,3 +276,4 @@ def test_migration_metadata_persists(tmp_path) -> None:
     assert applied[5]["migration_id"] == "0006_approval_delivery_claims"
     assert applied[6]["migration_id"] == "0007_approval_delivery_failures"
     assert applied[7]["migration_id"] == "0008_delivery_failure_claim_identity"
+    assert applied[8]["migration_id"] == "0009_approval_invocation_leases"

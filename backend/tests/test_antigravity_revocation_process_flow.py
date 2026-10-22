@@ -99,13 +99,23 @@ def test_antigravity_waiting_hook_fails_closed_after_credential_revocation(
     try:
         _wait_for_api(api_process, base_url)
         with httpx.Client(base_url=base_url, timeout=5) as client:
-            seeded = client.post("/demo/seed")
-            assert seeded.status_code == 200, seeded.text
-            projects_response = client.get("/projects")
-            assert projects_response.status_code == 200, projects_response.text
-            projects = projects_response.json()
-            assert projects
-            project_id = projects[0]["id"]
+            registration = client.post(
+                "/auth/register",
+                json={"email": "antigravity-revocation@example.com", "password": "Revocation-test-password-123!", "display_name": "Revocation owner"},
+            )
+            assert registration.status_code == 200, registration.text
+            code = registration.json().get("dev_verification_code")
+            assert code
+            verified = client.post(
+                "/auth/verify-email",
+                json={"email": "antigravity-revocation@example.com", "code": code},
+            )
+            assert verified.status_code == 200, verified.text
+            project_response = client.post(
+                "/projects", json={"name": "Antigravity revocation project"}
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
             registered = client.post(
                 "/agents",
                 json={

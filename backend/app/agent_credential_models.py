@@ -8,6 +8,12 @@ from pydantic import BaseModel, Field
 from .models import AgentAuthType, AgentCreate, new_id, now_utc
 
 
+# Four concurrent native approval waits can each issue about 30 decision reads,
+# four heartbeats, and three setup/finalization calls per minute. 148 calls is
+# the expected budget; 200 leaves bounded room for timing overlap and retries.
+DEFAULT_EXTERNAL_AGENT_RATE_LIMIT_PER_MINUTE = 200
+
+
 class AgentCredentialState(StrEnum):
     ACTIVE = "ACTIVE"
     DISABLED = "DISABLED"
@@ -26,7 +32,7 @@ class AgentCredentialRecord(BaseModel):
     last_used_at: datetime | None = None
     failed_auth_count: int = 0
     last_auth_failed_at: datetime | None = None
-    rate_limit_per_minute: int = 60
+    rate_limit_per_minute: int = DEFAULT_EXTERNAL_AGENT_RATE_LIMIT_PER_MINUTE
     rate_limit_window_started_at: datetime | None = None
     rate_limit_request_count: int = 0
     created_at: datetime = Field(default_factory=now_utc)
@@ -51,7 +57,9 @@ class AgentCredentialStatus(BaseModel):
 
 class AgentCreateWithCredentialPolicy(AgentCreate):
     token_expires_at: datetime | None = None
-    rate_limit_per_minute: int = Field(default=60, ge=1, le=1000)
+    rate_limit_per_minute: int = Field(
+        default=DEFAULT_EXTERNAL_AGENT_RATE_LIMIT_PER_MINUTE, ge=1, le=1000
+    )
 
 
 class AgentTokenRotateRequest(BaseModel):

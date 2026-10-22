@@ -45,6 +45,7 @@ def test_local_profile_defaults_to_auth_enabled(monkeypatch: pytest.MonkeyPatch)
     assert settings.approval_recovery_poll_seconds == 60
     assert str(settings.db_path) == "runtime/aixion_control_tower.sqlite3"
     assert settings.agent_approval_ttl_seconds == 600
+    assert settings.external_agent_invocation_lease_ttl_seconds == 60
     assert settings.outbox_dispatch_mode == "inline"
     assert settings.push_dispatch_enabled is False
     assert settings.push_dispatch_poll_seconds == 5
@@ -244,6 +245,24 @@ def test_approval_recovery_poll_interval_is_bounded(
 
     with pytest.raises(ValueError, match="AIXION_APPROVAL_RECOVERY_POLL_SECONDS"):
         get_settings()
+
+
+@pytest.mark.parametrize("value", ["29", "301", "not-an-int"])
+def test_external_agent_invocation_lease_ttl_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("AIXION_EXTERNAL_AGENT_INVOCATION_LEASE_TTL_SECONDS", value)
+
+    with pytest.raises(ValueError, match="AIXION_EXTERNAL_AGENT_INVOCATION_LEASE_TTL_SECONDS"):
+        get_settings()
+
+
+def test_external_agent_invocation_lease_ttl_is_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIXION_EXTERNAL_AGENT_INVOCATION_LEASE_TTL_SECONDS", "90")
+
+    assert get_settings().external_agent_invocation_lease_ttl_seconds == 90
 
 
 @pytest.mark.parametrize(

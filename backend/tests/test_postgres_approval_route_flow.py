@@ -540,6 +540,41 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     assert approval["workspace_id"] == workspace.id
     assert approval["source_agent_id"] == agent.id
     assert approval["status"] == "PENDING_REVIEW"
+    headers = {
+        "X-Aixion-Agent-Id": agent.id,
+        "X-Aixion-Agent-Token": agent_token,
+    }
+    with connect() as connection:
+        lease_row = connection.execute(
+            "SELECT workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+            "FROM approval_invocation_leases WHERE approval_id=%s",
+            (approval["id"],),
+        ).fetchone()
+    assert lease_row is not None
+    assert lease_row[:3] == (workspace.id, agent.id, invocation_id)
+
+    heartbeat = client.post(
+        f"/agents/approvals/{approval['id']}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": invocation_id},
+    )
+    assert heartbeat.status_code == 200, heartbeat.text
+    assert set(heartbeat.json()) == {
+        "approval_id", "source_agent_id", "source_invocation_id",
+        "heartbeat_at", "expires_at", "live",
+    }
+    assert heartbeat.json()["approval_id"] == approval["id"]
+    assert heartbeat.json()["source_agent_id"] == agent.id
+    assert heartbeat.json()["source_invocation_id"] == invocation_id
+    assert heartbeat.json()["live"] is True
+    assert isinstance(heartbeat.json()["heartbeat_at"], str) and heartbeat.json()["heartbeat_at"]
+    assert isinstance(heartbeat.json()["expires_at"], str) and heartbeat.json()["expires_at"]
+    mismatched_heartbeat = client.post(
+        f"/agents/approvals/{approval['id']}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": f"{invocation_id}-wrong"},
+    )
+    assert mismatched_heartbeat.status_code == 409
 
     decision = client.post(
         f"/approvals/{approval['id']}/decision",
@@ -549,10 +584,6 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     assert decision.json()["status"] == "APPROVED"
     assert decision.json()["approved_payload_hash"]
 
-    headers = {
-        "X-Aixion-Agent-Id": agent.id,
-        "X-Aixion-Agent-Token": agent_token,
-    }
     read = client.get(f"/agents/approvals/{approval['id']}/decision", headers=headers)
     assert read.status_code == 200, read.text
     assert read.json()["approved_payload_hash"] == decision.json()["approved_payload_hash"]

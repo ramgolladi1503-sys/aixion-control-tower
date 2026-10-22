@@ -4,7 +4,7 @@ import sqlite3
 import hmac
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 import psycopg
@@ -50,6 +50,103 @@ class ApprovalDecisionConflict(RuntimeError):
 
 class ApprovalDeliveryCredentialRejected(RuntimeError):
     """The connector credential is no longer valid at the delivery claim boundary."""
+
+
+class ApprovalInvocationLeaseRejected(RuntimeError):
+    """The connector invocation is not durably live for this approval."""
+
+
+@dataclass(frozen=True)
+class ApprovalInvocationLease:
+    approval_id: str
+    source_agent_id: str
+    source_invocation_id: str
+    heartbeat_at: datetime
+    expires_at: datetime
+
+
+def _invocation_lease_deadline(
+    *, approval: ApprovalRequest, heartbeat_at: datetime, ttl_seconds: int
+) -> datetime:
+    if not 30 <= ttl_seconds <= 300:
+        raise ValueError("Invocation lease TTL must be between 30 and 300 seconds")
+    approval_expiry = approval.expires_at
+    if approval_expiry is None or approval_expiry.tzinfo is None:
+        raise ApprovalInvocationLeaseRejected("Approval has no valid invocation deadline")
+    if heartbeat_at.tzinfo is None:
+        raise ValueError("Invocation heartbeat timestamp must be timezone-aware")
+    return min(heartbeat_at + timedelta(seconds=ttl_seconds), approval_expiry)
+
+
+def _sqlite_lease_from_row(row: tuple[object, ...]) -> ApprovalInvocationLease:
+    try:
+        heartbeat_at = datetime.fromisoformat(str(row[4]))
+        expires_at = datetime.fromisoformat(str(row[5]))
+        if heartbeat_at.tzinfo is None or expires_at.tzinfo is None:
+            raise ValueError("timezone missing")
+        return ApprovalInvocationLease(
+            approval_id=str(row[0]),
+            source_agent_id=str(row[2]),
+            source_invocation_id=str(row[3]),
+            heartbeat_at=heartbeat_at,
+            expires_at=expires_at,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ApprovalInvocationLeaseRejected("Invocation lease record is invalid") from exc
+
+
+def _postgres_lease_from_row(row: tuple[object, ...]) -> ApprovalInvocationLease:
+    if (
+        len(row) != 6
+        or not isinstance(row[4], datetime)
+        or not isinstance(row[5], datetime)
+        or row[4].tzinfo is None
+        or row[5].tzinfo is None
+    ):
+        raise ApprovalInvocationLeaseRejected("Invocation lease record is invalid")
+    return ApprovalInvocationLease(
+        approval_id=str(row[0]),
+        source_agent_id=str(row[2]),
+        source_invocation_id=str(row[3]),
+        heartbeat_at=row[4],
+        expires_at=row[5],
+    )
+
+
+def _validate_live_decision_invocation(
+    *,
+    approval: ApprovalRequest,
+    lease_row: tuple[object, ...] | None,
+    now: datetime,
+    postgres: bool,
+) -> None:
+    """Require a live lease for connector-bound decisions; leave manual decisions unchanged."""
+    # Webhook and legacy approvals may identify a source agent without being
+    # tied to a paused native invocation. Only a complete invocation identity
+    # opts into the live-lease decision fence below.
+    if approval.source_invocation_id is None:
+        return
+    if (
+        not approval.workspace_id
+        or not approval.source_agent_id
+        or not approval.source_invocation_id
+        or lease_row is None
+    ):
+        raise ApprovalDecisionConflict("Connector invocation is no longer live; reload the request.")
+    try:
+        lease = _postgres_lease_from_row(lease_row) if postgres else _sqlite_lease_from_row(lease_row)
+    except ApprovalInvocationLeaseRejected as exc:
+        raise ApprovalDecisionConflict(
+            "Connector invocation is no longer live; reload the request."
+        ) from exc
+    if (
+        lease.approval_id != approval.id
+        or lease_row[1] != approval.workspace_id
+        or lease.source_agent_id != approval.source_agent_id
+        or lease.source_invocation_id != approval.source_invocation_id
+        or lease.expires_at <= now
+    ):
+        raise ApprovalDecisionConflict("Connector invocation is no longer live; reload the request.")
 
 
 def _require_current_delivery_credential(
@@ -471,6 +568,18 @@ def _validate_expiry_backfill(
 class ApprovalDecisionRepository(Protocol):
     def get(self, approval_id: str) -> ApprovalRequest | None: ...
 
+    def heartbeat_invocation(
+        self,
+        *,
+        approval_id: str,
+        workspace_id: str,
+        source_agent_id: str,
+        source_invocation_id: str,
+        presented_token_hash: str,
+        occurred_at: datetime,
+        ttl_seconds: int,
+    ) -> ApprovalInvocationLease: ...
+
     def get_by_invocation(
         self, *, workspace_id: str | None, source_agent_id: str, source_invocation_id: str
     ) -> ApprovalRequest | None: ...
@@ -515,6 +624,7 @@ class ApprovalDecisionRepository(Protocol):
         approval: ApprovalRequest,
         audit_event: AuditEvent,
         notification: Notification,
+        invocation_lease_ttl_seconds: int | None = None,
     ) -> None: ...
 
     def create_for_agent_task(
@@ -595,6 +705,107 @@ class SQLiteApprovalDecisionRepository:
             return None
         return approval
 
+    def heartbeat_invocation(
+        self,
+        *,
+        approval_id: str,
+        workspace_id: str,
+        source_agent_id: str,
+        source_invocation_id: str,
+        presented_token_hash: str,
+        occurred_at: datetime,
+        ttl_seconds: int,
+    ) -> ApprovalInvocationLease:
+        if occurred_at.tzinfo is None or not workspace_id:
+            raise ValueError("Invocation heartbeat requires an aware timestamp and workspace")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _validate_sqlite_delivery_credential(
+                conn,
+                source_agent_id=source_agent_id,
+                workspace_id=workspace_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=now_utc(),
+            )
+            approval_row = conn.execute(
+                "SELECT entity_id,payload FROM kv_store "
+                "WHERE entity_type='approval_request' AND entity_id=?",
+                (approval_id,),
+            ).fetchone()
+            if approval_row is None:
+                raise ApprovalInvocationLeaseRejected("Approval invocation is unavailable")
+            try:
+                approval = ApprovalRequest.model_validate_json(approval_row[1])
+            except Exception as exc:
+                raise ApprovalInvocationLeaseRejected("Approval invocation record is invalid") from exc
+            if (
+                approval_row[0] != approval_id
+                or approval.id != approval_id
+                or approval.workspace_id != workspace_id
+                or approval.source_agent_id != source_agent_id
+                or approval.source_invocation_id != source_invocation_id
+                or approval.status not in {ApprovalStatus.PENDING_REVIEW, ApprovalStatus.APPROVED}
+                or approval.expires_at is None
+                or approval.expires_at <= now_utc()
+            ):
+                raise ApprovalInvocationLeaseRejected("Approval invocation is no longer live")
+            claim = conn.execute(
+                "SELECT 1 FROM approval_delivery_claims WHERE approval_id=?",
+                (approval_id,),
+            ).fetchone()
+            if claim is not None:
+                raise ApprovalInvocationLeaseRejected("Approval invocation was already consumed")
+            existing = conn.execute(
+                "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=?",
+                (approval_id,),
+            ).fetchone()
+            heartbeat_at = now_utc()
+            _validate_sqlite_delivery_credential(
+                conn,
+                source_agent_id=source_agent_id,
+                workspace_id=workspace_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=heartbeat_at,
+            )
+            if approval.expires_at is None or approval.expires_at <= heartbeat_at:
+                raise ApprovalInvocationLeaseRejected("Approval invocation is no longer live")
+            if existing is None:
+                raise ApprovalInvocationLeaseRejected("Invocation lease is missing")
+            current = _sqlite_lease_from_row(existing)
+            if (
+                current.approval_id != approval_id
+                or existing[1] != workspace_id
+                or current.source_agent_id != source_agent_id
+                or current.source_invocation_id != source_invocation_id
+            ):
+                raise ApprovalInvocationLeaseRejected("Invocation lease identity changed")
+            if current.expires_at <= heartbeat_at:
+                raise ApprovalInvocationLeaseRejected("Invocation lease expired and cannot be renewed")
+            expires_at = _invocation_lease_deadline(
+                approval=approval, heartbeat_at=heartbeat_at, ttl_seconds=ttl_seconds
+            )
+            try:
+                updated = conn.execute(
+                    "UPDATE approval_invocation_leases SET heartbeat_at=?,expires_at=? "
+                    "WHERE approval_id=? AND workspace_id=? AND source_agent_id=? "
+                    "AND source_invocation_id=? AND expires_at>?",
+                    (heartbeat_at.isoformat(), expires_at.isoformat(), approval_id,
+                     workspace_id, source_agent_id, source_invocation_id, heartbeat_at.isoformat()),
+                )
+                if updated.rowcount != 1:
+                    raise ApprovalInvocationLeaseRejected("Invocation lease expired and cannot be renewed")
+            except sqlite3.IntegrityError as exc:
+                raise ApprovalInvocationLeaseRejected("Invocation lease scope conflicts") from exc
+            conn.commit()
+        return ApprovalInvocationLease(
+            approval_id=approval_id,
+            source_agent_id=source_agent_id,
+            source_invocation_id=source_invocation_id,
+            heartbeat_at=heartbeat_at,
+            expires_at=expires_at,
+        )
+
     def get_by_invocation(
         self, *, workspace_id: str | None, source_agent_id: str, source_invocation_id: str
     ) -> ApprovalRequest | None:
@@ -648,7 +859,7 @@ class SQLiteApprovalDecisionRepository:
                 source_agent_id=source_agent_id,
                 workspace_id=workspace_id,
                 presented_token_hash=presented_token_hash,
-                occurred_at=audit_event.created_at,
+                occurred_at=now_utc(),
             )
             row = conn.execute(
                 "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id=?",
@@ -668,6 +879,33 @@ class SQLiteApprovalDecisionRepository:
                 raise ApprovalDecisionConflict("Approved invocation identity or payload did not match")
             if approval.status != ApprovalStatus.APPROVED:
                 return False
+            lease_row = conn.execute(
+                "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=?",
+                (approval_id,),
+            ).fetchone()
+            if lease_row is None:
+                raise ApprovalInvocationLeaseRejected("Connector invocation is not live")
+            lease = _sqlite_lease_from_row(lease_row)
+            claim_time = now_utc()
+            _validate_sqlite_delivery_credential(
+                conn,
+                source_agent_id=source_agent_id,
+                workspace_id=workspace_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=claim_time,
+            )
+            claim_audit_event = audit_event.model_copy(update={"created_at": claim_time})
+            if approval.expires_at is None or approval.expires_at <= claim_time:
+                raise ApprovalInvocationLeaseRejected("Approval expired before delivery claim")
+            if (
+                lease.approval_id != approval_id
+                or lease_row[1] != workspace_id
+                or lease.source_agent_id != source_agent_id
+                or lease.source_invocation_id != source_invocation_id
+                or lease.expires_at <= claim_time
+            ):
+                raise ApprovalInvocationLeaseRejected("Connector invocation lease is expired or mismatched")
             try:
                 conn.execute(
                     "INSERT INTO approval_delivery_claims "
@@ -678,14 +916,14 @@ class SQLiteApprovalDecisionRepository:
                         workspace_id or "",
                         source_agent_id,
                         source_invocation_id,
-                        audit_event.created_at.isoformat(),
+                        claim_time.isoformat(),
                     ),
                 )
             except sqlite3.IntegrityError:
                 return False
             conn.execute(
                 "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
-                ("audit_event", audit_event.id, audit_event.model_dump_json()),
+                ("audit_event", claim_audit_event.id, claim_audit_event.model_dump_json()),
             )
             conn.commit()
             return True
@@ -849,6 +1087,7 @@ class SQLiteApprovalDecisionRepository:
         approval: ApprovalRequest,
         audit_event: AuditEvent,
         notification: Notification,
+        invocation_lease_ttl_seconds: int | None = None,
     ) -> None:
         _validate_approval_creation(
             approval, audit_event, notification, require_workspace=False
@@ -909,6 +1148,57 @@ class SQLiteApprovalDecisionRepository:
                     ("notification", notification.id, notification.model_dump_json()),
                 ),
             )
+            if (
+                invocation_lease_ttl_seconds is not None
+                and approval.source_agent_id
+                and approval.source_invocation_id
+                and approval.status == ApprovalStatus.PENDING_REVIEW
+            ):
+                if not approval.workspace_id:
+                    raise ApprovalDecisionConflict(
+                        "Connector invocation leases require a workspace-scoped approval"
+                    )
+                persisted_identity = conn.execute(
+                    "SELECT entity_id,json_extract(payload,'$.workspace_id'), "
+                    "json_extract(payload,'$.source_agent_id'), "
+                    "json_extract(payload,'$.source_invocation_id') "
+                    "FROM kv_store WHERE entity_type='approval_request' AND entity_id=?",
+                    (approval.id,),
+                ).fetchone()
+                expected_identity = (
+                    approval.id,
+                    approval.workspace_id,
+                    approval.source_agent_id,
+                    approval.source_invocation_id,
+                )
+                if persisted_identity != expected_identity:
+                    raise ApprovalDecisionConflict(
+                        "Persisted approval scope does not match its invocation lease"
+                    )
+                lease_expires_at = _invocation_lease_deadline(
+                    approval=approval,
+                    heartbeat_at=approval.created_at,
+                    ttl_seconds=invocation_lease_ttl_seconds,
+                )
+                lease_values = (
+                    approval.id,
+                    approval.workspace_id,
+                    approval.source_agent_id,
+                    approval.source_invocation_id,
+                    approval.created_at.isoformat(),
+                    lease_expires_at.isoformat(),
+                )
+                try:
+                    conn.execute(
+                        "INSERT INTO approval_invocation_leases "
+                        "(approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at) "
+                        "VALUES(?,?,?,?,?,?)",
+                        lease_values,
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise ApprovalDecisionConflict(
+                        "SQLite rejected the scoped invocation lease"
+                    ) from exc
             conn.commit()
 
     def create_for_agent_task(
@@ -1200,8 +1490,21 @@ class SQLiteApprovalDecisionRepository:
                 )
             if durable_approval != expected_approval:
                 raise ApprovalDecisionConflict("Approval changed since the decision snapshot was read.")
-            if durable_approval.expires_at is not None and durable_approval.expires_at <= now_utc():
+            decision_at = now_utc()
+            if durable_approval.expires_at is not None and durable_approval.expires_at <= decision_at:
                 raise ApprovalDecisionConflict("Approval deadline elapsed before the decision committed.")
+            if durable_approval.source_invocation_id is not None:
+                invocation_lease = conn.execute(
+                    "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                    "FROM approval_invocation_leases WHERE approval_id=?",
+                    (approval_id,),
+                ).fetchone()
+                _validate_live_decision_invocation(
+                    approval=durable_approval,
+                    lease_row=invocation_lease,
+                    now=decision_at,
+                    postgres=False,
+                )
             if updated_approval.workspace_id != durable_approval.workspace_id:
                 raise ApprovalDecisionConflict(
                     "Approval workspace cannot change as part of a decision."
@@ -1407,6 +1710,111 @@ class PostgresApprovalDecisionRepository:
             raise ApprovalDecisionConflict("Approval identity does not match its database key.")
         return approval
 
+    def heartbeat_invocation(
+        self,
+        *,
+        approval_id: str,
+        workspace_id: str,
+        source_agent_id: str,
+        source_invocation_id: str,
+        presented_token_hash: str,
+        occurred_at: datetime,
+        ttl_seconds: int,
+    ) -> ApprovalInvocationLease:
+        if occurred_at.tzinfo is None or not workspace_id:
+            raise ValueError("Invocation heartbeat requires an aware timestamp and workspace")
+        if workspace_id is None:
+            raise ApprovalInvocationLeaseRejected("Approval workspace is required")
+        with self._connect() as conn:
+            _validate_postgres_delivery_credential(
+                conn,
+                source_agent_id=source_agent_id,
+                workspace_id=workspace_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=now_utc(),
+            )
+            row = conn.execute(
+                "SELECT payload,approval_id,workspace_id,source_agent_id,source_invocation_id,status,expires_at "
+                "FROM approval_requests WHERE approval_id=%s FOR UPDATE",
+                (approval_id,),
+            ).fetchone()
+            if row is None:
+                raise ApprovalInvocationLeaseRejected("Approval invocation is unavailable")
+            try:
+                approval = ApprovalRequest.model_validate(row[0])
+            except Exception as exc:
+                raise ApprovalInvocationLeaseRejected("Approval invocation record is invalid") from exc
+            if (
+                approval.id != approval_id
+                or approval.id != row[1]
+                or approval.workspace_id != workspace_id
+                or approval.workspace_id != row[2]
+                or approval.source_agent_id != source_agent_id
+                or approval.source_agent_id != row[3]
+                or approval.source_invocation_id != source_invocation_id
+                or approval.source_invocation_id != row[4]
+                or approval.status not in {ApprovalStatus.PENDING_REVIEW, ApprovalStatus.APPROVED}
+                or approval.expires_at is None
+                or approval.expires_at <= now_utc()
+                or row[5] != approval.status.value
+                or row[6] != approval.expires_at
+            ):
+                raise ApprovalInvocationLeaseRejected("Approval invocation is no longer live")
+            claim = conn.execute(
+                "SELECT 1 FROM approval_delivery_claims WHERE approval_id=%s FOR KEY SHARE",
+                (approval_id,),
+            ).fetchone()
+            if claim is not None:
+                raise ApprovalInvocationLeaseRejected("Approval invocation was already consumed")
+            lease_row = conn.execute(
+                "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=%s FOR UPDATE",
+                (approval_id,),
+            ).fetchone()
+            heartbeat_at = now_utc()
+            _validate_postgres_delivery_credential(
+                conn,
+                source_agent_id=source_agent_id,
+                workspace_id=workspace_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=heartbeat_at,
+            )
+            if approval.expires_at is None or approval.expires_at <= heartbeat_at:
+                raise ApprovalInvocationLeaseRejected("Approval invocation is no longer live")
+            if lease_row is None:
+                raise ApprovalInvocationLeaseRejected("Invocation lease is missing")
+            current = _postgres_lease_from_row(lease_row)
+            if (
+                current.approval_id != approval_id
+                or lease_row[1] != workspace_id
+                or current.source_agent_id != source_agent_id
+                or current.source_invocation_id != source_invocation_id
+            ):
+                raise ApprovalInvocationLeaseRejected("Invocation lease identity changed")
+            if current.expires_at <= heartbeat_at:
+                raise ApprovalInvocationLeaseRejected("Invocation lease expired and cannot be renewed")
+            expires_at = _invocation_lease_deadline(
+                approval=approval, heartbeat_at=heartbeat_at, ttl_seconds=ttl_seconds
+            )
+            updated = conn.execute(
+                "UPDATE approval_invocation_leases SET heartbeat_at=%s,expires_at=%s "
+                "WHERE approval_id=%s AND workspace_id=%s AND source_agent_id=%s "
+                "AND source_invocation_id=%s AND expires_at>%s "
+                "RETURNING approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at",
+                (
+                    heartbeat_at,
+                    expires_at,
+                    approval_id,
+                    workspace_id,
+                    source_agent_id,
+                    source_invocation_id,
+                    heartbeat_at,
+                ),
+            ).fetchone()
+            if updated is None:
+                raise ApprovalInvocationLeaseRejected("Invocation lease expired and cannot be renewed")
+            return _postgres_lease_from_row(updated)
+
     def get_by_invocation(
         self, *, workspace_id: str | None, source_agent_id: str, source_invocation_id: str
     ) -> ApprovalRequest | None:
@@ -1459,7 +1867,7 @@ class PostgresApprovalDecisionRepository:
                 source_agent_id=source_agent_id,
                 workspace_id=workspace_id,
                 presented_token_hash=presented_token_hash,
-                occurred_at=audit_event.created_at,
+                occurred_at=now_utc(),
             )
             row = conn.execute(
                 "SELECT payload,workspace_id,source_agent_id,source_invocation_id "
@@ -1483,6 +1891,33 @@ class PostgresApprovalDecisionRepository:
                 raise ApprovalDecisionConflict("Approved invocation identity or payload did not match")
             if approval.status != ApprovalStatus.APPROVED:
                 return False
+            lease_row = conn.execute(
+                "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=%s FOR UPDATE",
+                (approval_id,),
+            ).fetchone()
+            if lease_row is None:
+                raise ApprovalInvocationLeaseRejected("Connector invocation is not live")
+            lease = _postgres_lease_from_row(lease_row)
+            claim_time = now_utc()
+            _validate_postgres_delivery_credential(
+                conn,
+                source_agent_id=source_agent_id,
+                workspace_id=workspace_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=claim_time,
+            )
+            claim_audit_event = audit_event.model_copy(update={"created_at": claim_time})
+            if approval.expires_at is None or approval.expires_at <= claim_time:
+                raise ApprovalInvocationLeaseRejected("Approval expired before delivery claim")
+            if (
+                lease.approval_id != approval_id
+                or lease_row[1] != workspace_id
+                or lease.source_agent_id != source_agent_id
+                or lease.source_invocation_id != source_invocation_id
+                or lease.expires_at <= claim_time
+            ):
+                raise ApprovalInvocationLeaseRejected("Connector invocation lease is expired or mismatched")
             claimed = conn.execute(
                 "INSERT INTO approval_delivery_claims "
                 "(approval_id,workspace_id,source_agent_id,source_invocation_id,claimed_at) "
@@ -1492,12 +1927,12 @@ class PostgresApprovalDecisionRepository:
                     workspace_id,
                     source_agent_id,
                     source_invocation_id,
-                    audit_event.created_at,
+                    claim_time,
                 ),
             ).fetchone()
             if claimed is None:
                 return False
-            self._insert_audit(conn, approval, audit_event)
+            self._insert_audit(conn, approval, claim_audit_event)
             return True
 
     def record_approved_delivery_failure(
@@ -1654,6 +2089,7 @@ class PostgresApprovalDecisionRepository:
         approval: ApprovalRequest,
         audit_event: AuditEvent,
         notification: Notification,
+        invocation_lease_ttl_seconds: int | None = None,
     ) -> None:
         _validate_approval_creation(
             approval, audit_event, notification, require_workspace=True
@@ -1696,6 +2132,34 @@ class PostgresApprovalDecisionRepository:
                         Jsonb(notification.model_dump(mode="json")),
                     ),
                 )
+                if (
+                    invocation_lease_ttl_seconds is not None
+                    and approval.source_agent_id
+                    and approval.source_invocation_id
+                    and approval.status == ApprovalStatus.PENDING_REVIEW
+                ):
+                    if not approval.workspace_id:
+                        raise ApprovalDecisionConflict(
+                            "Connector invocation leases require a workspace-scoped approval"
+                        )
+                    lease_expires_at = _invocation_lease_deadline(
+                        approval=approval,
+                        heartbeat_at=approval.created_at,
+                        ttl_seconds=invocation_lease_ttl_seconds,
+                    )
+                    conn.execute(
+                        "INSERT INTO approval_invocation_leases "
+                        "(approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at) "
+                        "VALUES(%s,%s,%s,%s,%s,%s)",
+                        (
+                            approval.id,
+                            approval.workspace_id,
+                            approval.source_agent_id,
+                            approval.source_invocation_id,
+                            approval.created_at,
+                            lease_expires_at,
+                        ),
+                    )
         except psycopg.errors.UniqueViolation as exc:
             raise ApprovalDecisionConflict("Approval creation identifiers already exist.") from exc
 
@@ -2013,8 +2477,21 @@ class PostgresApprovalDecisionRepository:
                 )
             if durable != expected_approval:
                 raise ApprovalDecisionConflict("Approval changed since the decision snapshot was read.")
-            if durable.expires_at is not None and durable.expires_at <= now_utc():
+            decision_at = now_utc()
+            if durable.expires_at is not None and durable.expires_at <= decision_at:
                 raise ApprovalDecisionConflict("Approval deadline elapsed before the decision committed.")
+            if durable.source_invocation_id is not None:
+                invocation_lease = conn.execute(
+                    "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                    "FROM approval_invocation_leases WHERE approval_id=%s FOR UPDATE",
+                    (approval_id,),
+                ).fetchone()
+                _validate_live_decision_invocation(
+                    approval=durable,
+                    lease_row=invocation_lease,
+                    now=decision_at,
+                    postgres=True,
+                )
             if durable.workspace_id != updated_approval.workspace_id:
                 raise ApprovalDecisionConflict("Approval workspace cannot change during a decision.")
 

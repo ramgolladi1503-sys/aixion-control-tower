@@ -833,6 +833,7 @@ def test_external_agent_cannot_create_approval_for_another_workspace() -> None:
         summary="Must be rejected",
         target_branch="main",
         files=[FileChange(path="README.md", diff="+change")],
+        source_invocation_id="cross-workspace-invocation",
     )
 
     with pytest.raises(HTTPException) as error:
@@ -862,6 +863,7 @@ def test_approval_rejects_work_order_from_different_project_in_same_workspace(pa
         summary="Same workspace must not hide a broken project link.",
         target_branch="feature/mismatched-parent",
         files=[FileChange(path="README.md", diff="+change")],
+        source_invocation_id=("mismatched-parent-invocation" if path == "external_agent" else None),
     )
 
     with pytest.raises(HTTPException) as error:

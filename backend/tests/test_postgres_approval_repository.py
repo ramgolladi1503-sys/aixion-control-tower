@@ -8,7 +8,8 @@ from dataclasses import replace
 from collections.abc import Callable, Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
-from threading import Barrier
+from threading import Barrier, Event
+import time
 
 import psycopg
 import pytest
@@ -18,10 +19,11 @@ from psycopg.types.json import Jsonb
 from app.agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from app.agent_credential_models import AgentCredentialRecord
 from app.agent_run_repository import AgentRunRepositoryConflict, PostgresAgentRunRepository
-from app import approval_expiry
+from app import approval_expiry, approval_repository as approval_repository_module
 from app.approval_integrity import compute_approval_payload_hash
 from app.approval_repository import (
     ApprovalDecisionConflict,
+    ApprovalInvocationLeaseRejected,
     PostgresApprovalDecisionRepository,
 )
 from app.mcp_pending_repository import PostgresMCPPendingRepository
@@ -237,6 +239,132 @@ def _insert_agent_credential(connect, agent: ExternalAgent) -> tuple[ExternalAge
             ),
         )
     return agent, token_hash
+
+
+def _persist_live_approved_invocation(
+    connect: Callable[[], Connection],
+    *,
+    approval: ApprovalRequest,
+    agent: ExternalAgent,
+    source_invocation_id: str,
+) -> ApprovalRequest:
+    now = now_utc()
+    approved = approval.model_copy(
+        update={
+            "source_provider": AgentProvider.ANTIGRAVITY,
+            "source_agent_id": agent.id,
+            "source_invocation_id": source_invocation_id,
+            "status": ApprovalStatus.APPROVED,
+            "approved_payload_hash_version": 2,
+            "approved_at": now,
+            "expires_at": now + timedelta(minutes=5),
+        }
+    )
+    approved = approved.model_copy(
+        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+    )
+    lease_expires_at = min(now + timedelta(seconds=60), approved.expires_at)
+    with connect() as conn:
+        conn.execute(
+            "UPDATE approval_requests SET source_agent_id=%s,source_invocation_id=%s,"
+            "status=%s,expires_at=%s,payload=%s WHERE approval_id=%s",
+            (
+                agent.id,
+                source_invocation_id,
+                approved.status.value,
+                approved.expires_at,
+                Jsonb(approved.model_dump(mode="json")),
+                approved.id,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO approval_invocation_leases "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s)",
+            (
+                approved.id,
+                approved.workspace_id,
+                agent.id,
+                source_invocation_id,
+                now,
+                lease_expires_at,
+            ),
+        )
+    return approved
+
+
+def test_postgres_phone_decision_requires_live_connector_lease_without_side_effects(
+    postgres_repository,
+) -> None:
+    repository, connect = postgres_repository
+    workspace, project, approval, _ = _seed(connect)
+    agent = ExternalAgent(
+        id=f"agent_decision_lease_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Decision lease fence connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=workspace.id,
+    )
+    agent, _token_hash = _insert_agent_credential(connect, agent)
+    invocation_id = f"decision-lease:{uuid.uuid4().hex}"
+    created = now_utc()
+    approval = approval.model_copy(
+        update={
+            "source_provider": AgentProvider.ANTIGRAVITY,
+            "source_agent_id": agent.id,
+            "source_invocation_id": invocation_id,
+            "expires_at": created + timedelta(minutes=5),
+            "updated_at": created,
+        }
+    )
+    with connect() as connection:
+        connection.execute(
+            "UPDATE approval_requests SET source_agent_id=%s,source_invocation_id=%s,"
+            "expires_at=%s,updated_at=%s,payload=%s "
+            "WHERE approval_id=%s",
+            (
+                agent.id,
+                invocation_id,
+                approval.expires_at,
+                approval.updated_at,
+                Jsonb(approval.model_dump(mode="json")),
+                approval.id,
+            ),
+        )
+        lease_expiry = created - timedelta(seconds=1)
+        connection.execute(
+            "INSERT INTO approval_invocation_leases "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s)",
+            (
+                approval.id,
+                workspace.id,
+                agent.id,
+                invocation_id,
+                lease_expiry - timedelta(seconds=1),
+                lease_expiry,
+            ),
+        )
+
+    with connect() as connection:
+        audit_count_before = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+        notification_count_before = connection.execute("SELECT COUNT(*) FROM notifications").fetchone()[0]
+    approved = _updated_approval(approval, ApprovalStatus.APPROVED)
+    with pytest.raises(ApprovalDecisionConflict, match="invocation is no longer live"):
+        repository.commit_decision(
+            approval_id=approval.id,
+            expected_status=ApprovalStatus.REQUESTED,
+            expected_approval=approval,
+            updated_approval=approved,
+            audit_event=_audit(approval, approved, f"expired-lease-{uuid.uuid4().hex}"),
+            decision_notification=_notification(approval, f"expired-lease-{uuid.uuid4().hex}"),
+        )
+
+    persisted = repository.get(approval.id)
+    assert persisted == approval
+    with connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == audit_count_before
+        assert connection.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] == notification_count_before
 
 
 def _seed_mcp_pending(
@@ -461,30 +589,12 @@ def test_postgres_approved_invocation_delivery_claim_is_at_most_once(postgres_re
         workspace_id=workspace.id,
     )
     agent, presented_token_hash = _insert_agent_credential(connect, agent)
-    approved = approval.model_copy(
-        update={
-            "source_provider": AgentProvider.ANTIGRAVITY,
-            "source_agent_id": agent.id,
-            "source_invocation_id": "antigravity:v1:postgres-claim",
-            "status": ApprovalStatus.APPROVED,
-            "approved_payload_hash_version": 2,
-        }
+    approved = _persist_live_approved_invocation(
+        connect,
+        approval=approval,
+        agent=agent,
+        source_invocation_id="antigravity:v1:postgres-claim",
     )
-    approved = approved.model_copy(
-        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
-    )
-    with connect() as conn:
-        conn.execute(
-            "UPDATE approval_requests SET source_agent_id=%s,source_invocation_id=%s,status=%s,payload=%s "
-            "WHERE approval_id=%s",
-            (
-                agent.id,
-                approved.source_invocation_id,
-                approved.status.value,
-                Jsonb(approved.model_dump(mode="json")),
-                approved.id,
-            ),
-        )
     event = AuditEvent(
         event_type="approval.delivery_claimed",
         actor=f"agent:{agent.id}",
@@ -559,6 +669,107 @@ def test_postgres_approved_invocation_delivery_claim_is_at_most_once(postgres_re
         ).fetchone()[0] == 1
 
 
+@pytest.mark.parametrize("expiry_target", ("approval", "lease"))
+def test_postgres_claim_waiting_on_approval_lock_rechecks_expiry(
+    postgres_repository, monkeypatch, expiry_target: str
+) -> None:
+    repository, connect = postgres_repository
+    workspace, _project, approval, _task = _seed(connect)
+    agent = ExternalAgent(
+        id=f"agent_claim_lock_expiry_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Claim lock-expiry connector",
+        workspace_id=workspace.id,
+    )
+    agent, presented_token_hash = _insert_agent_credential(connect, agent)
+    invocation_id = f"claim-lock-expiry:{uuid.uuid4().hex}"
+    approved = _persist_live_approved_invocation(
+        connect,
+        approval=approval,
+        agent=agent,
+        source_invocation_id=invocation_id,
+    )
+    deadline = now_utc() + timedelta(seconds=2)
+    approval_expiry = (
+        deadline
+        if expiry_target == "approval"
+        else now_utc() + timedelta(minutes=5)
+    )
+    approved = approved.model_copy(update={"expires_at": approval_expiry})
+    with connect() as connection:
+        connection.execute(
+            "UPDATE approval_requests SET expires_at=%s,payload=%s WHERE approval_id=%s",
+            (approval_expiry, Jsonb(approved.model_dump(mode="json")), approved.id),
+        )
+        connection.execute(
+            "UPDATE approval_invocation_leases SET expires_at=%s WHERE approval_id=%s",
+            (deadline, approved.id),
+        )
+
+    claim_started_at = now_utc()
+    assert claim_started_at < deadline
+    claim_event = AuditEvent(
+        event_type="approval.delivery_claimed",
+        actor=f"agent:{agent.id}",
+        entity_id=approved.id,
+        workspace_id=workspace.id,
+        created_at=claim_started_at,
+        details={"source_invocation_id": invocation_id},
+    )
+    credentials_locked = Event()
+    original_validate_credentials = approval_repository_module._validate_postgres_delivery_credential
+
+    def observe_credential_lock(*args, **kwargs):
+        result = original_validate_credentials(*args, **kwargs)
+        if kwargs.get("source_agent_id") == agent.id:
+            credentials_locked.set()
+        return result
+
+    monkeypatch.setattr(
+        approval_repository_module,
+        "_validate_postgres_delivery_credential",
+        observe_credential_lock,
+    )
+    blocker = connect()
+    blocker.execute("BEGIN")
+    blocker.execute(
+        "SELECT approval_id FROM approval_requests WHERE approval_id=%s FOR UPDATE",
+        (approved.id,),
+    ).fetchone()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                repository.claim_approved_delivery,
+                approval_id=approved.id,
+                workspace_id=workspace.id,
+                source_agent_id=agent.id,
+                source_invocation_id=invocation_id,
+                expected_payload_hash=approved.approved_payload_hash,
+                presented_token_hash=presented_token_hash,
+                audit_event=claim_event,
+            )
+            assert credentials_locked.wait(timeout=2)
+            assert now_utc() < deadline
+            assert not future.done()
+            time.sleep(max(0.0, (deadline - now_utc()).total_seconds()) + 0.05)
+            assert now_utc() >= deadline
+            blocker.rollback()
+            with pytest.raises(ApprovalInvocationLeaseRejected, match="expired"):
+                future.result(timeout=5)
+    finally:
+        blocker.close()
+
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            (approved.id,),
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_type='approval.delivery_claimed' "
+            "AND entity_id=%s",
+            (approved.id,),
+        ).fetchone()[0] == 0
+
 def test_postgres_delivery_failure_report_requires_matching_claim(postgres_repository) -> None:
     repository, connect = postgres_repository
     workspace, _project, approval, _task = _seed(connect)
@@ -569,30 +780,12 @@ def test_postgres_delivery_failure_report_requires_matching_claim(postgres_repos
         workspace_id=workspace.id,
     )
     agent, presented_token_hash = _insert_agent_credential(connect, agent)
-    approved = approval.model_copy(
-        update={
-            "source_provider": AgentProvider.ANTIGRAVITY,
-            "source_agent_id": agent.id,
-            "source_invocation_id": "antigravity:v1:unclaimed",
-            "status": ApprovalStatus.APPROVED,
-            "approved_payload_hash_version": 2,
-        }
+    approved = _persist_live_approved_invocation(
+        connect,
+        approval=approval,
+        agent=agent,
+        source_invocation_id="antigravity:v1:unclaimed",
     )
-    approved = approved.model_copy(
-        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
-    )
-    with connect() as conn:
-        conn.execute(
-            "UPDATE approval_requests SET source_agent_id=%s,source_invocation_id=%s,status=%s,payload=%s "
-            "WHERE approval_id=%s",
-            (
-                agent.id,
-                approved.source_invocation_id,
-                approved.status.value,
-                Jsonb(approved.model_dump(mode="json")),
-                approved.id,
-            ),
-        )
     failure_event = AuditEvent(
         event_type="approval.delivery_failed",
         actor=f"agent:{agent.id}",

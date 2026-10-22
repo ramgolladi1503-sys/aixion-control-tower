@@ -99,11 +99,23 @@ def test_hook_wait_deadline_expires_pending_request_and_denies(tmp_path: Path) -
     try:
         _wait_for_api(api_process, base_url)
         with httpx.Client(base_url=base_url, timeout=5) as api:
-            seeded = api.post("/demo/seed")
-            assert seeded.status_code == 200, seeded.text
-            projects = api.get("/projects")
-            assert projects.status_code == 200, projects.text
-            project_id = projects.json()[0]["id"]
+            registration = api.post(
+                "/auth/register",
+                json={"email": "antigravity-timeout@example.com", "password": "Timeout-test-password-123!", "display_name": "Timeout owner"},
+            )
+            assert registration.status_code == 200, registration.text
+            code = registration.json().get("dev_verification_code")
+            assert code
+            verified = api.post(
+                "/auth/verify-email",
+                json={"email": "antigravity-timeout@example.com", "code": code},
+            )
+            assert verified.status_code == 200, verified.text
+            project_response = api.post(
+                "/projects", json={"name": "Antigravity timeout project"}
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
             registered = api.post(
                 "/agents",
                 json={
