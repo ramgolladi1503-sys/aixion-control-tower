@@ -8,7 +8,9 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -714,4 +716,194 @@ def test_antigravity_hook_process_relaunch_recovers_exact_approved_invocation(
             if process is not None and process.poll() is None:
                 process.kill()
                 process.communicate(timeout=5)
+        _stop_sqlite_approval_api(server)
+
+
+def test_hook_process_crash_after_consume_commit_fails_closed_on_relaunch(
+    tmp_path: Path,
+) -> None:
+    """A fresh hook cannot replay a claim committed before the first process died."""
+    db_path = tmp_path / "hook-crash-after-consume.sqlite3"
+    db_path.parent.chmod(0o700)
+    server = _start_sqlite_approval_api(db_path)
+    consume_committed = threading.Event()
+    release_consume_response = threading.Event()
+    proxy_errors: list[str] = []
+
+    class DropConsumeResponseHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._forward()
+
+        def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+            self._forward()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+        def _forward(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            headers = {
+                name: value
+                for name, value in self.headers.items()
+                if name.lower().startswith("x-") or name.lower() == "content-type"
+            }
+            try:
+                response = httpx.request(
+                    self.command,
+                    f"{server[2]}{self.path}",
+                    headers=headers,
+                    content=body,
+                    timeout=10,
+                )
+                if self.command == "POST" and self.path.endswith("/consume"):
+                    if response.status_code != 200:
+                        proxy_errors.append(
+                            f"consume returned {response.status_code}: {response.text}"
+                        )
+                    consume_committed.set()
+                    if not release_consume_response.wait(timeout=15):
+                        proxy_errors.append("test did not release the committed consume response")
+                        return
+                self.send_response(response.status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response.content)))
+                self.end_headers()
+                self.wfile.write(response.content)
+            except (BrokenPipeError, ConnectionResetError):
+                # Expected: the test kills the host hook while its response is held.
+                return
+            except Exception as error:  # surfaced in the test thread below
+                proxy_errors.append(f"{type(error).__name__}: {error}")
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), DropConsumeResponseHandler)
+    proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    proxy_thread.start()
+    proxy_base = f"http://127.0.0.1:{proxy.server_address[1]}"
+    hook_process: subprocess.Popen[str] | None = None
+    try:
+        with httpx.Client(timeout=10) as client:
+            project_response = client.post(
+                f"{server[2]}/projects", json={"name": "Crash replay project"}
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
+            agent_response = client.post(
+                f"{server[2]}/agents",
+                json={
+                    "provider": "ANTIGRAVITY",
+                    "display_name": "Crash after consume test hook",
+                    "auth_type": "API_KEY",
+                    "allowed_project_ids": [project_id],
+                    "allowed_actions": [
+                        "CREATE_APPROVAL",
+                        "READ_APPROVAL_DECISION",
+                        "CONSUME_APPROVAL_DECISION",
+                        "REPORT_APPROVAL_DELIVERY_FAILURE",
+                        "EXPIRE_OWN_APPROVAL",
+                    ],
+                    "enabled": True,
+                },
+            )
+            assert agent_response.status_code == 200, agent_response.text
+            agent_body = agent_response.json()
+
+        session_id = "hook-crash-after-consume-session"
+        invocation_payload = {
+            "conversationId": session_id,
+            "stepIdx": 19,
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "echo crash-after-claim"},
+            },
+        }
+        environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "AIXION_API_BASE_URL": proxy_base,
+            "AIXION_AGENT_ID": agent_body["agent"]["id"],
+            "AIXION_AGENT_TOKEN": agent_body["agent_token"],
+            "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+            "AIXION_PROJECT_ID": project_id,
+            "AIXION_APPROVAL_TIMEOUT_SECONDS": "30",
+        }
+        hook_process = _launch_hook_process(invocation_payload, environment)
+        approvals = _wait_for_antigravity_approvals(
+            db_path,
+            agent_id=agent_body["agent"]["id"],
+            session_id=session_id,
+            count=1,
+        )
+        approval = approvals[0]
+        assert approval["status"] == "PENDING_REVIEW"
+        with httpx.Client(timeout=10) as client:
+            decision = client.post(
+                f"{server[2]}/approvals/{approval['id']}/decision",
+                json={"decision": "approve", "reason": "test crash window"},
+            )
+        assert decision.status_code == 200, decision.text
+
+        assert consume_committed.wait(timeout=10), "consume was not committed by the API"
+        assert hook_process.poll() is None, "hook exited before the consume response was released"
+        hook_process.kill()
+        hook_process.communicate(timeout=5)
+        hook_process = None
+        release_consume_response.set()
+
+        # Relaunching the exact invocation after the host crash must observe the
+        # existing unique claim and deny, even though the request is approved.
+        replay_environment = dict(environment)
+        replay_environment["AIXION_API_BASE_URL"] = server[2]
+        replay = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=json.dumps(invocation_payload),
+            capture_output=True,
+            text=True,
+            env=replay_environment,
+            timeout=20,
+            check=False,
+        )
+        assert replay.returncode == 0, replay.stderr
+        replay_result = json.loads(replay.stdout)
+        assert replay_result["decision"] == "deny"
+        assert "could not be claimed safely" in replay_result["reason"]
+        assert proxy_errors == []
+
+        with sqlite3.connect(db_path) as connection:
+            claims = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (approval["id"],),
+            ).fetchone()[0]
+            failures = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_failures WHERE approval_id=?",
+                (approval["id"],),
+            ).fetchone()[0]
+            events = [
+                json.loads(row[0])["event_type"]
+                for row in connection.execute(
+                    "SELECT payload FROM kv_store WHERE entity_type='audit_event' "
+                    "AND json_extract(payload,'$.entity_id')=?",
+                    (approval["id"],),
+                ).fetchall()
+            ]
+            durable_approval = connection.execute(
+                "SELECT json_extract(payload,'$.status') FROM kv_store "
+                "WHERE entity_type='approval_request' AND entity_id=?",
+                (approval["id"],),
+            ).fetchone()
+        assert claims == 1
+        # The process died before it could report its ambiguous response. The
+        # durable claim and audit trail are the evidence for this crash window.
+        assert failures == 0
+        assert durable_approval == ("APPROVED",)
+        assert events.count("approval.created_by_agent") == 1
+        assert events.count("approval.decision") == 1
+        assert events.count("approval.delivery_claimed") == 1
+    finally:
+        release_consume_response.set()
+        if hook_process is not None and hook_process.poll() is None:
+            hook_process.kill()
+            hook_process.communicate(timeout=5)
+        proxy.shutdown()
+        proxy.server_close()
+        proxy_thread.join(timeout=5)
         _stop_sqlite_approval_api(server)

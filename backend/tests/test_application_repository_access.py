@@ -10,6 +10,7 @@ from app.application_repository_access import (
     agent_task_repository_for_request,
     application_repositories_for_request,
     approval_decision_repository_for_request,
+    audit_event_repository_for_request,
     project_repository_for_request,
     workspace_membership_repository_for_request,
 )
@@ -25,6 +26,7 @@ from app.test_run_repository import PostgresTestRunRepository
 from app.workspace_membership_repository import WorkspaceMembershipSnapshot
 from app.project_repository import PostgresProjectRepository
 from app.workspace_membership_repository import PostgresWorkspaceMembershipRepository
+from app.postgres_audit_repository import PostgresAuditEventRepository
 
 
 def test_agent_task_repository_access_returns_app_binding() -> None:
@@ -168,6 +170,59 @@ def test_application_repository_access_returns_lifespan_bundle() -> None:
     )
 
     assert application_repositories_for_request(request) is bundle
+
+
+def test_audit_repository_access_uses_matching_postgres_runtime_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = PostgresAuditEventRepository(lambda: None)  # type: ignore[arg-type]
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "audit_events", repository)
+    runtime = SimpleNamespace(repositories=repositories)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=runtime,
+                postgres_repositories=repositories,
+                audit_event_repository=object(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert audit_event_repository_for_request(request) is repository
+
+
+def test_audit_repository_access_rejects_mismatched_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(
+        repositories,
+        "audit_events",
+        PostgresAuditEventRepository(lambda: None),  # type: ignore[arg-type]
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=object()),
+                postgres_repositories=repositories,
+                audit_event_repository=object(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="unavailable or mismatched"):
+        audit_event_repository_for_request(request)
 
 
 @pytest.mark.parametrize(

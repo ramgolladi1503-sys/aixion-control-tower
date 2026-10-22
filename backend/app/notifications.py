@@ -256,7 +256,16 @@ def _fcm_access_token() -> str:
     from google.auth.transport.requests import Request
 
     credentials, _ = default(scopes=[FCM_SCOPE])
-    credentials.refresh(Request())
+    request = Request()
+
+    def bounded_request(url: str, **kwargs: Any) -> Any:
+        # google-auth's Requests transport defaults to 120 seconds. Keep token
+        # refresh within the same bound as the subsequent FCM send so a worker
+        # does not outlive its notification lease while waiting on credentials.
+        kwargs.setdefault("timeout", FCM_TIMEOUT_SECONDS)
+        return request(url, **kwargs)
+
+    credentials.refresh(bounded_request)
     if not credentials.token:
         raise RuntimeError("FCM credentials did not produce an access token")
     return credentials.token

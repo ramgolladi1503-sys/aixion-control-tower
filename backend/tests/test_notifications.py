@@ -9,6 +9,8 @@ import httpx
 import pytest
 from fastapi import Response
 from fastapi.testclient import TestClient
+import google.auth
+import google.auth.transport.requests
 
 from app import main, notifications
 from app.models import (
@@ -209,6 +211,44 @@ def test_fcm_credentials_failure_is_sanitized(monkeypatch: Any) -> None:
     )
 
     assert result == "FCM_CREDENTIALS_UNAVAILABLE"
+
+
+def test_fcm_oauth_refresh_timeout_is_bounded_sanitized_and_retryable(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("AIXION_FCM_PROJECT_ID", "control-tower-prod")
+    captured: dict[str, Any] = {}
+
+    class FakeRequest:
+        def __call__(self, url: str, **kwargs: Any) -> None:
+            captured["url"] = url
+            captured.update(kwargs)
+            raise TimeoutError("sensitive credential endpoint details")
+
+    class FakeCredentials:
+        token = None
+
+        def refresh(self, request: Any) -> None:
+            request("https://oauth.example.test/token", method="POST")
+
+    monkeypatch.setattr(google.auth, "default", lambda **_: (FakeCredentials(), None))
+    monkeypatch.setattr(
+        google.auth.transport.requests,
+        "Request",
+        lambda: FakeRequest(),
+    )
+
+    result = notifications._send_fcm_to_token(
+        token="device-token",
+        title="title",
+        body="body",
+        data={"notification_id": "notification_opaque"},
+    )
+
+    assert captured["timeout"] == notifications.FCM_TIMEOUT_SECONDS
+    assert result == "FCM_CREDENTIALS_UNAVAILABLE"
+    assert "sensitive" not in result
+    assert notifications._is_retryable_push_failure(result)
 
 
 def test_push_is_skipped_when_project_id_is_missing(monkeypatch: Any) -> None:

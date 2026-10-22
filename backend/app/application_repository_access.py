@@ -13,6 +13,7 @@ from .agent_auth_repository import SQLiteExternalAgentAuthRepository
 from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
 from .project_repository import PostgresProjectRepository, ProjectRepository
 from .connector_repository import ConnectorRepository, PostgresConnectorRepository
+from .postgres_audit_repository import PostgresAuditEventRepository
 from .postgres_external_agent_auth_repository import PostgresExternalAgentAuthRepository
 from .idea_repository import IdeaRepository, PostgresIdeaRepository
 from .settings import get_settings
@@ -136,9 +137,23 @@ def agent_run_repository_for_request(request: _RequestState | None) -> AgentRunR
 
 
 def audit_event_repository_for_request(request: _RequestState | None) -> AuditEventRepository:
-    """Return the audit reader explicitly bound to this FastAPI application."""
+    """Return the audit reader selected by this app's persistence authority."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        runtime = getattr(state, "postgres_runtime", None)
+        repository = getattr(repositories, "audit_events", None)
+        if (
+            runtime is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or not isinstance(repositories, ApplicationRepositories)
+            or not isinstance(repository, PostgresAuditEventRepository)
+        ):
+            raise RuntimeError(
+                "PostgreSQL audit repository is unavailable or mismatched"
+            )
+        return repository
     repository = getattr(state, "audit_event_repository", None)
     if repository is None:
         raise RuntimeError("Application audit-event repository is unavailable")
