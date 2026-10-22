@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -442,7 +443,7 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
         Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, fontSize = 14.sp)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text("Reason", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text(event.reason ?: "No reason was provided.", color = palette.inkMuted, fontSize = 14.sp, lineHeight = 20.sp)
+        Text(event.reason ?: "No reason was provided.", color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         val snapshot = event.requestSnapshot.takeIf { event.requestSnapshotVerified }
         if (snapshot == null) {
@@ -450,8 +451,7 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
             Text(
                 "This older or unverifiable record is shown without request details.",
                 color = palette.inkMuted,
-                fontSize = 14.sp,
-                lineHeight = 21.sp
+                style = MaterialTheme.typography.bodyLarge
             )
         } else {
             VerifiedRequestSnapshot(snapshot)
@@ -460,8 +460,7 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
         Text(
             "Decision record only. Delivery to the agent and execution are not confirmed here.",
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodyLarge
         )
     }
 }
@@ -471,7 +470,7 @@ private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
     val palette = LocalTowerPalette.current
     Text("Verified request", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
     Text(snapshot.title?.takeIf(String::isNotBlank) ?: "Untitled request", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-    Text(snapshot.summary?.takeIf(String::isNotBlank) ?: "Request summary unavailable", color = palette.inkMuted, fontSize = 14.sp, lineHeight = 20.sp)
+    Text(snapshot.summary?.takeIf(String::isNotBlank) ?: "Request summary unavailable", color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
     val provider = listOfNotNull(
         snapshot.sourceAgentName?.takeIf(String::isNotBlank) ?: snapshot.agentName?.takeIf(String::isNotBlank),
         snapshot.sourceProvider?.takeIf(String::isNotBlank)
@@ -493,11 +492,11 @@ private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
     }
     if (snapshot.testPlan.isNotEmpty()) {
         Text("Test plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp) }
+        snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge) }
     }
     snapshot.rollbackPlan?.takeIf(String::isNotBlank)?.let { plan ->
         Text("Rollback plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text(plan, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
+        Text(plan, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
     }
 }
 

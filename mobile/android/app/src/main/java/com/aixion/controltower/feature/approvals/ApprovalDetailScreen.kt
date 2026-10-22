@@ -24,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -391,7 +392,7 @@ fun ApprovalDetailContent(
                         .heightIn(max = 360.dp)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    Text("Action: ${approval.title}\n${approval.summary}")
+                    Text("Action: ${approval.title}\n${approval.summary}", style = MaterialTheme.typography.bodyLarge)
                     if (hasExactToolRequest) {
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         Text("Exact requested tool action", fontWeight = FontWeight.SemiBold)
@@ -619,13 +620,13 @@ private fun ApprovalHeroPanel(
                 lineHeight = 30.sp
             )
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
-            Text(text = approval.summary, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 20.sp)
+            Text(text = approval.summary, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
         }
 
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        DecisionContextLine(
-            "Risk rationale",
-            approval.riskReasons.ifEmpty { listOf("No risk rationale was supplied.") }.joinToString("\n")
+        DecisionContextBody(
+            label = "Risk rationale",
+            value = approval.riskReasons.ifEmpty { listOf("No risk rationale was supplied.") }.joinToString("\n")
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Column(
@@ -697,6 +698,21 @@ internal fun shouldStackDecisionContext(maxWidth: androidx.compose.ui.unit.Dp, f
     maxWidth < 360.dp || fontScale >= 1.5f
 
 @Composable
+private fun DecisionContextBody(label: String, value: String) {
+    val palette = LocalTowerPalette.current
+    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
+        Text(
+            label,
+            color = palette.inkMuted,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            lineHeight = 20.sp
+        )
+        Text(value, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
 private fun DetailPanel(title: String, body: String, modifier: Modifier = Modifier) {
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
@@ -708,7 +724,7 @@ private fun DetailPanel(title: String, body: String, modifier: Modifier = Modifi
             letterSpacing = 1.2.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(body, color = palette.ink, fontSize = 14.sp, lineHeight = 20.sp)
+        Text(body, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
     }
 }
 
@@ -724,7 +740,7 @@ private fun WarningPanel(title: String, body: String) {
     ) {
         Text(title, color = palette.danger, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(body, color = palette.ink, fontSize = 14.sp, lineHeight = 20.sp)
+        Text(body, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
     }
 }
 
@@ -740,7 +756,7 @@ private fun RequiredActionsPanel(actions: List<String>) {
     ) {
         Text("Required Before Approval", color = palette.danger, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        actions.forEach { action -> Text("• $action", color = palette.ink, fontSize = 14.sp, lineHeight = 21.sp) }
+        actions.forEach { action -> Text("• $action", color = palette.ink, style = MaterialTheme.typography.bodyLarge) }
     }
 }
 
@@ -786,8 +802,7 @@ private fun DecisionPanel(
                 .testTag("approval-decision-status")
                 .semantics { liveRegion = LiveRegionMode.Polite },
             color = if (canApprove) palette.inkMuted else palette.caution,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodyLarge
         )
         Spacer(modifier = Modifier.height(TowerSpacing.lg))
         if (decisionNeedsReconciliation) {

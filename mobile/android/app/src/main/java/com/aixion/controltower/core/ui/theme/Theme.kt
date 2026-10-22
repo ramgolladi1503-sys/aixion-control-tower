@@ -52,7 +52,7 @@ private fun TowerPalette.toColorScheme(darkTheme: Boolean) = if (darkTheme) {
     )
 }
 
-private val TowerTypography = Typography(
+internal val TowerTypography = Typography(
     displayLarge = TextStyle(fontSize = 28.sp, lineHeight = 34.sp, fontWeight = FontWeight.SemiBold),
     headlineLarge = TextStyle(fontSize = 28.sp, lineHeight = 34.sp, fontWeight = FontWeight.SemiBold),
     headlineMedium = TextStyle(fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.SemiBold),

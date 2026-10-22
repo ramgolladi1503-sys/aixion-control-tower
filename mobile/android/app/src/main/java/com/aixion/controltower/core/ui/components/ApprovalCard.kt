@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -60,7 +61,7 @@ fun ApprovalCard(
             lineHeight = 22.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(text = approval.summary, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
+        Text(text = approval.summary, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         val expiryLabel = formatApprovalExpiry(approval.expiresAt)
         Text(

@@ -1,11 +1,20 @@
 package com.aixion.controltower.core.ui.theme
 
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TowerDesignTokensTest {
+    @Test
+    fun bodyLargeMatchesApprovalReadingContract() {
+        val body = TowerTypography.bodyLarge
+
+        assertEquals(16.sp, body.fontSize)
+        assertEquals(24.sp, body.lineHeight)
+    }
+
     @Test
     fun releaseOneCardAndSpacingTokensFollowTheDesignContract() {
         assertEquals(16.dp, TowerRadius.md)
