@@ -38,7 +38,10 @@ def postgres_agent_task_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterat
         return connection
 
     try:
-        monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "true")
+        monkeypatch.setattr(
+            "app.application_repository_access.get_settings",
+            lambda: SimpleNamespace(postgres_auth_enabled=True),
+        )
         run_postgres_migrations(connect)
         owner = User(
             id=f"user_{uuid.uuid4().hex}", email=f"owner-{uuid.uuid4().hex}@example.test",
@@ -97,6 +100,12 @@ def test_postgres_agent_task_create_list_get_are_workspace_scoped_and_do_not_pro
         main.app.state,
         "postgres_repositories",
         ApplicationRepositories.from_connector(connect),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_runtime",
+        SimpleNamespace(repositories=main.app.state.postgres_repositories),
         raising=False,
     )
     monkeypatch.setattr(
@@ -431,6 +440,10 @@ def test_task_linked_approval_fails_closed_for_mixed_repository_profiles(
     assert task_response.status_code == 200, task_response.text
     task = task_response.json()
     monkeypatch.setattr(main.app.state, "agent_task_repository", sqlite_agent_task_repository)
+    monkeypatch.setattr(
+        "app.application_repository_access.get_settings",
+        lambda: SimpleNamespace(auth_enabled=True, postgres_auth_enabled=False),
+    )
 
     response = client.post(f"/agent/tasks/{task['id']}/approval", json={
         "project_id": project.id,
@@ -450,6 +463,12 @@ def _bind_postgres_agent_task_runtime(
 ) -> None:
     repositories = ApplicationRepositories.from_connector(connect)
     monkeypatch.setattr(main.app.state, "postgres_repositories", repositories, raising=False)
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_runtime",
+        SimpleNamespace(repositories=repositories),
+        raising=False,
+    )
     monkeypatch.setattr(
         "app.application_repository_access.get_settings",
         lambda: SimpleNamespace(auth_enabled=True, postgres_auth_enabled=True),

@@ -4,6 +4,8 @@ import os
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
@@ -217,8 +219,10 @@ def test_get_audit_event_by_id_and_missing_404() -> None:
     assert missing.status_code == 404
 
 
-def test_audit_and_recovery_reads_fail_closed_when_postgres_runtime_is_partial() -> None:
-    app.state.postgres_runtime = SimpleNamespace()
+def test_audit_and_recovery_reads_fail_closed_when_postgres_runtime_is_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app.state, "postgres_runtime", SimpleNamespace(), raising=False)
 
     responses = [
         client.get("/audit/events"),

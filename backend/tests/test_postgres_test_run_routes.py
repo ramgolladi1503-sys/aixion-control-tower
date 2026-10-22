@@ -54,7 +54,10 @@ def postgres_test_run_runtime(
         return connection
 
     try:
-        monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "true")
+        monkeypatch.setattr(
+            "app.application_repository_access.get_settings",
+            lambda: SimpleNamespace(postgres_auth_enabled=True),
+        )
         run_postgres_migrations(connect)
         owner = User(
             id=f"user_{uuid.uuid4().hex}",
