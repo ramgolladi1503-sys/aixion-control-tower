@@ -16,6 +16,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
@@ -57,6 +61,15 @@ fun ApprovalCard(
         )
         Spacer(modifier = Modifier.height(7.dp))
         Text(text = approval.summary, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
+        Spacer(modifier = Modifier.height(10.dp))
+        val expiryLabel = formatApprovalExpiry(approval.expiresAt)
+        Text(
+            text = expiryLabel,
+            color = if (expiryLabel == EXPIRY_UNAVAILABLE) palette.caution else palette.inkMuted,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            lineHeight = 20.sp
+        )
         Spacer(modifier = Modifier.height(14.dp))
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -72,4 +85,16 @@ fun ApprovalCard(
             StatusBadge(label = "${approval.files.size} files", color = palette.inkMuted, fontSize = 14.sp, uppercase = false)
         }
     }
+}
+
+private const val EXPIRY_UNAVAILABLE = "Expiry unavailable"
+
+internal fun formatApprovalExpiry(expiresAt: String?): String {
+    if (expiresAt.isNullOrBlank()) return EXPIRY_UNAVAILABLE
+    return runCatching {
+        val localFormatter = DateTimeFormatter
+            .ofPattern("MMM d, yyyy 'at' h:mm a (XXX)", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
+        "Expires ${localFormatter.format(Instant.parse(expiresAt))}"
+    }.getOrDefault(EXPIRY_UNAVAILABLE)
 }

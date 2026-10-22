@@ -5,11 +5,23 @@ import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.ApprovalHistoryEvent
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
+import com.aixion.controltower.core.ui.components.formatApprovalExpiry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ApprovalInboxFilterTest {
+    @Test
+    fun approvalExpiryLabelUsesLocalTimeOffsetAndFailsClosedForMissingOrInvalidValues() {
+        val formatted = formatApprovalExpiry("2026-10-22T10:00:00Z")
+
+        assertTrue(formatted.startsWith("Expires "))
+        assertTrue(Regex("\\((?:Z|[+-]\\d{2}:\\d{2})\\)$").containsMatchIn(formatted))
+        assertEquals("Expiry unavailable", formatApprovalExpiry(null))
+        assertEquals("Expiry unavailable", formatApprovalExpiry(" "))
+        assertEquals("Expiry unavailable", formatApprovalExpiry("not-a-timestamp"))
+    }
+
     @Test
     fun needsReviewIncludesOnlyActionablePendingStatesAndSortsByExpiry() {
         val pending = approval("pending", ApprovalStatus.PENDING_REVIEW).copy(expiresAt = "2026-10-22T11:00:00Z")

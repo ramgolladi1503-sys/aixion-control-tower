@@ -17,6 +17,7 @@ import com.aixion.controltower.core.model.ApprovalHistoryRequestSnapshot
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
+import com.aixion.controltower.core.ui.components.formatApprovalExpiry
 import com.aixion.controltower.core.ui.ForegroundRefreshEffect
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -53,6 +54,27 @@ class ApprovalInboxScreenTest {
         composeRule.onNodeWithText("Regression approval summary").assertExists()
         composeRule.onNodeWithText("Low").assertExists()
         composeRule.onNodeWithText("Pending review").assertExists()
+    }
+
+    @Test
+    fun approvalCardsShowLocalExpiryOrExplicitUnavailableState() {
+        val validExpiry = "2026-10-22T10:00:00Z"
+        val approvals = listOf(
+            approval("approval_valid_expiry", "Valid expiry", ApprovalStatus.REQUESTED)
+                .copy(expiresAt = validExpiry),
+            approval("approval_missing_expiry", "Missing expiry", ApprovalStatus.REQUESTED),
+            approval("approval_invalid_expiry", "Invalid expiry", ApprovalStatus.REQUESTED)
+                .copy(expiresAt = "not-a-timestamp")
+        )
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(loading = false, approvals = approvals)
+            )
+        }
+
+        val validLabel = formatApprovalExpiry(validExpiry)
+        composeRule.onNodeWithText(validLabel).assertExists()
+        composeRule.onAllNodesWithText("Expiry unavailable").assertCountEquals(2)
     }
 
     @Test
