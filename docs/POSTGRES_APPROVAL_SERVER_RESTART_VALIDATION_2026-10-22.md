@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-22  
 **Scope:** Pre-billing connector recovery evidence for Slices 2 and 6  
-**Status:** Focused local regression and full PostgreSQL-enabled backend suite passed; full slice gates remain open
+**Status:** Focused local regression and exact-head GitHub backend validation passed; full slice gates remain open
 
 ## Scenario exercised
 
@@ -19,25 +19,16 @@ The test owns its Uvicorn subprocesses and ephemeral loopback ports. Its Postgre
 
 ## Validation
 
-The focused restart suite was rerun from `backend/` against the currently accepting isolated PostgreSQL service:
+The focused route-flow suite was rerun from `backend/` against the isolated local PostgreSQL service at source revision `0c3447065b0acbfe442cb4b4fca4626de0ac1f89`:
 
 ```bash
 AIXION_TEST_POSTGRES_DSN='host=/tmp/aixion-ct-pg.O8jwnb/socket dbname=aixion_test user=madhuram port=55432' \
   .venv/bin/python -m pytest -q tests/test_postgres_approval_route_flow.py
 ```
 
-Result: **6 passed**, one existing Starlette/httpx deprecation warning.
+Result: **7 passed**, one existing Starlette/httpx deprecation warning. The suite includes HTTP server-restart recovery, recovery through a fresh API process, lost consume-response handling, workspace isolation, absence of SQLite projection, and an independent-process decision race.
 
-The full backend suite was run from `backend/` with PostgreSQL integration enabled:
-
-```bash
-AIXION_TEST_POSTGRES_DSN='host=/tmp/aixion-ct-pg.O8jwnb/socket dbname=aixion_test user=madhuram port=55432' \
-  .venv/bin/python -m pytest -q
-```
-
-Result: **1,342 passed, 0 skipped, 6 existing deprecation warnings** in 73.25 seconds.
-
-Ruff, Python compilation, and `git diff --check` passed in the earlier focused validation run; they were not rerun with the full suite.
+GitHub CI run `39699619985` passed at the exact same source revision. Its backend validation, Android validation, container validation, and expected-blocked production startup guard all passed. Android debug APK build run `39699620016` also passed at that revision.
 
 ## Limits
 
