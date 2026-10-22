@@ -22,6 +22,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -54,6 +55,7 @@ import com.aixion.controltower.core.ui.theme.RiskLow
 import com.aixion.controltower.core.ui.theme.RiskMedium
 import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSpacing
+import com.aixion.controltower.core.ui.theme.TowerCodeTextStyle
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
@@ -236,12 +238,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                     }
                 }
                 Spacer(Modifier.height(TowerSpacing.sm))
-                Text(
-                    "Granted actions: CREATE_APPROVAL, READ_APPROVAL_DECISION, CONSUME_APPROVAL_DECISION, REPORT_APPROVAL_DELIVERY_FAILURE, EXPIRE_OWN_APPROVAL. Consume only returns an already-approved decision once. This credential cannot approve requests or start tools; the paused host agent continues only after that decision is returned.",
-                    color = TowerTextMuted,
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp
-                )
+                ConnectorPermissionsDisclosure()
                 Spacer(Modifier.height(TowerSpacing.md))
                 Button(
                     onClick = viewModel::createAgent,
@@ -279,6 +276,34 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                 Text("Refresh agent status")
             }
         }
+    }
+}
+
+@Composable
+internal fun ConnectorPermissionsDisclosure() {
+    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
+        Text("Granted actions", color = TowerTextPrimary, style = MaterialTheme.typography.titleMedium)
+        Text(
+            "This connector is limited to the selected project and these five approval-only actions:",
+            color = TowerTextMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
+            listOf(
+                "CREATE_APPROVAL",
+                "READ_APPROVAL_DECISION",
+                "CONSUME_APPROVAL_DECISION",
+                "REPORT_APPROVAL_DELIVERY_FAILURE",
+                "EXPIRE_OWN_APPROVAL"
+            ).forEach { action ->
+                Text("• $action", color = TowerTextMuted, style = TowerCodeTextStyle)
+            }
+        }
+        Text(
+            "Consume only returns an already-approved decision once. This credential cannot approve requests or start tools; the paused host agent continues only after that decision is returned.",
+            color = TowerTextMuted,
+            style = MaterialTheme.typography.bodyLarge
+        )
     }
 }
 
