@@ -18,10 +18,12 @@ from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.application_repositories import ApplicationRepositories
 from app.approval_integrity import compute_approval_payload_hash
 from app.models import (
+    AgentAction,
     AgentProvider,
     ApprovalRequest,
     ApprovalStatus,
     AuthUser,
+    ExternalAgent,
     FileChange,
     Project,
     RiskAssessment,
@@ -45,6 +47,7 @@ from app.trust_crypto import sign_payload
 from app.trust_policy import lease_receipt_payload
 from app.trust_routes import (
     consume_manual_action,
+    consume_external_agent_action,
     create_lease,
     decide_exact_action,
     evaluate_manual_action,
@@ -1236,6 +1239,112 @@ def test_postgres_lease_issue_route_is_atomic_idempotent_and_not_projected(
             "event_type=%s AND entity_id=%s",
             (workspace_id, TrustEventType.LEASE_ISSUED.value, first.id),
         ).fetchone()[0] == 1
+
+
+def test_postgres_external_agent_action_consumption_is_durable_and_workspace_bound(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, _approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    agent_id = f"agent_{uuid.uuid4().hex}"
+    with connect() as conn:
+        project_id = conn.execute(
+            "SELECT project_id FROM projects WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchone()[0]
+    agent = ExternalAgent(
+        id=agent_id,
+        provider=AgentProvider.CODEX,
+        display_name="Durable action consumer",
+        allowed_project_ids=[project_id],
+        allowed_repositories=["owner/repo"],
+        allowed_actions=[AgentAction.EXECUTE_GITHUB],
+        workspace_id=workspace_id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO external_agents(agent_id,workspace_id,created_by_user_id,"
+            "provider,auth_type,enabled,secret_hash,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                agent.id,
+                workspace_id,
+                user.id,
+                agent.provider.value,
+                agent.auth_type.value,
+                agent.enabled,
+                agent.secret_hash,
+                Jsonb(agent.model_dump(mode="json")),
+            ),
+        )
+    lease = create_lease(
+        payload.model_copy(update={"agent_id": agent.id}), user, request
+    )
+    action = ProposedAction(
+        lease_id=lease.id,
+        provider=agent.provider,
+        agent_id=agent.id,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.MODIFY_FILES,
+        repository="owner/repo",
+        branch="feature/trust-test",
+        paths=["src/approved.py"],
+        estimated_runtime_seconds=10,
+    )
+    repositories = request.app.state.postgres_repositories
+    with connect() as conn:
+        with conn.transaction():
+            decision, _ = repositories.trust.evaluate_proposed_action(
+                conn,
+                action=action,
+                actor=f"agent:{agent.id}",
+                now=now_utc(),
+                trust_event_repository=repositories.trust_events,
+                expected_agent_id=agent.id,
+            )
+    assert decision.decision == PolicyDecisionType.ALLOW
+    consumption = ActionConsumption(actual_runtime_seconds=10)
+
+    wrong_agent = agent.model_copy(update={"id": f"agent_{uuid.uuid4().hex}"})
+    with pytest.raises(HTTPException) as denied:
+        consume_external_agent_action(
+            action.id, consumption, wrong_agent, request
+        )
+    assert denied.value.status_code == 403
+
+    bound_external_auth = request.app.state.external_agent_auth_repository
+    request.app.state.external_agent_auth_repository = object()
+    with pytest.raises(HTTPException) as partial_binding:
+        consume_external_agent_action(action.id, consumption, agent, request)
+    assert partial_binding.value.status_code == 409
+    request.app.state.external_agent_auth_repository = bound_external_auth
+
+    first = consume_external_agent_action(action.id, consumption, agent, request)
+    retry = consume_external_agent_action(action.id, consumption, agent, request)
+    assert first == retry == consumption
+    assert action.id not in store.proposed_actions
+    assert action.id not in store.action_consumptions
+    with connect() as conn:
+        persisted_lease = repositories.trust.get_capability_lease(
+            conn, lease.id, workspace_id
+        )
+        assert persisted_lease is not None
+        assert persisted_lease.consumed_runtime_seconds == 10
+        assert repositories.trust.get_action_consumption(
+            conn, action.id, workspace_id
+        ) == consumption
+        assert conn.execute(
+            "SELECT count(*) FROM action_consumptions WHERE action_id=%s",
+            (action.id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE event_type=%s AND entity_id=%s",
+            (TrustEventType.ACTION_CONSUMED.value, action.id),
+        ).fetchone()[0] == 1
+    assert PostgresTrustEventRepository(connect).verify().valid is True
 
 
 def test_postgres_concurrent_identical_lease_issues_resolve_once(

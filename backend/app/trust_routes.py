@@ -692,7 +692,76 @@ def consume_external_agent_action(
     action_id: str,
     payload: ActionConsumption,
     agent: ExternalAgent = Depends(require_external_agent),
+    request: Request = None,  # type: ignore[assignment]
 ) -> ActionConsumption:
+    runtime = _postgres_action_runtime(request)
+    if runtime is not None:
+        repositories = request.app.state.postgres_repositories
+        external_auth = external_agent_auth_repository_for_request(request)
+        if external_auth is not repositories.external_agent_auth:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL action consumption requires the external-agent auth repository from the same runtime",
+            )
+        if not agent.workspace_id:
+            raise HTTPException(status_code=403, detail="External agent workspace is required")
+        try:
+            with runtime.connect() as conn:
+                action = repositories.trust.get_proposed_action(
+                    conn, action_id, agent.workspace_id
+                )
+            if action is None:
+                raise HTTPException(status_code=404, detail="Proposed action not found")
+            if action.agent_id != agent.id or action.workspace_id != agent.workspace_id:
+                raise HTTPException(status_code=403, detail="Agent does not own this action")
+            if action.run_id or action.task_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Run-linked action consumption requires the durable AgentRun execution transaction",
+                )
+            assert_agent_can(
+                agent,
+                AgentAction.EXECUTE_GITHUB,
+                project_id=action.project_id,
+                repository_full_name=action.repository,
+                http_request=request,
+            )
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    locked_action = repositories.trust.get_proposed_action(
+                        conn, action_id, agent.workspace_id, for_update=True
+                    )
+                    if locked_action is None:
+                        raise HTTPException(
+                            status_code=404, detail="Proposed action not found"
+                        )
+                    if (
+                        locked_action.agent_id != agent.id
+                        or locked_action.workspace_id != agent.workspace_id
+                    ):
+                        raise HTTPException(
+                            status_code=403, detail="Agent does not own this action"
+                        )
+                    if locked_action.run_id or locked_action.task_id:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Run-linked action consumption requires the durable AgentRun execution transaction",
+                        )
+                    return repositories.trust.consume_effective_action(
+                        conn,
+                        action_id=action_id,
+                        workspace_id=agent.workspace_id,
+                        consumption=payload,
+                        actor=f"agent:{agent.id}",
+                        now=now_utc(),
+                    )
+        except (ValueError, TrustControlConflict, PostgresTrustRepositoryConflict) as error:
+            raise _trust_error(error) from error
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="PostgreSQL action consumption requires the complete durable project and trust repository bundle",
+        )
     action = store.proposed_actions.get(action_id)
     if action is None or not proposed_action_scope_is_consistent(action):
         raise HTTPException(status_code=404, detail="Proposed action not found")
@@ -703,6 +772,7 @@ def consume_external_agent_action(
         AgentAction.EXECUTE_GITHUB,
         project_id=action.project_id,
         repository_full_name=action.repository,
+        http_request=request,
     )
     try:
         return consume_effective_action(
