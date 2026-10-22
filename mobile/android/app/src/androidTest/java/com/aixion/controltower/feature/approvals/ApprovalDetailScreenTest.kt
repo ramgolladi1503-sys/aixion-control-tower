@@ -603,7 +603,12 @@ class ApprovalDetailScreenTest {
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
         composeRule.onNodeWithText("Decision context").assertExists()
+        composeRule.onAllNodesWithText("Command may modify production configuration.", substring = true)
+            .assertCountEquals(1)
+        composeRule.onAllNodesWithText("Command runs with workspace write access.", substring = true)
+            .assertCountEquals(1)
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+        composeRule.onNodeWithText("Reject").assertIsDisplayed()
         composeRule.onNodeWithText("Command may modify production configuration.", substring = true)
             .performScrollTo()
         composeRule.onNodeWithText("Command may modify production configuration.", substring = true)

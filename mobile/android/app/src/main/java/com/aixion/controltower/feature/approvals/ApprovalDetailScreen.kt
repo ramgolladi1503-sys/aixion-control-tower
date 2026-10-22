@@ -305,14 +305,6 @@ fun ApprovalDetailContent(
                     onToggle = { showTechnicalDetails = !showTechnicalDetails }
                 )
             }
-            item {
-                DetailPanel(
-                    title = "Risk Rationale",
-                    body = approval.riskReasons.ifEmpty {
-                        listOf("No risk rationale was supplied by the backend.")
-                    }.joinToString("\n")
-                )
-            }
             item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
             item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
 
