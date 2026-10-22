@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import sqlite3
+import hmac
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Protocol
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from .agent_run_models import AgentRun
+from .agent_credential_models import AgentCredentialRecord
+from .agent_token_lifetime import effective_agent_token_expiry
 from .agent_task_models import (
     AgentTask,
     AgentTaskEvent,
@@ -24,6 +28,7 @@ from .mcp_pending_repository import (
 from .models import (
     ApprovalRequest,
     ApprovalStatus,
+    AgentAuthType,
     AuditEvent,
     ExternalAgent,
     Notification,
@@ -41,6 +46,124 @@ class ApprovalRecordMissing(LookupError):
 
 class ApprovalDecisionConflict(RuntimeError):
     """The durable approval changed before this decision could commit."""
+
+
+class ApprovalDeliveryCredentialRejected(RuntimeError):
+    """The connector credential is no longer valid at the delivery claim boundary."""
+
+
+def _require_current_delivery_credential(
+    *,
+    agent: ExternalAgent | None,
+    credential: AgentCredentialRecord | None,
+    source_agent_id: str,
+    workspace_id: str | None,
+    presented_token_hash: str,
+    occurred_at: datetime,
+) -> None:
+    if (
+        agent is None
+        or credential is None
+        or agent.id != source_agent_id
+        or credential.agent_id != source_agent_id
+        or agent.workspace_id != workspace_id
+        or not agent.enabled
+        or agent.auth_type == AgentAuthType.MANUAL
+        or not agent.secret_hash
+        or credential.token_revoked_at is not None
+        or effective_agent_token_expiry(credential) <= occurred_at
+        or not hmac.compare_digest(agent.secret_hash, presented_token_hash)
+    ):
+        raise ApprovalDeliveryCredentialRejected(
+            "Connector credential is no longer valid for delivery"
+        )
+
+
+def _validate_sqlite_delivery_credential(
+    conn: sqlite3.Connection,
+    *,
+    source_agent_id: str,
+    workspace_id: str | None,
+    presented_token_hash: str,
+    occurred_at: datetime,
+) -> None:
+    agent_row = conn.execute(
+        "SELECT payload FROM kv_store WHERE entity_type='external_agent' AND entity_id=?",
+        (source_agent_id,),
+    ).fetchone()
+    credential_row = conn.execute(
+        "SELECT payload FROM kv_store WHERE entity_type='external_agent_credential' AND entity_id=?",
+        (source_agent_id,),
+    ).fetchone()
+    agent = ExternalAgent.model_validate_json(agent_row[0]) if agent_row else None
+    credential = (
+        AgentCredentialRecord.model_validate_json(credential_row[0])
+        if credential_row
+        else None
+    )
+    _require_current_delivery_credential(
+        agent=agent,
+        credential=credential,
+        source_agent_id=source_agent_id,
+        workspace_id=workspace_id,
+        presented_token_hash=presented_token_hash,
+        occurred_at=occurred_at,
+    )
+
+
+def _validate_postgres_delivery_credential(
+    conn: psycopg.Connection,
+    *,
+    source_agent_id: str,
+    workspace_id: str,
+    presented_token_hash: str,
+    occurred_at: datetime,
+) -> None:
+    agent_row = conn.execute(
+        "SELECT payload,agent_id,workspace_id,enabled,auth_type,secret_hash "
+        "FROM external_agents WHERE agent_id=%s AND workspace_id=%s FOR UPDATE",
+        (source_agent_id, workspace_id),
+    ).fetchone()
+    credential_row = conn.execute(
+        "SELECT payload,credential_id,agent_id,workspace_id,token_expires_at,token_revoked_at,"
+        "token_rotated_at,created_at,updated_at FROM external_agent_credentials "
+        "WHERE agent_id=%s AND workspace_id=%s FOR UPDATE",
+        (source_agent_id, workspace_id),
+    ).fetchone()
+    agent = ExternalAgent.model_validate(agent_row[0]) if agent_row else None
+    credential = (
+        AgentCredentialRecord.model_validate(credential_row[0])
+        if credential_row
+        else None
+    )
+    if agent is not None and (
+        agent.id != agent_row[1]
+        or agent.workspace_id != agent_row[2]
+        or agent.enabled is not agent_row[3]
+        or agent.auth_type.value != agent_row[4]
+        or agent.secret_hash != agent_row[5]
+    ):
+        raise ApprovalDeliveryCredentialRejected("Connector credential record is inconsistent")
+    if credential is not None and (
+        credential.id != credential_row[1]
+        or credential.agent_id != credential_row[2]
+        or credential.agent_id != source_agent_id
+        or credential_row[3] != workspace_id
+        or credential.token_expires_at != credential_row[4]
+        or credential.token_revoked_at != credential_row[5]
+        or credential.token_rotated_at != credential_row[6]
+        or credential.created_at != credential_row[7]
+        or credential.updated_at != credential_row[8]
+    ):
+        raise ApprovalDeliveryCredentialRejected("Connector credential record is inconsistent")
+    _require_current_delivery_credential(
+        agent=agent,
+        credential=credential,
+        source_agent_id=source_agent_id,
+        workspace_id=workspace_id,
+        presented_token_hash=presented_token_hash,
+        occurred_at=occurred_at,
+    )
 
 
 def _validate_delivery_failure_report(
@@ -360,6 +483,7 @@ class ApprovalDecisionRepository(Protocol):
         source_agent_id: str,
         source_invocation_id: str,
         expected_payload_hash: str,
+        presented_token_hash: str,
         audit_event: AuditEvent,
     ) -> bool: ...
 
@@ -508,6 +632,7 @@ class SQLiteApprovalDecisionRepository:
         source_agent_id: str,
         source_invocation_id: str,
         expected_payload_hash: str,
+        presented_token_hash: str,
         audit_event: AuditEvent,
     ) -> bool:
         if (
@@ -518,6 +643,13 @@ class SQLiteApprovalDecisionRepository:
             raise ValueError("Delivery audit identity must match the approval scope")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            _validate_sqlite_delivery_credential(
+                conn,
+                source_agent_id=source_agent_id,
+                workspace_id=workspace_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=audit_event.created_at,
+            )
             row = conn.execute(
                 "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id=?",
                 (approval_id,),
@@ -1310,6 +1442,7 @@ class PostgresApprovalDecisionRepository:
         source_agent_id: str,
         source_invocation_id: str,
         expected_payload_hash: str,
+        presented_token_hash: str,
         audit_event: AuditEvent,
     ) -> bool:
         if (
@@ -1321,6 +1454,13 @@ class PostgresApprovalDecisionRepository:
         if workspace_id is None:
             raise ApprovalDecisionConflict("Approval workspace is required for PostgreSQL delivery.")
         with self._connect() as conn:
+            _validate_postgres_delivery_credential(
+                conn,
+                source_agent_id=source_agent_id,
+                workspace_id=workspace_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=audit_event.created_at,
+            )
             row = conn.execute(
                 "SELECT payload,workspace_id,source_agent_id,source_invocation_id "
                 "FROM approval_requests WHERE approval_id=%s FOR UPDATE",

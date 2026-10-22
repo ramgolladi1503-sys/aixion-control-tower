@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import uuid
@@ -21,6 +22,7 @@ from app.agent_task_models import (
     AgentTaskEventType,
     AgentTaskStatus,
 )
+from app.agent_credential_models import AgentCredentialRecord
 from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
 from app.agent_run_repository import PostgresAgentRunRepository
 from app.approval_integrity import compute_approval_payload_hash
@@ -28,6 +30,7 @@ from app.approval_expiry import expire_approval
 from app.approval_repository import (
     ApprovalDecisionConflict,
     ApprovalDecisionRepository,
+    ApprovalDeliveryCredentialRejected,
     PostgresApprovalDecisionRepository,
     SQLiteApprovalDecisionRepository,
 )
@@ -203,28 +206,57 @@ def _store_task(case: ApprovalRepositoryCase, task: AgentTask) -> None:
         )
 
 
-def _store_external_agent(case: ApprovalRepositoryCase, agent: ExternalAgent) -> None:
+def _store_external_agent(case: ApprovalRepositoryCase, agent: ExternalAgent) -> str:
+    token = "contract-test-agent-token"
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    agent = agent.model_copy(update={"secret_hash": token_hash})
+    credential = AgentCredentialRecord(agent_id=agent.id)
     if case.backend == "sqlite":
         with case.connect() as connection:
-            connection.execute(
+            connection.executemany(
                 "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
-                ("external_agent", agent.id, agent.model_dump_json()),
+                (
+                    ("external_agent", agent.id, agent.model_dump_json()),
+                    (
+                        "external_agent_credential",
+                        agent.id,
+                        credential.model_dump_json(),
+                    ),
+                ),
             )
-        return
+        return token_hash
     with case.connect() as connection:
         connection.execute(
             "INSERT INTO external_agents "
             "(agent_id,workspace_id,created_by_user_id,provider,auth_type,enabled,secret_hash,payload) "
-            "VALUES(%s,%s,NULL,%s,%s,%s,NULL,%s)",
+            "VALUES(%s,%s,NULL,%s,%s,%s,%s,%s)",
             (
                 agent.id,
                 agent.workspace_id,
                 agent.provider.value,
                 agent.auth_type.value,
                 agent.enabled,
+                token_hash,
                 Jsonb(agent.model_dump(mode="json")),
             ),
         )
+        connection.execute(
+            "INSERT INTO external_agent_credentials "
+            "(credential_id,agent_id,workspace_id,token_expires_at,token_revoked_at,"
+            "token_rotated_at,last_used_at,failed_auth_count,rate_limit_per_minute,"
+            "rate_limit_window_started_at,rate_limit_request_count,created_at,updated_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                credential.id, agent.id, agent.workspace_id,
+                credential.token_expires_at, credential.token_revoked_at,
+                credential.token_rotated_at, credential.last_used_at,
+                credential.failed_auth_count, credential.rate_limit_per_minute,
+                credential.rate_limit_window_started_at,
+                credential.rate_limit_request_count, credential.created_at,
+                credential.updated_at, Jsonb(credential.model_dump(mode="json")),
+            ),
+        )
+    return token_hash
 
 
 def _linked_task_records(
@@ -847,7 +879,7 @@ def test_approved_connector_delivery_claim_is_single_use_across_adapters(approva
         auth_type=AgentAuthType.API_KEY,
         workspace_id=approval_case.workspace.id,
     )
-    _store_external_agent(approval_case, agent)
+    presented_token_hash = _store_external_agent(approval_case, agent)
     approval = _approval(
         approval_case,
         source_provider=AgentProvider.ANTIGRAVITY,
@@ -889,6 +921,7 @@ def test_approved_connector_delivery_claim_is_single_use_across_adapters(approva
         "source_agent_id": agent.id,
         "source_invocation_id": invocation_id,
         "expected_payload_hash": approved.approved_payload_hash,
+        "presented_token_hash": presented_token_hash,
         "audit_event": claim_audit,
     }
 
@@ -897,6 +930,111 @@ def test_approved_connector_delivery_claim_is_single_use_across_adapters(approva
         **{**claim, "audit_event": claim_audit.model_copy(update={"id": "duplicate_claim_audit"})}
     ) is False
     assert _count(approval_case, "audit_event") == 3
+
+
+def test_connector_revoked_after_authentication_cannot_claim_delivery(approval_case) -> None:
+    agent = ExternalAgent(
+        id=f"agent_revocation_contract_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Revocation race connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=approval_case.workspace.id,
+    )
+    presented_token_hash = _store_external_agent(approval_case, agent)
+    approval = _approval(
+        approval_case,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=agent.id,
+        source_invocation_id=f"connector-revocation:{uuid.uuid4().hex}",
+    )
+    _create(approval_case, approval)
+    approved = approval.model_copy(
+        update={"status": ApprovalStatus.APPROVED, "approved_payload_hash_version": 2}
+    )
+    approved = approved.model_copy(
+        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+    )
+    approval_case.repository.commit_decision(
+        approval_id=approval.id,
+        expected_status=ApprovalStatus.REQUESTED,
+        expected_approval=approval,
+        updated_approval=approved,
+        audit_event=_decision_audit(approval, approved, uuid.uuid4().hex),
+        decision_notification=Notification(
+            title="Decision recorded",
+            body="The connector may claim this invocation once.",
+            entity_type="approval_request",
+            entity_id=approval.id,
+            workspace_id=approval.workspace_id,
+        ),
+    )
+
+    with approval_case.connect() as connection:
+        if approval_case.backend == "sqlite":
+            row = connection.execute(
+                "SELECT payload FROM kv_store "
+                "WHERE entity_type='external_agent_credential' AND entity_id=?",
+                (agent.id,),
+            ).fetchone()
+            credential = AgentCredentialRecord.model_validate_json(row[0]).model_copy(
+                update={"token_revoked_at": now_utc(), "updated_at": now_utc()}
+            )
+            connection.execute(
+                "UPDATE kv_store SET payload=? "
+                "WHERE entity_type='external_agent_credential' AND entity_id=?",
+                (credential.model_dump_json(), agent.id),
+            )
+        else:
+            row = connection.execute(
+                "SELECT payload FROM external_agent_credentials WHERE agent_id=%s",
+                (agent.id,),
+            ).fetchone()
+            credential = AgentCredentialRecord.model_validate(row[0]).model_copy(
+                update={"token_revoked_at": now_utc(), "updated_at": now_utc()}
+            )
+            connection.execute(
+                "UPDATE external_agent_credentials SET token_revoked_at=%s,updated_at=%s,payload=%s "
+                "WHERE agent_id=%s",
+                (
+                    credential.token_revoked_at,
+                    credential.updated_at,
+                    Jsonb(credential.model_dump(mode="json")),
+                    agent.id,
+                ),
+            )
+
+    claim_event = AuditEvent(
+        event_type="approval.delivery_claimed",
+        entity_id=approval.id,
+        workspace_id=approval.workspace_id,
+        actor=f"agent:{agent.id}",
+        details={"source_invocation_id": approval.source_invocation_id},
+    )
+    audit_count_before_claim = _count(approval_case, "audit_event")
+    with pytest.raises(ApprovalDeliveryCredentialRejected):
+        approval_case.repository.claim_approved_delivery(
+            approval_id=approval.id,
+            workspace_id=approval.workspace_id,
+            source_agent_id=agent.id,
+            source_invocation_id=approval.source_invocation_id,
+            expected_payload_hash=approved.approved_payload_hash,
+            presented_token_hash=presented_token_hash,
+            audit_event=claim_event,
+        )
+
+    with approval_case.connect() as connection:
+        if approval_case.backend == "sqlite":
+            claim_count = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (approval.id,),
+            ).fetchone()[0]
+        else:
+            claim_count = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval.id,),
+            ).fetchone()[0]
+    assert claim_count == 0
+    assert _count(approval_case, "audit_event") == audit_count_before_claim
 
 
 @pytest.mark.parametrize(

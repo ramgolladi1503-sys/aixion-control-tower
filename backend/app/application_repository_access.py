@@ -11,6 +11,7 @@ from .agent_auth_repository import SQLiteExternalAgentAuthRepository
 from .approval_repository import ApprovalDecisionRepository
 from .project_repository import ProjectRepository
 from .connector_repository import ConnectorRepository, PostgresConnectorRepository
+from .postgres_external_agent_auth_repository import PostgresExternalAgentAuthRepository
 from .idea_repository import IdeaRepository
 from .settings import get_settings
 from .workspace_access import workspace_id_for_user as resolve_workspace_id_for_user
@@ -192,6 +193,24 @@ def external_agent_auth_repository_for_request(
     request: _RequestState | None,
 ) -> ExternalAgentAuthenticationRepository:
     """Return the external-agent auth adapter bound to this FastAPI app."""
+    if getattr(get_settings(), "postgres_auth_enabled", False):
+        repositories = application_repositories_for_request(request)
+        app = getattr(request, "app", None)
+        state = getattr(app, "state", None)
+        runtime = getattr(state, "postgres_runtime", None)
+        if runtime is None or getattr(runtime, "repositories", None) is not repositories:
+            raise RuntimeError(
+                "PostgreSQL external-agent auth repository is not bound to the active runtime"
+            )
+        repository = getattr(repositories, "external_agent_auth", None)
+        if not isinstance(repositories, ApplicationRepositories) or not isinstance(
+            repository, PostgresExternalAgentAuthRepository
+        ):
+            raise RuntimeError(
+                "PostgreSQL external-agent auth repository bundle is unavailable or mismatched"
+            )
+        return repository
+
     if request is None:
         raise RuntimeError("External-agent authentication requires an app-bound request")
     app = getattr(request, "app", None)

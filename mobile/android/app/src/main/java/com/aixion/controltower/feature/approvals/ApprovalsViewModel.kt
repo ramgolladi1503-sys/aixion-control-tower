@@ -392,6 +392,15 @@ class ApprovalsViewModel internal constructor(
             _state.value = _state.value.copy(decisionInFlight = true)
             try {
                 val latest = repository.getApproval(approvalId)
+                if (latest.id != approvalId) {
+                    _state.value = _state.value.copy(
+                        decisionInFlight = false,
+                        decisionNeedsReconciliation = true,
+                        lastActionMessage = "Decision result is still unknown. The server returned a different approval; check this request's status before retrying.",
+                        lastActionApprovalId = approvalId
+                    )
+                    return@launch
+                }
                 val decision = _state.value.decisionBeingReconciled
                 if (decision != null && decisionMatchesStatus(decision, latest.status)) {
                     completeDecision(_state.value.selectedApproval ?: latest, latest, decision, {})

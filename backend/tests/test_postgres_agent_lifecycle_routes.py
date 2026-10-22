@@ -13,6 +13,7 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app import main
+from app import application_repository_access
 from app.application_repositories import ApplicationRepositories
 from app.agent_routes import APPROVAL_CONNECTOR_ACTIONS
 from app.auth import require_owner
@@ -20,6 +21,77 @@ from app.models import AuthUser, Project, User, UserRole, Workspace, now_utc
 from app.postgres_database import run_postgres_migrations
 from app.settings import get_settings
 from app.store import store
+
+
+def _unexpected_connection() -> Connection:
+    raise AssertionError("repository selection tests must not open a database connection")
+
+
+def test_external_agent_repository_requires_active_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = ApplicationRepositories.from_connector(_unexpected_connection)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(repositories=repositories),
+        postgres_repositories=repositories,
+        external_agent_auth_repository=object(),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    monkeypatch.setattr(
+        application_repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert (
+        application_repository_access.external_agent_auth_repository_for_request(request)
+        is repositories.external_agent_auth
+    )
+
+    state.postgres_runtime = None
+    with pytest.raises(RuntimeError, match="not bound to the active runtime"):
+        application_repository_access.external_agent_auth_repository_for_request(request)
+
+
+def test_external_agent_repository_rejects_mixed_postgres_runtime_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = ApplicationRepositories.from_connector(_unexpected_connection)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(
+            repositories=ApplicationRepositories.from_connector(_unexpected_connection)
+        ),
+        postgres_repositories=repositories,
+        external_agent_auth_repository=repositories.external_agent_auth,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    monkeypatch.setattr(
+        application_repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="not bound to the active runtime"):
+        application_repository_access.external_agent_auth_repository_for_request(request)
+
+
+def test_external_agent_repository_keeps_explicit_local_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_repository = object()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        external_agent_auth_repository=local_repository
+    )))
+    monkeypatch.setattr(
+        application_repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=False),
+    )
+
+    assert (
+        application_repository_access.external_agent_auth_repository_for_request(request)
+        is local_repository
+    )
 
 
 @pytest.fixture

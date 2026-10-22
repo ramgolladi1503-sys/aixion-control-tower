@@ -6,6 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlparse
+import json
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.approval_integrity import compute_approval_payload_hash
 from app.approval_decisions import approval_decision_repository
+from app.agent_auth import revoke_external_agent_token
 from app.models import ApprovalRequest
 from app.main import app
 from app.models import ApprovalStatus, Project, Workspace, now_utc
@@ -186,6 +188,55 @@ def test_approved_invocation_delivery_is_claimed_once_and_audited() -> None:
     ]
     assert len(delivery_events) == 1
     assert delivery_events[0].details["delivery"] == "at_most_once"
+
+
+def test_credential_revoked_after_authentication_cannot_claim_delivery(monkeypatch) -> None:
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve"},
+    )
+    assert decision.status_code == 200
+
+    auth_repository = app.state.external_agent_auth_repository
+
+    class RevokeImmediatelyAfterAuthentication:
+        def authenticate_and_consume(self, **kwargs):
+            result = auth_repository.authenticate_and_consume(**kwargs)
+            if result.reason is None:
+                assert result.agent is not None and result.credential is not None
+                revoke_external_agent_token(
+                    result.agent,
+                    credential=result.credential,
+                    repository=auth_repository,
+                    actor="test:revoke-between-auth-and-claim",
+                )
+            return result
+
+    monkeypatch.setattr(
+        app.state,
+        "external_agent_auth_repository",
+        RevokeImmediatelyAfterAuthentication(),
+    )
+    response = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "External agent credential is no longer active"
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+            (approval_id,),
+        ).fetchone()[0] == 0
+        audit_rows = connection.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='audit_event'"
+        ).fetchall()
+    assert not any(
+        json.loads(row[0]).get("event_type") == "approval.delivery_claimed"
+        and json.loads(row[0]).get("entity_id") == approval_id
+        for row in audit_rows
+    )
 
 
 def test_hook_denies_when_consume_commits_but_response_is_lost_and_retry_replays_claim() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from datetime import timedelta
 from typing import Literal
@@ -50,7 +51,10 @@ from .approval_decisions import (
     approval_decision_repository,
     project_repository,
 )
-from .approval_repository import ApprovalDecisionConflict
+from .approval_repository import (
+    ApprovalDecisionConflict,
+    ApprovalDeliveryCredentialRejected,
+)
 from .approval_integrity import compute_approval_payload_hash
 from .auth import require_owner
 from .models import (
@@ -472,6 +476,7 @@ def consume_agent_approval_decision(
     approval_id: str,
     agent: ExternalAgent = Depends(require_external_agent),
     http_request: Request = None,  # type: ignore[assignment]
+    x_aixion_agent_token: str | None = Header(default=None),
 ) -> dict[str, bool]:
     """Claim an approved invocation once before returning allow to a host hook."""
     repository = _approval_repository_for_route(http_request)
@@ -513,8 +518,16 @@ def consume_agent_approval_decision(
             source_agent_id=agent.id,
             source_invocation_id=request.source_invocation_id or "",
             expected_payload_hash=request.approved_payload_hash,
+            presented_token_hash=hashlib.sha256(
+                (x_aixion_agent_token or "").encode("utf-8")
+            ).hexdigest(),
             audit_event=audit_event,
         )
+    except ApprovalDeliveryCredentialRejected as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="External agent credential is no longer active",
+        ) from exc
     except ApprovalDecisionConflict as exc:
         raise HTTPException(status_code=409, detail="Approval identity or payload changed") from exc
     if not claimed:

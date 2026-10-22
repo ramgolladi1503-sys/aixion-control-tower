@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import multiprocessing
+import hashlib
 import uuid
 from dataclasses import replace
 from collections.abc import Callable, Iterator
@@ -15,6 +16,7 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app.agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from app.agent_credential_models import AgentCredentialRecord
 from app.agent_run_repository import AgentRunRepositoryConflict, PostgresAgentRunRepository
 from app import approval_expiry
 from app.approval_integrity import compute_approval_payload_hash
@@ -201,6 +203,40 @@ def _seed(
                 ),
             )
     return workspace, project, approval, task
+
+
+def _insert_agent_credential(connect, agent: ExternalAgent) -> tuple[ExternalAgent, str]:
+    token_hash = hashlib.sha256(b"postgres-approval-test-token").hexdigest()
+    agent = agent.model_copy(update={"secret_hash": token_hash})
+    credential = AgentCredentialRecord(agent_id=agent.id)
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO external_agents "
+            "(agent_id,workspace_id,created_by_user_id,provider,auth_type,enabled,secret_hash,payload) "
+            "VALUES(%s,%s,NULL,%s,%s,%s,%s,%s)",
+            (
+                agent.id, agent.workspace_id, agent.provider.value,
+                agent.auth_type.value, agent.enabled, token_hash,
+                Jsonb(agent.model_dump(mode="json")),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO external_agent_credentials "
+            "(credential_id,agent_id,workspace_id,token_expires_at,token_revoked_at,"
+            "token_rotated_at,last_used_at,failed_auth_count,rate_limit_per_minute,"
+            "rate_limit_window_started_at,rate_limit_request_count,created_at,updated_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                credential.id, agent.id, agent.workspace_id,
+                credential.token_expires_at, credential.token_revoked_at,
+                credential.token_rotated_at, credential.last_used_at,
+                credential.failed_auth_count, credential.rate_limit_per_minute,
+                credential.rate_limit_window_started_at,
+                credential.rate_limit_request_count, credential.created_at,
+                credential.updated_at, Jsonb(credential.model_dump(mode="json")),
+            ),
+        )
+    return agent, token_hash
 
 
 def _seed_mcp_pending(
@@ -424,20 +460,7 @@ def test_postgres_approved_invocation_delivery_claim_is_at_most_once(postgres_re
         display_name="Antigravity connector",
         workspace_id=workspace.id,
     )
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO external_agents "
-            "(agent_id,workspace_id,created_by_user_id,provider,auth_type,enabled,secret_hash,payload) "
-            "VALUES(%s,%s,NULL,%s,%s,%s,NULL,%s)",
-            (
-                agent.id,
-                workspace.id,
-                agent.provider.value,
-                agent.auth_type.value,
-                agent.enabled,
-                Jsonb(agent.model_dump(mode="json")),
-            ),
-        )
+    agent, presented_token_hash = _insert_agent_credential(connect, agent)
     approved = approval.model_copy(
         update={
             "source_provider": AgentProvider.ANTIGRAVITY,
@@ -475,6 +498,7 @@ def test_postgres_approved_invocation_delivery_claim_is_at_most_once(postgres_re
         "source_agent_id": agent.id,
         "source_invocation_id": approved.source_invocation_id,
         "expected_payload_hash": approved.approved_payload_hash,
+        "presented_token_hash": presented_token_hash,
         "audit_event": event,
     }
 
@@ -544,6 +568,7 @@ def test_postgres_delivery_failure_report_requires_matching_claim(postgres_repos
         display_name="Antigravity connector",
         workspace_id=workspace.id,
     )
+    agent, presented_token_hash = _insert_agent_credential(connect, agent)
     approved = approval.model_copy(
         update={
             "source_provider": AgentProvider.ANTIGRAVITY,
@@ -557,19 +582,6 @@ def test_postgres_delivery_failure_report_requires_matching_claim(postgres_repos
         update={"approved_payload_hash": compute_approval_payload_hash(approved)}
     )
     with connect() as conn:
-        conn.execute(
-            "INSERT INTO external_agents "
-            "(agent_id,workspace_id,created_by_user_id,provider,auth_type,enabled,secret_hash,payload) "
-            "VALUES(%s,%s,NULL,%s,%s,%s,NULL,%s)",
-            (
-                agent.id,
-                workspace.id,
-                agent.provider.value,
-                agent.auth_type.value,
-                agent.enabled,
-                Jsonb(agent.model_dump(mode="json")),
-            ),
-        )
         conn.execute(
             "UPDATE approval_requests SET source_agent_id=%s,source_invocation_id=%s,status=%s,payload=%s "
             "WHERE approval_id=%s",
@@ -618,6 +630,7 @@ def test_postgres_delivery_failure_report_requires_matching_claim(postgres_repos
         source_agent_id=agent.id,
         source_invocation_id=approved.source_invocation_id,
         expected_payload_hash=approved.approved_payload_hash,
+        presented_token_hash=presented_token_hash,
         audit_event=claim_event,
     ) is True
     with pytest.raises(psycopg.errors.ForeignKeyViolation):

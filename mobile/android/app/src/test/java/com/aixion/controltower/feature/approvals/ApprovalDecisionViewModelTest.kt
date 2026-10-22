@@ -313,6 +313,49 @@ class ApprovalDecisionViewModelTest {
         }
     }
 
+    @Test
+    fun reconciliationWithDifferentApprovalIdKeepsOriginalDecisionUnknown() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                decideResult = { _, _ -> throw IOException("decision response lost") }
+                getResult = { id, callNumber ->
+                    when (callNumber) {
+                        1 -> approvalDto(id, "REQUESTED")
+                        2 -> throw IOException("automatic status check failed")
+                        else -> approvalDto("different-approval", "APPROVED")
+                    }
+                }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            val original = approvalSummary(REQUEST_ID)
+            viewModel.selectApproval(original)
+            val approvalsBeforeReconciliation = viewModel.state.value.approvals
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+            assertTrue(viewModel.state.value.decisionNeedsReconciliation)
+
+            viewModel.reconcileDecisionStatus()
+            runCurrent()
+
+            assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
+            assertEquals(1, api.decisionCalls)
+            assertEquals(listOf(REQUEST_ID, REQUEST_ID, REQUEST_ID), api.statusApprovalIds)
+            assertEquals(original, viewModel.state.value.selectedApproval)
+            assertEquals(approvalsBeforeReconciliation, viewModel.state.value.approvals)
+            assertFalse(viewModel.state.value.approvals.any { it.id == "different-approval" })
+            assertTrue(viewModel.state.value.decisionNeedsReconciliation)
+            assertFalse(viewModel.state.value.decisionInFlight)
+            assertEquals(REQUEST_ID, viewModel.state.value.lastActionApprovalId)
+            assertTrue(viewModel.state.value.lastActionMessage.orEmpty().contains("different approval"))
+            assertFalse(canStartApprovalDecision(viewModel.state.value))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun newViewModel(api: ControlTowerApi): ApprovalsViewModel {
         val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
         return ApprovalsViewModel(application, ApprovalRepository(api))
