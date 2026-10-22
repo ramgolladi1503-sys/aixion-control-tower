@@ -28,6 +28,7 @@ from app.agent_run_repository import (
     AgentRunRepositoryIntegrityError,
     PostgresAgentRunRepository,
     SQLiteAgentRunRepository,
+    _validate_step_completion,
 )
 from app.database_migrations import run_migrations
 from app.agent_task_models import AgentTask, AgentTaskStatus
@@ -444,6 +445,109 @@ def test_postgres_step_completion_accepts_active_matching_lease(
         event.event_type == AgentRunEventType.STEP_SUCCEEDED
         for event in repository.list_events_for_run(run.id)
     )
+
+
+def test_postgres_step_completion_rejects_invalid_step_status_transition(
+    postgres_agent_run_repository,
+) -> None:
+    repository, connect = postgres_agent_run_repository
+    run, step = _seed_postgres_running_step(repository, connect)
+    updated_run = run.model_copy(deep=True)
+    transition_run(updated_run, AgentRunStatus.SUCCEEDED)
+    invalid_step = step.model_copy(
+        update={"status": AgentRunStepStatus.PENDING}, deep=True
+    )
+    event = AgentRunEvent(
+        run_id=run.id,
+        task_id=run.task_id,
+        step_id=step.id,
+        correlation_id=run.correlation_id,
+        event_type=AgentRunEventType.STEP_SUCCEEDED,
+        previous_status=step.status.value,
+        new_status=AgentRunStepStatus.SUCCEEDED.value,
+        actor="completion-worker",
+    )
+    audit = AuditEvent(
+        event_type="agent_run.step_completed",
+        entity_id=run.id,
+        workspace_id=run.workspace_id,
+        actor="completion-worker",
+        details={"step_id": step.id, "event_ids": [event.id]},
+    )
+
+    with pytest.raises(ValueError, match="valid identity and scope"):
+        repository.commit_step_completion(
+            expected_run=run,
+            updated_run=updated_run,
+            expected_steps=[step],
+            updated_steps=[invalid_step],
+            events=[event],
+            audit=audit,
+            now=datetime.now(timezone.utc),
+        )
+
+    assert repository.get(run.id) == run
+    assert repository.list_steps_for_run(run.id) == [step]
+
+
+def test_step_completion_contract_rejects_invalid_state_transition_without_postgres() -> None:
+    now = datetime.now(timezone.utc)
+    run = AgentRun(
+        task_id="task_completion_contract",
+        workspace_id="workspace_completion_contract",
+        status=AgentRunStatus.RUNNING,
+        current_step_id="step_completion_contract",
+        lease_owner="completion-worker",
+        lease_token="lease-token",
+        lease_expires_at=now + timedelta(minutes=1),
+    )
+    step = AgentRunStep(
+        id="step_completion_contract",
+        run_id=run.id,
+        task_id=run.task_id,
+        sequence=0,
+        step_type=AgentRunStepType.VALIDATE_SCOPE,
+        status=AgentRunStepStatus.RUNNING,
+        idempotency_key="completion-contract",
+        lease_owner=run.lease_owner,
+        lease_token=run.lease_token,
+        lease_expires_at=run.lease_expires_at,
+    )
+    updated_run = run.model_copy(
+        update={
+            "status": AgentRunStatus.SUCCEEDED,
+            "lease_owner": None,
+            "lease_token": None,
+            "lease_expires_at": None,
+        }
+    )
+    invalid_step = step.model_copy(update={"status": AgentRunStepStatus.PENDING})
+    event = AgentRunEvent(
+        run_id=run.id,
+        task_id=run.task_id,
+        step_id=step.id,
+        correlation_id=run.correlation_id,
+        event_type=AgentRunEventType.STEP_SUCCEEDED,
+        previous_status=step.status.value,
+        new_status=AgentRunStepStatus.SUCCEEDED.value,
+    )
+    audit = AuditEvent(
+        event_type="agent_run.step_completed",
+        entity_id=run.id,
+        workspace_id=run.workspace_id,
+        details={"step_id": step.id},
+    )
+
+    with pytest.raises(ValueError, match="valid identity and scope"):
+        _validate_step_completion(
+            expected_run=run,
+            updated_run=updated_run,
+            expected_steps=[step],
+            updated_steps=[invalid_step],
+            events=[event],
+            audit=audit,
+            now=now,
+        )
 
 
 def test_postgres_step_completion_rejects_expired_lease_without_writes(

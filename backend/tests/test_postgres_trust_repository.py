@@ -1874,26 +1874,73 @@ def test_postgres_flight_recorder_routes_read_the_durable_workspace_ledger(
     request.app.state.trust_event_repository = bound_event_repository
 
 
-def test_postgres_runtime_disables_sqlite_backed_trust_reports(
+def test_postgres_runtime_reads_durable_scorecards_without_sqlite_projection(
     trust_repository,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    _repository, _connect, _workspace_id, _approval_id, request, user, _payload = (
+    _repository, connect, workspace_id, _approval_id, request, user, _payload = (
         _postgres_lease_issue_context(trust_repository, monkeypatch)
     )
     repositories = request.app.state.postgres_repositories
     request.app.state.postgres_runtime.repositories = repositories
     def runtime_connect():
-        connection = _connect()
+        connection = connect()
         connection.commit()
         return connection
 
     request.app.state.postgres_runtime.connect = runtime_connect
+    request.app.state.trust_repository = repositories.trust
     request.app.state.agent_task_repository = repositories.agent_tasks
     request.app.state.agent_run_repository = repositories.agent_runs
+
+    durable_action = ProposedAction(
+        id=f"action_{uuid.uuid4().hex}",
+        provider=AgentProvider.CODEX,
+        agent_id="durable-codex-installation",
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        command="python -m pytest",
+    )
+    durable_decision = PolicyDecision(
+        proposed_action_id=durable_action.id,
+        decision=PolicyDecisionType.ALLOW,
+        risk_level=RiskLevel.LOW,
+        reasons=["Within the approved capability."],
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repositories.trust.insert_proposed_action(conn, durable_action)
+            repositories.trust.insert_policy_decision(
+                conn, durable_decision, workspace_id=workspace_id
+            )
+
+    sqlite_only_action = ProposedAction(
+        id=f"sqlite_action_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        agent_id="process-local-only",
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        command="should not appear",
+    )
+    monkeypatch.setitem(store.proposed_actions, sqlite_only_action.id, sqlite_only_action)
+    scorecards = list_scorecards(user=user, request=request)
+    durable_card = next(
+        card
+        for card in scorecards
+        if card.provider == AgentProvider.CODEX
+        and card.agent_id == "durable-codex-installation"
+    )
+    assert durable_card.evaluated_actions == 1
+    assert durable_card.allowed_actions == 1
+    assert durable_card.scope_adherence_rate == 1.0
+    assert not any(card.agent_id == "process-local-only" for card in scorecards)
+
+    bound = request.app.state.agent_run_repository
+    request.app.state.agent_run_repository = object()
     with pytest.raises(HTTPException) as unavailable:
         list_scorecards(user=user, request=request)
     assert unavailable.value.status_code == 503
+    request.app.state.agent_run_repository = bound
     assert list_exceptions(user=user, request=request) == []
 
 

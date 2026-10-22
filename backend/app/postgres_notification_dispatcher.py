@@ -52,7 +52,18 @@ def dispatch_one_postgres_push(
     skipped = False
     try:
         devices = repository.list_device_targets(notification)
-        for device in devices:
+    except Exception:
+        # A target lookup failure means no recipient set was established. Keep
+        # the claim retryable and avoid dispatching against a partial snapshot.
+        logger.warning(
+            "PostgreSQL push target lookup failed for notification id=%s",
+            notification.id,
+        )
+        errors.append("FCM_DISPATCH_FAILED")
+        devices = []
+
+    for device in devices:
+        try:
             error = sender(
                 token=device.token,
                 title=notification.title,
@@ -71,13 +82,15 @@ def dispatch_one_postgres_push(
                 errors.append(error)
                 if error == "FCM_TOKEN_UNREGISTERED":
                     invalid_devices.append((device.id, device.token))
-    except Exception:
-        # Do not persist provider exception text or payload data. The outbox
-        # records a bounded retry category instead.
-        logger.warning(
-            "PostgreSQL push dispatch failed for notification id=%s", notification.id
-        )
-        errors.append("FCM_DISPATCH_FAILED")
+        except Exception:
+            # Isolate provider failures per device so one broken request cannot
+            # prevent attempts to later recipients. Persist only the bounded
+            # category; provider exception text can contain secrets or tokens.
+            logger.warning(
+                "PostgreSQL push target failed for notification id=%s",
+                notification.id,
+            )
+            errors.append("FCM_DISPATCH_FAILED")
 
     if accepted:
         outcome_status = "SENT"

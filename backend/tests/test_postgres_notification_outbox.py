@@ -557,6 +557,58 @@ def test_postgres_dispatcher_does_not_retry_after_partial_acceptance(
     assert stored.push_next_attempt_at is None
 
 
+@pytest.mark.parametrize("failed_target_index", [0, 1])
+def test_postgres_dispatcher_continues_fanout_after_one_target_raises(
+    outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
+    monkeypatch: pytest.MonkeyPatch,
+    failed_target_index: int,
+) -> None:
+    repository, connect = outbox_repository
+    workspace, _, notification = _seed_notification(connect)
+    with connect() as conn:
+        _insert_user(conn, workspace, "push-owner-a")
+        _insert_user(conn, workspace, "push-owner-b")
+        _insert_device(conn, workspace, "push-owner-a", "first-token")
+        _insert_device(conn, workspace, "push-owner-b", "second-token")
+    actual_targets = repository.list_device_targets(notification)
+    assert len(actual_targets) == 2
+    ordered_targets = sorted(actual_targets, key=lambda device: device.token)
+    monkeypatch.setattr(
+        repository,
+        "list_device_targets",
+        lambda _notification: ordered_targets,
+    )
+    monkeypatch.setenv("AIXION_PUSH_DISPATCH_ENABLED", "true")
+    attempts: list[str] = []
+
+    def sender(*, token: str, **_: object) -> None:
+        target_index = len(attempts)
+        attempts.append(token)
+        if target_index == failed_target_index:
+            raise RuntimeError("provider diagnostic must not be persisted")
+        return None
+
+    dispatch_one_postgres_push(repository, now=now_utc(), sender=sender)
+
+    assert attempts == ["first-token", "second-token"]
+    stored = _persisted_notification(connect, notification.id)
+    assert stored.push_status == "SENT"
+    assert stored.push_error == "PARTIAL_DELIVERY"
+    assert stored.push_next_attempt_at is None
+    with connect() as conn:
+        device_audits = conn.execute(
+            "SELECT event_type FROM audit_events WHERE entity_type='device_registration' "
+            "AND event_type='notification.device_token_invalidated'"
+        ).fetchall()
+        persisted_payload = conn.execute(
+            "SELECT payload::text FROM notifications WHERE notification_id=%s",
+            (notification.id,),
+        ).fetchone()
+    assert device_audits == []
+    assert persisted_payload is not None
+    assert "provider diagnostic" not in persisted_payload[0]
+
+
 def test_postgres_dispatcher_removes_unregistered_token_and_records_failure(
     outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
     monkeypatch: pytest.MonkeyPatch,

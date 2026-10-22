@@ -983,10 +983,44 @@ def list_scorecards(
     request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentReliabilityScorecard]:
     if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
-        raise HTTPException(
-            status_code=503,
-            detail="Trust scorecards are unavailable until their action and AgentRun inputs use the selected PostgreSQL runtime",
-        )
+        runtime = getattr(request.app.state, "postgres_runtime", None)
+        repositories = getattr(request.app.state, "postgres_repositories", None)
+        if (
+            runtime is None
+            or repositories is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or getattr(request.app.state, "trust_repository", None)
+            is not getattr(repositories, "trust", None)
+            or getattr(request.app.state, "agent_task_repository", None)
+            is not getattr(repositories, "agent_tasks", None)
+            or getattr(request.app.state, "agent_run_repository", None)
+            is not getattr(repositories, "agent_runs", None)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Trust scorecards require the complete app-bound PostgreSQL runtime",
+            )
+        workspace_id = workspace_id_for_request(user, request)
+        if not workspace_id:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Trust scorecards require a resolved workspace",
+            )
+        try:
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    conn.execute(
+                        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                    )
+                    return repositories.trust.list_reliability_scorecards(
+                        conn,
+                        workspace_id=workspace_id,
+                    )
+        except (psycopg.Error, PostgresTrustRepositoryError, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL trust scorecards are unavailable",
+            ) from error
     return build_reliability_scorecards(workspace_id_for_user(user))
 
 

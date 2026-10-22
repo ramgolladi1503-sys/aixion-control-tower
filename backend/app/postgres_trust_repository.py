@@ -10,7 +10,7 @@ from typing import Any, TypeVar
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from .agent_run_models import AgentRun, AgentRunStep
+from .agent_run_models import AgentRun, AgentRunEvent, AgentRunStep
 from .agent_task_models import AgentTask
 from .trust_action_authorization_models import (
     ActionAuthorization,
@@ -20,6 +20,7 @@ from .trust_crypto import sha256_hex, verify_payload_signature
 from .models import AgentProvider, RiskLevel
 from .trust_models import (
     ActionConsumption,
+    AgentReliabilityScorecard,
     CapabilityLease,
     CapabilityLeaseStatus,
     CredentialGrant,
@@ -413,6 +414,333 @@ class PostgresTrustRepository:
                 )
             )
         return sorted(items, key=lambda item: item.created_at, reverse=True)
+
+    def list_reliability_scorecards(
+        self,
+        conn: Connection,
+        *,
+        workspace_id: str,
+    ) -> list[AgentReliabilityScorecard]:
+        """Build reliability scorecards entirely from one durable workspace snapshot."""
+        self._require_scope(workspace_id)
+        if conn.autocommit:
+            raise ValueError("Scorecard reads require a transaction")
+
+        actions: list[ProposedAction] = []
+        action_rows = conn.execute(
+            "SELECT action_id,workspace_id,lease_id,project_id,task_id,run_id,created_at,payload "
+            "FROM proposed_actions WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchall()
+        for row in action_rows:
+            try:
+                action = ProposedAction.model_validate(row[7])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard action payload is invalid"
+                ) from error
+            if (
+                action.id != row[0]
+                or action.workspace_id != row[1]
+                or action.lease_id != row[2]
+                or action.project_id != row[3]
+                or action.task_id != row[4]
+                or action.run_id != row[5]
+                or action.created_at != row[6]
+                or row[1] != workspace_id
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard action scope is inconsistent"
+                )
+            actions.append(action)
+
+        tasks: list[AgentTask] = []
+        task_rows = conn.execute(
+            "SELECT task_id,project_id,workspace_id,external_agent_id,status,updated_at,payload "
+            "FROM agent_tasks WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchall()
+        for row in task_rows:
+            try:
+                task = AgentTask.model_validate(row[6])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard task payload is invalid"
+                ) from error
+            if (
+                task.id != row[0]
+                or task.project_id != row[1]
+                or task.workspace_id != row[2]
+                or task.external_agent_id != row[3]
+                or task.status.value != row[4]
+                or task.updated_at != row[5]
+                or row[2] != workspace_id
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard task scope is inconsistent"
+                )
+            tasks.append(task)
+
+        task_by_id = {task.id: task for task in tasks}
+        decisions_by_action: dict[str, PolicyDecision] = {}
+        decision_rows = conn.execute(
+            "SELECT decision_id,action_id,workspace_id,lease_id,decision,evaluated_at,payload "
+            "FROM policy_decisions WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchall()
+        for row in decision_rows:
+            try:
+                decision = PolicyDecision.model_validate(row[6])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard policy decision payload is invalid"
+                ) from error
+            if (
+                decision.id != row[0]
+                or decision.proposed_action_id != row[1]
+                or decision.lease_id != row[3]
+                or decision.decision.value != row[4]
+                or decision.evaluated_at != row[5]
+                or row[2] != workspace_id
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard policy decision scope is inconsistent"
+                )
+            action = next((item for item in actions if item.id == row[1]), None)
+            if action is None or action.lease_id != decision.lease_id:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard decision is detached from its workspace action"
+                )
+            previous = decisions_by_action.get(decision.proposed_action_id)
+            if previous is None or (decision.evaluated_at, decision.id) > (
+                previous.evaluated_at,
+                previous.id,
+            ):
+                decisions_by_action[decision.proposed_action_id] = decision
+
+        runs: list[AgentRun] = []
+        run_rows = conn.execute(
+            "SELECT run_id,workspace_id,task_id,project_id,status,updated_at,payload "
+            "FROM agent_runs WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchall()
+        for row in run_rows:
+            try:
+                run = AgentRun.model_validate(row[6])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard run payload is invalid"
+                ) from error
+            task = task_by_id.get(row[2])
+            if (
+                run.id != row[0]
+                or run.workspace_id != row[1]
+                or run.task_id != row[2]
+                or run.project_id != row[3]
+                or run.status.value != row[4]
+                or run.updated_at != row[5]
+                or row[1] != workspace_id
+                or task is None
+                or task.project_id != run.project_id
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard run/task scope is inconsistent"
+                )
+            runs.append(run)
+
+        run_by_id = {run.id: run for run in runs}
+        steps_by_run: dict[str, list[AgentRunStep]] = {}
+        step_rows = conn.execute(
+            "SELECT step_id,run_id,task_id,workspace_id,status,sequence,payload "
+            "FROM agent_run_steps WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchall()
+        for row in step_rows:
+            try:
+                step = AgentRunStep.model_validate(row[6])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard run-step payload is invalid"
+                ) from error
+            run = run_by_id.get(row[1])
+            if (
+                step.id != row[0]
+                or step.run_id != row[1]
+                or step.task_id != row[2]
+                or step.status.value != row[4]
+                or step.sequence != row[5]
+                or run is None
+                or run.task_id != step.task_id
+                or row[3] != workspace_id
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard run-step scope is inconsistent"
+                )
+            steps_by_run.setdefault(step.run_id, []).append(step)
+
+        recovered_run_ids: set[str] = set()
+        event_rows = conn.execute(
+            "SELECT event_id,run_id,task_id,workspace_id,created_at,event_type,payload "
+            "FROM agent_run_events WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchall()
+        for row in event_rows:
+            try:
+                event = AgentRunEvent.model_validate(row[6])
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard run-event payload is invalid"
+                ) from error
+            run = run_by_id.get(row[1])
+            if (
+                event.id != row[0]
+                or event.run_id != row[1]
+                or event.task_id != row[2]
+                or event.created_at != row[4]
+                or event.event_type.value != row[5]
+                or row[3] != workspace_id
+                or run is None
+                or run.task_id != event.task_id
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard run-event scope is inconsistent"
+                )
+            if event.event_type.value == "STALE_LEASE_RECOVERED":
+                recovered_run_ids.add(event.run_id)
+
+        consumptions_by_action: dict[str, ActionConsumption] = {}
+        consumption_rows = conn.execute(
+            "SELECT action_id,workspace_id,lease_id,consumed_at,payload "
+            "FROM action_consumptions WHERE workspace_id=%s",
+            (workspace_id,),
+        ).fetchall()
+        action_by_id = {action.id: action for action in actions}
+        for row in consumption_rows:
+            payload = row[4]
+            if (
+                payload.get("action_id") != row[0]
+                or payload.get("workspace_id") != row[1]
+                or payload.get("lease_id") != row[2]
+                or datetime.fromisoformat(payload.get("consumed_at", "")) != row[3]
+                or row[1] != workspace_id
+            ):
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard consumption scope is inconsistent"
+                )
+            action = action_by_id.get(row[0])
+            if action is None or action.lease_id != row[2]:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard consumption is detached from its workspace action"
+                )
+            try:
+                consumptions_by_action[row[0]] = ActionConsumption.model_validate(
+                    payload["consumption"]
+                )
+            except Exception as error:
+                raise PostgresTrustRepositoryError(
+                    "Stored scorecard consumption payload is invalid"
+                ) from error
+
+        keys = {(action.provider, action.agent_id) for action in actions}
+        keys.update((task.provider, task.external_agent_id) for task in tasks)
+        results: list[AgentReliabilityScorecard] = []
+        for provider, agent_id in sorted(
+            keys, key=lambda item: (item[0].value, item[1] or "")
+        ):
+            scoped_actions = [
+                action
+                for action in actions
+                if action.provider == provider and action.agent_id == agent_id
+            ]
+            action_ids = {action.id for action in scoped_actions}
+            decisions = [
+                decisions_by_action[action_id]
+                for action_id in action_ids
+                if action_id in decisions_by_action
+            ]
+            scoped_tasks = [
+                task
+                for task in tasks
+                if task.provider == provider and task.external_agent_id == agent_id
+            ]
+            task_ids = {task.id for task in scoped_tasks}
+            scoped_runs = [run for run in runs if run.task_id in task_ids]
+            run_ids = {run.id for run in scoped_runs}
+            allowed = sum(
+                decision.decision == PolicyDecisionType.ALLOW
+                for decision in decisions
+            )
+            blocked = sum(
+                decision.decision == PolicyDecisionType.BLOCK
+                for decision in decisions
+            )
+            escalated = sum(
+                decision.decision == PolicyDecisionType.REQUIRE_APPROVAL
+                for decision in decisions
+            )
+            first_attempt_successes = sum(
+                bool(steps_by_run.get(run.id))
+                and all(step.attempt_count <= 1 for step in steps_by_run[run.id])
+                for run in scoped_runs
+            )
+            recovered_runs = recovered_run_ids & run_ids
+            recovered_successes = sum(
+                run.id in recovered_runs and run.status.value == "SUCCEEDED"
+                for run in scoped_runs
+            )
+            interventions = sum(
+                run.status.value == "NEEDS_HUMAN" for run in scoped_runs
+            )
+            completed_with_evidence = sum(
+                bool(run.final_evidence_hash) for run in scoped_runs
+            )
+            durations = [
+                (run.completed_at - run.started_at).total_seconds()
+                for run in scoped_runs
+                if run.started_at and run.completed_at
+            ]
+            total_cost = sum(
+                consumptions_by_action[action_id].actual_cost_usd
+                for action_id in action_ids
+                if action_id in consumptions_by_action
+            )
+            evaluated = len(decisions)
+            results.append(
+                AgentReliabilityScorecard(
+                    provider=provider,
+                    agent_id=agent_id,
+                    evaluated_actions=evaluated,
+                    allowed_actions=allowed,
+                    blocked_actions=blocked,
+                    approval_escalations=escalated,
+                    scope_adherence_rate=allowed / evaluated if evaluated else 0.0,
+                    first_attempt_success_rate=(
+                        first_attempt_successes / len(scoped_runs)
+                        if scoped_runs
+                        else 0.0
+                    ),
+                    recovery_success_rate=(
+                        recovered_successes / len(recovered_runs)
+                        if recovered_runs
+                        else 0.0
+                    ),
+                    human_intervention_rate=(
+                        interventions / len(scoped_runs) if scoped_runs else 0.0
+                    ),
+                    policy_block_rate=blocked / evaluated if evaluated else 0.0,
+                    evidence_completion_rate=(
+                        completed_with_evidence / len(scoped_runs)
+                        if scoped_runs
+                        else 0.0
+                    ),
+                    average_runtime_seconds=(
+                        sum(durations) / len(durations) if durations else 0.0
+                    ),
+                    total_cost_usd=total_cost,
+                    confidence=min(1.0, (evaluated + len(scoped_runs)) / 30.0),
+                )
+            )
+        return results
 
     @staticmethod
     def _insert(

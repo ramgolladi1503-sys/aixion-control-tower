@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from app import main
 from app import postgres_notification_dispatcher as postgres_dispatcher
+from app.models import DeviceRegistration, Notification, now_utc
 from app.notification_outbox_repository import PostgresNotificationOutboxRepository
 
 
@@ -247,3 +248,78 @@ def test_postgres_dispatch_loop_drains_inflight_thread_on_cancellation(monkeypat
         assert finished.is_set()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("failed_target_index", [0, 1])
+def test_postgres_dispatcher_isolates_sender_exception_per_target(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_target_index: int,
+) -> None:
+    notification = Notification(
+        id="notification_dispatch_unit",
+        title="Approval needed",
+        body="Open the app to review.",
+        entity_type="approval_request",
+        entity_id="approval_dispatch_unit",
+        workspace_id="workspace_dispatch_unit",
+        push_status="SENDING",
+        push_attempts=1,
+    )
+    devices = [
+        DeviceRegistration(
+            id="device_a",
+            user_id="owner_a",
+            workspace_id=notification.workspace_id,
+            token="token_a",
+        ),
+        DeviceRegistration(
+            id="device_b",
+            user_id="owner_b",
+            workspace_id=notification.workspace_id,
+            token="token_b",
+        ),
+    ]
+    recorded: list[dict[str, object]] = []
+
+    class Repository:
+        def claim_next_due(self, **_: object) -> Notification:
+            return notification
+
+        def list_device_targets(self, _notification: Notification) -> list[DeviceRegistration]:
+            return devices
+
+        def record_outcome(self, **kwargs: object) -> Notification:
+            recorded.append(kwargs)
+            return notification
+
+    monkeypatch.setattr(
+        postgres_dispatcher,
+        "get_settings",
+        lambda: SimpleNamespace(
+            push_dispatch_enabled=True,
+            push_max_attempts=5,
+            push_lease_seconds=30,
+            push_retry_base_seconds=15,
+            push_retry_max_seconds=900,
+        ),
+    )
+    attempts: list[str] = []
+
+    def sender(*, token: str, **_: object) -> None:
+        attempt_index = len(attempts)
+        attempts.append(token)
+        if attempt_index == failed_target_index:
+            raise RuntimeError("provider exception may contain sensitive details")
+        return None
+
+    postgres_dispatcher.dispatch_one_postgres_push(
+        Repository(), now=now_utc(), sender=sender
+    )
+
+    assert attempts == ["token_a", "token_b"]
+    assert len(recorded) == 1
+    assert recorded[0]["push_status"] == "SENT"
+    assert recorded[0]["push_error"] == "PARTIAL_DELIVERY"
+    assert recorded[0]["next_attempt_at"] is None
+    assert recorded[0]["invalid_devices"] == ()
+    assert "provider exception" not in repr(recorded[0])

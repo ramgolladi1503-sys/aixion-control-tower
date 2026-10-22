@@ -340,6 +340,7 @@ def _validate_step_completion(
         or completion_step.lease_owner != expected_run.lease_owner
         or completion_step.lease_token != expected_run.lease_token
         or completion_step.lease_expires_at != expected_run.lease_expires_at
+        or not can_transition_run(expected_run.status, updated_run.status)
         or updated_run.lease_token is not None
         or updated_run.lease_owner is not None
         or updated_run.lease_expires_at is not None
@@ -350,6 +351,9 @@ def _validate_step_completion(
             or expected.task_id != expected_run.task_id
             or updated_by_id[step_id].run_id != expected_run.id
             or updated_by_id[step_id].task_id != expected_run.task_id
+            or not can_transition_step(
+                expected.status, updated_by_id[step_id].status
+            )
             for step_id, expected in expected_by_id.items()
         )
         or any(event.run_id != expected_run.id or event.task_id != expected_run.task_id for event in events)
