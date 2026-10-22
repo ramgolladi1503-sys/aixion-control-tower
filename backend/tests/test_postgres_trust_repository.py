@@ -55,6 +55,8 @@ from app.trust_routes import (
     get_exact_action_decision,
     list_leases,
     list_flight_recorder_events,
+    list_exceptions,
+    list_scorecards,
     verify_flight_recorder_chain,
 )
 from app.trust_action_authorization_models import (
@@ -1383,6 +1385,19 @@ def test_postgres_flight_recorder_routes_read_the_durable_workspace_ledger(
         list_flight_recorder_events(limit=500, user=user, request=request)
     assert partial_binding.value.status_code == 503
     request.app.state.trust_event_repository = bound_event_repository
+
+
+def test_postgres_runtime_disables_sqlite_backed_trust_reports(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, _connect, _workspace_id, _approval_id, request, user, _payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    for endpoint in (list_scorecards, list_exceptions):
+        with pytest.raises(HTTPException) as unavailable:
+            endpoint(user=user, request=request)
+        assert unavailable.value.status_code == 503
 
 
 def test_postgres_concurrent_identical_lease_issues_resolve_once(

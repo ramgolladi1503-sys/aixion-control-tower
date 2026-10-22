@@ -974,12 +974,28 @@ def revoke_capability_credential(
 
 
 @router.get("/scorecards", response_model=list[AgentReliabilityScorecard])
-def list_scorecards(user: AuthUser = ReviewerDependency) -> list[AgentReliabilityScorecard]:
+def list_scorecards(
+    user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
+) -> list[AgentReliabilityScorecard]:
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="Trust scorecards are unavailable until their action and AgentRun inputs use the selected PostgreSQL runtime",
+        )
     return build_reliability_scorecards(workspace_id_for_user(user))
 
 
 @router.get("/exceptions", response_model=list[ExceptionQueueItem])
-def list_exceptions(user: AuthUser = ReviewerDependency) -> list[ExceptionQueueItem]:
+def list_exceptions(
+    user: AuthUser = ReviewerDependency,
+    request: Request = None,  # type: ignore[assignment]
+) -> list[ExceptionQueueItem]:
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="Trust exception queue is unavailable until its action and AgentRun inputs use the selected PostgreSQL runtime",
+        )
     return build_exception_queue(workspace_id_for_user(user))
 
 
