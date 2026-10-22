@@ -221,6 +221,7 @@ def test_registration_accepts_matching_pending_invite_and_assigns_invite_role(mo
     assert store.invites[invite.id].status == InviteStatus.ACCEPTED
     assert store.invites[invite.id].accepted_by_user_id == payload["user"]["id"]
     assert store.audit_events[-1].event_type == "auth.invite_accepted"
+    assert store.audit_events[-1].workspace_id == owner.workspace_id
 
     store.load()
     assert payload["user"]["id"] in store.users

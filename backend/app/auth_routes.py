@@ -112,6 +112,7 @@ def _record_account_deletion_request(
             event_type="auth.account_deletion_requested",
             actor=actor.email,
             entity_id=target_user_id,
+            workspace_id=actor.workspace_id,
             details={
                 "target_user_id": target_user_id,
                 "target_email": target_email,
