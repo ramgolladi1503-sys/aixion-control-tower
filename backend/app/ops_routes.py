@@ -31,6 +31,9 @@ class RuntimeReadinessResponse(BaseModel):
     database_backend: Literal["sqlite"]
     application_store_mode: Literal["sqlite_local", "postgres_probe_only"]
     application_store_ready: bool
+    app_state_repository_bindings: dict[
+        str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]
+    ] = Field(default_factory=dict)
     postgres_probe_enabled: bool
     postgres_auth_rate_limits_enabled: bool
     postgres_probe_status: Literal["disabled", "ready", "not_ready"]
@@ -69,8 +72,51 @@ def _probe_owner() -> AuthUser:
     )
 
 
+_APP_STATE_REPOSITORIES = {
+    "approval_decisions": ("approval_decision_repository", "approval_decisions"),
+    "agent_tasks": ("agent_task_repository", "agent_tasks"),
+    "agent_runs": ("agent_run_repository", "agent_runs"),
+    "projects": ("project_repository", "projects"),
+    "workspace_membership": ("workspace_membership_repository", "workspace_membership"),
+    "external_agent_auth": ("external_agent_auth_repository", "external_agent_auth"),
+    "work_orders": ("work_order_repository", "work_orders"),
+    "ideas": ("idea_repository", "ideas"),
+    "audit_events": ("audit_event_repository", "audit_events"),
+    "test_runs": ("test_run_repository", "test_runs"),
+    "connectors": ("connector_repository", "connectors"),
+    "notification_outbox": ("notification_outbox_repository", "notification_outbox"),
+    "mcp_child_servers": ("mcp_child_server_repository", "mcp_child_servers"),
+}
+
+
+def _application_repository_bindings(
+    *, application_state: object | None, postgres_runtime: PostgresRuntime | None
+) -> dict[str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]]:
+    """Report app-state repository identity without claiming whole-app readiness."""
+    if application_state is None:
+        return {name: "unavailable" for name in _APP_STATE_REPOSITORIES}
+
+    postgres_repositories = getattr(postgres_runtime, "repositories", None)
+    result: dict[str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]] = {}
+    for name, (state_attribute, postgres_attribute) in _APP_STATE_REPOSITORIES.items():
+        bound = getattr(application_state, state_attribute, None)
+        if bound is None:
+            result[name] = "unbound"
+            continue
+        expected = getattr(postgres_repositories, postgres_attribute, None)
+        if expected is not None and bound is expected:
+            result[name] = "postgresql"
+        elif type(bound).__name__.startswith("SQLite"):
+            result[name] = "sqlite"
+        else:
+            result[name] = "other"
+    return result
+
+
 def build_runtime_readiness(
-    *, postgres_runtime: PostgresRuntime | None = None
+    *,
+    postgres_runtime: PostgresRuntime | None = None,
+    application_state: object | None = None,
 ) -> RuntimeReadinessResponse:
     settings = get_settings()
     errors = list(settings.validation_errors)
@@ -165,6 +211,10 @@ def build_runtime_readiness(
         "postgres_probe_only" if postgres_runtime is not None else "sqlite_local"
     )
     application_store_ready = application_store_mode == "sqlite_local" and not settings.is_production
+    application_repository_bindings = _application_repository_bindings(
+        application_state=application_state,
+        postgres_runtime=postgres_runtime,
+    )
     if settings.is_production:
         errors.append(
             "Application persistence is not production-ready: authoritative routes and workers "
@@ -188,6 +238,7 @@ def build_runtime_readiness(
         database_backend="sqlite",
         application_store_mode=application_store_mode,
         application_store_ready=application_store_ready,
+        app_state_repository_bindings=application_repository_bindings,
         postgres_probe_enabled=settings.postgres_runtime_probe_enabled,
         postgres_auth_rate_limits_enabled=settings.postgres_auth_rate_limits_enabled,
         postgres_probe_status=postgres_probe_status,
@@ -228,7 +279,10 @@ def get_runtime_readiness(
     _: AuthUser = MaintainerDependency,
 ) -> RuntimeReadinessResponse:
     runtime = getattr(request.app.state, "postgres_runtime", None)
-    return build_runtime_readiness(postgres_runtime=runtime)
+    return build_runtime_readiness(
+        postgres_runtime=runtime,
+        application_state=request.app.state,
+    )
 
 
 @router.get("/external-agent-readiness", response_model=ExternalAgentReadinessResponse)

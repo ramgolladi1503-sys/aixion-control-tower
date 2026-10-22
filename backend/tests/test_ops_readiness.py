@@ -44,6 +44,9 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     assert body["database_backend"] == "sqlite"
     assert body["application_store_mode"] == "sqlite_local"
     assert body["application_store_ready"] is True
+    assert body["app_state_repository_bindings"]["approval_decisions"] == "sqlite"
+    assert body["app_state_repository_bindings"]["projects"] == "sqlite"
+    assert body["app_state_repository_bindings"]["notification_outbox"] == "unbound"
     assert body["postgres_probe_enabled"] is False
     assert body["postgres_auth_rate_limits_enabled"] is False
     assert body["postgres_probe_status"] == "disabled"
@@ -105,7 +108,10 @@ def test_readiness_reports_postgres_probe_without_claiming_it_is_active_store(
 
     monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
     monkeypatch.setenv("AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED", "true")
-    readiness = build_runtime_readiness(postgres_runtime=Runtime())
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=app.state,
+    )
 
     assert readiness.postgres_probe_enabled is True
     assert readiness.postgres_probe_status == "ready"
@@ -116,6 +122,59 @@ def test_readiness_reports_postgres_probe_without_claiming_it_is_active_store(
     assert readiness.postgres_auth_rate_limits_enabled is True
     assert readiness.database_backend == "sqlite"
     assert readiness.application_store_mode == "postgres_probe_only"
+    assert readiness.application_store_ready is False
+    assert readiness.app_state_repository_bindings["approval_decisions"] == "sqlite"
+
+
+def test_readiness_reports_bound_repository_identity_without_claiming_full_readiness(
+    monkeypatch,
+) -> None:
+    postgres_approval = object()
+    postgres_task = object()
+    runtime_repositories = type(
+        "Repositories",
+        (),
+        {"approval_decisions": postgres_approval, "agent_tasks": postgres_task},
+    )()
+
+    class Runtime:
+        repositories = runtime_repositories
+
+        def probe(self):
+            schema = type("Schema", (), {"ready": True})()
+            return type(
+                "Probe",
+                (),
+                {
+                    "ready": True,
+                    "schema": schema,
+                    "pool_size": 1,
+                    "pool_available": 1,
+                    "pool_waiting": 0,
+                },
+            )()
+
+    state = type(
+        "ApplicationState",
+        (),
+        {
+            "approval_decision_repository": postgres_approval,
+            "agent_task_repository": app.state.agent_task_repository,
+            "agent_run_repository": None,
+            "connector_repository": object(),
+        },
+    )()
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=state,
+    )
+
+    assert readiness.app_state_repository_bindings["approval_decisions"] == "postgresql"
+    assert readiness.app_state_repository_bindings["agent_tasks"] == "sqlite"
+    assert readiness.app_state_repository_bindings["agent_runs"] == "unbound"
+    assert readiness.app_state_repository_bindings["connectors"] == "other"
+    assert readiness.app_state_repository_bindings["projects"] == "unbound"
     assert readiness.application_store_ready is False
 
 
