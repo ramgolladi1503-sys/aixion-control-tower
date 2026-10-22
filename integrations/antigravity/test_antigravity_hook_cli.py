@@ -309,3 +309,120 @@ def test_run_denies_create_conflict_or_mismatched_retry_response(
 
     assert result["decision"] == "deny"
     assert calls == 1
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _patch_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    clock = _FakeClock()
+    monkeypatch.setattr(hook.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(hook.time, "sleep", clock.sleep)
+    return clock
+
+
+def test_run_reconnects_after_ambiguous_decision_read_then_consumes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    calls: list[str] = []
+    created: dict = {}
+    decision_reads = 0
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+        nonlocal decision_reads
+        calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            decision_reads += 1
+            if decision_reads == 1:
+                raise hook.AmbiguousRequestError("temporary decision read failure")
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._payload_hash(approved)
+            return approved
+        if method == "POST" and url.endswith("/consume"):
+            return {"consumed": True}
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), _test_environment())
+
+    assert result["decision"] == "allow"
+    assert decision_reads == 2
+    assert calls.count("POST consume") == 1
+    assert clock.sleeps == [hook.POLL_INTERVAL_SECONDS]
+
+
+def test_run_honors_retry_after_only_until_host_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    calls: list[str] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+        calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            raise hook.RateLimitError(9)
+        if method == "POST" and url.endswith("/expire"):
+            return {**created, "status": "EXPIRED"}
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert clock.sleeps == [3]
+    assert clock.now == 103
+    assert "POST expire" in calls
+    assert "POST consume" not in calls
+
+
+def test_run_exhausted_reconnect_wait_expires_and_never_consumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    calls: list[str] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None) -> dict:
+        calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            raise hook.AmbiguousRequestError("decision service disconnected")
+        if method == "POST" and url.endswith("/expire"):
+            return {**created, "status": "EXPIRED"}
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert clock.sleeps == [hook.POLL_INTERVAL_SECONDS, 1]
+    assert clock.now == 103
+    assert calls.count("POST expire") == 1
+    assert "POST consume" not in calls

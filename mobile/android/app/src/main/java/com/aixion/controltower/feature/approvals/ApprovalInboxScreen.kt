@@ -3,6 +3,8 @@ package com.aixion.controltower.feature.approvals
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -128,6 +130,7 @@ fun ApprovalInboxScreen(
     )
 }
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun ApprovalInboxContent(
     state: ApprovalsUiState,
     onRetry: () -> Unit = {},
@@ -190,7 +193,7 @@ fun ApprovalInboxContent(
         state.errorMessage?.let { message ->
             item {
                 TowerPanel(elevated = true) {
-                    StatusBadge("REAL DATA REQUIRED", RiskCritical)
+                    StatusBadge("Real data required", RiskCritical, fontSize = 14.sp, uppercase = false)
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
                         text = "Approval data unavailable",
@@ -213,10 +216,10 @@ fun ApprovalInboxContent(
         }
 
         if (!state.hasError) item {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusBadge("Needs review $pendingCount", RiskMedium)
-                StatusBadge("Status blocked ${blocked.size}", RiskBlocked)
-                StatusBadge("Approved ${approved.size}", RiskLow)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                StatusBadge("Needs review $pendingCount", RiskMedium, fontSize = 14.sp, uppercase = false)
+                StatusBadge("Status blocked ${blocked.size}", RiskBlocked, fontSize = 14.sp, uppercase = false)
+                StatusBadge("Approved ${approved.size}", RiskLow, fontSize = 14.sp, uppercase = false)
             }
         }
 
@@ -301,9 +304,11 @@ fun ApprovalInboxContent(
             item {
                 TowerPanel(elevated = true) {
                     StatusBadge(
-                        if (unsupported.isNotEmpty()) "UNSUPPORTED DATA · DECISIONS DISABLED"
-                        else "POLICY BLOCKED · DECISIONS DISABLED",
-                        RiskCritical
+                        if (unsupported.isNotEmpty()) "Unsupported data · decisions disabled"
+                        else "Policy blocked · decisions disabled",
+                        RiskCritical,
+                        fontSize = 14.sp,
+                        uppercase = false
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(

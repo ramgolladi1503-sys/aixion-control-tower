@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -243,7 +245,7 @@ fun ApprovalDetailContent(
                 item {
                     WarningPanel(
                         title = "Decision closed",
-                        body = "This approval is ${approval.status.name}. Decisions are available only while it is pending."
+                        body = "This approval is ${approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}. Decisions are available only while it is pending."
                     )
                 }
             }
@@ -338,7 +340,7 @@ fun ApprovalDetailContent(
                 Text(
                     "Action: ${approval.title}\n${approval.summary}\n\n" +
                         "Target: ${approval.projectName} · ${approval.targetBranch.ifBlank { "Not provided" }}\n" +
-                        "Risk: ${approval.risk.name}"
+                        "Risk: ${approval.risk.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}"
                 )
             },
             confirmButton = {
@@ -365,6 +367,7 @@ internal fun requiresExplicitRiskConfirmation(risk: RiskLevel): Boolean =
     risk == RiskLevel.HIGH || risk == RiskLevel.CRITICAL
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun ApprovalHeroPanel(
     approval: ApprovalSummary,
     canApprove: Boolean,
@@ -375,23 +378,29 @@ private fun ApprovalHeroPanel(
 ) {
     TowerHeroPanel {
         Column(modifier = Modifier.fillMaxWidth()) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 StatusBadge(
                     label = when {
-                        hasUnsupportedData -> "UNSUPPORTED DATA"
-                        isBlocked -> "BLOCKED"
-                        !canDecide -> "DECISION CLOSED"
-                        canApprove -> "READY FOR DECISION"
-                        hasRequiredActions -> "SAFETY GATE"
-                        else -> "REVIEW REQUIRED"
+                        hasUnsupportedData -> "Unsupported data"
+                        isBlocked -> "Blocked"
+                        !canDecide -> "Decision closed"
+                        canApprove -> "Ready for decision"
+                        hasRequiredActions -> "Safety gate"
+                        else -> "Review required"
                     },
                     color = when {
                         isBlocked || hasUnsupportedData -> RiskCritical
                         canApprove -> RiskLow
                         else -> RiskMedium
-                    }
+                    },
+                    fontSize = 14.sp,
+                    uppercase = false
                 )
-                RiskBadge(approval.risk)
+                RiskBadge(approval.risk, readable = true)
             }
             Spacer(modifier = Modifier.height(TowerSpacing.md))
             Text(
@@ -457,7 +466,7 @@ private fun DecisionContextLine(label: String, value: String) {
 private fun DetailPanel(title: String, body: String, modifier: Modifier = Modifier) {
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
-            title.uppercase(),
+                title,
             color = TowerTextMuted,
             fontSize = 14.sp,
             fontWeight = FontWeight.Medium,

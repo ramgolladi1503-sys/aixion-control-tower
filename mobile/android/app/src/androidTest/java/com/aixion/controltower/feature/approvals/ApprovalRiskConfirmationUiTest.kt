@@ -37,7 +37,7 @@ class ApprovalRiskConfirmationUiTest {
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
         composeRule.onNodeWithText("High impact operation", substring = true).assertExists()
         composeRule.onNodeWithText("Target: Production workspace · release", substring = true).assertExists()
-        composeRule.onNodeWithText("Risk: HIGH", substring = true).assertExists()
+        composeRule.onNodeWithText("Risk: High", substring = true).assertExists()
         composeRule.runOnIdle { assertEquals("Opening confirmation must not submit a decision", 0, decisionCount) }
 
         composeRule.onNodeWithText("Approve this request").assertIsEnabled().performClick()

@@ -39,12 +39,16 @@ class ApprovalInboxScreenTest {
 
         composeRule.onNodeWithText("Approvals").assertExists()
         composeRule.onNodeWithText("Review requests from connected agents, then see every decision and its status here.").assertExists()
-        composeRule.onNodeWithText("PENDING 2").assertExists()
-        composeRule.onNodeWithText("BLOCKED 1").assertExists()
-        composeRule.onNodeWithText("APPROVED 1").assertExists()
+        composeRule.onNodeWithText("Needs review 2").assertExists()
+        composeRule.onNodeWithText("Status blocked 1").assertExists()
+        composeRule.onNodeWithText("Approved 1").assertExists()
         composeRule.onNodeWithText("Pending approval").assertExists()
         composeRule.onNodeWithText("Blocked approval").assertExists()
         composeRule.onNodeWithText("Approved approval").assertExists()
+        composeRule.onNodeWithText("Aixion Control Tower").assertExists()
+        composeRule.onNodeWithText("Regression approval summary").assertExists()
+        composeRule.onNodeWithText("Low").assertExists()
+        composeRule.onNodeWithText("Pending review").assertExists()
     }
 
     @Test
@@ -76,7 +80,7 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onNodeWithText("Loading approval decisions...").assertExists()
-        composeRule.onNodeWithText("PENDING 0").assertExists()
+        composeRule.onNodeWithText("Needs review 0").assertExists()
     }
 
     @Test
@@ -108,7 +112,7 @@ class ApprovalInboxScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("UNSUPPORTED DATA · DECISIONS DISABLED").assertExists()
+        composeRule.onNodeWithText("Unsupported data · decisions disabled").assertExists()
         composeRule.onNodeWithText("Unrecognized risk request").assertExists()
     }
 

@@ -30,7 +30,11 @@ from .agent_task_models import (
     AgentTaskEventCreate,
     AgentTaskEventType,
 )
-from .agent_task_repository import AgentTaskRepositoryConflict
+from .agent_task_repository import (
+    AgentTaskRepositoryConflict,
+    PostgresAgentTaskRepository,
+    SQLiteAgentTaskRepository,
+)
 from .approval_expiry import (
     approval_repository_publishes_compatibility_state,
     approval_repository_scope,
@@ -38,6 +42,7 @@ from .approval_expiry import (
     expire_due_approval,
 )
 from .application_repository_access import (
+    agent_task_repository_for_request,
     approval_decision_repository_for_request,
     external_agent_auth_repository_for_request,
     is_sqlite_external_agent_auth_repository,
@@ -144,6 +149,17 @@ def _work_order_repository_for_route(http_request: Request | None):
         # Direct function calls in unit tests use the explicit local adapter.
         return store.work_order_repository
     return work_order_repository_for_request(http_request)
+
+
+def _agent_task_repository_for_route(http_request: Request | None):
+    repository = (
+        agent_task_repository
+        if http_request is None
+        else agent_task_repository_for_request(http_request)
+    )
+    if not isinstance(repository, (SQLiteAgentTaskRepository, PostgresAgentTaskRepository)):
+        raise HTTPException(status_code=503, detail="AgentTask repository is unsupported")
+    return repository
 
 
 class AgentDeliveryFailureReport(BaseModel):
@@ -729,18 +745,35 @@ def create_agent_work_order(
 def create_agent_task(
     payload: AgentTaskCreate,
     agent: ExternalAgent = Depends(require_external_agent),
+    http_request: Request = None,  # type: ignore[assignment]
 ) -> AgentTask:
     assert_agent_can(
         agent,
         AgentAction.CREATE_AGENT_TASK,
         project_id=payload.project_id,
         repository_full_name=payload.repository,
+        http_request=http_request,
     )
-    if payload.project_id and payload.project_id not in store.projects:
+    task_repository = _agent_task_repository_for_route(http_request)
+    project_repository_for_route = (
+        None if http_request is None else project_repository_for_request(http_request)
+    )
+    postgres_runtime = isinstance(task_repository, PostgresAgentTaskRepository)
+    sqlite_runtime = isinstance(task_repository, SQLiteAgentTaskRepository)
+    if not (postgres_runtime or sqlite_runtime):
+        raise HTTPException(status_code=503, detail="AgentTask repository is unsupported")
+    projects = store.projects if project_repository_for_route is None else None
+    project = (
+        project_repository_for_route.get(payload.project_id)
+        if project_repository_for_route is not None and payload.project_id
+        else (projects.get(payload.project_id) if projects is not None and payload.project_id else None)
+    )
+    if payload.project_id and project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    project = store.projects.get(payload.project_id) if payload.project_id else None
     if agent.workspace_id is not None and project and project.workspace_id != agent.workspace_id:
         raise HTTPException(status_code=404, detail="Project not found")
+    if postgres_runtime and (not payload.project_id or project is None or not project.workspace_id):
+        raise HTTPException(status_code=403, detail="A workspace-scoped project is required")
     if agent.workspace_id is None and get_settings().is_production:
         raise HTTPException(status_code=403, detail="Agent workspace is required")
 
@@ -780,10 +813,11 @@ def create_agent_task(
         },
     )
     try:
-        agent_task_repository.create(task=task, event=event, audit=audit_event)
+        task_repository.create(task=task, event=event, audit=audit_event)
     except (AgentTaskRepositoryConflict, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    store.project_agent_task_creation(task, event, audit_event)
+    if sqlite_runtime:
+        store.project_agent_task_creation(task, event, audit_event)
     return task
 
 
@@ -791,9 +825,11 @@ def create_agent_task(
 def get_agent_owned_task(
     task_id: str,
     agent: ExternalAgent = Depends(require_external_agent),
+    http_request: Request = None,  # type: ignore[assignment]
 ) -> AgentTask:
-    assert_agent_can(agent, AgentAction.READ_AGENT_TASK)
-    task = agent_task_repository.get(task_id)
+    assert_agent_can(agent, AgentAction.READ_AGENT_TASK, http_request=http_request)
+    repository = _agent_task_repository_for_route(http_request)
+    task = repository.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
     _assert_agent_owns_task(agent, task)
@@ -804,13 +840,18 @@ def get_agent_owned_task(
 def list_agent_owned_task_events(
     task_id: str,
     agent: ExternalAgent = Depends(require_external_agent),
+    http_request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentTaskEvent]:
-    assert_agent_can(agent, AgentAction.READ_AGENT_TASK)
-    task = agent_task_repository.get(task_id)
+    assert_agent_can(agent, AgentAction.READ_AGENT_TASK, http_request=http_request)
+    repository = _agent_task_repository_for_route(http_request)
+    task = repository.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Agent task not found")
     _assert_agent_owns_task(agent, task)
-    return sorted(_task_events(task_id), key=lambda event: event.created_at)
+    return sorted(
+        repository.list_events(task_id, workspace_id=task.workspace_id),
+        key=lambda event: event.created_at,
+    )
 
 
 @router.post("/tasks/{task_id}/events", response_model=AgentTaskEvent)
@@ -818,9 +859,13 @@ def append_agent_owned_task_event(
     task_id: str,
     payload: AgentTaskEventCreate,
     agent: ExternalAgent = Depends(require_external_agent),
+    http_request: Request = None,  # type: ignore[assignment]
 ) -> AgentTaskEvent:
-    assert_agent_can(agent, AgentAction.APPEND_AGENT_TASK_EVENT)
-    expected_task = agent_task_repository.get(task_id)
+    assert_agent_can(
+        agent, AgentAction.APPEND_AGENT_TASK_EVENT, http_request=http_request
+    )
+    repository = _agent_task_repository_for_route(http_request)
+    expected_task = repository.get(task_id)
     if not expected_task:
         raise HTTPException(status_code=404, detail="Agent task not found")
     _assert_agent_owns_task(agent, expected_task)
@@ -857,7 +902,7 @@ def append_agent_owned_task_event(
         },
     )
     try:
-        agent_task_repository.commit_event(
+        repository.commit_event(
             expected=expected_task,
             updated=updated_task,
             event=event,
@@ -865,7 +910,8 @@ def append_agent_owned_task_event(
         )
     except (AgentTaskRepositoryConflict, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    store.project_agent_task_transition(updated_task, event, audit_event)
+    if isinstance(repository, SQLiteAgentTaskRepository):
+        store.project_agent_task_transition(updated_task, event, audit_event)
     return event
 
 

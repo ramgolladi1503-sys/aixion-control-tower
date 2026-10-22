@@ -152,6 +152,9 @@ def postgres_lifespan_approval_context(
                 AgentAction.CREATE_APPROVAL,
                 AgentAction.READ_APPROVAL_DECISION,
                 AgentAction.CONSUME_APPROVAL_DECISION,
+                AgentAction.CREATE_AGENT_TASK,
+                AgentAction.READ_AGENT_TASK,
+                AgentAction.APPEND_AGENT_TASK_EVENT,
             ],
             created_by_user_id=user.id,
             workspace_id=workspace.id,
@@ -324,3 +327,113 @@ def test_lifespan_routes_antigravity_approval_to_postgres_inbox_without_sqlite_p
     assert set(store.notifications) == before_notifications
     assert set(store.device_registrations) == before_devices
     assert {event.id for event in store.audit_events} == before_audits
+
+
+def test_lifespan_routes_external_agent_tasks_to_postgres_without_sqlite_projection(
+    postgres_lifespan_approval_context,
+) -> None:
+    connect, workspace, project, _user, agent, agent_token = postgres_lifespan_approval_context
+    before_tasks = set(store.agent_tasks)
+    before_events = set(store.agent_task_events)
+    before_audits = {event.id for event in store.audit_events}
+    headers = {
+        "X-Aixion-Agent-Id": agent.id,
+        "X-Aixion-Agent-Token": agent_token,
+    }
+
+    with TestClient(main.app) as client:
+        repositories = client.app.state.postgres_repositories
+        assert repositories.workspace_membership.get_workspace(workspace.id) == workspace
+        assert repositories.projects.get(project.id) == project
+        assert repositories.external_agent_auth.get(agent.id)[0] == agent
+        task_response = client.post(
+            "/agents/tasks",
+            headers=headers,
+            json={
+                "project_id": project.id,
+                "title": "Persist external task",
+                "goal": "Keep task and approval state in one PostgreSQL authority",
+                "requested_action": "GENERATE_DOCS",
+                "requires_approval": True,
+            },
+        )
+        assert task_response.status_code == 200, task_response.text
+        task = task_response.json()
+        assert task["workspace_id"] == workspace.id
+        assert task["external_agent_id"] == agent.id
+        assert task["provider"] == "ANTIGRAVITY"
+        assert repositories.agent_tasks.get(task["id"]) is not None
+
+        task_read = client.get(f"/agents/tasks/{task['id']}", headers=headers)
+        assert task_read.status_code == 200, task_read.text
+        assert task_read.json()["id"] == task["id"]
+        initial_events = client.get(f"/agents/tasks/{task['id']}/events", headers=headers)
+        assert initial_events.status_code == 200, initial_events.text
+        assert [event["event_type"] for event in initial_events.json()] == ["TASK_CREATED"]
+
+        appended = client.post(
+            f"/agents/tasks/{task['id']}/events",
+            headers=headers,
+            json={
+                "event_type": "PLAN_RECEIVED",
+                "message": "Plan ready",
+                "status": "PLANNING",
+                "metadata": {"phase": "plan"},
+            },
+        )
+        assert appended.status_code == 200, appended.text
+        assert appended.json()["actor"] == f"agent:{agent.id}"
+        assert repositories.agent_tasks.get(task["id"]).status == "PLANNING"
+        assert len(repositories.agent_tasks.list_events(task["id"], workspace_id=workspace.id)) == 2
+
+        with connect() as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+                (task["id"], workspace.id),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT count(*) FROM agent_task_events WHERE task_id=%s AND workspace_id=%s",
+                (task["id"], workspace.id),
+            ).fetchone()[0] == 2
+            assert connection.execute(
+                "SELECT count(*) FROM audit_events WHERE entity_id=%s AND workspace_id=%s",
+                (task["id"], workspace.id),
+            ).fetchone()[0] == 2
+
+        assert set(store.agent_tasks) == before_tasks
+        assert set(store.agent_task_events) == before_events
+        assert {event.id for event in store.audit_events} == before_audits
+
+        foreign_workspace = Workspace(
+            id=f"workspace_{uuid.uuid4().hex}",
+            name="Foreign workspace",
+            owner_user_id=f"user_{uuid.uuid4().hex}",
+        )
+        foreign_project = Project(
+            id=f"project_{uuid.uuid4().hex}",
+            name="Foreign project",
+            workspace_id=foreign_workspace.id,
+        )
+        with connect() as connection:
+            connection.execute(
+                "INSERT INTO workspaces(workspace_id,payload) VALUES (%s,%s)",
+                (foreign_workspace.id, Jsonb(foreign_workspace.model_dump(mode="json"))),
+            )
+            connection.execute(
+                "INSERT INTO projects(project_id,workspace_id,payload) VALUES (%s,%s,%s)",
+                (
+                    foreign_project.id,
+                    foreign_workspace.id,
+                    Jsonb(foreign_project.model_dump(mode="json")),
+                ),
+            )
+        wrong_project = client.post(
+            "/agents/tasks",
+            headers=headers,
+            json={
+                "project_id": foreign_project.id,
+                "title": "Must not cross workspace scope",
+                "goal": "Fail closed when the selected project is outside agent scope",
+            },
+        )
+        assert wrong_project.status_code == 403

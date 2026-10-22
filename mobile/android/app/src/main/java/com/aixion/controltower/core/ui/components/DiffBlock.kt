@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,33 +38,31 @@ fun DiffBlock(file: FileChangeSummary, modifier: Modifier = Modifier) {
             lineHeight = 20.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        RiskBadge(risk = file.risk)
+        RiskBadge(risk = file.risk, readable = true)
         Spacer(modifier = Modifier.height(TowerSpacing.md))
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(TowerSurfaceRaised, RoundedCornerShape(TowerRadius.md))
-                .border(1.dp, TowerBorderSoft, RoundedCornerShape(TowerRadius.md))
-                .padding(TowerSpacing.md)
-        ) {
-            file.diff.lines().forEach { line ->
-                val color = when {
-                    line.startsWith("+") -> RiskLow
-                    line.startsWith("-") -> RiskCritical
-                    else -> TowerTextMuted
+        SelectionContainer {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(TowerSurfaceRaised, RoundedCornerShape(TowerRadius.md))
+                    .border(1.dp, TowerBorderSoft, RoundedCornerShape(TowerRadius.md))
+                    .padding(TowerSpacing.md)
+            ) {
+                file.diff.lines().forEach { line ->
+                    val color = when {
+                        line.startsWith("+") -> RiskLow
+                        line.startsWith("-") -> RiskCritical
+                        else -> TowerTextMuted
+                    }
+                    Text(
+                        text = line,
+                        color = color,
+                        fontSize = 14.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 21.sp,
+                        softWrap = true
+                    )
                 }
-                val prefix = when {
-                    line.startsWith("+") -> "+ "
-                    line.startsWith("-") -> "- "
-                    else -> "  "
-                }
-                Text(
-                    text = prefix + line.removePrefix("+").removePrefix("-"),
-                    color = color,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    lineHeight = 18.sp
-                )
             }
         }
     }

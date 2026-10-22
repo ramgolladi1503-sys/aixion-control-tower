@@ -12,8 +12,13 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
@@ -34,7 +39,7 @@ class ApprovalDetailScreenTest {
             ApprovalDetailContent(approval(ApprovalStatus.UNKNOWN), null, {}, {}, {})
         }
 
-        composeRule.onNodeWithText("UNSUPPORTED DATA").assertExists()
+        composeRule.onNodeWithText("Unsupported data").assertExists()
         composeRule.onNodeWithText("Unsupported approval data").assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
         composeRule.onNodeWithText("Reject").assertDoesNotExist()
@@ -46,7 +51,7 @@ class ApprovalDetailScreenTest {
             ApprovalDetailContent(approval(ApprovalStatus.REQUESTED).copy(risk = RiskLevel.UNKNOWN), null, {}, {}, {})
         }
 
-        composeRule.onNodeWithText("UNSUPPORTED DATA").assertExists()
+        composeRule.onNodeWithText("Unsupported data").assertExists()
         composeRule.onNodeWithTag("approval-detail-list")
             .performScrollToNode(hasText("Unsupported approval data"))
         composeRule.onNodeWithText("Unsupported approval data").assertExists()
@@ -105,7 +110,10 @@ class ApprovalDetailScreenTest {
     fun pendingApprovalAllowsOperatorDecisions() {
         composeRule.setContent { ApprovalDetailContent(approval(ApprovalStatus.REQUESTED), null, {}, {}, {}) }
 
-        composeRule.onNodeWithText("READY FOR DECISION").assertExists()
+        composeRule.onNodeWithText("Ready for decision").assertExists()
+        composeRule.onNodeWithText("Low").assertExists()
+        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("+test"))
+        composeRule.onNodeWithText("+test").assertExists()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
         composeRule.onNodeWithText("Reject").assertIsEnabled()
     }
@@ -127,6 +135,28 @@ class ApprovalDetailScreenTest {
         assertTrue(
             "Decision buttons should use the same full-width size",
             kotlin.math.abs(rejectBounds.width - approveBounds.width) < 1f
+        )
+    }
+
+    @Test
+    fun approvalHeroStatusAndRiskBadgesWrapAtNarrowWidth() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(220.dp).height(900.dp)) {
+                ApprovalDetailContent(
+                    approval(ApprovalStatus.REQUESTED).copy(risk = RiskLevel.HIGH),
+                    null,
+                    {},
+                    {},
+                    {}
+                )
+            }
+        }
+
+        val statusBounds = composeRule.onNodeWithText("Ready for decision").fetchSemanticsNode().boundsInRoot
+        val riskBounds = composeRule.onNodeWithText("High").fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "Approval status and risk badges should move to separate rows at narrow widths",
+            statusBounds.bottom < riskBounds.top
         )
     }
 
@@ -194,7 +224,7 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(manual, null, {}, {}, {}) }
 
-        composeRule.onNodeWithText("READY FOR DECISION").assertExists()
+        composeRule.onNodeWithText("Ready for decision").assertExists()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
         composeRule.onNodeWithText("Reject").assertIsEnabled()
     }
