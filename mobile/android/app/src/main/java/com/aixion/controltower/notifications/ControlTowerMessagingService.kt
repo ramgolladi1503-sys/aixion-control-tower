@@ -50,10 +50,16 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
             return
         }
         val approvedLink = approvalLink as NotificationDeepLink.ApprovalRequest
+        // Push copy can include private project/task text. The preview policy is
+        // intentionally generic while the detail remains available after unlock.
+        val preview = ApprovalNotificationPreview.fromUntrustedPush(
+            remoteTitle = message.notification?.title ?: message.data["title"],
+            remoteBody = message.notification?.body ?: message.data["body"]
+        )
 
         showNotification(
-            title = message.notification?.title ?: message.data["title"] ?: "Aixion update",
-            body = message.notification?.body ?: message.data["body"] ?: "Open Aixion Control Tower",
+            title = preview.title,
+            body = preview.body,
             entityType = "approval_request",
             entityId = approvedLink.entityId,
             notificationId = approvedLink.notificationId

@@ -13,10 +13,18 @@ from psycopg.types.json import Jsonb
 
 from app import main
 from app.application_repositories import ApplicationRepositories
-from app.auth import require_maintainer, require_reviewer
-from app.models import AuthUser, Idea, Project, User, UserRole, Workspace
+from app.auth import require_maintainer, require_owner, require_reviewer
+from app.models import (
+    AuthUser,
+    Idea,
+    Project,
+    User,
+    UserRole,
+    Workspace,
+)
 from app.postgres_database import run_postgres_migrations
 from app.store import store
+from app.work_order_repository import PostgresWorkOrderRepository, WorkOrderRepositoryScopeError
 
 
 @pytest.fixture
@@ -73,10 +81,12 @@ def postgres_idea_work_order_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterato
         user = AuthUser(id=owner.id, email=owner.email, display_name=owner.display_name,
                         role=owner.role, workspace_id=workspace.id)
         monkeypatch.setitem(main.app.dependency_overrides, require_maintainer, lambda: user)
+        monkeypatch.setitem(main.app.dependency_overrides, require_owner, lambda: user)
         monkeypatch.setitem(main.app.dependency_overrides, require_reviewer, lambda: user)
         yield connect, workspace, project
     finally:
         main.app.dependency_overrides.pop(require_maintainer, None)
+        main.app.dependency_overrides.pop(require_owner, None)
         main.app.dependency_overrides.pop(require_reviewer, None)
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
@@ -139,3 +149,162 @@ def test_work_order_cannot_link_an_idea_from_another_workspace(postgres_idea_wor
     })
     assert response.status_code == 404
     assert response.json()["detail"] == "Idea not found"
+
+
+def test_external_agent_work_order_uses_postgres_project_and_idea_scope(
+    postgres_idea_work_order_runtime, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_idea_work_order_runtime
+    idea = Idea(
+        project_id=project.id,
+        title="PostgreSQL only idea",
+        raw_text="External agent can link this scoped idea.",
+        workspace_id=workspace.id,
+    )
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO ideas(idea_id,project_id,workspace_id,created_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s)",
+            (
+                idea.id,
+                project.id,
+                workspace.id,
+                idea.created_at,
+                Jsonb(idea.model_dump(mode="json")),
+            ),
+        )
+
+    client = TestClient(main.app)
+    registration = client.post("/agents", json={
+        "provider": "ANTIGRAVITY",
+        "display_name": "PostgreSQL work-order agent",
+        "auth_type": "API_KEY",
+        "allowed_project_ids": [project.id],
+        "allowed_actions": ["CREATE_WORK_ORDER"],
+        "enabled": True,
+    })
+    assert registration.status_code == 200, registration.text
+    agent = registration.json()["agent"]
+    headers = {
+        "X-Aixion-Agent-Id": agent["id"],
+        "X-Aixion-Agent-Token": registration.json()["agent_token"],
+    }
+    before_orders = set(store.work_orders)
+    before_audits = {event.id for event in store.audit_events}
+
+    created = client.post(
+        "/agents/work-orders",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "idea_id": idea.id,
+            "goal": "Create the scoped PostgreSQL work order",
+            "tasks": ["Persist work order", "Keep its audit paired"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    work_order = created.json()
+    assert work_order["workspace_id"] == workspace.id
+    assert work_order["idea_id"] == idea.id
+    assert work_order["source_agent_id"] == agent["id"]
+    assert work_order["source_type"] == "AGENT_TASK"
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM work_orders WHERE work_order_id=%s AND workspace_id=%s",
+            (work_order["id"], workspace.id),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s AND workspace_id=%s "
+            "AND event_type='work_order.created_by_agent'",
+            (work_order["id"], workspace.id),
+        ).fetchone()[0] == 1
+    assert work_order["id"] not in store.work_orders
+    assert {event.id for event in store.audit_events} == before_audits
+    assert set(store.work_orders) == before_orders
+
+    foreign_workspace = Workspace(
+        id=f"workspace_{uuid.uuid4().hex}",
+        name="Foreign idea workspace",
+        owner_user_id=f"owner_{uuid.uuid4().hex}",
+    )
+    foreign_project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Foreign project",
+        workspace_id=foreign_workspace.id,
+    )
+    foreign_idea = Idea(
+        project_id=foreign_project.id,
+        title="Foreign idea",
+        raw_text="Must not be linked",
+        workspace_id=foreign_workspace.id,
+    )
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+            (foreign_workspace.id, Jsonb(foreign_workspace.model_dump(mode="json"))),
+        )
+        connection.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (
+                foreign_project.id,
+                foreign_workspace.id,
+                Jsonb(foreign_project.model_dump(mode="json")),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO ideas(idea_id,project_id,workspace_id,created_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s)",
+            (
+                foreign_idea.id,
+                foreign_project.id,
+                foreign_workspace.id,
+                foreign_idea.created_at,
+                Jsonb(foreign_idea.model_dump(mode="json")),
+            ),
+        )
+    rejected = client.post(
+        "/agents/work-orders",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "idea_id": foreign_idea.id,
+            "goal": "Must reject a foreign-workspace idea",
+        },
+    )
+    assert rejected.status_code == 404
+    assert rejected.json()["detail"] == "Idea not found"
+    assert set(store.work_orders) == before_orders
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM work_orders WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s "
+            "AND event_type='work_order.created_by_agent'",
+            (workspace.id,),
+        ).fetchone()[0] == 1
+
+    def reject_changed_scope(self, *, work_order, audit_event) -> None:
+        raise WorkOrderRepositoryScopeError("WorkOrder project scope changed before commit")
+
+    monkeypatch.setattr(PostgresWorkOrderRepository, "create", reject_changed_scope)
+    conflicted = client.post(
+        "/agents/work-orders",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "goal": "Must return conflict when repository scope changes",
+        },
+    )
+    assert conflicted.status_code == 409
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM work_orders WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s "
+            "AND event_type='work_order.created_by_agent'",
+            (workspace.id,),
+        ).fetchone()[0] == 1

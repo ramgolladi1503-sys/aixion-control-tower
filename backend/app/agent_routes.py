@@ -45,6 +45,7 @@ from .application_repository_access import (
     agent_task_repository_for_request,
     approval_decision_repository_for_request,
     external_agent_auth_repository_for_request,
+    idea_repository_for_request,
     is_sqlite_external_agent_auth_repository,
     project_repository_for_request,
     workspace_membership_repository_for_request,
@@ -61,6 +62,7 @@ from .approval_repository import (
     ApprovalDeliveryCredentialRejected,
 )
 from .approval_integrity import compute_approval_payload_hash
+from .idea_repository import IdeaRepository, PostgresIdeaRepository
 from .auth import require_owner
 from .models import (
     AgentAction,
@@ -82,9 +84,12 @@ from .models import (
 from .risk_engine import assess_approval_request, assess_work_order
 from .settings import get_settings
 from .store import store
+from .work_order_repository import (
+    PostgresWorkOrderRepository,
+    SQLiteWorkOrderRepository,
+    WorkOrderRepositoryError,
+)
 from .workspace_access import (
-    idea_scope_is_consistent,
-    idea_workspace_id,
     external_agent_scope_is_consistent,
     work_order_scope_is_consistent,
     work_order_workspace_id,
@@ -684,21 +689,48 @@ def create_agent_work_order(
     agent: ExternalAgent = Depends(require_external_agent),
     http_request: Request = None,  # type: ignore[assignment]
 ) -> WorkOrder:
-    assert_agent_can(agent, AgentAction.CREATE_WORK_ORDER, project_id=payload.project_id)
-    if payload.project_id not in store.projects:
+    assert_agent_can(
+        agent,
+        AgentAction.CREATE_WORK_ORDER,
+        project_id=payload.project_id,
+        http_request=http_request,
+    )
+    project_repository_for_route = _project_repository_for_route(http_request)
+    project = (
+        project_repository_for_route.get(payload.project_id)
+        if http_request is not None
+        else store.projects.get(payload.project_id)
+    )
+    if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    project = store.projects[payload.project_id]
     if agent.workspace_id is not None and project.workspace_id != agent.workspace_id:
         raise HTTPException(status_code=404, detail="Project not found")
     if agent.workspace_id is None and get_settings().is_production:
         raise HTTPException(status_code=403, detail="Agent workspace is required")
+    idea_repository: IdeaRepository | None = (
+        None if http_request is None else idea_repository_for_request(http_request)
+    )
     if payload.idea_id:
-        idea = store.ideas.get(payload.idea_id)
+        idea = (
+            store.ideas.get(payload.idea_id)
+            if idea_repository is None
+            else idea_repository.get(payload.idea_id)
+        )
+        idea_project = (
+            None
+            if idea is None or idea.project_id is None
+            else project_repository_for_route.get(idea.project_id)
+        )
+        resolved_idea_workspace = (
+            idea.workspace_id
+            if idea is not None and idea.workspace_id is not None
+            else (idea_project.workspace_id if idea_project is not None else None)
+        )
         if (
             idea is None
-            or not idea_scope_is_consistent(idea)
+            or (idea.project_id is not None and idea_project is None)
             or (idea.project_id is not None and idea.project_id != project.id)
-            or idea_workspace_id(idea) != project.workspace_id
+            or resolved_idea_workspace != project.workspace_id
         ):
             raise HTTPException(status_code=404, detail="Idea not found")
 
@@ -731,13 +763,19 @@ def create_agent_work_order(
             "verified_source": work_order.verified_source,
         },
     )
+    repository = _work_order_repository_for_route(http_request)
+    if not isinstance(repository, (SQLiteWorkOrderRepository, PostgresWorkOrderRepository)):
+        raise HTTPException(status_code=503, detail="WorkOrder repository is unsupported")
+    if isinstance(repository, PostgresWorkOrderRepository) and not isinstance(
+        idea_repository, PostgresIdeaRepository
+    ):
+        raise HTTPException(status_code=503, detail="Idea repository is unsupported")
     try:
-        _work_order_repository_for_route(http_request).create(
-            work_order=work_order, audit_event=audit_event
-        )
-    except (ValueError, sqlite3.IntegrityError) as exc:
+        repository.create(work_order=work_order, audit_event=audit_event)
+    except (ValueError, sqlite3.IntegrityError, WorkOrderRepositoryError) as exc:
         raise HTTPException(status_code=409, detail="Work order could not be committed safely") from exc
-    store.project_work_order_creation(work_order, audit_event)
+    if isinstance(repository, SQLiteWorkOrderRepository):
+        store.project_work_order_creation(work_order, audit_event)
     return work_order
 
 
