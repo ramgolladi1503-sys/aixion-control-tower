@@ -3,9 +3,17 @@
 **Checked:** 2026-10-21  
 **Purpose:** Recheck Slice 4's invocation-correlation blocker against the current
 official Codex hook documentation.  
-**Result:** The existing Control Tower `PermissionRequest` adapter remains
-fail-closed and cannot be certified for live phone approval with the currently
-documented event schema.
+**Historical result:** At the time of this check, the existing Control Tower
+`PermissionRequest` adapter required provider-supplied `tool_use_id`, which the
+documented event did not include. That finding was later superseded by the
+callback-scoped identity implementation recorded in
+[`PRE_BILLING_WORK_LOCK.md`](PRE_BILLING_WORK_LOCK.md#slice-4--implement-the-codex-local-permission-adapter).
+
+**Current status:** The hook now uses provider `tool_use_id` when available, or
+creates a fresh random ID for each synchronous callback when it is absent. This
+avoids deriving identity from command payloads and prevents identical calls
+from colliding. The installed-app round trip remains unverified, so Slice 4
+stays open.
 
 ## Verified current contract
 
@@ -30,38 +38,40 @@ not guarantee a fail-closed remote approval gate. The hook must not return
 `allow` after an ambiguous phone/API result, and the system must not infer that
 a failed callback denied execution.
 
-## Current implementation boundary
+## Implementation at the time of this check
 
-`integrations/codex/aixion_permission_request_hook.py` requires
-`tool_use_id` before making any API request. When that identity is absent, the
-hook emits an explicit Codex `deny` response and does not create an approval.
-This is intentional. Do not synthesize the ID from payload, reuse `turn_id`,
-or switch to `PreToolUse` as a way to make the current Codex session appear
-supported.
+At the time of this check, `integrations/codex/aixion_permission_request_hook.py`
+required `tool_use_id` before making any API request and explicitly denied if it
+was absent. The current hook has since added the callback-scoped random-ID
+fallback described above. It must not derive IDs from payloads or reuse
+`turn_id`; `PreToolUse` remains unsuitable for the remote approval wait because
+its timeout/error behavior does not guarantee that the tool is blocked.
 
-The integration remains a development adapter, not a certified Codex product
-path. In particular, this evidence does not establish interception of an
-existing native Codex Desktop session or that phone approval resumes that same
-invocation.
+The integration remains an uncertified Codex adapter. This evidence does not
+establish that the installed Codex build invokes the hook with the expected
+event shape or that phone approval resumes that same native invocation.
 
 ## Evidence required to reopen the gate
 
-Reassess Slice 4 only when all of the following are available:
+Slice 4 remains open until all of the following are available:
 
-1. The supported Codex build emits a stable, unique invocation ID in the
-   synchronous permission callback, or documents another collision-safe way
-   to correlate one permission request to one tool invocation.
-2. The supported callback has an explicit, documented failure behavior that
+1. A test against the actual Codex app captures the callback payload and
+   confirms the installed build invokes the synchronous `PermissionRequest`
+   hook for the intended native permission prompt.
+2. The callback-scoped ID stays bound to that callback through creation,
+   phone decision polling, and consume, without payload-derived identity.
+3. The supported callback has an explicit, documented failure behavior that
    prevents the tool from proceeding on timeout, hook failure, malformed
    output, connector loss, or stale approval.
-3. A test against the actual Codex app captures the real callback payload and
+4. A test against the actual Codex app captures the real callback payload and
    verifies approve resumes the same invocation while deny and failure prevent
    it.
-4. Restart and duplicate-delivery tests show that an approval cannot be
-   replayed to a different invocation.
+5. Restart and duplicate-delivery tests show that an approval cannot be
+   replayed to a different invocation; a restarted callback must get a new ID.
 
-Until those conditions are met, keep Slice 4 open and keep the hook's
-missing-identity behavior as explicit denial.
+Until those conditions are met, keep Slice 4 open. Explicitly deny malformed
+provider IDs or events missing session/turn identity; when the provider ID is
+absent, use only a fresh callback-scoped ID.
 
 ## Validation and rollout
 

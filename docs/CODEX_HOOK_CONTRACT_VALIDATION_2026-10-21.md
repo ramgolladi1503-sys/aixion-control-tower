@@ -1,5 +1,10 @@
 # Codex PermissionRequest Contract Validation — 2026-10-21
 
+> Historical check. Its conclusion that the adapter denies when `tool_use_id`
+> is absent was superseded by the callback-scoped random-ID fallback recorded
+> in [`PRE_BILLING_WORK_LOCK.md`](PRE_BILLING_WORK_LOCK.md#slice-4--implement-the-codex-local-permission-adapter).
+> The Slice 4 native Codex-to-phone round trip remains unverified.
+
 **Scope:** Pre-billing Slice 4 adapter contract check from [PRE_BILLING_WORK_LOCK.md](PRE_BILLING_WORK_LOCK.md).
 
 ## Current official contract checked
