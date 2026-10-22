@@ -23,11 +23,12 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
                 PUSH_TOKEN_KEY_ALIAS,
                 token
             )
-            Log.i(TAG, "FCM token refreshed and stored securely for backend registration")
+            PushDeviceRegistrationWorker.enqueue(this)
+            Log.i(TAG, "FCM token refreshed; backend registration queued")
         } catch (_: Exception) {
-            // The app can retrieve the current token from Firebase on its next
-            // authenticated registration attempt; never log the token or fail open.
-            Log.w(TAG, "FCM token could not be stored securely; registration must retry")
+            // The encrypted token remains available for a later authenticated
+            // registration attempt if scheduling fails. Never log the token.
+            Log.w(TAG, "FCM token refresh could not be stored or queued; registration must retry")
         }
     }
 

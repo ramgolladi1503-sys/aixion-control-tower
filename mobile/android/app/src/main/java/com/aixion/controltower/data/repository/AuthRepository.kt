@@ -13,6 +13,7 @@ import com.aixion.controltower.core.api.dto.VerifyEmailRequestDto
 import com.aixion.controltower.core.api.dto.VerifyEmailResponseDto
 import com.aixion.controltower.core.auth.AuthSession
 import com.aixion.controltower.notifications.PushDeviceRegistrationRepository
+import com.aixion.controltower.notifications.PushDeviceRegistrationWorker
 import com.aixion.controltower.notifications.PushRegistrationResult
 import kotlinx.coroutines.CancellationException
 
@@ -36,6 +37,7 @@ internal suspend fun <T> establishAuthenticatedSession(
 }
 
 internal suspend fun logoutWithCleanup(
+    cancelPushRegistration: suspend () -> Unit = {},
     unregisterPushDevice: suspend () -> Boolean,
     revokeServerSession: suspend () -> Unit,
     clearLocalSession: () -> Unit,
@@ -43,6 +45,14 @@ internal suspend fun logoutWithCleanup(
 ): Boolean {
     var cleanupSucceeded = true
     try {
+        try {
+            cancelPushRegistration()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            cleanupSucceeded = false
+            onFailure("push-registration-cancel", error)
+        }
         try {
             if (!unregisterPushDevice()) cleanupSucceeded = false
         } catch (cancelled: CancellationException) {
@@ -133,6 +143,7 @@ class AuthRepository(
 
     suspend fun logout(): Boolean {
         return logoutWithCleanup(
+            cancelPushRegistration = { PushDeviceRegistrationWorker.cancelAndAwait(context) },
             unregisterPushDevice = { pushRegistrationRepository.unregisterCurrentDevice() },
             revokeServerSession = { api.logout() },
             clearLocalSession = { AuthSession.clear(context) },

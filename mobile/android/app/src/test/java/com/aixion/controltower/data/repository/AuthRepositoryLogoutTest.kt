@@ -9,6 +9,28 @@ import org.junit.Test
 
 class AuthRepositoryLogoutTest {
     @Test
+    fun pendingTokenRegistrationIsCancelledBeforeDeviceUnregisterAndSessionRevocation() = runTest {
+        val events = mutableListOf<String>()
+
+        val result = logoutWithCleanup(
+            cancelPushRegistration = { events += "cancel-token-worker" },
+            unregisterPushDevice = {
+                events += "unregister-device"
+                true
+            },
+            revokeServerSession = { events += "revoke-session" },
+            clearLocalSession = { events += "clear-local-session" },
+            onFailure = { _, _ -> error("unexpected failure") }
+        )
+
+        assertTrue(result)
+        assertEquals(
+            listOf("cancel-token-worker", "unregister-device", "revoke-session", "clear-local-session"),
+            events
+        )
+    }
+
+    @Test
     fun successfulServerRevocationAndPushCleanupClearLocalSession() = runTest {
         var cleared = false
 

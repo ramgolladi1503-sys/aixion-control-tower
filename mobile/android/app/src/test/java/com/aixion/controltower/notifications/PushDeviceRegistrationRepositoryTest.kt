@@ -56,6 +56,30 @@ class PushDeviceRegistrationRepositoryTest {
     }
 
     @Test
+    fun unauthenticatedRegistrationFailsClosedWithoutFetchingOrSendingToken() = runTest {
+        val state = FakeRegistrationState()
+        val api = FakeRegistrationApi(userId = "unused").apply {
+            currentUserFailure = IOException("authentication required")
+        }
+        var tokenFetchCount = 0
+        val repository = repository(
+            api = api,
+            state = state,
+            token = {
+                tokenFetchCount += 1
+                "must-not-be-fetched"
+            }
+        )
+
+        val result = repository.registerCurrentDevice()
+
+        assertEquals(PushRegistrationResult.BACKEND_UNAVAILABLE, result)
+        assertEquals(0, tokenFetchCount)
+        assertTrue(api.registrationRequests.isEmpty())
+        assertEquals(null, state.activeRegistration)
+    }
+
+    @Test
     fun deniedPermissionUnregistersOwnedDeviceWithoutFetchingOrSendingToken() = runTest {
         val state = FakeRegistrationState(
             deviceId = "device-current",
@@ -177,9 +201,13 @@ class PushDeviceRegistrationRepositoryTest {
     ) : PushRegistrationApi {
         val registrationRequests = mutableListOf<DeviceRegistrationRequestDto>()
         val unregisteredDeviceIds = mutableListOf<String>()
+        var currentUserFailure: Exception? = null
         var unregisterFailure: Exception? = null
 
-        override suspend fun currentUserId(): String = userId
+        override suspend fun currentUserId(): String {
+            currentUserFailure?.let { throw it }
+            return userId
+        }
 
         override suspend fun registerDevice(
             payload: DeviceRegistrationRequestDto
