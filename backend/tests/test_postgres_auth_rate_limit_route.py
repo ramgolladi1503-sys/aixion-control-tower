@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 
 from app.main import app
+from app.application_repositories import ApplicationRepositories
 from app.postgres_auth_rate_limits import PostgresAuthRateLimitRepository
 from app.postgres_database import run_postgres_migrations
 from app.store import store
@@ -37,7 +38,8 @@ def postgres_rate_limits(
     prior_repositories = getattr(app.state, "postgres_repositories", None)
     try:
         run_postgres_migrations(connect)
-        repository = PostgresAuthRateLimitRepository(connect)
+        repositories = ApplicationRepositories.from_connector(connect)
+        repository = repositories.auth_rate_limits
         monkeypatch.setenv("AIXION_PROFILE", "test")
         monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
         monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
@@ -47,13 +49,13 @@ def postgres_rate_limits(
         monkeypatch.setattr(
             app.state,
             "postgres_runtime",
-            SimpleNamespace(auth_rate_limits=repository),
+            SimpleNamespace(repositories=repositories),
             raising=False,
         )
         monkeypatch.setattr(
             app.state,
             "postgres_repositories",
-            SimpleNamespace(auth_rate_limits=repository),
+            repositories,
             raising=False,
         )
         yield repository, connect

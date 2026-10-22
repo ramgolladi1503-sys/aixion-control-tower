@@ -62,6 +62,12 @@ def postgres_project_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[
             "get_settings",
             lambda: SimpleNamespace(postgres_auth_enabled=True),
         )
+        monkeypatch.setattr(
+            main.app.state,
+            "postgres_runtime",
+            SimpleNamespace(repositories=repositories),
+            raising=False,
+        )
         monkeypatch.setattr(main.app.state, "postgres_repositories", repositories, raising=False)
         monkeypatch.setattr(main.app.state, "project_repository", main.project_repository, raising=False)
         monkeypatch.setattr(main.app.state, "workspace_membership_repository",

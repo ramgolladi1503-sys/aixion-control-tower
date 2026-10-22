@@ -158,7 +158,10 @@ def postgres_attestation_runtime(
         )
         repositories = ApplicationRepositories.from_connector(connect)
         app = FastAPI()
-        app.state.postgres_runtime = SimpleNamespace(connect=connect)
+        app.state.postgres_runtime = SimpleNamespace(
+            connect=connect,
+            repositories=repositories,
+        )
         app.state.postgres_repositories = repositories
         app.state.approval_decision_repository = repositories.approval_decisions
         app.state.workspace_membership_repository = repositories.workspace_membership

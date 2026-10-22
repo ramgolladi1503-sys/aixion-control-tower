@@ -556,7 +556,7 @@ def test_workspace_membership_postgres_selection_fails_closed_without_runtime(
         lambda: SimpleNamespace(postgres_auth_enabled=True),
     )
 
-    with pytest.raises(RuntimeError, match="PostgreSQL application repository runtime is unavailable"):
+    with pytest.raises(RuntimeError, match="runtime is unavailable or mismatched"):
         workspace_membership_repository_for_request(request)
 
 
@@ -569,7 +569,7 @@ def test_workspace_id_resolution_requires_request_for_postgres_auth(
         lambda: SimpleNamespace(auth_enabled=True, postgres_auth_enabled=True),
     )
 
-    with pytest.raises(RuntimeError, match="PostgreSQL application repository runtime is unavailable"):
+    with pytest.raises(RuntimeError, match="app-bound request"):
         repository_access.workspace_id_for_request(
             AuthUser(
                 id="pg-user",

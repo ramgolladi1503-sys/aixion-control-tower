@@ -13,11 +13,10 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 
+from app.application_repositories import ApplicationRepositories
 from app.main import app
-from app.postgres_auth_rate_limits import PostgresAuthRateLimitRepository
 from app.postgres_auth_repository import AuthenticatedSession, PostgresAuthRepository
 from app.postgres_database import run_postgres_migrations
-from app.workspace_membership_repository import PostgresWorkspaceMembershipRepository
 from app.store import store
 
 
@@ -41,12 +40,14 @@ def postgres_auth_runtime(
     prior_runtime = getattr(app.state, "postgres_runtime", None)
     try:
         run_postgres_migrations(connect)
-        repository = PostgresAuthRepository(connect)
+        repositories = ApplicationRepositories.from_connector(connect)
+        repository = repositories.auth
         runtime = SimpleNamespace(
+            repositories=repositories,
             auth=repository,
-            auth_rate_limits=PostgresAuthRateLimitRepository(connect),
-            workspace_membership=PostgresWorkspaceMembershipRepository(connect),
-            email_outbox=object(),
+            auth_rate_limits=repositories.auth_rate_limits,
+            workspace_membership=repositories.workspace_membership,
+            email_outbox=repositories.email_outbox,
         )
         monkeypatch.setenv("AIXION_PROFILE", "test")
         monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
@@ -63,7 +64,7 @@ def postgres_auth_runtime(
         monkeypatch.setenv("AIXION_AUTH_VERIFY_LIMIT_PER_EMAIL", "100")
         monkeypatch.setenv("AIXION_AUTH_LOGIN_LIMIT_PER_IP", "100")
         monkeypatch.setattr(app.state, "postgres_runtime", runtime, raising=False)
-        monkeypatch.setattr(app.state, "postgres_repositories", runtime, raising=False)
+        monkeypatch.setattr(app.state, "postgres_repositories", repositories, raising=False)
         yield repository, connect, dsn, schema
     finally:
         monkeypatch.setattr(app.state, "postgres_runtime", prior_runtime, raising=False)

@@ -141,7 +141,7 @@ def test_connector_route_rejects_repository_bundle_from_another_runtime_without_
         "postgres_runtime",
         SimpleNamespace(repositories=repositories_b),
     )
-    with pytest.raises(RuntimeError, match="not bound to the active runtime"):
+    with pytest.raises(RuntimeError, match="runtime is unavailable or mismatched"):
         repository_access.connector_repository_for_request(
             SimpleNamespace(app=main.app)
         )
@@ -161,7 +161,7 @@ def test_connector_route_rejects_repository_bundle_from_another_runtime_without_
     )
 
     assert response.status_code == 503
-    assert "PostgreSQL connector repository runtime is unavailable or mismatched" in response.json()["detail"]
+    assert response.json()["detail"] == "PostgreSQL workspace membership runtime is unavailable"
     assert main.app.state.postgres_repositories is repositories_a
     assert set(store.agent_connectors) == before_connectors
     assert {event.id for event in store.audit_events} == before_audits

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from fastapi import HTTPException, status
+
 from .application_repositories import ApplicationRepositories
 from .audit_repository import AuditEventRepository
 from .agent_task_repository import AgentTaskRepository, PostgresAgentTaskRepository
@@ -347,9 +349,18 @@ def workspace_id_for_request(user: AuthUser, request: _RequestState | None) -> s
     """Resolve membership from PostgreSQL auth or the local app binding."""
     settings = get_settings()
     if getattr(settings, "postgres_auth_enabled", False):
+        if request is None:
+            raise RuntimeError("PostgreSQL workspace membership requires an app-bound request")
+        try:
+            membership_repository = workspace_membership_repository_for_request(request)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL workspace membership runtime is unavailable",
+            ) from exc
         return resolve_workspace_id_for_user(
             user,
-            membership_repository=workspace_membership_repository_for_request(request),
+            membership_repository=membership_repository,
         )
     if request is None or not getattr(settings, "auth_enabled", False):
         return resolve_workspace_id_for_user(user)
