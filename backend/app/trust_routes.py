@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from .agent_auth import assert_agent_can, require_external_agent
@@ -24,6 +27,7 @@ from .trust_credentials import (
     CredentialIntrospectionResult,
     CredentialRevocationRequest,
     introspect_credential,
+    introspect_credential_record,
     revoke_credential_grant,
 )
 from .trust_flight_recorder import verify_flight_recorder
@@ -39,6 +43,7 @@ from .trust_models import (
     CredentialGrantCreate,
     CredentialGrantPublic,
     CredentialGrantResponse,
+    CredentialGrantType,
     ExceptionQueueItem,
     FlightRecorderVerification,
     LeaseRevocationRequest,
@@ -61,6 +66,7 @@ from .trust_service import (
     refresh_lease_status,
     revoke_capability_lease,
 )
+from .trust_crypto import issue_bearer_token
 from .postgres_trust_repository import PostgresTrustRepositoryConflict
 from .workspace_access import (
     approval_scope_is_consistent,
@@ -616,16 +622,63 @@ def consume_manual_action(
 def create_credential_grant(
     payload: CredentialGrantCreate,
     user: AuthUser = OwnerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> CredentialGrantResponse:
-    lease = store.capability_leases.get(payload.lease_id)
-    workspace_id = workspace_id_for_user(user)
-    if lease is None or not capability_lease_scope_is_consistent(lease) or (
-        workspace_id is not None and capability_lease_workspace_id(lease) != workspace_id
-    ):
-        raise HTTPException(status_code=404, detail="Capability lease not found")
     try:
+        runtime = _postgres_trust_runtime(request)
+        if runtime is not None:
+            if payload.grant_type != CredentialGrantType.INTERNAL_CAPABILITY_TOKEN:
+                raise NotImplementedError(
+                    "External GitHub App and OIDC brokers require deployment-specific issuer integration."
+                )
+            workspace_id = workspace_id_for_request(user, request)
+            if workspace_id is None:
+                raise HTTPException(
+                    status_code=403, detail="Workspace membership is required"
+                )
+            now = now_utc()
+            raw_token, token_hash = issue_bearer_token()
+            grant = CredentialGrant(
+                lease_id=payload.lease_id,
+                workspace_id=workspace_id,
+                grant_type=payload.grant_type,
+                audience=payload.audience,
+                subject=payload.subject,
+                scope=payload.scope,
+                expires_at=now + timedelta(seconds=payload.expires_in_seconds),
+                token_hash=token_hash,
+                metadata={"issued_by_user_id": user.id},
+            )
+            repositories = request.app.state.postgres_repositories
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    repositories.trust.issue_credential_grant(
+                        conn,
+                        record=grant,
+                        actor_user_id=user.id,
+                        actor=user.email,
+                        now=now,
+                        trust_event_repository=repositories.trust_events,
+                    )
+            return CredentialGrantResponse(grant=grant, bearer_token=raw_token)
+        if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL credential issuance requires the complete durable trust repository bundle",
+            )
+        lease = store.capability_leases.get(payload.lease_id)
+        workspace_id = workspace_id_for_user(user)
+        if lease is None or not capability_lease_scope_is_consistent(lease) or (
+            workspace_id is not None and capability_lease_workspace_id(lease) != workspace_id
+        ):
+            raise HTTPException(status_code=404, detail="Capability lease not found")
         return issue_credential_grant(payload, user=user)
-    except (ValueError, TrustControlConflict, NotImplementedError) as error:
+    except (
+        ValueError,
+        TrustControlConflict,
+        PostgresTrustRepositoryConflict,
+        NotImplementedError,
+    ) as error:
         raise _trust_error(error) from error
 
 
@@ -635,7 +688,25 @@ def create_credential_grant(
 )
 def introspect_capability_credential(
     payload: CredentialIntrospectionRequest,
+    request: Request = None,  # type: ignore[assignment]
 ) -> CredentialIntrospectionResult:
+    runtime = _postgres_trust_runtime(request)
+    if runtime is not None:
+        repositories = request.app.state.postgres_repositories
+        token_hash = hashlib.sha256(payload.bearer_token.encode("utf-8")).hexdigest()
+        with runtime.connect() as conn:
+            found = repositories.trust.get_credential_grant_by_token_hash(
+                conn, token_hash
+            )
+        if found is None:
+            return introspect_credential_record(payload, None, None)
+        grant, lease = found
+        return introspect_credential_record(payload, grant, lease)
+    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL credential introspection requires the complete durable trust repository bundle",
+        )
     return introspect_credential(payload)
 
 

@@ -38,6 +38,8 @@ from app.postgres_trust_event_repository import (
     PostgresTrustEventRepositoryError,
 )
 from app.store import store
+from app.trust_crypto import sign_payload
+from app.trust_policy import lease_receipt_payload
 from app.trust_routes import (
     consume_manual_action,
     decide_exact_action,
@@ -280,7 +282,7 @@ def test_postgres_trust_repository_writes_roll_back_with_callers_transaction(tru
 def _lease_with_runtime_budget(
     *, workspace_id: str, user_id: str, approval_id: str, runtime_budget: int
 ) -> CapabilityLease:
-    return CapabilityLease(
+    lease = CapabilityLease(
         id=f"lease_{uuid.uuid4().hex}",
         approval_request_id=approval_id,
         workspace_id=workspace_id,
@@ -297,6 +299,8 @@ def _lease_with_runtime_budget(
         receipt_nonce=uuid.uuid4().hex,
         receipt_signature="signature",
     )
+    lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
+    return lease
 
 
 def test_postgres_lease_revocation_updates_grants_and_appends_one_event(trust_repository):
@@ -528,6 +532,124 @@ def test_postgres_credential_revocation_rolls_back_if_event_append_fails(trust_r
         persisted = repository.get_credential_grant(conn, grant.id, workspace_id)
         assert persisted is not None and not persisted.revoked
         assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0
+
+
+def test_postgres_credential_issuance_requires_active_scoped_lease_and_is_durable(
+    trust_repository,
+):
+    repository, connect, workspace_id, user_id, _project_id, approval_id = trust_repository
+    events = PostgresTrustEventRepository(connect)
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    grant = CredentialGrant(
+        lease_id=lease.id,
+        workspace_id=workspace_id,
+        grant_type=CredentialGrantType.INTERNAL_CAPABILITY_TOKEN,
+        audience="worker",
+        subject="agent:test",
+        scope=["run:execute"],
+        expires_at=now_utc() + timedelta(minutes=4),
+        token_hash=uuid.uuid4().hex + ("0" * 32),
+        metadata={"issued_by_user_id": user_id},
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            issued = repository.issue_credential_grant(
+                conn,
+                record=grant,
+                actor_user_id=user_id,
+                actor="owner@example.test",
+                now=now_utc(),
+                trust_event_repository=events,
+            )
+    assert issued == grant
+    with connect() as conn:
+        assert repository.get_credential_grant_by_token_hash(
+            conn, grant.token_hash
+        ) == (grant, lease)
+        assert repository.get_credential_grant_by_token_hash(conn, "not-a-hash") is None
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE entity_id=%s AND event_type=%s",
+            (grant.id, TrustEventType.CREDENTIAL_GRANT_ISSUED.value),
+        ).fetchone()[0] == 1
+    assert events.verify().valid
+
+
+def test_postgres_credential_issuance_rejects_revoked_lease_and_rolls_back_on_event_error(
+    trust_repository,
+):
+    repository, connect, workspace_id, user_id, _project_id, approval_id = trust_repository
+    events = PostgresTrustEventRepository(connect)
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    grant = CredentialGrant(
+        lease_id=lease.id,
+        workspace_id=workspace_id,
+        grant_type=CredentialGrantType.INTERNAL_CAPABILITY_TOKEN,
+        audience="worker",
+        subject="agent:test",
+        scope=["run:execute"],
+        expires_at=now_utc() + timedelta(minutes=4),
+        token_hash=uuid.uuid4().hex + ("0" * 32),
+        metadata={"issued_by_user_id": user_id},
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+    with connect() as conn:
+        original_event_hash = conn.execute(
+            "SELECT event_hash FROM trust_event_heads WHERE singleton=TRUE"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE trust_event_heads SET event_hash=%s WHERE singleton=TRUE", ("0" * 64,)
+        )
+    with pytest.raises(PostgresTrustEventRepositoryError, match="empty ledger"):
+        with connect() as conn:
+            with conn.transaction():
+                repository.issue_credential_grant(
+                    conn,
+                    record=grant,
+                    actor_user_id=user_id,
+                    actor="owner@example.test",
+                    now=now_utc(),
+                    trust_event_repository=events,
+                )
+    with connect() as conn:
+        assert repository.get_credential_grant(conn, grant.id, workspace_id) is None
+        assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0
+
+    # The same operation must reject authorization after a durable lease revoke.
+    with connect() as conn:
+        conn.execute(
+            "UPDATE trust_event_heads SET event_hash=%s WHERE singleton=TRUE",
+            (original_event_hash,),
+        )
+    with connect() as conn:
+        with conn.transaction():
+            repository.revoke_capability_lease(
+                conn,
+                lease_id=lease.id,
+                workspace_id=workspace_id,
+                actor_user_id=user_id,
+                actor="owner@example.test",
+                reason="Operator revoked the lease",
+                now=now_utc(),
+                trust_event_repository=PostgresTrustEventRepository(connect),
+            )
+    with pytest.raises(PostgresTrustRepositoryConflict, match="active, unexpired"):
+        with connect() as conn:
+            with conn.transaction():
+                repository.issue_credential_grant(
+                    conn,
+                    record=grant.model_copy(update={"id": f"grant_{uuid.uuid4().hex}"}),
+                    actor_user_id=user_id,
+                    actor="owner@example.test",
+                    now=now_utc(),
+                    trust_event_repository=PostgresTrustEventRepository(connect),
+                )
 
 
 def _action_with_allow_decision(

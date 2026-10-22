@@ -575,6 +575,119 @@ def test_postgres_credential_revocation_route_uses_durable_workspace_state(
         ).fetchone()[0] == 1
 
 
+def test_postgres_credential_issue_introspect_and_revoke_are_durable(
+    postgres_agent_run_route_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    _run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        state=state,
+        client=client,
+    )
+    runtime = SimpleNamespace(connect=connect)
+    for name, value in {
+        "postgres_runtime": runtime,
+        "postgres_repositories": repositories,
+        "trust_repository": repositories.trust,
+        "trust_event_repository": repositories.trust_events,
+    }.items():
+        monkeypatch.setattr(main.app.state, name, value, raising=False)
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        require_owner,
+        lambda: state["current_user"]["value"],
+    )
+    sqlite_grants_before = dict(store.credential_grants)
+    sqlite_events_before = dict(store.trust_events)
+
+    issued = client.post(
+        "/trust/credentials",
+        json={
+            "lease_id": lease.id,
+            "audience": "runner",
+            "subject": "agent:codex",
+            "scope": ["run:execute"],
+            "expires_in_seconds": 240,
+        },
+    )
+    assert issued.status_code == 200, issued.text
+    issued_payload = issued.json()
+    raw_token = issued_payload["bearer_token"]
+    grant_id = issued_payload["grant"]["id"]
+    assert raw_token and issued_payload["grant"]["revoked"] is False
+    assert "bearer_token" not in issued_payload["grant"]
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT token_hash,payload FROM credential_grants WHERE grant_id=%s AND workspace_id=%s",
+            (grant_id, workspace.id),
+        ).fetchone()
+        assert row is not None
+        assert row[0] != raw_token
+        assert row[1]["token_hash"] == row[0]
+        assert "bearer_token" not in row[1]
+
+    active = client.post(
+        "/trust/credentials/introspect",
+        json={
+            "bearer_token": raw_token,
+            "audience": "runner",
+            "required_scope": ["run:execute"],
+        },
+    )
+    assert active.status_code == 200, active.text
+    assert active.json()["active"] is True
+    insufficient_scope = client.post(
+        "/trust/credentials/introspect",
+        json={
+            "bearer_token": raw_token,
+            "audience": "runner",
+            "required_scope": ["admin:all"],
+        },
+    )
+    assert insufficient_scope.status_code == 200
+    assert insufficient_scope.json()["active"] is False
+
+    revoked = client.post(
+        f"/trust/credentials/{grant_id}/revoke",
+        json={"reason": "Owner revoked the credential"},
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["revoked"] is True
+    inactive = client.post(
+        "/trust/credentials/introspect",
+        json={
+            "bearer_token": raw_token,
+            "audience": "runner",
+            "required_scope": ["run:execute"],
+        },
+    )
+    assert inactive.status_code == 200
+    assert inactive.json()["active"] is False
+    assert inactive.json()["reason"] == "Credential grant was revoked."
+    assert store.credential_grants == sqlite_grants_before
+    assert store.trust_events == sqlite_events_before
+
+    monkeypatch.setattr(main.app.state, "trust_event_repository", object())
+    unavailable = client.post(
+        "/trust/credentials/introspect",
+        json={
+            "bearer_token": raw_token,
+            "audience": "runner",
+            "required_scope": ["run:execute"],
+        },
+    )
+    assert unavailable.status_code == 503
+    assert store.credential_grants == sqlite_grants_before
+    assert store.trust_events == sqlite_events_before
+
+
 @pytest.mark.parametrize(
     (
         "status", "approved_payload_hash", "expires_at", "valid_signature",

@@ -25,7 +25,10 @@ from .trust_models import (
     TrustEventType,
 )
 from .postgres_trust_event_repository import PostgresTrustEventRepository
-from .trust_policy import evaluate_proposed_action as evaluate_action_policy
+from .trust_policy import (
+    evaluate_proposed_action as evaluate_action_policy,
+    lease_receipt_payload,
+)
 
 T = TypeVar("T")
 
@@ -83,6 +86,7 @@ class PostgresTrustRepository:
         model: type[T],
         columns: Sequence[tuple[str, str]],
         for_update: bool = False,
+        for_share: bool = False,
     ) -> T | None:
         PostgresTrustRepository._require_scope(workspace_id)
         selected = [id_column, "workspace_id", *(column for column, _ in columns), "payload"]
@@ -91,7 +95,9 @@ class PostgresTrustRepository:
                 sql.SQL(",").join(sql.Identifier(name) for name in selected),
                 sql.Identifier(table),
                 sql.Identifier(id_column),
-                sql.SQL(" FOR UPDATE") if for_update else sql.SQL(""),
+                sql.SQL(" FOR UPDATE") if for_update else (
+                    sql.SQL(" FOR SHARE") if for_share else sql.SQL("")
+                ),
             ),
             (record_id, workspace_id),
         ).fetchone()
@@ -137,6 +143,7 @@ class PostgresTrustRepository:
         workspace_id: str,
         *,
         for_update: bool = False,
+        for_share: bool = False,
     ) -> CapabilityLease | None:
         return self._get(
             conn,
@@ -147,6 +154,7 @@ class PostgresTrustRepository:
             model=CapabilityLease,
             columns=(("approval_id", "approval_request_id"), ("issued_by_user_id", "issued_by_user_id"), ("status", "status"), ("expires_at", "expires_at"), ("consumed_pull_requests", "consumed_pull_requests"), ("consumed_retries", "consumed_retries"), ("consumed_runtime_seconds", "consumed_runtime_seconds"), ("consumed_cost_usd", "consumed_cost_usd"), ("created_at", "created_at"), ("updated_at", "updated_at")),
             for_update=for_update,
+            for_share=for_share,
         )
 
     def revoke_capability_lease(
@@ -618,6 +626,7 @@ class PostgresTrustRepository:
         workspace_id: str,
         *,
         for_update: bool = False,
+        for_share: bool = False,
     ) -> CredentialGrant | None:
         return self._get(
             conn,
@@ -628,7 +637,95 @@ class PostgresTrustRepository:
             model=CredentialGrant,
             columns=(("lease_id", "lease_id"), ("grant_type", "grant_type"), ("audience", "audience"), ("subject", "subject"), ("expires_at", "expires_at"), ("revoked", "revoked"), ("token_hash", "token_hash")),
             for_update=for_update,
+            for_share=for_share,
         )
+
+    def get_credential_grant_by_token_hash(
+        self, conn: Connection, token_hash: str
+    ) -> tuple[CredentialGrant, CapabilityLease | None] | None:
+        """Resolve a bearer hash without exposing or indexing the raw token."""
+        if len(token_hash) != 64:
+            return None
+        row = conn.execute(
+            "SELECT grant_id,workspace_id,lease_id FROM credential_grants WHERE token_hash=%s",
+            (token_hash,),
+        ).fetchone()
+        if row is None:
+            return None
+        grant_id, workspace_id, lease_id = row
+        # Match the lease-then-grant order used by lease revocation. Shared locks
+        # keep the returned grant/lease state stable through caller evaluation.
+        lease = self.get_capability_lease(
+            conn, lease_id, workspace_id, for_share=True
+        )
+        grant = self.get_credential_grant(
+            conn, grant_id, workspace_id, for_share=True
+        )
+        if grant is None:
+            raise PostgresTrustRepositoryError(
+                "Credential grant disappeared during token lookup"
+            )
+        if lease is None or grant.lease_id != lease.id:
+            raise PostgresTrustRepositoryError(
+                "Credential grant lease scope is inconsistent"
+            )
+        return grant, lease
+
+    def issue_credential_grant(
+        self,
+        conn: Connection,
+        *,
+        record: CredentialGrant,
+        actor_user_id: str,
+        actor: str,
+        now: datetime,
+        trust_event_repository: PostgresTrustEventRepository,
+    ) -> CredentialGrant:
+        """Insert a grant only under an active lease and append its event atomically."""
+        workspace_id = record.workspace_id
+        self._require_scope(workspace_id)
+        if not actor_user_id or not actor or conn.autocommit:
+            raise ValueError("Credential issuance requires actor and transaction")
+        if record.metadata.get("issued_by_user_id") != actor_user_id:
+            raise ValueError("Credential grant issuer does not match authenticated actor")
+        lease = self.get_capability_lease(
+            conn, record.lease_id, workspace_id, for_update=True
+        )
+        if lease is None:
+            raise ValueError("Capability lease not found")
+        if lease.status != CapabilityLeaseStatus.ACTIVE or lease.expires_at <= now:
+            raise PostgresTrustRepositoryConflict(
+                "Credentials require an active, unexpired capability lease"
+            )
+        if not verify_payload_signature(
+            lease_receipt_payload(lease), lease.receipt_signature
+        ):
+            raise PostgresTrustRepositoryConflict(
+                "Credential issuance requires a valid capability lease receipt"
+            )
+        if record.expires_at <= now or record.expires_at > lease.expires_at:
+            raise PostgresTrustRepositoryConflict(
+                "Credential grant must expire before its capability lease"
+            )
+        self.insert_credential_grant(conn, record)
+        trust_event_repository.append_in_transaction(
+            conn,
+            TrustEventType.CREDENTIAL_GRANT_ISSUED,
+            entity_type="credential_grant",
+            entity_id=record.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            correlation_id=record.lease_id,
+            payload={
+                "lease_id": record.lease_id,
+                "grant_type": record.grant_type,
+                "audience": record.audience,
+                "subject": record.subject,
+                "scope": record.scope,
+                "expires_at": record.expires_at.isoformat(),
+            },
+        )
+        return record
 
     def revoke_credential_grant(
         self,
