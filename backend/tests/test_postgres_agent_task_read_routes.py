@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from app import main
+from app import approval_recovery, main
 from app.approval_decisions import agent_task_repository as sqlite_agent_task_repository
 from app.agent_task_routes import MaintainerDependency, ReviewerDependency
 from app.approval_recovery import reconcile_linked_approval_tasks
@@ -307,6 +307,100 @@ def test_postgres_recovery_repairs_interrupted_approval_propagation(
         run_repository=run_repository,
     ) == 0
     assert run_repository.list_for_task(task["id"]) == [run]
+
+
+def test_postgres_recovery_failure_is_observable_and_retry_is_idempotent(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _connect, _workspace, project = postgres_agent_task_route_runtime
+    client = TestClient(main.app, raise_server_exceptions=False)
+    task_response = client.post("/agent/tasks", json={
+        "provider": "MANUAL", "project_id": project.id,
+        "title": "Retry interrupted recovery", "goal": "Retry the scheduling boundary",
+        "requested_action": "CREATE_WORK_ORDER", "requires_approval": True,
+    })
+    assert task_response.status_code == 200, task_response.text
+    task = task_response.json()
+    approval_response = client.post(f"/agent/tasks/{task['id']}/approval", json={
+        "project_id": project.id,
+        "title": "Retry recovery decision",
+        "summary": "Scheduling may fail after the approval decision is committed.",
+        "target_branch": "feature/approval-recovery-retry-test",
+        "files": [{"path": "src/retry.txt", "change_type": "modified", "diff": "-old\n+new"}],
+    })
+    assert approval_response.status_code == 200, approval_response.text
+    approval_id = approval_response.json()["id"]
+
+    original_propagator = main.propagate_approval_decision_to_agent_task
+    monkeypatch.setattr(
+        main,
+        "propagate_approval_decision_to_agent_task",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("simulated interruption after approval commit")
+        ),
+    )
+    decision = client.post(f"/approvals/{approval_id}/decision", json={"decision": "approve"})
+    assert decision.status_code == 500
+    monkeypatch.setattr(main, "propagate_approval_decision_to_agent_task", original_propagator)
+
+    approval_repository = main.app.state.approval_decision_repository
+    task_repository = main.app.state.agent_task_repository
+    run_repository = main.app.state.agent_run_repository
+    original_create_run = approval_recovery.create_agent_run
+    attempts = 0
+
+    def fail_first_schedule(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("simulated transient AgentRun persistence failure")
+        return original_create_run(*args, **kwargs)
+
+    monkeypatch.setattr(approval_recovery, "create_agent_run", fail_first_schedule)
+    with caplog.at_level("ERROR", logger="app.approval_recovery"):
+        assert reconcile_linked_approval_tasks(
+            approval_repository=approval_repository,
+            task_repository=task_repository,
+            run_repository=run_repository,
+        ) == 0
+
+    assert task_repository.get(task["id"]).status.value == "APPROVED"
+    assert run_repository.list_for_task(task["id"]) == []
+    assert any(
+        f"approval_id={approval_id}" in record.message
+        and f"task_id={task['id']}" in record.message
+        and "phase=schedule_first_run" in record.message
+        and "error_type=RuntimeError" in record.message
+        for record in caplog.records
+    )
+
+    assert reconcile_linked_approval_tasks(
+        approval_repository=approval_repository,
+        task_repository=task_repository,
+        run_repository=run_repository,
+    ) == 1
+    runs = run_repository.list_for_task(task["id"])
+    assert len(runs) == 1
+    assert runs[0].approval_request_id == approval_id
+    with _connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s AND event_type='APPROVED'",
+            (task["id"],),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_type='agent_task' "
+            "AND entity_id=%s AND event_type='agent_task.run_scheduled'",
+            (task["id"],),
+        ).fetchone()[0] == 1
+
+    assert reconcile_linked_approval_tasks(
+        approval_repository=approval_repository,
+        task_repository=task_repository,
+        run_repository=run_repository,
+    ) == 0
+    assert run_repository.list_for_task(task["id"]) == runs
 
 
 def test_task_linked_approval_fails_closed_for_mixed_repository_profiles(

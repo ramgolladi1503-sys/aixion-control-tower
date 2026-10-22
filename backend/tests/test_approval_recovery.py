@@ -9,6 +9,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from app.agent_run_models import AgentRun, AgentRunCreate, AgentRunStatus
 from app.agent_task_repository import SQLiteAgentTaskRepository
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app import approval_recovery
 from app.approval_recovery import reconcile_linked_approval_tasks
 from app.approval_decisions import agent_run_repository, approval_decision_repository
 from app.agent_run_supervisor import create_agent_run
@@ -113,6 +114,45 @@ def test_startup_reconciliation_is_idempotent_after_success() -> None:
     assert len([event for event in store.agent_task_events.values() if event.task_id == task.id]) == event_count
     assert len(store.notifications) == notification_count
     assert len([run for run in store.agent_runs.values() if run.task_id == task.id]) == 1
+
+
+def test_recovery_schedule_failure_can_be_retried_without_duplicate_task_event(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    approval_id, task_id = _linked_records()
+    original_create_run = approval_recovery.create_agent_run
+    attempts = 0
+
+    def fail_first_schedule(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("simulated transient AgentRun persistence failure")
+        return original_create_run(*args, **kwargs)
+
+    monkeypatch.setattr(approval_recovery, "create_agent_run", fail_first_schedule)
+    with caplog.at_level("ERROR", logger="app.approval_recovery"):
+        assert reconcile_linked_approval_tasks() == 0
+
+    assert store.agent_tasks[task_id].status == AgentTaskStatus.APPROVED
+    assert not [run for run in store.agent_runs.values() if run.task_id == task_id]
+    assert any(
+        f"approval_id={approval_id}" in record.message
+        and f"task_id={task_id}" in record.message
+        and "phase=schedule_first_run" in record.message
+        and "error_type=RuntimeError" in record.message
+        for record in caplog.records
+    )
+
+    assert reconcile_linked_approval_tasks() == 1
+    task_events = [event for event in store.agent_task_events.values() if event.task_id == task_id]
+    assert len(task_events) == 1
+    runs = [run for run in store.agent_runs.values() if run.task_id == task_id]
+    assert len(runs) == 1
+    assert runs[0].approval_request_id == approval_id
+    assert reconcile_linked_approval_tasks() == 0
+    assert [run for run in store.agent_runs.values() if run.task_id == task_id] == runs
 
 
 def test_recovery_repairs_missing_schedule_audit_without_creating_another_run() -> None:

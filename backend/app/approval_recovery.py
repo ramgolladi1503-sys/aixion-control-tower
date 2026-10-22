@@ -167,6 +167,7 @@ def reconcile_linked_approval_tasks(
                 ):
                     continue
                 try:
+                    recovery_phase = "load_decision_audit"
                     if repair_status:
                         task_status_changed_at = now_utc()
                     else:
@@ -193,6 +194,7 @@ def reconcile_linked_approval_tasks(
                     )
 
                     if repair_event or repair_status:
+                        recovery_phase = "propagate_task_decision"
                         event_type, message = _TASK_EVENT_BY_APPROVAL[approval.status]
                         updated_task = task.model_copy(
                             update={
@@ -255,6 +257,7 @@ def reconcile_linked_approval_tasks(
                         task = updated_task
 
                     if schedule_first_run:
+                        recovery_phase = "schedule_first_run"
                         scheduled_run = create_agent_run(
                             AgentRunCreate(
                                 task_id=task.id,
@@ -270,6 +273,7 @@ def reconcile_linked_approval_tasks(
                         )
                         repair_schedule_audit = False
                     if repair_schedule_audit and scheduled_run is not None:
+                        recovery_phase = "repair_schedule_audit"
                         # Query the durable audit ledger above rather than the
                         # compatibility cache: a restart can lose or stale it.
                         schedule_audit = AuditEvent(
@@ -291,13 +295,18 @@ def reconcile_linked_approval_tasks(
                             event.id != schedule_audit.id for event in store.audit_events
                         ):
                             store.audit_events.append(schedule_audit)
-                except Exception:
+                except Exception as error:
                     # Keep the approval's committed decision authoritative and
                     # fail closed: no run is scheduled unless the normal
-                    # approved-task checks succeed. Startup remains observable.
+                    # approved-task checks succeed. The phase and both entity
+                    # identifiers make the interrupted, retryable boundary
+                    # visible to operators without implying a shared transaction.
                     logger.exception(
-                        "Could not reconcile linked task for approval %s",
+                        "Approval recovery failed: approval_id=%s task_id=%s phase=%s error_type=%s",
                         approval.id,
+                        task.id,
+                        recovery_phase,
+                        type(error).__name__,
                     )
                     continue
                 reconciled += 1
