@@ -1,8 +1,8 @@
 # PostgreSQL Backup and Restore Runbook
 
-**Status:** Local synthetic restore drill passed. Cloud SQL backup configuration and restore rehearsal are not performed or approved.
+**Status:** Local synthetic restore drills passed. Cloud SQL backup configuration and restore rehearsal are not performed or approved.
 **Scope:** Slice 7 preparation under [PRE_BILLING_WORK_LOCK.md](PRE_BILLING_WORK_LOCK.md).
-**Last local drill:** 2026-10-21, PostgreSQL 17.11, isolated loopback test server.
+**Last local drill:** 2026-10-22, PostgreSQL 17.11, isolated loopback test server.
 
 ## Safety boundary
 
@@ -89,6 +89,32 @@ Run every check against the restored target, not the source:
 6. Record restore start/end times, recovery point, data checks, observed RPO/RTO, warnings, operator, and go/no-go decision. Keep the restored target isolated until the recovery owner signs off.
 
 The current application still has split SQLite/PostgreSQL route and worker authority. A PostgreSQL restore drill does not authorize production use until Slice 1 and the local failure-certification gates pass.
+
+## Current local drill record — 2026-10-22
+
+- Target: existing isolated local PostgreSQL 17.11 test server at
+  `/tmp/aixion-ct-pg.O8jwnb/socket:55432`. Source and recovery databases were
+  newly created as `aixion_prebill_restore_20261022_source` and
+  `aixion_prebill_restore_20261022_recovery`; no existing database was
+  overwritten.
+- Applied all **26** checked-in PostgreSQL migrations to the fresh source with
+  `scripts/migrate_postgres.py --apply`, exact `--expected-database`, and
+  `--expected-schema public`. The migration CLI reported `READY` with no
+  missing, unknown, or mismatched migration IDs.
+- Inserted only a synthetic workspace and project fixture, verified the
+  project/workspace relationship, and exported the source with PostgreSQL 17.11
+  `pg_dump --format=custom --no-owner --no-privileges`. The archive is
+  `/tmp/aixion-prebilling-restore-drill-20261022/source.dump`; its SHA-256
+  sidecar is adjacent. Both files have mode `0600`; checksum validation and
+  `pg_restore --list` succeeded.
+- Restored with `pg_restore --exit-on-error --single-transaction --no-owner
+  --no-privileges` into the separate empty recovery database. The migration CLI
+  reported `READY`; queries confirmed all 26 ledger entries, the synthetic
+  workspace/project rows, and the validated project-to-workspace foreign key.
+- This is local synthetic evidence for the current migration set and documented
+  logical-restore commands. It does not verify Cloud SQL backups/PITR, Google
+  IAM, encryption settings, retention, recovery time, or restoration of live
+  application traffic. Keep Slice 7 and the staging restore gate open.
 
 ## Migration and rollback procedure
 
