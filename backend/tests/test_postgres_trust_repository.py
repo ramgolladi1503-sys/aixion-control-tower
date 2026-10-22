@@ -256,6 +256,24 @@ def test_postgres_trust_repository_round_trips_workspace_records(trust_repositor
             assert snapshot.push_status_counts == {}
             assert snapshot.push_attempt_count == 0
             assert snapshot.push_queue_depth == 0
+            other_workspace_snapshot = repository.metrics_snapshot(
+                conn,
+                workspace_id=f"other-{workspace_id}",
+                now=now,
+                trust_event_repository=PostgresTrustEventRepository(connect),
+            )
+            assert other_workspace_snapshot.lease_status_counts == {}
+            assert other_workspace_snapshot.policy_decision_counts == {}
+            assert other_workspace_snapshot.provider_decision_counts == {}
+            assert other_workspace_snapshot.authorization_count == 0
+            assert other_workspace_snapshot.consumption_count == 0
+            assert other_workspace_snapshot.active_credential_count == 0
+            assert other_workspace_snapshot.revoked_credential_count == 0
+            assert other_workspace_snapshot.trust_event_count == 0
+            assert other_workspace_snapshot.push_status_counts == {}
+            assert other_workspace_snapshot.push_attempt_count == 0
+            assert other_workspace_snapshot.push_queue_depth == 0
+            assert other_workspace_snapshot.verification.valid is True
         assert repository.get_capability_lease(conn, lease.id, "wrong-workspace") is None
 
 
