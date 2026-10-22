@@ -1263,6 +1263,14 @@ def list_audit_events(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[AuditEvent]:
     if http_request is not None:
+        if getattr(http_request.app.state, "postgres_runtime", None) is not None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Audit reads are unavailable while PostgreSQL is configured without "
+                    "a unified audit writer and recovery repository."
+                ),
+            )
         repository = audit_event_repository_for_request(http_request)
         if not isinstance(repository, SQLiteAuditEventRepository):
             workspace_id = _workspace_id_for_route(user, http_request)

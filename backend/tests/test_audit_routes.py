@@ -234,3 +234,16 @@ def test_audit_and_recovery_reads_fail_closed_when_postgres_runtime_is_partial(
 
     assert [response.status_code for response in responses] == [503] * 5
     assert all("unified audit writer" in response.json()["detail"] for response in responses)
+
+
+def test_root_audit_read_fails_closed_instead_of_serving_sqlite_during_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _seed_audit_events()
+    monkeypatch.setattr(app.state, "postgres_runtime", SimpleNamespace(), raising=False)
+
+    response = client.get("/audit")
+
+    assert response.status_code == 503
+    assert "unified audit writer" in response.json()["detail"]
+    assert len(store.audit_events) == len(events)
