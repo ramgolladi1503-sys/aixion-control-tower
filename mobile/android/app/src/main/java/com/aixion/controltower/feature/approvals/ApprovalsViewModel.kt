@@ -230,7 +230,7 @@ class ApprovalsViewModel internal constructor(
         } catch (error: Exception) {
             _state.value = _state.value.copy(
                 loading = false,
-                errorMessage = "Backend approval sync failed. No mock approvals shown. ${error.message ?: "Retry when the backend is reachable."}"
+                errorMessage = "Backend approval sync failed. No mock approvals shown. Check your connection and retry."
             )
             return false
         } finally {
@@ -312,7 +312,7 @@ class ApprovalsViewModel internal constructor(
                     selectedApproval = null,
                     openingApprovalId = null,
                     detailTargetApprovalId = approvalId,
-                    lastActionMessage = "Failed to open approval $approvalId: ${error.message ?: "backend request failed"}",
+                    lastActionMessage = "Failed to open approval $approvalId. Check your connection and retry.",
                     lastActionApprovalId = approvalId
                 )
                 return@launch
@@ -353,7 +353,7 @@ class ApprovalsViewModel internal constructor(
             } catch (error: Exception) {
                 _state.value = _state.value.copy(
                     decisionInFlight = false,
-                    lastActionMessage = "Approval could not be refreshed before the decision. No decision was sent. Refresh and review the request before trying again. ${error.message ?: ""}".trim(),
+                    lastActionMessage = "Approval could not be refreshed before the decision. No decision was sent. Refresh and review the request before trying again.",
                     lastActionApprovalId = approval.id
                 )
                 return@launch
@@ -419,7 +419,7 @@ class ApprovalsViewModel internal constructor(
                 )
                 throw cancelled
             } catch (error: Exception) {
-                reconcileDecisionAfterFailure(approval, decision, error, onCompleted)
+                reconcileDecisionAfterFailure(approval, decision, onCompleted)
                 return@launch
             }
             completeDecision(approval, updated, decision, onCompleted)
@@ -429,7 +429,6 @@ class ApprovalsViewModel internal constructor(
     private suspend fun reconcileDecisionAfterFailure(
         original: ApprovalSummary,
         decision: String,
-        error: Exception,
         onCompleted: () -> Unit
     ) {
         val latest = try {
@@ -447,7 +446,7 @@ class ApprovalsViewModel internal constructor(
                 _state.value,
                 original.id,
                 decision,
-                "Decision result is unknown. The server could not confirm whether it committed. Check this approval’s status before retrying. ${error.message ?: ""}".trim()
+                "Decision result is unknown. The server could not confirm whether it committed. Check this approval’s status before retrying."
             )
             return
         }
@@ -461,7 +460,7 @@ class ApprovalsViewModel internal constructor(
                 decisionBeingReconciled = null,
                 selectedApproval = latest,
                 approvals = _state.value.approvals.map { if (it.id == latest.id) latest else it },
-                lastActionMessage = "Decision was not confirmed. The server still shows this approval as pending. Review its current details before retrying. ${error.message ?: ""}".trim(),
+                lastActionMessage = "Decision was not confirmed. The server still shows this approval as pending. Review its current details before retrying.",
                 lastActionApprovalId = latest.id
             )
             return
@@ -529,7 +528,7 @@ class ApprovalsViewModel internal constructor(
                 _state.value = _state.value.copy(
                     decisionInFlight = false,
                     decisionNeedsReconciliation = true,
-                    lastActionMessage = "Decision result is still unknown. Status check failed: ${error.message ?: "backend request failed"}",
+                    lastActionMessage = "Decision result is still unknown. Check your connection, then refresh this approval before retrying.",
                     lastActionApprovalId = approvalId
                 )
             }
@@ -550,7 +549,7 @@ class ApprovalsViewModel internal constructor(
             } catch (cancelled: CancellationException) {
                 " MCP forwarding was interrupted and remains unconfirmed."
             } catch (error: Exception) {
-                " MCP forwarding remains unconfirmed: ${error.message ?: "backend request failed"}."
+                " MCP forwarding remains unconfirmed. Refresh the approval status before retrying."
             }
         } else {
             ""

@@ -108,6 +108,7 @@ CORE_TYPES = {
     "auth_email_outbox",
     "approval_delivery_claim",
     "approval_delivery_failure",
+    "approval_invocation_lease",
     "auth_rate_limit_bucket",
     "mcp_child_server", "mcp_pending_request",
     "test_run",
@@ -146,6 +147,7 @@ IMPORT_TABLES = {
     "auth_email_outbox": ("auth_email_outbox", "outbox_id"),
     "approval_delivery_claim": ("approval_delivery_claims", "approval_id"),
     "approval_delivery_failure": ("approval_delivery_failures", "approval_id"),
+    "approval_invocation_lease": ("approval_invocation_leases", "approval_id"),
     "auth_rate_limit_bucket": ("auth_rate_limit_buckets", "bucket_hash"),
 }
 
@@ -154,8 +156,9 @@ class ImportBlocked(RuntimeError):
     pass
 
 
-def _pending_native_invocation_drain_summary(
+def _native_invocation_drain_summary(
     approvals: dict[str, dict[str, Any]],
+    delivery_claims: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """Return a safe summary for native invocation approvals that must drain.
 
@@ -168,7 +171,7 @@ def _pending_native_invocation_drain_summary(
         ApprovalStatus.REQUESTED.value,
         ApprovalStatus.PENDING_REVIEW.value,
     }
-    fingerprints = sorted(
+    pending_fingerprints = sorted(
         hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
         for approval_id, payload in approvals.items()
         if payload.get("status", ApprovalStatus.REQUESTED.value) in pending_statuses
@@ -177,9 +180,21 @@ def _pending_native_invocation_drain_summary(
         and isinstance(payload.get("source_invocation_id"), str)
         and bool(payload.get("source_invocation_id"))
     )
+    approved_unconsumed_fingerprints = sorted(
+        hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
+        for approval_id, payload in approvals.items()
+        if payload.get("status") == ApprovalStatus.APPROVED.value
+        and isinstance(payload.get("source_agent_id"), str)
+        and bool(payload.get("source_agent_id"))
+        and isinstance(payload.get("source_invocation_id"), str)
+        and bool(payload.get("source_invocation_id"))
+        and approval_id not in delivery_claims
+    )
     return {
-        "pending_native_invocation_count": len(fingerprints),
-        "approval_id_sha256": fingerprints,
+        "pending_native_invocation_count": len(pending_fingerprints),
+        "approval_id_sha256": pending_fingerprints,
+        "approved_unconsumed_invocation_count": len(approved_unconsumed_fingerprints),
+        "approved_unconsumed_approval_id_sha256": approved_unconsumed_fingerprints,
     }
 
 
@@ -353,6 +368,66 @@ def _read_delivery_state(
     return claims, failures
 
 
+def _read_approval_invocation_leases(
+    path: Path,
+) -> tuple[dict[str, dict[str, Any]], bool]:
+    """Read the complete scoped invocation-lease relation from SQLite."""
+    uri = f"file:{quote(path.resolve().as_posix(), safe='/')}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+        conn.execute("PRAGMA query_only = ON")
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='approval_invocation_leases'"
+        ).fetchone()
+        if exists is None:
+            return {}, False
+        columns = [
+            row[1] for row in conn.execute("PRAGMA table_info(approval_invocation_leases)").fetchall()
+        ]
+        required = [
+            "approval_id", "workspace_id", "source_agent_id", "source_invocation_id",
+            "heartbeat_at", "expires_at",
+        ]
+        if columns != required:
+            raise ImportBlocked(
+                "approval_invocation_leases schema is unexpected; review source migration state"
+            )
+        rows = conn.execute(
+            "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+            "FROM approval_invocation_leases ORDER BY approval_id"
+        ).fetchall()
+    leases: dict[str, dict[str, Any]] = {}
+    invocation_keys: set[tuple[str, str, str]] = set()
+    for approval_id, workspace_id, source_agent_id, source_invocation_id, heartbeat_at, expires_at in rows:
+        values = {
+            "approval_id": approval_id,
+            "workspace_id": workspace_id,
+            "source_agent_id": source_agent_id,
+            "source_invocation_id": source_invocation_id,
+        }
+        if any(
+            not isinstance(value, str) or not value or len(value) > 256
+            for value in values.values()
+        ):
+            raise ImportBlocked("approval_invocation_leases contains an invalid identity")
+        try:
+            heartbeat = datetime.fromisoformat(heartbeat_at)
+            expiry = datetime.fromisoformat(expires_at)
+        except (TypeError, ValueError) as exc:
+            raise ImportBlocked(f"approval_invocation_lease/{approval_id} has invalid timestamps") from exc
+        if heartbeat.tzinfo is None or expiry.tzinfo is None or expiry < heartbeat:
+            raise ImportBlocked(f"approval_invocation_lease/{approval_id} has invalid lease time bounds")
+        unique_invocation = (workspace_id, source_agent_id, source_invocation_id)
+        if unique_invocation in invocation_keys:
+            raise ImportBlocked("approval_invocation_leases contains a duplicate scoped invocation")
+        invocation_keys.add(unique_invocation)
+        leases[approval_id] = {
+            **values,
+            "heartbeat_at": heartbeat.isoformat(),
+            "expires_at": expiry.isoformat(),
+        }
+    return leases, True
+
+
 def _read_auth_rate_limit_buckets(path: Path) -> dict[str, dict[str, int | str]]:
     """Read hashed fixed-window auth counters without exposing identifiers."""
     uri = f"file:{quote(path.resolve().as_posix(), safe='/')}?mode=ro"
@@ -403,11 +478,17 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         raise ImportBlocked("read-only structural audit did not pass; review its findings first")
     records = _read_records(path)
     selected = {key: value for key, value in records.items() if key in CORE_TYPES}
+    if records.get("approval_invocation_lease"):
+        raise ImportBlocked(
+            "approval_invocation_lease rows must come from the normalized SQLite lease table"
+        )
     email_outbox, sanitized_terminal_email_ciphertexts = _read_email_outbox(path)
     selected["auth_email_outbox"] = email_outbox
     delivery_claims, delivery_failures = _read_delivery_state(path)
     selected["approval_delivery_claim"] = delivery_claims
     selected["approval_delivery_failure"] = delivery_failures
+    invocation_leases, lease_table_present = _read_approval_invocation_leases(path)
+    selected["approval_invocation_lease"] = invocation_leases
     selected["auth_rate_limit_bucket"] = _read_auth_rate_limit_buckets(path)
     # No inferred scope is accepted for records that establish imported ownership.
     for entity_type in ("user", "project", "approval_request", "agent_task", "notification"):
@@ -426,13 +507,51 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     devices = selected.get("device_registration", {})
     derived_workspace_scope_counts: Counter[str] = Counter()
     approvals = selected.get("approval_request", {})
-    invocation_drain = _pending_native_invocation_drain_summary(approvals)
-    if invocation_drain["pending_native_invocation_count"]:
-        safe_fingerprints = ",".join(invocation_drain["approval_id_sha256"])
+    for approval_id, lease in invocation_leases.items():
+        approval = approvals.get(approval_id)
+        agent = agents.get(lease["source_agent_id"])
+        if (
+            not approval
+            or approval_id != lease["approval_id"]
+            or approval.get("workspace_id") != lease["workspace_id"]
+            or approval.get("source_agent_id") != lease["source_agent_id"]
+            or approval.get("source_invocation_id") != lease["source_invocation_id"]
+            or not agent
+            or agent.get("workspace_id") != lease["workspace_id"]
+        ):
+            raise ImportBlocked(
+                f"approval_invocation_lease/{approval_id} does not match its approval and agent scope"
+            )
+        try:
+            approval_expiry = datetime.fromisoformat(approval["expires_at"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ImportBlocked(
+                f"approval_invocation_lease/{approval_id} references an approval with invalid expiry"
+            ) from exc
+        lease_expiry = datetime.fromisoformat(lease["expires_at"])
+        heartbeat = datetime.fromisoformat(lease["heartbeat_at"])
+        if (
+            approval_expiry.tzinfo is None
+            or heartbeat > approval_expiry
+            or lease_expiry > approval_expiry
+        ):
+            raise ImportBlocked(
+                f"approval_invocation_lease/{approval_id} exceeds its approval expiry"
+            )
+    invocation_drain = _native_invocation_drain_summary(approvals, delivery_claims)
+    if (
+        invocation_drain["pending_native_invocation_count"]
+        or invocation_drain["approved_unconsumed_invocation_count"]
+    ):
+        safe_fingerprints = ",".join(
+            invocation_drain["approval_id_sha256"]
+            + invocation_drain["approved_unconsumed_approval_id_sha256"]
+        )
         raise ImportBlocked(
-            "source snapshot contains "
-            f"{invocation_drain['pending_native_invocation_count']} pending native invocation "
-            "approval(s); complete or explicitly reject/expire them through the owner flow "
+            "source snapshot contains native invocations that must drain before import: "
+            f"{invocation_drain['pending_native_invocation_count']} pending native invocation approval(s), "
+            f"{invocation_drain['approved_unconsumed_invocation_count']} approved but unconsumed native invocation(s); "
+            "complete or explicitly reject/expire them through the owner flow "
             "before creating the migration snapshot; approval_id_sha256="
             f"{safe_fingerprints}"
         )
@@ -958,6 +1077,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     source_counts["auth_email_outbox"] = len(email_outbox)
     source_counts["approval_delivery_claim"] = len(delivery_claims)
     source_counts["approval_delivery_failure"] = len(delivery_failures)
+    source_counts["approval_invocation_lease"] = len(invocation_leases)
     source_counts["auth_rate_limit_bucket"] = len(selected["auth_rate_limit_bucket"])
     source_counts = dict(sorted(source_counts.items()))
     omissions = {kind: count for kind, count in source_counts.items() if kind not in CORE_TYPES and count}
@@ -982,6 +1102,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         "derived_workspace_scope_counts": dict(sorted(derived_workspace_scope_counts.items())),
         "invocation_drain": {
             "status": "CLEAR",
+            "lease_table_present": lease_table_present,
             **invocation_drain,
         },
         "sanitized_terminal_email_ciphertext_count": sanitized_terminal_email_ciphertexts,
@@ -994,6 +1115,18 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
 
 
 def _insert_payload(conn: psycopg.Connection, kind: str, entity_id: str, payload: dict[str, Any]) -> None:
+    if kind == "approval_invocation_lease":
+        conn.execute(
+            "INSERT INTO approval_invocation_leases "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s)",
+            (
+                payload["approval_id"], payload["workspace_id"], payload["source_agent_id"],
+                payload["source_invocation_id"], datetime.fromisoformat(payload["heartbeat_at"]),
+                datetime.fromisoformat(payload["expires_at"]),
+            ),
+        )
+        return
     if kind == "auth_rate_limit_bucket":
         conn.execute(
             "INSERT INTO auth_rate_limit_buckets(bucket_hash,window_start,request_count) "
@@ -1405,6 +1538,33 @@ def _first_payload_mismatch(
 ) -> str | None:
     """Return the entity type whose target payloads differ from the source plan."""
     for kind, (table, id_column) in IMPORT_TABLES.items():
+        if kind == "approval_invocation_lease":
+            rows = conn.execute(
+                "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+                "FROM approval_invocation_leases"
+            ).fetchall()
+            actual = {
+                row[0]: {
+                    "approval_id": row[0], "workspace_id": row[1], "source_agent_id": row[2],
+                    "source_invocation_id": row[3],
+                    "heartbeat_at": row[4].astimezone(timezone.utc).isoformat(),
+                    "expires_at": row[5].astimezone(timezone.utc).isoformat(),
+                }
+                for row in rows
+            }
+            expected = {
+                approval_id: {
+                    **payload,
+                    "heartbeat_at": datetime.fromisoformat(payload["heartbeat_at"])
+                    .astimezone(timezone.utc).isoformat(),
+                    "expires_at": datetime.fromisoformat(payload["expires_at"])
+                    .astimezone(timezone.utc).isoformat(),
+                }
+                for approval_id, payload in selected.get(kind, {}).items()
+            }
+            if actual != expected:
+                return kind
+            continue
         if kind == "auth_rate_limit_bucket":
             rows = conn.execute(
                 "SELECT bucket_hash,window_start,request_count FROM auth_rate_limit_buckets"
@@ -1567,7 +1727,8 @@ def apply_import(dsn: str, digest: str, plan: dict[str, Any], selected: dict[str
                 "auth_rate_limit_bucket", "workspace", "user", "invite", "session",
                 "project", "mcp_child_server",
                 "agent_connector", "external_agent", "external_agent_credential",
-                "device_registration", "idea", "work_order", "approval_request", "test_run",
+                "device_registration", "idea", "work_order", "approval_request",
+                "approval_invocation_lease", "test_run",
                 "mcp_pending_request",
                 "agent_task", "agent_task_event", "agent_run", "agent_run_step", "agent_run_event",
                 "approval_delivery_claim", "approval_delivery_failure",

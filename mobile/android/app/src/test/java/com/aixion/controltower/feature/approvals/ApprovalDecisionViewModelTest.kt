@@ -118,6 +118,26 @@ class ApprovalDecisionViewModelTest {
             assertFalse(viewModel.state.value.decisionInFlight)
             assertFalse(viewModel.state.value.decisionNeedsReconciliation)
             assertTrue(viewModel.state.value.lastActionMessage.orEmpty().contains("No decision was sent"))
+            assertFalse(viewModel.state.value.lastActionMessage.orEmpty().contains("approval refresh unavailable"))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun backendSyncErrorDoesNotExposeExceptionDetails() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                listResult = { throw IOException("INTERNAL SECRET: database host") }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+
+            val message = viewModel.state.value.errorMessage.orEmpty()
+            assertTrue(message.contains("Check your connection and retry"))
+            assertFalse(message.contains("INTERNAL SECRET"))
+            assertFalse(message.contains("database host"))
         } finally {
             Dispatchers.resetMain()
         }

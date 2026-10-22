@@ -73,6 +73,7 @@ def _snapshot(
         "workspace_id": "ws1", "source_provider": "ANTIGRAVITY",
         "source_agent_id": "agent1", "source_invocation_id": "inv1",
         "created_at": now, "updated_at": now,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
     }
     rows = [
         ("workspace", "ws1", workspace),
@@ -333,6 +334,16 @@ def _snapshot(
             "source_invocation_id TEXT NOT NULL, reason_code TEXT NOT NULL, reported_at TEXT NOT NULL)"
         )
         conn.execute(
+            "CREATE TABLE approval_invocation_leases (approval_id TEXT PRIMARY KEY, "
+            "workspace_id TEXT NOT NULL, source_agent_id TEXT NOT NULL, "
+            "source_invocation_id TEXT NOT NULL, heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL, "
+            "UNIQUE(workspace_id,source_agent_id,source_invocation_id))"
+        )
+        conn.execute(
+            "INSERT INTO approval_invocation_leases VALUES (?,?,?,?,?,?)",
+            ("a1", "ws1", "agent1", "inv1", "2000-01-01T00:00:00+00:00", "2000-01-01T00:05:00+00:00"),
+        )
+        conn.execute(
             "CREATE TABLE auth_email_outbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL, "
             "encrypted_code BLOB NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, "
             "created_at TEXT NOT NULL, next_attempt_at TEXT NOT NULL, lease_expires_at TEXT, "
@@ -449,6 +460,7 @@ def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
     assert plan["planned_counts"]["invite"] == 1
     assert plan["planned_counts"]["session"] == 1
     assert plan["planned_counts"]["external_agent"] == 1
+    assert plan["planned_counts"]["approval_invocation_lease"] == 1
     assert plan["planned_counts"]["agent_connector"] == 1
     assert plan["planned_counts"]["mcp_child_server"] == 1
     assert plan["planned_counts"]["mcp_pending_request"] == 1
@@ -466,9 +478,84 @@ def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
     assert selected["notification"]["n2"]["entity_type"] == "agent_task"
     assert plan["invocation_drain"] == {
         "status": "CLEAR",
+        "lease_table_present": True,
         "pending_native_invocation_count": 0,
         "approval_id_sha256": [],
+        "approved_unconsumed_invocation_count": 0,
+        "approved_unconsumed_approval_id_sha256": [],
     }
+
+
+def test_plan_blocks_approved_unconsumed_native_invocation_with_live_lease(tmp_path, monkeypatch):
+    path = tmp_path / "live_approved_native_snapshot.sqlite3"
+    _snapshot(path)
+    heartbeat = datetime.now(timezone.utc)
+    expiry = heartbeat + timedelta(minutes=5)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET heartbeat_at=?,expires_at=? WHERE approval_id='a1'",
+            (heartbeat.isoformat(), expiry.isoformat()),
+        )
+
+    def unexpected_target_connection(*_args, **_kwargs):
+        pytest.fail("live-invocation drain barrier must run before opening a PostgreSQL target")
+
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.psycopg.connect",
+        unexpected_target_connection,
+    )
+    with pytest.raises(ImportBlocked, match="1 approved but unconsumed native invocation") as exc_info:
+        build_plan(path)
+    assert hashlib.sha256(b"a1").hexdigest() in str(exc_info.value)
+
+
+@pytest.mark.parametrize("lease_state", ["missing_row", "expired"])
+def test_plan_blocks_approved_unconsumed_invocation_without_valid_lease(tmp_path, lease_state):
+    path = tmp_path / f"approved_unconsumed_{lease_state}.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        if lease_state == "missing_row":
+            conn.execute("DELETE FROM approval_invocation_leases WHERE approval_id='a1'")
+        else:
+            expired = datetime.now(timezone.utc) - timedelta(minutes=10)
+            expired_lease = expired + timedelta(minutes=1)
+            conn.execute(
+                "UPDATE approval_invocation_leases SET heartbeat_at=?,expires_at=? WHERE approval_id='a1'",
+                (expired.isoformat(), expired_lease.isoformat()),
+            )
+    with pytest.raises(ImportBlocked, match="approved but unconsumed native invocation"):
+        build_plan(path)
+
+
+def test_plan_blocks_approved_unconsumed_invocation_when_lease_schema_is_missing(tmp_path):
+    path = tmp_path / "missing_invocation_lease_schema.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE approval_invocation_leases")
+    with pytest.raises(ImportBlocked, match="approved but unconsumed native invocation"):
+        build_plan(path)
+
+
+def test_plan_rejects_invocation_lease_scope_and_time_mismatch(tmp_path):
+    path = tmp_path / "invalid_invocation_lease_snapshot.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET source_invocation_id='wrong-invocation' "
+            "WHERE approval_id='a1'"
+        )
+    with pytest.raises(ImportBlocked, match="does not match its approval and agent scope"):
+        build_plan(path)
+
+    invalid_time_path = tmp_path / "invalid_invocation_lease_time.sqlite3"
+    _snapshot(invalid_time_path)
+    with sqlite3.connect(invalid_time_path) as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET expires_at='1999-01-01T00:00:00+00:00' "
+            "WHERE approval_id='a1'"
+        )
+    with pytest.raises(ImportBlocked, match="invalid lease time bounds"):
+        build_plan(invalid_time_path)
 
 
 @pytest.mark.parametrize("status", ["REQUESTED", "PENDING_REVIEW"])
@@ -525,6 +612,7 @@ def test_delivery_state_is_included_and_requires_matching_invocation_audit(tmp_p
     assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11"
     assert plan["planned_counts"]["approval_delivery_claim"] == 1
     assert plan["planned_counts"]["approval_delivery_failure"] == 1
+    assert plan["planned_counts"]["approval_invocation_lease"] == 1
     assert selected["approval_delivery_claim"]["a1"]["source_invocation_id"] == "inv1"
     assert selected["approval_delivery_failure"]["a1"]["reason_code"] == "CLAIM_RESPONSE_AMBIGUOUS"
     assert len(digest) == 64
@@ -549,6 +637,13 @@ def test_delivery_state_import_preserves_at_most_once_claim_and_failure(tmp_path
         ).fetchone()
         assert claim == ("ws1", "agent1", "inv1")
         assert failure == ("ws1", "agent1", "inv1", "CLAIM_RESPONSE_AMBIGUOUS")
+        lease = conn.execute(
+            "SELECT workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+            "FROM approval_invocation_leases WHERE approval_id='a1'"
+        ).fetchone()
+        assert lease[:3] == ("ws1", "agent1", "inv1")
+        assert lease[3].isoformat() == "2000-01-01T00:00:00+00:00"
+        assert lease[4].isoformat() == "2000-01-01T00:05:00+00:00"
 
 
 def test_plan_blocks_delivery_claim_with_mismatched_source_invocation(tmp_path):
@@ -965,6 +1060,20 @@ def test_idempotent_retry_rejects_same_count_target_content_drift(
         apply_import(postgres_import_dsn, digest, plan, selected)
 
 
+def test_idempotent_retry_rejects_invocation_lease_drift(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    plan, selected, digest = build_plan(path)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    with psycopg.connect(postgres_import_dsn) as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET source_invocation_id='tampered' "
+            "WHERE approval_id='a1'"
+        )
+    with pytest.raises(ImportBlocked, match="target approval_invocation_lease payloads changed"):
+        apply_import(postgres_import_dsn, digest, plan, selected)
+
+
 def test_apply_import_rolls_back_rows_when_a_parent_constraint_fails(tmp_path, postgres_import_dsn):
     path = tmp_path / "snapshot.sqlite3"
     _snapshot(path, include_omitted=False)
@@ -977,4 +1086,18 @@ def test_apply_import_rolls_back_rows_when_a_parent_constraint_fails(tmp_path, p
     with psycopg.connect(postgres_import_dsn) as conn:
         assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM projects").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 0
+
+
+def test_apply_import_rolls_back_when_invocation_lease_scope_fails(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    plan, selected, digest = build_plan(path)
+    selected["approval_invocation_lease"]["a1"]["workspace_id"] = "missing-workspace"
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        apply_import(postgres_import_dsn, digest, plan, selected)
+    with psycopg.connect(postgres_import_dsn) as conn:
+        assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM approval_invocation_leases").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 0
