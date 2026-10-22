@@ -381,6 +381,7 @@ class PostgresTrustRepository:
         actor: str,
         now: datetime,
         trust_event_repository: PostgresTrustEventRepository,
+        expected_agent_id: str | None = None,
     ) -> tuple[PolicyDecision, CapabilityLease | None]:
         """Persist one standalone action evaluation and its ledger events atomically."""
         workspace_id = action.workspace_id
@@ -400,6 +401,14 @@ class PostgresTrustRepository:
             )
             if lease is None:
                 raise ValueError("Capability lease not found")
+            if (
+                expected_agent_id is not None
+                and lease.agent_id
+                and lease.agent_id != expected_agent_id
+            ):
+                raise PostgresTrustRepositoryConflict(
+                    "Capability lease belongs to another external agent"
+                )
 
         decision = evaluate_action_policy(action, lease, now=now)
         self.insert_proposed_action(conn, action)

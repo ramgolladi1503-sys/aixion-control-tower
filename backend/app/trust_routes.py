@@ -8,6 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from .agent_auth import assert_agent_can, require_external_agent
 from .approval_decisions import approval_decision_repository
 from .application_repository_access import workspace_id_for_request
+from .application_repository_access import (
+    external_agent_auth_repository_for_request,
+    is_sqlite_external_agent_auth_repository,
+)
 from .auth import require_maintainer, require_owner, require_reviewer
 from .models import AgentAction, AuthUser, ExternalAgent, now_utc
 from .store import store
@@ -359,12 +363,14 @@ def revoke_lease(
 def evaluate_external_agent_action(
     payload: ProposedAction,
     agent: ExternalAgent = Depends(require_external_agent),
+    request: Request = None,  # type: ignore[assignment]
 ) -> AgentGatewayResult:
     assert_agent_can(
         agent,
         AgentAction.EXECUTE_GITHUB,
         project_id=payload.project_id,
         repository_full_name=payload.repository,
+        http_request=request,
     )
     normalized = payload.model_copy(
         update={
@@ -373,6 +379,54 @@ def evaluate_external_agent_action(
             "workspace_id": agent.workspace_id,
         }
     )
+    runtime = _postgres_action_runtime(request)
+    if runtime is not None:
+        repositories = request.app.state.postgres_repositories
+        external_auth = external_agent_auth_repository_for_request(request)
+        if external_auth is not repositories.external_agent_auth:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL gateway actions require the external-agent auth repository from the same runtime",
+            )
+        if normalized.run_id or normalized.task_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Run-linked external-agent actions require the durable AgentRun execution transaction",
+            )
+        if normalized.project_id:
+            project = repositories.projects.get(normalized.project_id)
+            if project is None or project.workspace_id != agent.workspace_id:
+                raise HTTPException(status_code=404, detail="Project not found")
+        try:
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    decision, lease = repositories.trust.evaluate_proposed_action(
+                        conn,
+                        action=normalized,
+                        actor=f"agent:{agent.id}",
+                        now=now_utc(),
+                        trust_event_repository=repositories.trust_events,
+                        expected_agent_id=agent.id,
+                    )
+            return AgentGatewayResult(
+                action=normalized,
+                decision=decision,
+                lease=_public(lease) if lease else None,
+            )
+        except (ValueError, PostgresTrustRepositoryConflict) as error:
+            raise _trust_error(error) from error
+    if request is not None:
+        external_auth = external_agent_auth_repository_for_request(request)
+        if not is_sqlite_external_agent_auth_repository(external_auth):
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL-authenticated gateway actions require the complete durable trust repository bundle",
+            )
+        if getattr(request.app.state, "postgres_runtime", None) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL gateway actions require the complete durable project and trust repository bundle",
+            )
     lease = store.capability_leases.get(normalized.lease_id or "")
     if lease and (
         not capability_lease_scope_is_consistent(lease)

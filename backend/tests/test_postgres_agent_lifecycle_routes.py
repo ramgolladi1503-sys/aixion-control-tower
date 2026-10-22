@@ -4,6 +4,7 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -143,3 +144,116 @@ def test_postgres_agent_owner_lifecycle_is_scoped_audited_and_does_not_project_t
         "agent.token_revoked", "agent.auth_failed",
     ]
     assert set(store.external_agents) == initial_sqlite_ids
+
+
+def test_postgres_external_gateway_action_is_durable_and_partial_runtime_fails_closed(
+    postgres_agent_route_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect, workspace, project, _user, repositories = postgres_agent_route_runtime
+    runtime = SimpleNamespace(connect=connect)
+    for name, value in {
+        "postgres_runtime": runtime,
+        "postgres_repositories": repositories,
+        "approval_decision_repository": repositories.approval_decisions,
+        "workspace_membership_repository": repositories.workspace_membership,
+        "trust_repository": repositories.trust,
+        "trust_event_repository": repositories.trust_events,
+        "external_agent_auth_repository": repositories.external_agent_auth,
+        "project_repository": repositories.projects,
+    }.items():
+        monkeypatch.setattr(main.app.state, name, value, raising=False)
+
+    client = TestClient(main.app)
+    agent_response = client.post(
+        "/agents",
+        json={
+            "provider": "CODEX",
+            "display_name": "PostgreSQL gateway agent",
+            "auth_type": "API_KEY",
+            "allowed_project_ids": [project.id],
+            "allowed_repositories": ["owner/repo"],
+            "allowed_actions": ["EXECUTE_GITHUB"],
+            "enabled": True,
+        },
+    )
+    assert agent_response.status_code == 200, agent_response.text
+    agent_id = agent_response.json()["agent"]["id"]
+    token = agent_response.json()["agent_token"]
+    headers = {
+        "X-Aixion-Agent-Id": agent_id,
+        "X-Aixion-Agent-Token": token,
+    }
+    sqlite_actions_before = dict(store.proposed_actions)
+    sqlite_decisions_before = dict(store.policy_decisions)
+    sqlite_events_before = dict(store.trust_events)
+
+    evaluated = client.post(
+        "/trust/gateway/actions",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "action_type": "RUN_COMMAND",
+            "repository": "owner/repo",
+            "branch": "feature/durable-gateway",
+            "command": "python -m compileall",
+        },
+    )
+    assert evaluated.status_code == 200, evaluated.text
+    action_id = evaluated.json()["action"]["id"]
+    with connect() as conn:
+        action = repositories.trust.get_proposed_action(conn, action_id, workspace.id)
+        assert action is not None
+        decision = repositories.trust.get_latest_policy_decision_for_action(
+            conn, action_id, workspace.id
+        )
+        assert decision is not None
+        assert decision.decision.value == evaluated.json()["decision"]["decision"]
+        event_types = conn.execute(
+            "SELECT event_type FROM trust_events WHERE entity_id=%s ORDER BY sequence",
+            (action_id,),
+        ).fetchall()
+        assert len(event_types) == 2
+        assert event_types[0][0] == "ACTION_RECEIVED"
+        assert event_types[1][0] in {
+            "ACTION_ALLOWED",
+            "ACTION_REQUIRES_APPROVAL",
+            "ACTION_BLOCKED",
+        }
+    assert action.agent_id == agent_id
+    assert action.workspace_id == workspace.id
+    assert store.proposed_actions == sqlite_actions_before
+    assert store.policy_decisions == sqlite_decisions_before
+    assert store.trust_events == sqlite_events_before
+
+    run_linked = client.post(
+        "/trust/gateway/actions",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "action_type": "RUN_COMMAND",
+            "repository": "owner/repo",
+            "branch": "feature/durable-gateway",
+            "command": "python -m compileall",
+            "run_id": "run_not_yet_durable",
+        },
+    )
+    assert run_linked.status_code == 409
+
+    monkeypatch.setattr(main.app.state, "postgres_runtime", None)
+    mixed_runtime = client.post(
+        "/trust/gateway/actions",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "action_type": "RUN_COMMAND",
+            "repository": "owner/repo",
+            "branch": "feature/durable-gateway",
+            "command": "python -m compileall",
+        },
+    )
+    assert mixed_runtime.status_code == 409
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM proposed_actions WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone()[0] == 1
