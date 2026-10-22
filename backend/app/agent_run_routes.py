@@ -30,6 +30,7 @@ from .agent_run_models import (
     AgentRunStatus,
     AgentRunStep,
     AgentRunStepStatus,
+    AgentRunStepType,
     AgentRunSummary,
 )
 from .agent_run_supervisor import (
@@ -45,6 +46,7 @@ from .agent_run_supervisor import (
 )
 from .agent_run_trust import (
     AgentRunTrustConflict,
+    SIDE_EFFECT_STEPS,
     attach_capability_lease,
     authorize_run_step,
     consume_run_step_actions,
@@ -592,13 +594,14 @@ def execute_run_next_step(
     run_repository = (
         agent_run_repository_for_request(request) if request is not None else None
     )
-    if run_repository is not None and not isinstance(run_repository, SQLiteAgentRunRepository):
+    if run_repository is not None and not isinstance(
+        run_repository, (SQLiteAgentRunRepository, PostgresAgentRunRepository)
+    ):
         raise HTTPException(
             status_code=409,
             detail=(
-                "AgentRun execution is unavailable for the configured PostgreSQL "
-                "runtime until capability, trust, and worker effects use the same "
-                "durable repository transaction path."
+                "AgentRun execution is unavailable until capability, trust, and "
+                "worker effects are supported by the configured repository."
             ),
         )
     if run_repository is not None:
@@ -646,14 +649,27 @@ def execute_run_next_step(
         )
         if current_step is None:
             raise HTTPException(status_code=409, detail="Run has no current step")
-        try:
-            ensure_run_capability(run, user=user)
-            trust_actions = authorize_run_step(
-                run,
-                current_step,
-                actor=user.email,
-                timeout_seconds=payload.timeout_seconds,
+        if (
+            isinstance(run_repository, PostgresAgentRunRepository)
+            and current_step.step_type != AgentRunStepType.VALIDATE_SCOPE
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "PostgreSQL AgentRun execution currently supports only the "
+                    "side-effect-free VALIDATE_SCOPE step."
+                ),
             )
+        try:
+            trust_actions = []
+            if current_step.step_type in SIDE_EFFECT_STEPS:
+                ensure_run_capability(run, user=user)
+                trust_actions = authorize_run_step(
+                    run,
+                    current_step,
+                    actor=user.email,
+                    timeout_seconds=payload.timeout_seconds,
+                )
             execute_next_step(
                 run.id,
                 worker_id=payload.worker_id,
@@ -674,6 +690,10 @@ def execute_run_next_step(
             RunCapabilityConflict,
         ) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+        if isinstance(run_repository, PostgresAgentRunRepository):
+            run = run_repository.get(run.id)
+            if run is None:
+                raise HTTPException(status_code=503, detail="AgentRun disappeared after execution")
         return _durable_detail(run, request) if request is not None else _detail(run)
     finally:
         _release_execution_lock(run.id, execution_lock)

@@ -29,6 +29,7 @@ from .agent_task_models import AgentTaskStatus
 from .agent_run_repository import (
     AgentRunRepository,
     AgentRunRepositoryConflict,
+    PostgresAgentRunRepository,
     SQLiteAgentRunRepository,
 )
 from .agent_task_repository import AgentTaskRepository, SQLiteAgentTaskRepository
@@ -517,10 +518,12 @@ def execute_next_step(
     run_repository: AgentRunRepository | None = None,
 ) -> AgentRunStepExecutionResult:
     active_run_repository = run_repository
-    if active_run_repository is not None and not isinstance(active_run_repository, SQLiteAgentRunRepository):
+    if active_run_repository is not None and not isinstance(
+        active_run_repository,
+        (SQLiteAgentRunRepository, PostgresAgentRunRepository),
+    ):
         raise AgentRunConflict(
-            "AgentRun execution is unavailable until trust and worker effects are "
-            "bound to the configured durable repository."
+            "AgentRun execution is unavailable for the configured repository."
         )
     if active_run_repository is None:
         run = store.agent_runs.get(run_id)
@@ -534,6 +537,19 @@ def execute_next_step(
         run_steps = active_run_repository.list_steps_for_run(run_id)
         run_events = active_run_repository.list_events_for_run(run_id)
         store.project_agent_run_snapshot(run, run_steps, run_events)
+    postgres_scope_validation = isinstance(
+        active_run_repository, PostgresAgentRunRepository
+    )
+    if postgres_scope_validation:
+        current_step = store.agent_run_steps.get(run.current_step_id or "")
+        if (
+            current_step is None
+            or current_step.step_type != AgentRunStepType.VALIDATE_SCOPE
+        ):
+            raise AgentRunConflict(
+                "PostgreSQL AgentRun execution currently supports only the "
+                "side-effect-free VALIDATE_SCOPE step."
+            )
     if run.status in {
         AgentRunStatus.BLOCKED,
         AgentRunStatus.SUCCEEDED,
@@ -551,6 +567,18 @@ def execute_next_step(
         run, worker_id=worker_id, lease_seconds=lease_seconds,
         run_repository=active_run_repository,
     )
+    if postgres_scope_validation:
+        # Lease acquisition may have waited behind another process. Refresh the
+        # durable run and step snapshot before deciding what code may execute.
+        durable_run = active_run_repository.get(run_id)
+        if durable_run is None:
+            raise AgentRunConflict("AgentRun disappeared after its lease was acquired.")
+        store.project_agent_run_snapshot(
+            durable_run,
+            active_run_repository.list_steps_for_run(run_id),
+            active_run_repository.list_events_for_run(run_id),
+        )
+        run = store.agent_runs[run_id]
     retry_ready_events: list[AgentRunEvent] = []
     step = _ready_step(run, pending_events=retry_ready_events)
     if step is None:
@@ -565,6 +593,17 @@ def execute_next_step(
                 reason="No step is ready because retry backoff has not elapsed.",
             )
         raise AgentRunConflict("No executable step is ready.")
+    if postgres_scope_validation and step.step_type != AgentRunStepType.VALIDATE_SCOPE:
+        release_run_lease(
+            run,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            run_repository=active_run_repository,
+        )
+        raise AgentRunConflict(
+            "PostgreSQL AgentRun execution currently supports only the "
+            "side-effect-free VALIDATE_SCOPE step."
+        )
 
     durable_run_after_ready = active_run_repository.get(run.id)
     durable_steps_after_ready = active_run_repository.list_steps_for_run(run.id)
@@ -791,14 +830,12 @@ def execute_next_step(
         },
         actor=worker_id,
     )
-    changed_expected_steps: list[AgentRunStep] = []
-    changed_steps: list[AgentRunStep] = []
-    for previous_step in expected_steps:
-        current_step = store.agent_run_steps[previous_step.id]
-        if current_step != previous_step:
-            changed_expected_steps.append(previous_step)
-            changed_steps.append(current_step.model_copy(deep=True))
-    if not changed_expected_steps:
+    completion_audit.workspace_id = run.workspace_id
+    updated_steps = [item.model_copy(deep=True) for item in _run_steps(run.id)]
+    if all(
+        updated_by_id == expected_by_id
+        for updated_by_id, expected_by_id in zip(updated_steps, expected_steps, strict=True)
+    ):
         restore_completion_checkpoint()
         raise AgentRunConflict("Step completion produced no durable step change.")
     completion_events = [
@@ -808,8 +845,8 @@ def execute_next_step(
         active_run_repository.commit_step_completion(
             expected_run=expected_run,
             updated_run=run.model_copy(deep=True),
-            expected_steps=changed_expected_steps,
-            updated_steps=changed_steps,
+            expected_steps=expected_steps,
+            updated_steps=updated_steps,
             events=completion_events,
             audit=completion_audit,
             now=_now(),

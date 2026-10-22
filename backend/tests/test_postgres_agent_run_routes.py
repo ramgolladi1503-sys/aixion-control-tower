@@ -15,7 +15,12 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app import main
-from app.agent_run_models import AgentRunStatus
+from app.agent_run_models import (
+    AgentRunEventType,
+    AgentRunStatus,
+    AgentRunStepStatus,
+    AgentRunStepType,
+)
 from app.agent_run_repository import AgentRunRepositoryConflict
 from app.agent_run_routes import MaintainerDependency, ReviewerDependency
 from app.agent_task_models import AgentTask, AgentTaskStatus
@@ -346,6 +351,74 @@ def test_postgres_agent_run_http_control_transitions_are_durable_and_audited(
     assert "OPERATOR_ACTION" in event_types
     assert "STEP_CANCELLED" in event_types
     assert run_id not in store.agent_runs
+
+
+def test_postgres_agent_run_executes_only_durable_scope_validation(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    with connect() as conn:
+        task_row = conn.execute(
+            "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        task = AgentTask.model_validate(task_row[0])
+        task.repository = "owner/approved-repository"
+        task.branch_preference = "feature/approved-branch"
+        conn.execute(
+            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
+        )
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (task.approval_request_id, workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+        approval.test_plan = ["python -c 'print(1)'"]
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
+        )
+
+    client = TestClient(main.app)
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    assert created.json()["steps"][0]["step_type"] == AgentRunStepType.VALIDATE_SCOPE.value
+
+    executed = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
+    )
+    assert executed.status_code == 200, executed.text
+    body = executed.json()
+    assert body["run"]["status"] == AgentRunStatus.RUNNING.value
+    assert body["run"]["current_step_id"] == body["steps"][1]["id"]
+    assert body["steps"][0]["status"] == AgentRunStepStatus.SUCCEEDED.value
+    assert body["steps"][1]["status"] == AgentRunStepStatus.READY.value
+    assert any(
+        event["event_type"] == AgentRunEventType.STEP_SUCCEEDED.value
+        for event in body["events"]
+    )
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.status == AgentRunStatus.RUNNING
+    assert repositories.agent_tasks.get(task_id).status == AgentTaskStatus.APPROVED
+    durable_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    assert durable_steps[0].status == AgentRunStepStatus.SUCCEEDED
+
+    rejected = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
+    )
+    assert rejected.status_code == 409
+    assert "only the side-effect-free VALIDATE_SCOPE step" in rejected.json()["detail"]
+    assert repositories.agent_runs.get(run_id) == durable_run
+    assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
 
 
 def _create_run_with_postgres_capability_lease(
