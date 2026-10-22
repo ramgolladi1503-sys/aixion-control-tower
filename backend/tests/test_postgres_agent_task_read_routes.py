@@ -728,3 +728,171 @@ def test_postgres_cancel_route_refuses_task_with_active_run_without_projection(
             (workspace.id, task["id"]),
         ).fetchone()[0] == 0
     assert {event.id for event in store.audit_events} == before_audit_ids
+
+
+def test_postgres_agent_task_event_route_commits_event_audit_and_notification_atomically(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    _bind_postgres_agent_task_runtime(connect, monkeypatch)
+    before_task_ids = set(store.agent_tasks)
+    before_event_ids = set(store.agent_task_events)
+    before_audit_ids = {event.id for event in store.audit_events}
+    before_notification_ids = set(store.notifications)
+    client = TestClient(main.app)
+
+    task_response = client.post("/agent/tasks", json={
+        "provider": "MANUAL", "project_id": project.id,
+        "title": "PostgreSQL event result", "goal": "Verify atomic event persistence",
+        "requested_action": "OTHER", "requires_approval": False,
+    })
+    assert task_response.status_code == 200, task_response.text
+    task = task_response.json()
+
+    response = client.post(
+        f"/agent/tasks/{task['id']}/events",
+        json={
+            "event_type": "RESULT_READY",
+            "message": "The result is ready for review.",
+            "status": "DONE",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    event = response.json()
+    notification_id = event["metadata"]["notification_id"]
+    with connect() as conn:
+        task_row = conn.execute(
+            "SELECT status,payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task["id"], workspace.id),
+        ).fetchone()
+        event_row = conn.execute(
+            "SELECT task_id,workspace_id,event_type,payload FROM agent_task_events WHERE event_id=%s",
+            (event["id"],),
+        ).fetchone()
+        audit_row = conn.execute(
+            "SELECT workspace_id,event_type,details,payload FROM audit_events "
+            "WHERE entity_type='agent_task' AND entity_id=%s AND event_type='agent_task.event_recorded' "
+            "AND details->>'event_id'=%s",
+            (task["id"], event["id"]),
+        ).fetchone()
+        notification_row = conn.execute(
+            "SELECT workspace_id,user_id,task_id,entity_type,payload FROM notifications "
+            "WHERE notification_id=%s",
+            (notification_id,),
+        ).fetchone()
+
+    assert task_row is not None
+    assert task_row[0] == "DONE"
+    assert task_row[1]["status"] == "DONE"
+    assert event_row is not None
+    assert event_row[:3] == (task["id"], workspace.id, "RESULT_READY")
+    assert event_row[3]["metadata"]["notification_id"] == notification_id
+    assert audit_row is not None
+    assert audit_row[0:2] == (workspace.id, "agent_task.event_recorded")
+    assert audit_row[2]["event_id"] == event["id"]
+    assert audit_row[2]["notification_id"] == notification_id
+    assert audit_row[3]["details"]["event_id"] == event["id"]
+    assert notification_row is not None
+    assert notification_row[:4] == (
+        workspace.id,
+        task["created_by_user_id"],
+        task["id"],
+        "agent_task",
+    )
+    assert notification_row[4]["id"] == notification_id
+    assert notification_row[4]["entity_id"] == task["id"]
+    assert notification_row[4]["title"] == "Agent task done: PostgreSQL event result"
+    assert set(store.agent_tasks) == before_task_ids
+    assert set(store.agent_task_events) == before_event_ids
+    assert {audit.id for audit in store.audit_events} == before_audit_ids
+    assert set(store.notifications) == before_notification_ids
+
+
+def test_postgres_agent_task_event_route_rolls_back_all_records_when_notification_insert_fails(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    _bind_postgres_agent_task_runtime(connect, monkeypatch)
+    before_task_ids = set(store.agent_tasks)
+    before_event_ids = set(store.agent_task_events)
+    before_audit_ids = {event.id for event in store.audit_events}
+    before_notification_ids = set(store.notifications)
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    task_response = client.post("/agent/tasks", json={
+        "provider": "MANUAL", "project_id": project.id,
+        "title": "PostgreSQL rollback event", "goal": "Verify event transaction rollback",
+        "requested_action": "OTHER", "requires_approval": False,
+    })
+    assert task_response.status_code == 200, task_response.text
+    task = task_response.json()
+    with connect() as conn:
+        initial_task_payload = conn.execute(
+            "SELECT status,payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task["id"], workspace.id),
+        ).fetchone()
+        initial_event_count = conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s",
+            (task["id"],),
+        ).fetchone()[0]
+        initial_audit_count = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_type='agent_task' "
+            "AND entity_id=%s",
+            (workspace.id, task["id"]),
+        ).fetchone()[0]
+        initial_notification_count = conn.execute(
+            "SELECT count(*) FROM notifications WHERE workspace_id=%s AND task_id=%s",
+            (workspace.id, task["id"]),
+        ).fetchone()[0]
+        conn.execute("""
+            CREATE FUNCTION reject_agent_task_done_notification() RETURNS trigger AS $$
+            BEGIN
+                IF NEW.entity_type = 'agent_task'
+                   AND NEW.payload->>'title' LIKE 'Agent task done: %' THEN
+                    RAISE EXCEPTION 'injected AgentTask notification failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
+        conn.execute("""
+            CREATE TRIGGER reject_agent_task_done_notification_insert
+            BEFORE INSERT ON notifications FOR EACH ROW
+            EXECUTE FUNCTION reject_agent_task_done_notification()
+        """)
+
+    response = client.post(
+        f"/agent/tasks/{task['id']}/events",
+        json={
+            "event_type": "RESULT_READY",
+            "message": "This transaction must roll back.",
+            "status": "DONE",
+        },
+    )
+
+    assert response.status_code == 500
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status,payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task["id"], workspace.id),
+        ).fetchone() == initial_task_payload
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s",
+            (task["id"],),
+        ).fetchone()[0] == initial_event_count
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_type='agent_task' "
+            "AND entity_id=%s",
+            (workspace.id, task["id"]),
+        ).fetchone()[0] == initial_audit_count
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE workspace_id=%s AND task_id=%s",
+            (workspace.id, task["id"]),
+        ).fetchone()[0] == initial_notification_count
+    assert set(store.agent_tasks) == before_task_ids
+    assert set(store.agent_task_events) == before_event_ids
+    assert {audit.id for audit in store.audit_events} == before_audit_ids
+    assert set(store.notifications) == before_notification_ids
