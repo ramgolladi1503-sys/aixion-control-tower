@@ -8,7 +8,8 @@ import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.core.api.dto.AgentRegistrationResponseDto
 import com.aixion.controltower.core.api.dto.ExternalAgentDto
-import com.aixion.controltower.core.api.dto.isExpectedAntigravityApprovalAgent
+import com.aixion.controltower.core.api.dto.LOCAL_APPROVAL_CONNECTOR_PROVIDERS
+import com.aixion.controltower.core.api.dto.isExpectedApprovalConnectorAgent
 import com.aixion.controltower.data.repository.AgentAccessRepository
 import com.aixion.controltower.data.repository.AgentAccessSummary
 import kotlinx.coroutines.CancellationException
@@ -22,9 +23,11 @@ data class AgentAccessUiState(
     val working: Boolean = false,
     val agents: List<AgentAccessSummary> = emptyList(),
     val projects: List<ProjectDto> = emptyList(),
+    val selectedProvider: String = "ANTIGRAVITY",
     val selectedProjectId: String? = null,
     val displayName: String = "Antigravity on this Mac",
     val oneTimeToken: String? = null,
+    val oneTimeProvider: String? = null,
     val oneTimeAgentName: String? = null,
     val oneTimeAgentId: String? = null,
     val oneTimeProjectId: String? = null,
@@ -45,8 +48,9 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             _state.value = _state.value.copy(loading = true, error = "")
             try {
+                val provider = _state.value.selectedProvider
                 val projects = repository.listProjects()
-                val agents = repository.listAntigravityAgents()
+                val agents = repository.listApprovalAgents(provider)
                 val current = _state.value
                 _state.value = current.copy(
                     loading = false,
@@ -62,7 +66,7 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
             } catch (_: Exception) {
                 _state.value = _state.value.copy(
                     loading = false,
-                    error = "Could not load projects or Antigravity agents. Check owner access and connection, then retry."
+                    error = "Could not load projects or ${providerDisplayName(_state.value.selectedProvider)} agents. Check owner access and connection, then retry."
                 )
             }
         }
@@ -70,6 +74,30 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
 
     fun setDisplayName(value: String) {
         _state.value = _state.value.copy(displayName = value.take(100), error = "")
+    }
+
+    fun selectProvider(provider: String) {
+        val current = _state.value
+        if (current.working || current.loading || provider !in LOCAL_APPROVAL_CONNECTOR_PROVIDERS) return
+        if (provider == current.selectedProvider) return
+        val defaults = mapOf(
+            "ANTIGRAVITY" to "Antigravity on this Mac",
+            "CODEX" to "Codex on this Mac"
+        )
+        val nextName = if (current.displayName == defaults[current.selectedProvider]) {
+            defaults[provider].orEmpty()
+        } else {
+            current.displayName
+        }
+        _state.value = current.copy(
+            selectedProvider = provider,
+            displayName = nextName,
+            agents = emptyList(),
+            loading = true,
+            error = "",
+            notice = ""
+        )
+        refresh()
     }
 
     fun selectProject(projectId: String) {
@@ -82,12 +110,17 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
         val current = _state.value
         val name = current.displayName.trim()
         val projectId = current.selectedProjectId
+        val provider = current.selectedProvider
         if (name.isBlank() || projectId == null || current.working) {
             _state.value = current.copy(error = "Enter an agent name and select one project.")
             return
         }
-        runCredentialAction("Antigravity agent created", expectedProjectId = projectId) {
-            repository.createAntigravityAgent(name, projectId)
+        runCredentialAction(
+            "${providerDisplayName(provider)} connector created",
+            expectedProvider = provider,
+            expectedProjectId = projectId
+        ) {
+            repository.createApprovalAgent(name, projectId, provider)
         }
     }
 
@@ -99,13 +132,25 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
             _state.value = _state.value.copy(error = "Agent scope is unknown. Refresh before rotating its credential.")
             return
         }
-        runCredentialAction("Antigravity token rotated", expectedProjectId = projectId, expectedAgentId = agentId) {
+        runCredentialAction(
+            "${providerDisplayName(agent.provider)} token rotated",
+            expectedProvider = agent.provider,
+            expectedProjectId = projectId,
+            expectedAgentId = agentId
+        ) {
             repository.rotateToken(agentId)
         }
     }
 
     fun revokeToken(agentId: String) {
-        if (_state.value.working) return
+        val current = _state.value
+        if (current.working) return
+        val selectedAgent = current.agents.firstOrNull { it.agent.id == agentId }?.agent
+        if (selectedAgent == null || selectedAgent.provider != current.selectedProvider) {
+            _state.value = current.copy(error = "Connector is not in the selected platform list. Refresh before revoking.")
+            return
+        }
+        val provider = selectedAgent.provider
         viewModelScope.launch {
             _state.value = _state.value.copy(working = true, error = "", notice = "")
             try {
@@ -127,13 +172,14 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
                     working = false,
                     agents = _state.value.agents.map { summary -> if (summary.agent.id == agentId) summary.copy(agent = revoked, credential = revokedCredential) else summary },
                     oneTimeToken = if (_state.value.oneTimeAgentId == agentId) null else _state.value.oneTimeToken,
+                    oneTimeProvider = if (_state.value.oneTimeAgentId == agentId) null else _state.value.oneTimeProvider,
                     oneTimeAgentName = if (_state.value.oneTimeAgentId == agentId) null else _state.value.oneTimeAgentName,
                     oneTimeAgentId = if (_state.value.oneTimeAgentId == agentId) null else _state.value.oneTimeAgentId,
                     oneTimeProjectId = if (_state.value.oneTimeAgentId == agentId) null else _state.value.oneTimeProjectId,
                     notice = "Agent token revoked. The Mac hook will now fail closed."
                 )
                 try {
-                    _state.value = _state.value.copy(agents = repository.listAntigravityAgents())
+                    _state.value = _state.value.copy(agents = repository.listApprovalAgents(provider))
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
@@ -153,6 +199,7 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
     fun clearOneTimeToken() {
         _state.value = _state.value.copy(
             oneTimeToken = null,
+            oneTimeProvider = null,
             oneTimeAgentName = null,
             oneTimeAgentId = null,
             oneTimeProjectId = null
@@ -161,6 +208,7 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
 
     private fun runCredentialAction(
         successMessage: String,
+        expectedProvider: String,
         expectedProjectId: String,
         expectedAgentId: String? = null,
         action: suspend () -> AgentRegistrationResponseDto
@@ -172,12 +220,12 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
                 val token = response.agent_token
                 val agent = response.agent
                 if (token.isNullOrBlank() ||
-                    !isExpectedAntigravityApprovalAgent(agent, expectedProjectId) ||
+                    !isExpectedApprovalConnectorAgent(agent, expectedProjectId, expectedProvider) ||
                     (expectedAgentId != null && agent.id != expectedAgentId)
                 ) {
                     _state.value = _state.value.copy(
                         working = false,
-                        error = "Server response did not confirm the exact Antigravity project, actions, and credential. Do not install this token; refresh and reconcile agent state."
+                        error = "Server response did not confirm the exact ${providerDisplayName(expectedProvider)} project, actions, and credential. Do not install this token; refresh and reconcile agent state."
                     )
                     return@launch
                 }
@@ -188,6 +236,7 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
                     working = false,
                     agents = (_state.value.agents.filterNot { it.agent.id == agent.id } + AgentAccessSummary(agent, credential)),
                     oneTimeToken = token,
+                    oneTimeProvider = expectedProvider,
                     oneTimeAgentName = agent.display_name,
                     oneTimeAgentId = agent.id,
                     oneTimeProjectId = expectedProjectId,
@@ -195,7 +244,7 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
                     error = ""
                 )
                 try {
-                    val agents = repository.listAntigravityAgents()
+                    val agents = repository.listApprovalAgents(expectedProvider)
                     _state.value = _state.value.copy(agents = agents)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -214,4 +263,9 @@ class AgentAccessViewModel(application: Application) : AndroidViewModel(applicat
             }
         }
     }
+}
+
+private fun providerDisplayName(provider: String): String = when (provider) {
+    "CODEX" -> "Codex"
+    else -> "Antigravity"
 }

@@ -65,6 +65,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
     val tokenCurrentlyVisible = state.oneTimeToken
     val latestVisibleToken by rememberUpdatedState(tokenCurrentlyVisible)
     var projectMenuOpen by remember { mutableStateOf(false) }
+    var providerMenuOpen by remember { mutableStateOf(false) }
     var pendingAction by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     DisposableEffect(lifecycleOwner) {
@@ -132,10 +133,10 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
             TowerHeroPanel {
                 StatusBadge(label = if (state.loading) "SYNCING" else "MAC AGENT ACCESS", color = if (state.loading) RiskMedium else RiskLow)
                 Spacer(Modifier.height(TowerSpacing.md))
-                Text("Antigravity setup", color = TowerTextPrimary, fontSize = 26.sp)
+                Text("Connect ${agentProviderName(state.selectedProvider)}", color = TowerTextPrimary, fontSize = 26.sp)
                 Spacer(Modifier.height(TowerSpacing.sm))
                 Text(
-                    "Enroll one Mac agent with one project scope. The phone decides; this credential only submits and reads its own approval requests.",
+                    "Create a project-limited connector credential here, then install its local hook in that project on your Mac. Approval decisions stay in this phone app.",
                     color = TowerTextMuted,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
@@ -146,15 +147,44 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
         if (state.notice.isNotBlank()) item { Text(state.notice, color = RiskLow) }
         if (state.error.isNotBlank()) item { Text(state.error, color = RiskBlocked) }
 
+        item {
+            TowerPanel {
+                Text("Choose platform", color = TowerTextPrimary, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(TowerSpacing.sm))
+                Box {
+                    OutlinedButton(
+                        onClick = { providerMenuOpen = true },
+                        enabled = !state.working && !state.loading && pendingAction == null,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(agentProviderName(state.selectedProvider)) }
+                    DropdownMenu(
+                        expanded = providerMenuOpen,
+                        onDismissRequest = { providerMenuOpen = false }
+                    ) {
+                        listOf("ANTIGRAVITY", "CODEX").forEach { provider ->
+                            DropdownMenuItem(
+                                text = { Text(agentProviderName(provider)) },
+                                onClick = {
+                                    providerMenuOpen = false
+                                    viewModel.selectProvider(provider)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         state.oneTimeToken?.let { token ->
             item {
                 OneTimeTokenPanel(
                     token = token,
+                    provider = state.oneTimeProvider ?: state.selectedProvider,
                     agentName = state.oneTimeAgentName.orEmpty(),
                     agentId = state.oneTimeAgentId.orEmpty(),
                     projectId = state.oneTimeProjectId.orEmpty(),
                     onCopy = {
-                        val clip = ClipData.newPlainText("Antigravity agent token", token)
+                        val clip = ClipData.newPlainText("Platform agent token", token)
                         if (Build.VERSION.SDK_INT >= 33) {
                             clip.description.extras = PersistableBundle().apply {
                                 putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
@@ -172,7 +202,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
 
         item {
             TowerSectionHeader(
-                title = "Create Antigravity agent",
+                title = "Create ${agentProviderName(state.selectedProvider)} connector",
                 subtitle = "The credential is limited to one selected project and five approval-only actions."
             )
         }
@@ -181,7 +211,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                 OutlinedTextField(
                     value = state.displayName,
                     onValueChange = viewModel::setDisplayName,
-                    label = { Text("Mac agent name") },
+                    label = { Text("Connector name") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -217,20 +247,20 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                     onClick = viewModel::createAgent,
                     enabled = !state.working && !state.loading && state.selectedProjectId != null,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text(if (state.working) "Working…" else "Create agent and issue token") }
+                ) { Text(if (state.working) "Working…" else "Create connector and issue token") }
             }
         }
 
         item {
             TowerSectionHeader(
-                title = "Existing Antigravity agents",
+                title = "Existing ${agentProviderName(state.selectedProvider)} connectors",
                 subtitle = "Rotate or revoke credentials when a Mac is replaced, lost, or no longer trusted."
             )
         }
         if (!state.loading && state.agents.isEmpty()) {
             item {
                 TowerPanel {
-                    Text("No Antigravity agent enrolled", color = TowerTextPrimary)
+                    Text("No ${agentProviderName(state.selectedProvider)} connector enrolled", color = TowerTextPrimary)
                     Spacer(Modifier.height(TowerSpacing.sm))
                     Text("Create an agent above to generate a one-time token.", color = TowerTextMuted)
                 }
@@ -311,16 +341,19 @@ private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRota
 @Composable
 private fun OneTimeTokenPanel(
     token: String,
+    provider: String,
     agentName: String,
     agentId: String,
     projectId: String,
     onCopy: () -> Unit,
     onHide: () -> Unit
 ) {
+    val providerName = agentProviderName(provider)
+    val hookDirectory = if (provider == "CODEX") "codex" else "antigravity"
     TowerPanel(elevated = true) {
         StatusBadge(label = "ONE-TIME SECRET", color = RiskMedium)
         Spacer(Modifier.height(TowerSpacing.sm))
-        Text("Save this token in macOS Keychain now", color = TowerTextPrimary, fontWeight = FontWeight.SemiBold)
+        Text("Save this $providerName token in macOS Keychain now", color = TowerTextPrimary, fontWeight = FontWeight.SemiBold)
         Text("It is held only in screen memory and is cleared when you hide it or leave the app.", color = TowerTextMuted, fontSize = 12.sp)
         Spacer(Modifier.height(TowerSpacing.sm))
         Text("Agent: $agentName", color = TowerTextMuted, fontSize = 12.sp)
@@ -340,16 +373,30 @@ private fun OneTimeTokenPanel(
         )
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
-            "Next, install the hook only in the Antigravity project you want to protect. Use the Control Tower API URL reachable from your Mac and that project's absolute folder path. The installer writes workspace-scoped settings and preserves other hooks.",
+            "Next, install the $providerName hook only in the project you want to protect. Use the Control Tower API URL reachable from your Mac and that project's absolute folder path. The installer writes project-scoped settings and preserves other hooks.",
             color = TowerTextMuted,
             fontSize = 11.sp,
             lineHeight = 16.sp
         )
         Text(
-            "python3 /ABSOLUTE/PATH/integrations/antigravity/setup_workspace.py \\\n  --workspace \"/ABSOLUTE/PATH/TO/PROJECT\" \\\n  --api-base-url \"https://CONTROL-TOWER-URL\" \\\n  --agent-id \"$agentId\" \\\n  --project-id \"$projectId\"",
+            "python3 /ABSOLUTE/PATH/integrations/$hookDirectory/setup_workspace.py \\\n  --workspace \"/ABSOLUTE/PATH/TO/PROJECT\" \\\n  --api-base-url \"https://CONTROL-TOWER-URL\" \\\n  --agent-id \"$agentId\" \\\n  --project-id \"$projectId\"",
             color = TowerTextPrimary,
             fontSize = 11.sp,
             lineHeight = 16.sp
         )
+        if (provider == "CODEX") {
+            Spacer(Modifier.height(TowerSpacing.sm))
+            Text(
+                "Open that project in Codex and review/trust the PermissionRequest hook when prompted. It covers local permission prompts only; verify the same paused Codex action continues after approval.",
+                color = TowerTextMuted,
+                fontSize = 11.sp,
+                lineHeight = 16.sp
+            )
+        }
     }
+}
+
+private fun agentProviderName(provider: String): String = when (provider) {
+    "CODEX" -> "Codex"
+    else -> "Antigravity"
 }

@@ -6,6 +6,7 @@ import com.aixion.controltower.core.api.dto.AgentCreateRequestDto
 import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.core.api.dto.AgentRegistrationResponseDto
 import com.aixion.controltower.core.api.dto.ExternalAgentDto
+import com.aixion.controltower.core.api.dto.LOCAL_APPROVAL_CONNECTOR_PROVIDERS
 import com.aixion.controltower.core.api.dto.ProjectDto
 
 data class AgentAccessSummary(
@@ -17,9 +18,12 @@ data class AgentAccessSummary(
 }
 
 class AgentAccessRepository(private val api: ControlTowerApi) {
-    suspend fun listAntigravityAgents(): List<AgentAccessSummary> =
-        api.listExternalAgents()
-            .filter { it.provider == "ANTIGRAVITY" }
+    suspend fun listApprovalAgents(provider: String): List<AgentAccessSummary> {
+        require(provider in LOCAL_APPROVAL_CONNECTOR_PROVIDERS) {
+            "Unsupported local approval connector provider"
+        }
+        return api.listExternalAgents()
+            .filter { it.provider == provider }
             .map { agent ->
                 val credentials = try {
                     api.getExternalAgentCredentials(agent.id)
@@ -30,15 +34,26 @@ class AgentAccessRepository(private val api: ControlTowerApi) {
                 }
                 AgentAccessSummary(agent, credentials)
             }
+    }
 
     suspend fun listProjects(): List<ProjectDto> = api.listProjects()
 
-    suspend fun createAntigravityAgent(
+    suspend fun createApprovalAgent(
         displayName: String,
-        projectId: String
-    ): AgentRegistrationResponseDto = api.createExternalAgent(
-        AgentCreateRequestDto(display_name = displayName.trim(), allowed_project_ids = listOf(projectId))
-    )
+        projectId: String,
+        provider: String
+    ): AgentRegistrationResponseDto {
+        require(provider in LOCAL_APPROVAL_CONNECTOR_PROVIDERS) {
+            "Unsupported local approval connector provider"
+        }
+        return api.createExternalAgent(
+            AgentCreateRequestDto(
+                provider = provider,
+                display_name = displayName.trim(),
+                allowed_project_ids = listOf(projectId)
+            )
+        )
+    }
 
     suspend fun rotateToken(agentId: String): AgentRegistrationResponseDto =
         api.rotateExternalAgentToken(agentId)

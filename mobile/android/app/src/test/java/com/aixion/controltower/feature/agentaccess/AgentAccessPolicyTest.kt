@@ -4,6 +4,7 @@ import com.aixion.controltower.core.api.dto.AgentCreateRequestDto
 import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.core.api.dto.ExternalAgentDto
 import com.aixion.controltower.core.api.dto.ANTIGRAVITY_APPROVAL_ACTIONS
+import com.aixion.controltower.core.api.dto.isExpectedApprovalConnectorAgent
 import com.aixion.controltower.core.api.dto.isExpectedAntigravityApprovalAgent
 import com.aixion.controltower.core.api.dto.webhookNativeSessionLimitation
 import com.aixion.controltower.data.repository.AgentAccessSummary
@@ -33,6 +34,22 @@ class AgentAccessPolicyTest {
             request.allowed_actions
         )
         assertEquals(ANTIGRAVITY_APPROVAL_ACTIONS, request.allowed_actions)
+        assertFalse(request.allowed_actions.contains("EXECUTE_GITHUB"))
+        assertFalse(request.allowed_actions.contains("APPROVE"))
+    }
+
+    @Test
+    fun codexConnectorRequestUsesTheSameLeastPrivilegeApprovalScope() {
+        val request = AgentCreateRequestDto(
+            provider = "CODEX",
+            display_name = "Codex test Mac",
+            allowed_project_ids = listOf("project-1")
+        )
+
+        assertEquals("CODEX", request.provider)
+        assertEquals("API_KEY", request.auth_type)
+        assertEquals(listOf("project-1"), request.allowed_project_ids)
+        assertEquals(ANTIGRAVITY_APPROVAL_ACTIONS.toSet(), request.allowed_actions.toSet())
         assertFalse(request.allowed_actions.contains("EXECUTE_GITHUB"))
         assertFalse(request.allowed_actions.contains("APPROVE"))
     }
@@ -110,5 +127,24 @@ class AgentAccessPolicyTest {
         assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS.dropLast(1) + "CREATE_APPROVAL"), "project-1"))
         assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(provider = "CODEX"), "project-1"))
         assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(auth_type = "OAUTH"), "project-1"))
+    }
+
+    @Test
+    fun approvalConnectorValidationRequiresSelectedProviderAndExactProjectScope() {
+        val codexAgent = ExternalAgentDto(
+            id = "codex-agent-1",
+            provider = "CODEX",
+            display_name = "Codex on Mac",
+            auth_type = "API_KEY",
+            allowed_project_ids = listOf("project-1"),
+            allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS
+        )
+
+        assertEquals(true, isExpectedApprovalConnectorAgent(codexAgent, "project-1", "CODEX"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent, "project-2", "CODEX"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent, "project-1", "ANTIGRAVITY"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent.copy(enabled = false), "project-1", "CODEX"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent.copy(allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS + "APPROVE"), "project-1", "CODEX"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent, "project-1", "OTHER"))
     }
 }

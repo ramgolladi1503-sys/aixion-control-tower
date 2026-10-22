@@ -49,11 +49,21 @@ val ANTIGRAVITY_APPROVAL_ACTIONS = listOf(
     "EXPIRE_OWN_APPROVAL"
 )
 
-fun isExpectedAntigravityApprovalAgent(agent: ExternalAgentDto, projectId: String): Boolean =
+val LOCAL_APPROVAL_CONNECTOR_PROVIDERS = listOf("ANTIGRAVITY", "CODEX")
+
+fun isExpectedApprovalConnectorAgent(
+    agent: ExternalAgentDto,
+    projectId: String,
+    provider: String
+): Boolean =
     agent.id.isNotBlank() &&
-        agent.provider == "ANTIGRAVITY" &&
+        provider in LOCAL_APPROVAL_CONNECTOR_PROVIDERS &&
+        agent.provider == provider &&
         agent.auth_type == "API_KEY" &&
         agent.enabled &&
         agent.allowed_project_ids == listOf(projectId) &&
         agent.allowed_actions.size == ANTIGRAVITY_APPROVAL_ACTIONS.size &&
         agent.allowed_actions.toSet() == ANTIGRAVITY_APPROVAL_ACTIONS.toSet()
+
+fun isExpectedAntigravityApprovalAgent(agent: ExternalAgentDto, projectId: String): Boolean =
+    isExpectedApprovalConnectorAgent(agent, projectId, "ANTIGRAVITY")
