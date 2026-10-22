@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -8,8 +9,10 @@ from .agent_run_faults import default_fault_reason
 from .agent_run_metrics import (
     build_agent_run_summary,
     prometheus_agent_run_metrics,
+    prometheus_postgres_agent_run_metrics,
 )
 from .application_repository_access import (
+    application_repositories_for_request,
     agent_task_repository_for_request,
     approval_decision_repository_for_request,
     agent_run_repository_for_request,
@@ -57,6 +60,10 @@ from .agent_run_repository import (
     PostgresAgentRunRepository,
     SQLiteAgentRunRepository,
 )
+from .application_repositories import ApplicationRepositories
+from .notification_outbox_repository import PostgresNotificationOutboxRepository
+from .postgres_trust_event_repository import PostgresTrustEventRepository
+from .postgres_trust_repository import PostgresTrustRepository
 from .approval_decisions import (
     agent_task_repository,
     approval_decision_repository,
@@ -75,6 +82,7 @@ from .workspace_access import (
 )
 
 router = APIRouter(prefix="/agent/runs", tags=["agent-runs"])
+logger = logging.getLogger(__name__)
 ReviewerDependency = Depends(require_reviewer)
 MaintainerDependency = Depends(require_maintainer)
 MetricsDependency = Depends(require_metrics_or_maintainer)
@@ -355,31 +363,134 @@ def get_run_metrics(
     user: AuthUser = MetricsDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> Response:
-    workspace_id = (
-        user.workspace_id if user.id == METRICS_SCRAPER_USER_ID else workspace_id_for_user(user)
-    )
-    notification_repository = (
-        getattr(http_request.app.state, "notification_outbox_repository", None)
+    postgres_auth_enabled = bool(get_settings().postgres_auth_enabled)
+    postgres_runtime = (
+        getattr(http_request.app.state, "postgres_runtime", None)
         if http_request is not None
         else None
     )
-    if http_request is not None:
-        run_repository = agent_run_repository_for_request(http_request)
-        postgres_runtime = getattr(http_request.app.state, "postgres_runtime", None)
-        if (
-            postgres_runtime is not None
-            or not isinstance(run_repository, SQLiteAgentRunRepository)
-            or notification_repository is not None
-        ):
+    postgres_bundle = (
+        getattr(http_request.app.state, "postgres_repositories", None)
+        if http_request is not None
+        else None
+    )
+    postgres_selected = (
+        postgres_runtime is not None
+        or postgres_bundle is not None
+        or postgres_auth_enabled
+    )
+    workspace_id = (
+        user.workspace_id
+        if user.id == METRICS_SCRAPER_USER_ID
+        else (
+            workspace_id_for_request(user, http_request)
+            if postgres_selected and postgres_auth_enabled and http_request is not None
+            else workspace_id_for_user(user)
+        )
+    )
+    if postgres_selected:
+        if user.id != METRICS_SCRAPER_USER_ID and not postgres_auth_enabled:
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "Agent-run metrics are unavailable while PostgreSQL is selected "
-                    "until run, trust, and notification metric families use the "
-                    "same durable runtime."
+                    "PostgreSQL metrics require the same durable runtime and "
+                    "PostgreSQL-backed authentication for maintainer workspace resolution"
                 ),
             )
-    content = prometheus_agent_run_metrics(workspace_id)
+        try:
+            if not workspace_id:
+                raise RuntimeError("PostgreSQL metrics require an authenticated workspace")
+            if http_request is None:
+                raise RuntimeError("PostgreSQL metrics require an app-bound request")
+            repositories = application_repositories_for_request(http_request)
+            state = http_request.app.state
+            required_bindings = {
+                "agent_run_repository": repositories.agent_runs,
+                "notification_outbox_repository": repositories.notification_outbox,
+                "trust_repository": repositories.trust,
+                "trust_event_repository": repositories.trust_events,
+            }
+            if (
+                not isinstance(repositories, ApplicationRepositories)
+                or not isinstance(repositories.agent_runs, PostgresAgentRunRepository)
+                or not isinstance(
+                    repositories.notification_outbox,
+                    PostgresNotificationOutboxRepository,
+                )
+                or not isinstance(repositories.trust, PostgresTrustRepository)
+                or not isinstance(
+                    repositories.trust_events,
+                    PostgresTrustEventRepository,
+                )
+                or any(
+                    getattr(state, state_name, None) is not repository
+                    for state_name, repository in required_bindings.items()
+                )
+                or getattr(postgres_runtime, "repositories", None) is not repositories
+            ):
+                raise RuntimeError("PostgreSQL metrics repository bundle is incomplete")
+
+            with postgres_runtime.connect() as conn:
+                conn.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                )
+                now = now_utc()
+                run_snapshot = repositories.agent_runs.metrics_snapshot(
+                    conn,
+                    workspace_id=workspace_id,
+                    now=now,
+                )
+                trust_snapshot = repositories.trust.metrics_snapshot(
+                    conn,
+                    workspace_id=workspace_id,
+                    now=now,
+                    trust_event_repository=repositories.trust_events,
+                )
+                notification_snapshot = (
+                    repositories.notification_outbox.metrics_snapshot(
+                        workspace_id=workspace_id,
+                        now=now,
+                        connection=conn,
+                    )
+                )
+            content = prometheus_postgres_agent_run_metrics(
+                workspace_id=workspace_id,
+                run_snapshot=run_snapshot,
+                trust_snapshot=trust_snapshot,
+                notification_snapshot=notification_snapshot,
+            )
+        except Exception as error:
+            # Do not project process-local maps or expose partial/stale metrics
+            # when any durable authority is unavailable or misbound.
+            logger.error(
+                "PostgreSQL AgentRun metrics unavailable; failure_type=%s",
+                type(error).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "PostgreSQL agent-run metrics require the same durable runtime "
+                    "for run, trust, and notification authorities"
+                ),
+            ) from error
+    else:
+        if http_request is not None:
+            run_repository = agent_run_repository_for_request(http_request)
+            notification_repository = getattr(
+                http_request.app.state, "notification_outbox_repository", None
+            )
+            if (
+                not isinstance(run_repository, SQLiteAgentRunRepository)
+                or notification_repository is not None
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Agent-run metrics require the same durable runtime for "
+                        "run, trust, and notification authorities"
+                    ),
+                )
+        content = prometheus_agent_run_metrics(workspace_id)
     return Response(
         content=content,
         media_type="text/plain; version=0.0.4",

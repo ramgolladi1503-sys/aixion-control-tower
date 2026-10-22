@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -43,6 +44,7 @@ class PostgresNotificationOutboxRepository:
         *,
         workspace_id: str,
         now: datetime | None = None,
+        connection: Connection | None = None,
     ) -> NotificationOutboxMetricsSnapshot:
         """Return one-snapshot delivery aggregates for an authenticated workspace."""
         if not workspace_id or not workspace_id.strip():
@@ -50,7 +52,8 @@ class PostgresNotificationOutboxRepository:
         current_time = now or now_utc()
         if current_time.utcoffset() is None:
             raise ValueError("Notification outbox metric time must be timezone-aware")
-        with self._connect() as conn:
+        connection_context = nullcontext(connection) if connection is not None else self._connect()
+        with connection_context as conn:
             rows = conn.execute(
                 "WITH scoped AS MATERIALIZED ("
                 "SELECT status,created_at FROM notifications WHERE workspace_id=%s"

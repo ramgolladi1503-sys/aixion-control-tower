@@ -4,9 +4,16 @@ from collections import Counter
 from datetime import datetime, timezone
 
 from .agent_run_models import AgentRunStatus, AgentRunStepStatus, AgentRunSummary
-from .agent_run_repository import AgentRunRepository
+from .agent_run_repository import (
+    AgentRunRepository,
+    PostgresAgentRunMetricsSnapshot,
+)
 from .store import store
-from .notification_outbox_repository import PostgresNotificationOutboxRepository
+from .notification_outbox_repository import (
+    NotificationOutboxMetricsSnapshot,
+    PostgresNotificationOutboxRepository,
+)
+from .postgres_trust_repository import PostgresTrustMetricsSnapshot
 from .trust_metrics import prometheus_trust_metrics
 from .workspace_access import agent_run_scope_is_consistent, agent_run_workspace_id
 
@@ -204,13 +211,18 @@ def prometheus_agent_run_metrics(workspace_id: str | None = None) -> str:
 
 
 def prometheus_postgres_notification_metrics(
-    repository: PostgresNotificationOutboxRepository,
+    repository: PostgresNotificationOutboxRepository | None,
     workspace_id: str | None,
+    *,
+    snapshot: NotificationOutboxMetricsSnapshot | None = None,
 ) -> str:
     """Expose explicit PostgreSQL outbox aggregates without leaking row identity."""
     if not workspace_id:
         raise ValueError("PostgreSQL notification metrics require workspace scope")
-    snapshot = repository.metrics_snapshot(workspace_id=workspace_id)
+    if snapshot is None:
+        if repository is None:
+            raise ValueError("A PostgreSQL notification metrics source is required")
+        snapshot = repository.metrics_snapshot(workspace_id=workspace_id)
     lines = [
         "# HELP aixion_postgres_push_notifications_total PostgreSQL push notifications by delivery state.",
         "# TYPE aixion_postgres_push_notifications_total gauge",
@@ -239,3 +251,96 @@ def prometheus_postgres_notification_metrics(
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def prometheus_postgres_agent_run_metrics(
+    *,
+    workspace_id: str,
+    run_snapshot: PostgresAgentRunMetricsSnapshot,
+    trust_snapshot: PostgresTrustMetricsSnapshot,
+    notification_snapshot: NotificationOutboxMetricsSnapshot,
+) -> str:
+    """Render only durable, same-snapshot workspace aggregates."""
+    if not workspace_id or not workspace_id.strip():
+        raise ValueError("PostgreSQL AgentRun metrics require a workspace")
+    lines = [
+        "# HELP aixion_agent_runs_total Durable agent runs by state.",
+        "# TYPE aixion_agent_runs_total gauge",
+    ]
+    for state in AgentRunStatus:
+        lines.append(
+            _metric_line(
+                "aixion_agent_runs_total",
+                run_snapshot.run_status_counts.get(state.value, 0),
+                {"status": state.value},
+            )
+        )
+    lines.extend(
+        [
+            "# HELP aixion_agent_run_steps_total Durable run steps by state and type.",
+            "# TYPE aixion_agent_run_steps_total gauge",
+        ]
+    )
+    for (step_type, state), count in sorted(run_snapshot.step_status_counts.items()):
+        lines.append(
+            _metric_line(
+                "aixion_agent_run_steps_total",
+                count,
+                {"step_type": step_type, "status": state},
+            )
+        )
+    lines.extend(
+        [
+            "# HELP aixion_agent_run_queue_depth Steps waiting for execution or retry.",
+            "# TYPE aixion_agent_run_queue_depth gauge",
+            _metric_line("aixion_agent_run_queue_depth", run_snapshot.queue_depth),
+            "# HELP aixion_agent_run_retry_attempts_total Total attempts beyond the first.",
+            "# TYPE aixion_agent_run_retry_attempts_total counter",
+            _metric_line("aixion_agent_run_retry_attempts_total", run_snapshot.retry_attempts),
+            "# HELP aixion_agent_run_duplicate_deliveries_total Duplicate callbacks ignored.",
+            "# TYPE aixion_agent_run_duplicate_deliveries_total counter",
+            _metric_line(
+                "aixion_agent_run_duplicate_deliveries_total",
+                run_snapshot.duplicate_deliveries,
+            ),
+            "# HELP aixion_agent_run_stale_lease_recoveries_total Expired leases recovered.",
+            "# TYPE aixion_agent_run_stale_lease_recoveries_total counter",
+            _metric_line(
+                "aixion_agent_run_stale_lease_recoveries_total",
+                run_snapshot.stale_lease_recoveries,
+            ),
+            "# HELP aixion_agent_run_step_duration_seconds Completed step duration.",
+            "# TYPE aixion_agent_run_step_duration_seconds summary",
+        ]
+    )
+    for step_type, (duration_sum, sample_count) in sorted(
+        run_snapshot.step_duration_seconds.items()
+    ):
+        labels = {"step_type": step_type}
+        lines.extend(
+            [
+                _metric_line(
+                    "aixion_agent_run_step_duration_seconds_sum", duration_sum, labels
+                ),
+                _metric_line(
+                    "aixion_agent_run_step_duration_seconds_count", sample_count, labels
+                ),
+            ]
+        )
+    lines.extend(
+        [
+            "# HELP aixion_agent_run_expired_leases Current expired run leases.",
+            "# TYPE aixion_agent_run_expired_leases gauge",
+            _metric_line("aixion_agent_run_expired_leases", run_snapshot.expired_leases),
+        ]
+    )
+    return (
+        "\n".join(lines)
+        + "\n"
+        + prometheus_trust_metrics(workspace_id, postgres_snapshot=trust_snapshot)
+        + prometheus_postgres_notification_metrics(
+            None,
+            workspace_id,
+            snapshot=notification_snapshot,
+        )
+    )

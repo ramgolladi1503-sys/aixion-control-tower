@@ -25,7 +25,7 @@ from app.agent_run_models import (
 )
 from app.agent_run_repository import AgentRunRepositoryConflict
 from app.agent_run_verifier import canonical_evidence_hash
-from app.agent_run_routes import MaintainerDependency, ReviewerDependency
+from app.agent_run_routes import MaintainerDependency, MetricsDependency, ReviewerDependency
 from app.agent_worker_validation_runner import (
     CommandExecutionResult,
     run_agent_worker_validation_commands,
@@ -221,6 +221,11 @@ def postgres_agent_run_route_runtime(
             ReviewerDependency.dependency,
             lambda: current_user["value"],
         )
+        monkeypatch.setitem(
+            main.app.dependency_overrides,
+            MetricsDependency.dependency,
+            lambda: current_user["value"],
+        )
 
         yield (
             connect,
@@ -240,6 +245,7 @@ def postgres_agent_run_route_runtime(
         main.app.dependency_overrides.pop(require_reviewer, None)
         main.app.dependency_overrides.pop(MaintainerDependency.dependency, None)
         main.app.dependency_overrides.pop(ReviewerDependency.dependency, None)
+        main.app.dependency_overrides.pop(MetricsDependency.dependency, None)
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
@@ -305,6 +311,149 @@ def test_postgres_agent_run_http_routes_create_read_and_scope_durable_records(
     assert scoped_list.status_code == 200
     assert [run["id"] for run in scoped_list.json()] == [run_id]
     assert hidden_detail.status_code == 404
+
+
+def test_postgres_agent_run_metrics_use_one_workspace_scoped_durable_snapshot(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, _project, other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    current_user = state["current_user"]
+    client = TestClient(main.app)
+
+    for selected_workspace in (workspace, other_workspace):
+        current_user["value"] = next(
+            user for user in state["users"] if user.workspace_id == selected_workspace.id
+        )
+        task_id = state["task_ids_by_workspace"][selected_workspace.id]
+        created = client.post("/agent/runs", json={"task_id": task_id})
+        assert created.status_code == 200, created.text
+
+    runtime = SimpleNamespace(repositories=repositories, connect=connect)
+    monkeypatch.setattr(
+        "app.agent_run_routes.get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        "app.agent_run_routes.workspace_id_for_request",
+        lambda user, _request: user.workspace_id,
+    )
+    monkeypatch.setattr(main.app.state, "postgres_runtime", runtime, raising=False)
+    monkeypatch.setattr(
+        main.app.state, "postgres_repositories", repositories, raising=False
+    )
+    for state_name, repository_name in {
+        "agent_run_repository": "agent_runs",
+        "notification_outbox_repository": "notification_outbox",
+        "trust_repository": "trust",
+        "trust_event_repository": "trust_events",
+    }.items():
+        monkeypatch.setattr(
+            main.app.state,
+            state_name,
+            getattr(repositories, repository_name),
+            raising=False,
+        )
+
+    def reject_process_map_fallback(*_args, **_kwargs):
+        raise AssertionError("PostgreSQL metrics must not read process-local maps")
+
+    monkeypatch.setattr(
+        "app.agent_run_routes.prometheus_agent_run_metrics",
+        reject_process_map_fallback,
+    )
+
+    current_user["value"] = state["users"][0]
+    own_metrics = client.get("/agent/runs/metrics")
+    assert own_metrics.status_code == 200, own_metrics.text
+    own_body = own_metrics.text
+    assert 'aixion_agent_runs_total{status="SCHEDULED"} 1' in own_body
+    assert "aixion_capability_leases_total" in own_body
+    assert "aixion_postgres_push_outbox_oldest_pending_age_seconds" in own_body
+    assert workspace.id not in own_body
+    assert other_workspace.id not in own_body
+
+    current_user["value"] = state["users"][1]
+    other_metrics = client.get("/agent/runs/metrics")
+    assert other_metrics.status_code == 200, other_metrics.text
+    assert 'aixion_agent_runs_total{status="SCHEDULED"} 1' in other_metrics.text
+
+    # Every repository in the scrape must be the exact lifespan-owned instance.
+    monkeypatch.setattr(main.app.state, "trust_event_repository", object())
+    mismatch = client.get("/agent/runs/metrics")
+    assert mismatch.status_code == 503
+
+
+def test_postgres_agent_run_metrics_fail_closed_on_query_error(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    current_user = state["current_user"]
+    current_user["value"] = state["users"][0]
+    runtime = SimpleNamespace(repositories=repositories, connect=connect)
+    monkeypatch.setattr(
+        "app.agent_run_routes.get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        "app.agent_run_routes.workspace_id_for_request",
+        lambda user, _request: user.workspace_id,
+    )
+    monkeypatch.setattr(main.app.state, "postgres_runtime", runtime, raising=False)
+    monkeypatch.setattr(
+        main.app.state, "postgres_repositories", repositories, raising=False
+    )
+    for state_name, repository_name in {
+        "agent_run_repository": "agent_runs",
+        "notification_outbox_repository": "notification_outbox",
+        "trust_repository": "trust",
+        "trust_event_repository": "trust_events",
+    }.items():
+        monkeypatch.setattr(
+            main.app.state,
+            state_name,
+            getattr(repositories, repository_name),
+            raising=False,
+        )
+
+    def fail_snapshot(*_args, **_kwargs):
+        raise RuntimeError("database read failed")
+
+    monkeypatch.setattr(repositories.agent_runs, "metrics_snapshot", fail_snapshot)
+    response = TestClient(main.app).get("/agent/runs/metrics")
+    assert response.status_code == 503
+    assert "database read failed" not in response.text
+
+
+def test_postgres_agent_run_metrics_reject_local_auth_maintainer(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, _workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    state["current_user"]["value"] = state["users"][0]
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_runtime",
+        SimpleNamespace(repositories=repositories, connect=connect),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        main.app.state, "postgres_repositories", repositories, raising=False
+    )
+
+    response = TestClient(main.app).get("/agent/runs/metrics")
+    assert response.status_code == 503
+    assert "PostgreSQL-backed authentication" in response.json()["detail"]
 
 
 def test_postgres_agent_run_http_control_transitions_are_durable_and_audited(

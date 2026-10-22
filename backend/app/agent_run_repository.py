@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import secrets
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
@@ -17,6 +18,7 @@ from .agent_run_models import (
     AgentRunStatus,
     AgentRunStep,
     AgentRunStepStatus,
+    AgentRunStepType,
 )
 from .agent_run_state_machine import can_transition_run, can_transition_step
 from .agent_task_models import AgentTask, AgentTaskStatus
@@ -38,6 +40,20 @@ class AgentRunRepositoryConflict(RuntimeError):
 
 class AgentRunRepositoryNotFound(AgentRunRepositoryConflict):
     """A workspace-scoped durable AgentRun or lease is not visible."""
+
+
+@dataclass(frozen=True)
+class PostgresAgentRunMetricsSnapshot:
+    """Workspace-scoped AgentRun aggregates read from a caller snapshot."""
+
+    run_status_counts: dict[str, int]
+    step_status_counts: dict[tuple[str, str], int]
+    queue_depth: int
+    retry_attempts: int
+    duplicate_deliveries: int
+    stale_lease_recoveries: int
+    step_duration_seconds: dict[str, tuple[float, int]]
+    expired_leases: int
 
 
 class AgentRunRepository(Protocol):
@@ -1583,6 +1599,112 @@ class PostgresAgentRunRepository:
                 )
             steps.append(step)
         return steps
+
+    def metrics_snapshot(
+        self,
+        conn: Connection,
+        *,
+        workspace_id: str,
+        now: datetime,
+    ) -> PostgresAgentRunMetricsSnapshot:
+        """Read bounded AgentRun aggregates using the caller's DB snapshot.
+
+        The migration constraints bind the indexed identity/status columns to
+        the JSON payload. Queries use those indexed columns and workspace
+        predicates, avoiding unbounded row materialization and process maps.
+        """
+        if not workspace_id or not workspace_id.strip():
+            raise ValueError("AgentRun metrics require a workspace")
+        if now.utcoffset() is None:
+            raise ValueError("AgentRun metrics time must be timezone-aware")
+
+        run_status_counts: dict[str, int] = {}
+        expired_leases = 0
+        for state, count, expired_count in conn.execute(
+            "SELECT status,COUNT(*)::bigint,"
+            "COUNT(*) FILTER (WHERE lease_expires_at IS NOT NULL "
+            "AND lease_expires_at<=%s)::bigint "
+            "FROM agent_runs WHERE workspace_id=%s GROUP BY status",
+            (now, workspace_id),
+        ).fetchall():
+            if state not in {item.value for item in AgentRunStatus}:
+                raise AgentRunRepositoryIntegrityError(
+                    "AgentRun metrics contain an unsupported state"
+                )
+            run_status_counts[state] = int(count)
+            expired_leases += int(expired_count)
+
+        step_status_counts: dict[tuple[str, str], int] = {}
+        step_duration_ms: dict[str, tuple[int, int]] = {}
+        queue_depth = 0
+        retry_attempts = 0
+        for step_type, state, count, retries, duration_ms, duration_count, queued in conn.execute(
+            "SELECT step.payload->>'step_type',step.status,COUNT(*)::bigint,"
+            "COALESCE(SUM(GREATEST(COALESCE((step.payload->>'attempt_count')::integer,1)-1,0)),0)::bigint,"
+            "COALESCE(SUM((step.payload->>'duration_ms')::integer) FILTER "
+            "(WHERE step.payload ? 'duration_ms' "
+            "AND step.payload->>'duration_ms' IS NOT NULL),0)::bigint,"
+            "COUNT(*) FILTER (WHERE step.payload ? 'duration_ms' "
+            "AND step.payload->>'duration_ms' IS NOT NULL)::bigint,"
+            "COUNT(*) FILTER (WHERE step.status IN ('PENDING','READY','RETRY_WAIT'))::bigint "
+            "FROM agent_run_steps AS step JOIN agent_runs AS run "
+            "ON run.run_id=step.run_id AND run.workspace_id=step.workspace_id "
+            "WHERE run.workspace_id=%s "
+            "GROUP BY step.payload->>'step_type',step.status",
+            (workspace_id,),
+        ).fetchall():
+            if (
+                step_type not in {item.value for item in AgentRunStepType}
+                or state not in {item.value for item in AgentRunStepStatus}
+            ):
+                raise AgentRunRepositoryIntegrityError(
+                    "AgentRun step metrics contain an unsupported type or state"
+                )
+            key = (step_type, state)
+            step_status_counts[key] = int(count)
+            retry_attempts += int(retries)
+            queue_depth += int(queued)
+            if duration_count:
+                prior_sum, prior_count = step_duration_ms.get(step_type, (0, 0))
+                step_duration_ms[step_type] = (
+                    prior_sum + int(duration_ms),
+                    prior_count + int(duration_count),
+                )
+
+        duplicate_deliveries = 0
+        stale_lease_recoveries = 0
+        for event_type, count in conn.execute(
+            "SELECT event.event_type,COUNT(*)::bigint FROM agent_run_events AS event "
+            "JOIN agent_runs AS run ON run.run_id=event.run_id "
+            "AND run.workspace_id=event.workspace_id "
+            "WHERE run.workspace_id=%s AND event.event_type=ANY(%s) "
+            "GROUP BY event.event_type",
+            (
+                workspace_id,
+                [
+                    AgentRunEventType.DUPLICATE_DELIVERY_IGNORED.value,
+                    AgentRunEventType.STALE_LEASE_RECOVERED.value,
+                ],
+            ),
+        ).fetchall():
+            if event_type == AgentRunEventType.DUPLICATE_DELIVERY_IGNORED.value:
+                duplicate_deliveries = int(count)
+            elif event_type == AgentRunEventType.STALE_LEASE_RECOVERED.value:
+                stale_lease_recoveries = int(count)
+
+        return PostgresAgentRunMetricsSnapshot(
+            run_status_counts=run_status_counts,
+            step_status_counts=step_status_counts,
+            queue_depth=queue_depth,
+            retry_attempts=retry_attempts,
+            duplicate_deliveries=duplicate_deliveries,
+            stale_lease_recoveries=stale_lease_recoveries,
+            step_duration_seconds={
+                step_type: (duration_sum / 1000.0, sample_count)
+                for step_type, (duration_sum, sample_count) in step_duration_ms.items()
+            },
+            expired_leases=expired_leases,
+        )
 
     def list_events_for_run(self, run_id: str) -> list[AgentRunEvent]:
         with self._connect() as conn:
