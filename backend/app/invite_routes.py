@@ -83,6 +83,7 @@ def record_invite_event(event_type: str, actor: AuthUser, invite: Invite) -> Non
             event_type=event_type,
             actor=actor.email,
             entity_id=invite.id,
+            workspace_id=invite.workspace_id,
             details={
                 "invite_id": invite.id,
                 "workspace_id": invite.workspace_id,

@@ -147,6 +147,7 @@ def test_invite_creation_and_revocation_audit_events_exist() -> None:
     ]
     assert store.audit_events[0].details["email"] == "new@example.com"
     assert store.audit_events[1].details["status"] == InviteStatus.REVOKED
+    assert all(event.workspace_id == owner.workspace_id for event in store.audit_events)
 
 
 def test_invite_validation_helper_accepts_only_pending_valid_token() -> None:
