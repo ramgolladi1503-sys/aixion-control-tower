@@ -4,7 +4,10 @@ import os
 import json
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterator
+from datetime import timedelta
+from threading import Barrier
 from types import SimpleNamespace
 
 import psycopg
@@ -425,6 +428,29 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
 
     accepted = client.post(f"/connectors/{connector_id}/webhook", content=body, headers=headers)
     replayed = client.post(f"/connectors/{connector_id}/webhook", content=body, headers=headers)
+    mismatched_body = json.dumps(
+        {
+            "action": "CREATE_AGENT_TASK",
+            "project_id": project.id,
+            "title": "Different request reusing the nonce",
+            "goal": "A nonce remains single-use even when a new valid body is signed.",
+        },
+        separators=(",", ":"),
+    ).encode()
+    mismatched_signature = expected_hmac_v1_signature(
+        hash_connector_secret(secret),
+        timestamp=timestamp,
+        nonce=replay_nonce,
+        body=mismatched_body,
+    )
+    mismatched = client.post(
+        f"/connectors/{connector_id}/webhook",
+        content=mismatched_body,
+        headers={
+            **headers,
+            "X-Aixion-Connector-Signature": f"v1={mismatched_signature}",
+        },
+    )
     limited_nonce = f"nonce_{uuid.uuid4().hex}"
     limited_headers = {
         **headers,
@@ -438,6 +464,8 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
     assert accepted.status_code == 200, accepted.text
     assert replayed.status_code == 401
     assert replayed.json()["detail"] == "Connector HMAC nonce has already been used"
+    assert mismatched.status_code == 401
+    assert mismatched.json()["detail"] == "Connector HMAC nonce has already been used"
     assert limited.status_code == 429
     task_id = accepted.json()["task_id"]
     with connect() as conn:
@@ -460,11 +488,528 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
     assert limited_nonce in connector_payload["config"]["hmac_nonce_history"]
     assert connector_payload["config"]["rate_limit_request_count"] == 2
     assert [row[0] for row in connector_audits].count("connector.webhook_authenticated") == 1
-    assert [row[0] for row in connector_audits].count("connector.webhook_auth_failed") == 1
+    assert [row[0] for row in connector_audits].count("connector.webhook_auth_failed") == 2
     assert [row[0] for row in connector_audits].count("connector.webhook_rate_limited") == 1
     assert set(store.agent_tasks) == before_task_ids
     assert connector_id not in store.agent_connectors
     assert set(store.agent_connectors) == before_connector_ids
+
+
+@pytest.mark.parametrize(
+    ("failure_entity_type", "failure_event_type"),
+    [
+        ("agent_task", "connector.webhook_task_created"),
+        ("connector", "connector.webhook_authenticated"),
+    ],
+)
+def test_postgres_webhook_create_rolls_back_auth_nonce_task_and_audits_on_write_failure(
+    postgres_connector_route_runtime,
+    failure_entity_type: str,
+    failure_event_type: str,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Atomic webhook project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+    client = TestClient(main.app)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": "Atomic webhook connector",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+    with connect() as conn:
+        original_connector_payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        conn.execute(
+            "CREATE FUNCTION reject_webhook_audit() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN IF NEW.entity_type = '" + failure_entity_type + "' AND NEW.event_type = '"
+            + failure_event_type + "' THEN RAISE EXCEPTION 'injected webhook audit failure'; "
+            "END IF; RETURN NEW; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_webhook_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_webhook_audit()"
+        )
+    body = json.dumps(
+        {
+            "action": "CREATE_AGENT_TASK",
+            "project_id": project.id,
+            "title": "Must roll back",
+            "goal": "A failed acceptance transaction must leave no partial state.",
+        },
+        separators=(",", ":"),
+    ).encode()
+    timestamp = str(int(time.time()))
+    nonce = f"atomic_{uuid.uuid4().hex}"
+    signature = expected_hmac_v1_signature(
+        hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+    )
+    headers = {
+        "X-Aixion-Signature-Version": "v1",
+        "X-Aixion-Timestamp": timestamp,
+        "X-Aixion-Nonce": nonce,
+        "X-Aixion-Connector-Signature": f"v1={signature}",
+        "Content-Type": "application/json",
+    }
+
+    response = TestClient(main.app, raise_server_exceptions=False).post(
+        f"/connectors/{connector_id}/webhook", content=body, headers=headers
+    )
+
+    assert response.status_code == 500
+    with connect() as conn:
+        stored_connector_payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        task_count = conn.execute(
+            "SELECT count(*) FROM agent_tasks WHERE workspace_id=%s", (workspace.id,)
+        ).fetchone()[0]
+        webhook_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s AND event_type LIKE 'connector.webhook_%%'",
+            (connector_id,),
+        ).fetchone()[0]
+    assert stored_connector_payload == original_connector_payload
+    assert task_count == 0
+    assert webhook_audits == 0
+    assert nonce not in stored_connector_payload["config"].get("hmac_nonce_history", {})
+
+
+def test_postgres_webhook_append_failure_rolls_back_connector_and_task_event(
+    postgres_connector_route_runtime,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Atomic append project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+    client = TestClient(main.app)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": "Atomic append connector",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK", "APPEND_AGENT_TASK_EVENT"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+
+    def send(body: bytes, nonce: str):
+        timestamp = str(int(time.time()))
+        signature = expected_hmac_v1_signature(
+            hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+        )
+        return client.post(
+            f"/connectors/{connector_id}/webhook",
+            content=body,
+            headers={
+                "X-Aixion-Signature-Version": "v1",
+                "X-Aixion-Timestamp": timestamp,
+                "X-Aixion-Nonce": nonce,
+                "X-Aixion-Connector-Signature": f"v1={signature}",
+                "Content-Type": "application/json",
+            },
+        )
+
+    create_body = json.dumps(
+        {
+            "action": "CREATE_AGENT_TASK",
+            "project_id": project.id,
+            "title": "Append rollback target",
+            "goal": "Retain its original status and event list.",
+        },
+        separators=(",", ":"),
+    ).encode()
+    accepted = send(create_body, f"create_{uuid.uuid4().hex}")
+    assert accepted.status_code == 200, accepted.text
+    task_id = accepted.json()["task_id"]
+    with connect() as conn:
+        original_connector_payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        original_task = conn.execute(
+            "SELECT status,payload FROM agent_tasks WHERE task_id=%s", (task_id,)
+        ).fetchone()
+        original_event_count = conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s", (task_id,)
+        ).fetchone()[0]
+        conn.execute(
+            "CREATE FUNCTION reject_append_audit() RETURNS trigger LANGUAGE plpgsql AS $$ "
+            "BEGIN IF NEW.entity_type = 'agent_task' AND NEW.event_type = "
+            "'connector.webhook_task_event_appended' THEN RAISE EXCEPTION 'injected append audit failure'; "
+            "END IF; RETURN NEW; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_append_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_append_audit()"
+        )
+    append_body = json.dumps(
+        {
+            "action": "APPEND_AGENT_TASK_EVENT",
+            "task_id": task_id,
+            "event_type": "NOTE",
+            "message": "This append must roll back.",
+            "status": "EXECUTING",
+        },
+        separators=(",", ":"),
+    ).encode()
+    append_nonce = f"append_{uuid.uuid4().hex}"
+    append_timestamp = str(int(time.time()))
+    append_signature = expected_hmac_v1_signature(
+        hash_connector_secret(secret), timestamp=append_timestamp,
+        nonce=append_nonce, body=append_body,
+    )
+    failed = TestClient(main.app, raise_server_exceptions=False).post(
+        f"/connectors/{connector_id}/webhook",
+        content=append_body,
+        headers={
+            "X-Aixion-Signature-Version": "v1",
+            "X-Aixion-Timestamp": append_timestamp,
+            "X-Aixion-Nonce": append_nonce,
+            "X-Aixion-Connector-Signature": f"v1={append_signature}",
+            "Content-Type": "application/json",
+        },
+    )
+    assert failed.status_code == 500
+    with connect() as conn:
+        final_connector_payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        final_task = conn.execute(
+            "SELECT status,payload FROM agent_tasks WHERE task_id=%s", (task_id,)
+        ).fetchone()
+        final_event_count = conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s", (task_id,)
+        ).fetchone()[0]
+    assert final_connector_payload == original_connector_payload
+    assert final_task == original_task
+    assert final_event_count == original_event_count
+    assert append_nonce not in final_connector_payload["config"].get("hmac_nonce_history", {})
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_status"),
+    [
+        (b"{malformed-json", 400),
+        (b'{"action":"APPEND_AGENT_TASK_EVENT","task_id":"unused"}', 403),
+    ],
+)
+def test_postgres_webhook_refusals_keep_authentication_and_refusal_audits(
+    postgres_connector_route_runtime,
+    body: bytes,
+    expected_status: int,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Refused webhook project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+    client = TestClient(main.app)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": "Refused webhook connector",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+    nonce = f"refused_{uuid.uuid4().hex}"
+    timestamp = str(int(time.time()))
+    signature = expected_hmac_v1_signature(
+        hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+    )
+
+    response = client.post(
+        f"/connectors/{connector_id}/webhook",
+        content=body,
+        headers={
+            "X-Aixion-Signature-Version": "v1",
+            "X-Aixion-Timestamp": timestamp,
+            "X-Aixion-Nonce": nonce,
+            "X-Aixion-Connector-Signature": f"v1={signature}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == expected_status, response.text
+    with connect() as conn:
+        payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        webhook_audits = conn.execute(
+            "SELECT event_type FROM audit_events WHERE entity_id=%s "
+            "AND event_type LIKE 'connector.webhook_%%' ORDER BY created_at,event_id",
+            (connector_id,),
+        ).fetchall()
+        task_count = conn.execute(
+            "SELECT count(*) FROM agent_tasks WHERE workspace_id=%s", (workspace.id,)
+        ).fetchone()[0]
+    assert nonce in payload["config"]["hmac_nonce_history"]
+    assert [row[0] for row in webhook_audits] == [
+        "connector.webhook_authenticated",
+        "connector.webhook_refused",
+    ]
+    assert task_count == 0
+
+
+def test_postgres_webhook_concurrent_duplicate_nonce_accepts_at_most_once(
+    postgres_connector_route_runtime,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Concurrent webhook project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+    setup_client = TestClient(main.app)
+    created = setup_client.post(
+        "/connectors",
+        json={
+            "name": "Concurrent webhook connector",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = setup_client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+    body = json.dumps(
+        {
+            "action": "CREATE_AGENT_TASK",
+            "project_id": project.id,
+            "title": "Concurrent replay target",
+            "goal": "Only one transaction may consume this nonce and create the task.",
+        },
+        separators=(",", ":"),
+    ).encode()
+    nonce = f"concurrent_{uuid.uuid4().hex}"
+    timestamp = str(int(time.time()))
+    signature = expected_hmac_v1_signature(
+        hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+    )
+    headers = {
+        "X-Aixion-Signature-Version": "v1",
+        "X-Aixion-Timestamp": timestamp,
+        "X-Aixion-Nonce": nonce,
+        "X-Aixion-Connector-Signature": f"v1={signature}",
+        "Content-Type": "application/json",
+    }
+    start = Barrier(2)
+    clients = [TestClient(main.app), TestClient(main.app)]
+
+    def request_once(client: TestClient) -> int:
+        start.wait(timeout=5)
+        return client.post(
+            f"/connectors/{connector_id}/webhook", content=body, headers=headers
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(request_once, clients))
+
+    assert responses.count(200) == 1
+    assert responses.count(401) == 1
+    with connect() as conn:
+        tasks = conn.execute(
+            "SELECT task_id FROM agent_tasks WHERE workspace_id=%s", (workspace.id,)
+        ).fetchall()
+        task_events = conn.execute(
+            "SELECT event_id FROM agent_task_events WHERE workspace_id=%s", (workspace.id,)
+        ).fetchall()
+        accepted_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='connector.webhook_task_created' "
+            "AND entity_type='agent_task'"
+        ).fetchone()[0]
+        authenticated_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='connector.webhook_authenticated'",
+            (connector_id,),
+        ).fetchone()[0]
+    assert len(tasks) == 1
+    assert len(task_events) == 1
+    assert accepted_audits == 1
+    assert authenticated_audits == 1
+
+
+def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict(
+    postgres_connector_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Stale webhook project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+    client = TestClient(main.app)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": "Stale webhook connector",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+
+    def send(title: str, nonce: str):
+        body = json.dumps(
+            {
+                "action": "CREATE_AGENT_TASK",
+                "project_id": project.id,
+                "title": title,
+                "goal": "Detect stale connector state without misclassifying old nonce history.",
+            },
+            separators=(",", ":"),
+        ).encode()
+        timestamp = str(int(time.time()))
+        signature = expected_hmac_v1_signature(
+            hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+        )
+        return client.post(
+            f"/connectors/{connector_id}/webhook",
+            content=body,
+            headers={
+                "X-Aixion-Signature-Version": "v1",
+                "X-Aixion-Timestamp": timestamp,
+                "X-Aixion-Nonce": nonce,
+                "X-Aixion-Connector-Signature": f"v1={signature}",
+                "Content-Type": "application/json",
+            },
+        )
+
+    previously_consumed_nonce = f"prior_{uuid.uuid4().hex}"
+    accepted = send("Previously committed task", previously_consumed_nonce)
+    assert accepted.status_code == 200, accepted.text
+
+    original_commit = PostgresConnectorRepository.commit_webhook_action
+
+    def apply_unrelated_concurrent_update(
+        repository: PostgresConnectorRepository,
+        *,
+        connector: AgentConnector,
+        request_nonce: str | None,
+        expected_updated_at,
+        audit_event: AuditEvent,
+        write_action,
+    ):
+        durable = repository.get_for_authentication(connector.id)
+        assert durable is not None
+        prior_updated_at = durable.updated_at
+        durable.config = {**durable.config, "concurrent_test_marker": "updated"}
+        durable.updated_at = min(
+            prior_updated_at + timedelta(seconds=1),
+            connector.updated_at - timedelta(microseconds=1),
+        )
+        assert durable.updated_at > prior_updated_at
+        repository.update(
+            connector=durable,
+            expected_updated_at=prior_updated_at,
+            audit_event=AuditEvent(
+                event_type="connector.concurrent_test_update",
+                entity_id=durable.id,
+                workspace_id=durable.workspace_id,
+                actor=f"connector:{durable.id}",
+                details={"test_only": True},
+            ),
+        )
+        return original_commit(
+            repository,
+            connector=connector,
+            request_nonce=request_nonce,
+            expected_updated_at=expected_updated_at,
+            audit_event=audit_event,
+            write_action=write_action,
+        )
+
+    monkeypatch.setattr(
+        PostgresConnectorRepository,
+        "commit_webhook_action",
+        apply_unrelated_concurrent_update,
+    )
+    fresh_nonce = f"fresh_{uuid.uuid4().hex}"
+    stale_request = send("Must not be created", fresh_nonce)
+    assert stale_request.status_code == 409
+
+    with connect() as conn:
+        payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        task_count = conn.execute(
+            "SELECT count(*) FROM agent_tasks WHERE workspace_id=%s", (workspace.id,)
+        ).fetchone()[0]
+    assert payload["config"]["concurrent_test_marker"] == "updated"
+    assert fresh_nonce not in payload["config"].get("hmac_nonce_history", {})
+    assert task_count == 1
+
+    replay = send("Previously committed task", previously_consumed_nonce)
+    assert replay.status_code == 401, replay.text
 
 
 def test_postgres_hmac_failure_updates_postgres_without_sqlite_persist(

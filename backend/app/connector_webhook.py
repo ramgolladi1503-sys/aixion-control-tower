@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from psycopg import Connection
 
 from .agent_task_models import (
     AgentTask,
@@ -31,6 +32,7 @@ from .connector_repository import (
     ConnectorRepository,
     ConnectorRepositoryConflict,
     ConnectorRepositoryScopeError,
+    ConnectorWebhookReplay,
 )
 from .project_repository import ProjectRepository
 from .workspace_membership_repository import WorkspaceMembershipRepository
@@ -308,6 +310,7 @@ def _create_task_from_connector(
     project_repository: ProjectRepository | None = None,
     workspace_memberships: WorkspaceMembershipRepository | None = None,
     project_to_store: bool = True,
+    task_connection: Connection | None = None,
 ) -> ConnectorWebhookResponse:
     if not connector_scope_is_consistent(
         connector, projects=project_repository, memberships=workspace_memberships
@@ -338,7 +341,13 @@ def _create_task_from_connector(
         details={"connector_id": connector.id, "project_id": task.project_id, "repository": task.repository, "requested_action": task.requested_action},
     )
     try:
-        (task_repository or agent_task_repository).create(task=task, event=event, audit=audit_event)
+        selected_repository = task_repository or agent_task_repository
+        if task_connection is None:
+            selected_repository.create(task=task, event=event, audit=audit_event)
+        else:
+            selected_repository.create_in_transaction(
+                task_connection, task=task, event=event, audit=audit_event
+            )
     except (AgentTaskRepositoryConflict, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if project_to_store:
@@ -354,6 +363,7 @@ def _append_task_event_from_connector(
     project_repository: ProjectRepository | None = None,
     workspace_memberships: WorkspaceMembershipRepository | None = None,
     project_to_store: bool = True,
+    task_connection: Connection | None = None,
 ) -> ConnectorWebhookResponse:
     if not connector_scope_is_consistent(
         connector, projects=project_repository, memberships=workspace_memberships
@@ -407,12 +417,21 @@ def _append_task_event_from_connector(
         },
     )
     try:
-        selected_task_repository.commit_event(
-            expected=task,
-            updated=updated_task,
-            event=event,
-            audit=audit_event,
-        )
+        if task_connection is None:
+            selected_task_repository.commit_event(
+                expected=task,
+                updated=updated_task,
+                event=event,
+                audit=audit_event,
+            )
+        else:
+            selected_task_repository.commit_event_in_transaction(
+                task_connection,
+                expected=task,
+                updated=updated_task,
+                event=event,
+                audit=audit_event,
+            )
     except (AgentTaskRepositoryConflict, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if project_to_store:
@@ -477,32 +496,82 @@ async def handle_connector_webhook(
                 details={"limit": connector.rate_limit_per_minute},
             )
         raise
-    if repository_mode:
-        _commit_webhook_connector_update(
-            connector_repository,
-            connector,
-            expected_updated_at=expected_updated_at,
-            event_type="connector.webhook_authenticated",
-            details={"body_sha256": _body_hash(body), "auth_type": connector.auth_type.value},
-        )
-        expected_updated_at = connector.updated_at
     try:
         raw_payload = await request.json()
         normalized_payload = normalize_connector_payload(connector, raw_payload)
         payload = ConnectorWebhookPayload.model_validate(normalized_payload)
     except Exception as error:
-        record_connector_auth_failure(connector, "invalid webhook payload")
         details = {"reason": "invalid webhook payload", "error": type(error).__name__}
         if repository_mode:
-            _commit_webhook_connector_update(
-                connector_repository, connector,
+            _commit_authenticated_refusal(
+                connector_repository,
+                connector,
                 expected_updated_at=expected_updated_at,
-                event_type="connector.webhook_refused", details=details,
+                body=body,
+                details=details,
             )
         else:
+            record_connector_auth_failure(connector, "invalid webhook payload")
             _audit("connector.webhook_refused", connector.id, details, actor=f"connector:{connector.id}")
             store.persist()
         raise HTTPException(status_code=400, detail="Invalid connector webhook payload") from error
+
+    if repository_mode:
+        if connector.updated_at <= expected_updated_at:
+            connector.updated_at = now_utc()
+        connector_audit = AuditEvent(
+            event_type="connector.webhook_authenticated",
+            entity_id=connector.id,
+            workspace_id=connector.workspace_id,
+            actor=f"connector:{connector.id}",
+            details={"body_sha256": _body_hash(body), "auth_type": connector.auth_type.value},
+        )
+
+        def write_action(conn: Connection) -> ConnectorWebhookResponse:
+            if payload.action == AgentAction.CREATE_AGENT_TASK:
+                return _create_task_from_connector(
+                    connector, payload, task_repository=task_repository,
+                    project_repository=project_repository,
+                    workspace_memberships=workspace_memberships,
+                    project_to_store=False, task_connection=conn,
+                )
+            if payload.action == AgentAction.APPEND_AGENT_TASK_EVENT:
+                return _append_task_event_from_connector(
+                    connector, payload, task_repository=task_repository,
+                    project_repository=project_repository,
+                    workspace_memberships=workspace_memberships,
+                    project_to_store=False, task_connection=conn,
+                )
+            raise HTTPException(
+                status_code=403,
+                detail=f"Connector webhook action is not supported: {payload.action.value}",
+            )
+
+        try:
+            return connector_repository.commit_webhook_action(
+                connector=connector,
+                request_nonce=x_aixion_nonce,
+                expected_updated_at=expected_updated_at,
+                audit_event=connector_audit,
+                write_action=write_action,
+            )
+        except ConnectorWebhookReplay as error:
+            raise HTTPException(status_code=401, detail=str(error)) from error
+        except ConnectorRepositoryConflict as error:
+            raise HTTPException(status_code=409, detail="Connector state changed; retry webhook") from error
+        except ConnectorRepositoryScopeError as error:
+            raise HTTPException(status_code=404, detail="Connector not found") from error
+        except HTTPException as error:
+            details = {"reason": str(error.detail), "action": payload.action.value}
+            _commit_authenticated_refusal(
+                connector_repository,
+                connector,
+                expected_updated_at=expected_updated_at,
+                body=body,
+                details=details,
+            )
+            raise
+
     try:
         if payload.action == AgentAction.CREATE_AGENT_TASK:
             response = _create_task_from_connector(
@@ -565,3 +634,30 @@ def _commit_webhook_connector_update(
         raise HTTPException(status_code=409, detail="Connector state changed; retry webhook") from error
     except ConnectorRepositoryScopeError as error:
         raise HTTPException(status_code=404, detail="Connector not found") from error
+
+
+def _commit_authenticated_refusal(
+    repository: ConnectorRepository,
+    connector: AgentConnector,
+    *,
+    expected_updated_at: datetime,
+    body: bytes,
+    details: dict[str, Any],
+) -> None:
+    """Preserve authenticated and refusal audit records for rejected requests."""
+    _commit_webhook_connector_update(
+        repository,
+        connector,
+        expected_updated_at=expected_updated_at,
+        event_type="connector.webhook_authenticated",
+        details={"body_sha256": _body_hash(body), "auth_type": connector.auth_type.value},
+    )
+    authenticated_updated_at = connector.updated_at
+    record_connector_auth_failure(connector, str(details.get("reason", "webhook refused")))
+    _commit_webhook_connector_update(
+        repository,
+        connector,
+        expected_updated_at=authenticated_updated_at,
+        event_type="connector.webhook_refused",
+        details=details,
+    )

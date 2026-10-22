@@ -3,11 +3,11 @@ package com.aixion.controltower.core.ui.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
@@ -31,13 +31,12 @@ fun StatusCard(
         Text(
             text = title.uppercase(),
             color = TowerTextMuted,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Medium,
+            style = MaterialTheme.typography.labelSmall,
             letterSpacing = 1.4.sp
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Text(text = value, color = accent, fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
+        Text(text = value, color = accent, style = MaterialTheme.typography.headlineMedium)
         Spacer(modifier = Modifier.height(4.dp))
-        Text(text = subtitle, color = TowerTextPrimary.copy(alpha = 0.7f), fontSize = 12.sp, lineHeight = 17.sp)
+        Text(text = subtitle, color = TowerTextPrimary, style = MaterialTheme.typography.bodySmall)
     }
 }

@@ -209,6 +209,11 @@ def _validate_event_commit(
 class AgentTaskRepository(Protocol):
     def create(self, *, task: AgentTask, event: AgentTaskEvent, audit: AuditEvent) -> None: ...
 
+    def create_in_transaction(
+        self, conn: psycopg.Connection, *, task: AgentTask,
+        event: AgentTaskEvent, audit: AuditEvent,
+    ) -> None: ...
+
     def get(self, task_id: str) -> AgentTask | None: ...
 
     def list_for_approval(self, approval_request_id: str) -> list[AgentTask]: ...
@@ -244,6 +249,12 @@ class AgentTaskRepository(Protocol):
     def commit_event(
         self, *, expected: AgentTask, updated: AgentTask, event: AgentTaskEvent,
         audit: AuditEvent, notification: Notification | None = None,
+    ) -> None: ...
+
+    def commit_event_in_transaction(
+        self, conn: psycopg.Connection, *, expected: AgentTask,
+        updated: AgentTask, event: AgentTaskEvent, audit: AuditEvent,
+        notification: Notification | None = None,
     ) -> None: ...
 
     def claim(
@@ -900,6 +911,18 @@ class PostgresAgentTaskRepository:
         self._connect = connect
 
     def create(self, *, task: AgentTask, event: AgentTaskEvent, audit: AuditEvent) -> None:
+        with self._connect() as conn:
+            self.create_in_transaction(conn, task=task, event=event, audit=audit)
+
+    def create_in_transaction(
+        self,
+        conn: psycopg.Connection,
+        *,
+        task: AgentTask,
+        event: AgentTaskEvent,
+        audit: AuditEvent,
+    ) -> None:
+        """Write a task, its initial event, and audit using the caller's transaction."""
         if (
             not task.workspace_id
             or not task.project_id
@@ -914,33 +937,32 @@ class PostgresAgentTaskRepository:
             }
         ):
             raise ValueError("PostgreSQL AgentTask creation requires matching workspace-scoped records.")
+        project = conn.execute(
+            "SELECT workspace_id FROM projects WHERE project_id=%s FOR KEY SHARE",
+            (task.project_id,),
+        ).fetchone()
+        if project is None or project[0] != task.workspace_id:
+            raise AgentTaskRepositoryConflict("AgentTask project is missing or outside its workspace.")
         try:
-            with self._connect() as conn:
-                project = conn.execute(
-                    "SELECT workspace_id FROM projects WHERE project_id=%s FOR KEY SHARE",
-                    (task.project_id,),
-                ).fetchone()
-                if project is None or project[0] != task.workspace_id:
-                    raise AgentTaskRepositoryConflict("AgentTask project is missing or outside its workspace.")
-                conn.execute(
-                    "INSERT INTO agent_tasks(task_id,project_id,workspace_id,external_agent_id,"
-                    "approval_request_id,status,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (task.id, task.project_id, task.workspace_id, task.external_agent_id,
-                     task.approval_request_id, task.status.value, task.updated_at,
-                     Jsonb(task.model_dump(mode="json"))),
-                )
-                conn.execute(
-                    "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                    (event.id, task.id, task.workspace_id, event.event_type.value, event.actor,
-                     event.created_at, Jsonb(event.model_dump(mode="json"))),
-                )
-                conn.execute(
-                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
-                    "actor,details,created_at,payload) VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
-                    (audit.id, task.workspace_id, task.id, audit.event_type, audit.actor,
-                     Jsonb(audit.details), audit.created_at, Jsonb(audit.model_dump(mode="json"))),
-                )
+            conn.execute(
+                "INSERT INTO agent_tasks(task_id,project_id,workspace_id,external_agent_id,"
+                "approval_request_id,status,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (task.id, task.project_id, task.workspace_id, task.external_agent_id,
+                 task.approval_request_id, task.status.value, task.updated_at,
+                 Jsonb(task.model_dump(mode="json"))),
+            )
+            conn.execute(
+                "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (event.id, task.id, task.workspace_id, event.event_type.value, event.actor,
+                 event.created_at, Jsonb(event.model_dump(mode="json"))),
+            )
+            conn.execute(
+                "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
+                "actor,details,created_at,payload) VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                (audit.id, task.workspace_id, task.id, audit.event_type, audit.actor,
+                 Jsonb(audit.details), audit.created_at, Jsonb(audit.model_dump(mode="json"))),
+            )
         except psycopg.errors.UniqueViolation as exc:
             raise AgentTaskRepositoryConflict("AgentTask creation identifiers already exist.") from exc
 
@@ -1224,53 +1246,73 @@ class PostgresAgentTaskRepository:
         self, *, expected: AgentTask, updated: AgentTask, event: AgentTaskEvent,
         audit: AuditEvent, notification: Notification | None = None,
     ) -> None:
+        with self._connect() as conn:
+            self.commit_event_in_transaction(
+                conn,
+                expected=expected,
+                updated=updated,
+                event=event,
+                audit=audit,
+                notification=notification,
+            )
+
+    def commit_event_in_transaction(
+        self,
+        conn: psycopg.Connection,
+        *,
+        expected: AgentTask,
+        updated: AgentTask,
+        event: AgentTaskEvent,
+        audit: AuditEvent,
+        notification: Notification | None = None,
+    ) -> None:
+        """Append an event and task audit using the caller's transaction."""
         _validate_event_commit(expected, updated, event, audit, notification)
         if not expected.workspace_id or not expected.project_id:
             raise ValueError("PostgreSQL AgentTask event requires persisted workspace ownership.")
+        row = conn.execute(
+            "SELECT workspace_id,project_id,payload FROM agent_tasks "
+            "WHERE task_id=%s FOR UPDATE",
+            (expected.id,),
+        ).fetchone()
+        if row is None or row[0] != expected.workspace_id or row[1] != expected.project_id:
+            raise AgentTaskRepositoryConflict("AgentTask is missing or outside its workspace.")
+        durable = AgentTask.model_validate(row[2])
+        if durable != expected:
+            raise AgentTaskRepositoryConflict("AgentTask changed before event committed.")
         try:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT workspace_id,project_id,payload FROM agent_tasks "
-                    "WHERE task_id=%s FOR UPDATE",
-                    (expected.id,),
-                ).fetchone()
-                if row is None or row[0] != expected.workspace_id or row[1] != expected.project_id:
-                    raise AgentTaskRepositoryConflict("AgentTask is missing or outside its workspace.")
-                durable = AgentTask.model_validate(row[2])
-                if durable != expected:
-                    raise AgentTaskRepositoryConflict("AgentTask changed before event committed.")
-                changed = conn.execute(
-                    "UPDATE agent_tasks SET status=%s,updated_at=%s,payload=%s "
-                    "WHERE task_id=%s AND workspace_id=%s AND payload=%s",
-                    (updated.status.value, updated.updated_at,
-                     Jsonb(updated.model_dump(mode="json")), expected.id,
-                     expected.workspace_id, Jsonb(expected.model_dump(mode="json"))),
-                )
-                if changed.rowcount != 1:
-                    raise AgentTaskRepositoryConflict("AgentTask changed during event commit.")
+            changed = conn.execute(
+                "UPDATE agent_tasks SET status=%s,updated_at=%s,payload=%s "
+                "WHERE task_id=%s AND workspace_id=%s AND payload=%s",
+                (updated.status.value, updated.updated_at,
+                 Jsonb(updated.model_dump(mode="json")), expected.id,
+                 expected.workspace_id, Jsonb(expected.model_dump(mode="json"))),
+            )
+            if changed.rowcount != 1:
+                raise AgentTaskRepositoryConflict("AgentTask changed during event commit.")
+            conn.execute(
+                "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (event.id, updated.id, updated.workspace_id, event.event_type.value,
+                 event.actor, event.created_at, Jsonb(event.model_dump(mode="json"))),
+            )
+            conn.execute(
+                "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
+                "actor,details,created_at,payload) VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                (audit.id, audit.workspace_id, audit.entity_id, audit.event_type, audit.actor,
+                 Jsonb(audit.details), audit.created_at, Jsonb(audit.model_dump(mode="json"))),
+            )
+            if notification is not None:
                 conn.execute(
-                    "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
-                    (event.id, updated.id, updated.workspace_id, event.event_type.value,
-                     event.actor, event.created_at, Jsonb(event.model_dump(mode="json"))),
+                    "INSERT INTO notifications(notification_id,workspace_id,user_id,approval_id,task_id,"
+                    "entity_type,status,attempts,next_attempt_at,lease_expires_at,created_at,payload) "
+                    "VALUES(%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (notification.id, notification.workspace_id, notification.user_id,
+                     updated.id, notification.entity_type, notification.push_status,
+                     notification.push_attempts, notification.push_next_attempt_at,
+                     notification.push_lease_expires_at, notification.created_at,
+                     Jsonb(notification.model_dump(mode="json"))),
                 )
-                conn.execute(
-                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
-                    "actor,details,created_at,payload) VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
-                    (audit.id, audit.workspace_id, audit.entity_id, audit.event_type, audit.actor,
-                     Jsonb(audit.details), audit.created_at, Jsonb(audit.model_dump(mode="json"))),
-                )
-                if notification is not None:
-                    conn.execute(
-                        "INSERT INTO notifications(notification_id,workspace_id,user_id,approval_id,task_id,"
-                        "entity_type,status,attempts,next_attempt_at,lease_expires_at,created_at,payload) "
-                        "VALUES(%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,%s)",
-                        (notification.id, notification.workspace_id, notification.user_id,
-                         updated.id, notification.entity_type, notification.push_status,
-                         notification.push_attempts, notification.push_next_attempt_at,
-                         notification.push_lease_expires_at, notification.created_at,
-                         Jsonb(notification.model_dump(mode="json"))),
-                    )
         except psycopg.errors.UniqueViolation as exc:
             raise AgentTaskRepositoryConflict("AgentTask event record already exists.") from exc
 
