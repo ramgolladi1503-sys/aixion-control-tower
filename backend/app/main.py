@@ -421,6 +421,8 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     runtime_repository = getattr(
                         runtime_repositories, repository_name, None
                     )
+                    if runtime_repository is None:
+                        continue
                     if getattr(application.state, state_name, None) is not runtime_repository:
                         continue
                     previous = original_repository_bindings.get(

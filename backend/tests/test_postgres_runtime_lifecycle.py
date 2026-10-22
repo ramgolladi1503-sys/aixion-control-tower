@@ -195,6 +195,80 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
     asyncio.run(exercise())
 
 
+def test_postgres_auth_lifecycle_fails_closed_for_missing_repository_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeRuntime()
+    runtime.repositories.trust_events = None
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            outbox_dispatch_mode="scheduled",
+            push_dispatch_enabled=False,
+            email_dispatch_enabled=False,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(main.PostgresRuntime, "from_environment", staticmethod(lambda: runtime))
+    monkeypatch.setattr(main, "reconcile_linked_approval_tasks", lambda **_kwargs: 0)
+    application = SimpleNamespace(state=SimpleNamespace())
+
+    async def exercise() -> None:
+        with pytest.raises(RuntimeError, match="repository bundle is incomplete"):
+            async with main.lifespan(application):
+                pytest.fail("Lifespan must reject an incomplete PostgreSQL repository bundle")
+
+    asyncio.run(exercise())
+
+    assert runtime.opened is True
+    assert runtime.closed is True
+    assert application.state.postgres_runtime is None
+    assert application.state.postgres_repositories is None
+    for state_name in main._POSTGRES_APP_STATE_BINDINGS:
+        assert not hasattr(application.state, state_name)
+
+
+def test_postgres_auth_lifecycle_fails_closed_for_foreign_required_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeRuntime()
+    foreign_approval_repository = object()
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            outbox_dispatch_mode="scheduled",
+            push_dispatch_enabled=False,
+            email_dispatch_enabled=False,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(main.PostgresRuntime, "from_environment", staticmethod(lambda: runtime))
+    application = SimpleNamespace(
+        state=SimpleNamespace(approval_decision_repository=foreign_approval_repository)
+    )
+
+    async def exercise() -> None:
+        with pytest.raises(RuntimeError, match="foreign binding"):
+            async with main.lifespan(application):
+                pytest.fail("Lifespan must reject a foreign PostgreSQL repository binding")
+
+    asyncio.run(exercise())
+
+    assert runtime.opened is True
+    assert runtime.closed is True
+    assert application.state.postgres_runtime is None
+    assert application.state.postgres_repositories is None
+    assert application.state.approval_decision_repository is foreign_approval_repository
+    for state_name in list(main._POSTGRES_APP_STATE_BINDINGS)[1:]:
+        assert not hasattr(application.state, state_name)
+
+
 def test_lifespan_retries_approval_reconciliation_and_cancels_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
