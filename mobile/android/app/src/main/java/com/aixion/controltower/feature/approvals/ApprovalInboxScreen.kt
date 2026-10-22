@@ -34,6 +34,7 @@ import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 internal fun orderApprovalsForInbox(approvals: List<ApprovalSummary>): List<ApprovalSummary> =
     approvals.sortedBy { approval ->
@@ -79,7 +80,7 @@ fun ApprovalInboxContent(
         modifier = Modifier
             .fillMaxSize()
             .background(TowerBackground)
-            .padding(18.dp),
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
@@ -107,8 +108,8 @@ fun ApprovalInboxContent(
                 Text(
                     text = "External agents can submit work, but they do not approve it. This queue is where the operator decides whether work may continue, must stop, or needs revision.",
                     color = TowerTextMuted,
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp
                 )
             }
         }
@@ -121,8 +122,8 @@ fun ApprovalInboxContent(
                     Text(
                         text = "${unsupported.size} approval(s) contain a status or risk value this app does not recognize. Update the app or backend before deciding.",
                         color = TowerTextMuted,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp
                     )
                 }
             }
@@ -142,8 +143,8 @@ fun ApprovalInboxContent(
                     Text(
                         text = message,
                         color = TowerTextMuted,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
                     Button(onClick = onRetry, enabled = !state.loading) {
@@ -173,8 +174,8 @@ fun ApprovalInboxContent(
                     Text(
                         text = "Authenticated approval screens now require real backend data instead of silently rendering demo approvals. Use Retry after the backend is reachable.",
                         color = TowerTextMuted,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp
                     )
                 }
             }
@@ -190,8 +191,8 @@ fun ApprovalInboxContent(
                     Text(
                         text = "Requests from connected agents and your past decisions will appear here.",
                         color = TowerTextMuted,
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp
+                        fontSize = 14.sp,
+                        lineHeight = 21.sp
                     )
                 }
             }

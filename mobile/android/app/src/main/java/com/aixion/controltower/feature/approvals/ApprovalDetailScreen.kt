@@ -54,6 +54,7 @@ import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 @Composable
 fun ApprovalDetailScreen(
@@ -120,7 +121,7 @@ internal fun ApprovalDetailEmptyContent(
         modifier = Modifier
             .fillMaxSize()
             .background(TowerBackground)
-            .padding(18.dp),
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.Center
     ) {
         TowerPanel(elevated = true) {
@@ -198,7 +199,7 @@ fun ApprovalDetailContent(
             .testTag("approval-detail-list")
             .fillMaxSize()
             .background(TowerBackground)
-            .padding(18.dp),
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
@@ -383,7 +384,7 @@ private fun DetailPanel(title: String, body: String, modifier: Modifier = Modifi
         Text(
             title.uppercase(),
             color = TowerTextMuted,
-            fontSize = 10.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.Medium,
             letterSpacing = 1.2.sp
         )
@@ -454,8 +455,8 @@ private fun DecisionPanel(
                 else -> "Approval is disabled until safety requirements are satisfied."
             },
             color = if (canApprove) TowerTextMuted else RiskMedium,
-            fontSize = 13.sp,
-            lineHeight = 19.sp
+            fontSize = 14.sp,
+            lineHeight = 21.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.lg))
         Button(

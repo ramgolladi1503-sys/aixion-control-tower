@@ -37,6 +37,7 @@ import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 @Composable
 fun HomeScreen(
@@ -66,7 +67,7 @@ fun HomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(TowerBackground)
-            .padding(18.dp),
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
@@ -190,14 +191,14 @@ private fun HomeHeader(loading: Boolean, hasError: Boolean) {
             Text(
                 text = "AIXION",
                 color = TowerTextPrimary,
-                fontSize = 12.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 letterSpacing = 2.2.sp
             )
             Text(
                 text = "CONTROL TOWER",
                 color = TowerTextMuted,
-                fontSize = 10.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
                 letterSpacing = 1.8.sp
             )
@@ -234,8 +235,8 @@ private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEn
         Text(
             text = body,
             color = TowerTextMuted,
-            fontSize = 13.sp,
-            lineHeight = 19.sp
+            fontSize = 14.sp,
+            lineHeight = 21.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Button(onClick = onRetry, enabled = retryEnabled) {
@@ -257,8 +258,8 @@ private fun EmptyHomePanel(title: String, body: String) {
         Text(
             text = body,
             color = TowerTextMuted,
-            fontSize = 13.sp,
-            lineHeight = 19.sp
+            fontSize = 14.sp,
+            lineHeight = 21.sp
         )
     }
 }

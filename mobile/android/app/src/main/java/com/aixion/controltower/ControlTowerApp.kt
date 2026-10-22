@@ -4,11 +4,14 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -17,11 +20,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Settings
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.feature.agentruns.AgentRunsScreen
@@ -139,14 +148,25 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                 if (showMainShell) {
                     TopAppBar(
                         title = {
-                            Text(allNavigationRoutes.firstOrNull { it.value == currentRoute }?.label ?: "Control Tower")
-                        }
+                            Text(
+                                allNavigationRoutes.firstOrNull { it.value == currentRoute }?.label
+                                    ?: "Control Tower",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.background,
+                            titleContentColor = MaterialTheme.colorScheme.onBackground
+                        )
                     )
                 }
             },
             bottomBar = {
                 if (showMainShell) {
-                    NavigationBar {
+                    NavigationBar(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        contentColor = MaterialTheme.colorScheme.onSurface
+                    ) {
                         primaryRoutes.forEach { route ->
                             NavigationBarItem(
                                 selected = primaryRouteFor(currentRoute) == route,
@@ -162,7 +182,12 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
                                     }
                                 },
                                 label = { Text(route.label) },
-                                icon = { Text(route.label.take(1)) }
+                                icon = {
+                                    Icon(
+                                        imageVector = primaryRouteIcon(route.value),
+                                        contentDescription = null
+                                    )
+                                }
                             )
                         }
                     }
@@ -250,4 +275,12 @@ fun ControlTowerApp(notificationDeepLink: NotificationDeepLink? = null) {
             }
         }
     }
+}
+
+private fun primaryRouteIcon(route: String): ImageVector = when (route) {
+    Route.Home.value -> Icons.Filled.Home
+    Route.Inbox.value -> Icons.Filled.Notifications
+    Route.Connectors.value -> Icons.Filled.Settings
+    Route.Account.value -> Icons.Filled.AccountCircle
+    else -> Icons.Filled.Home
 }

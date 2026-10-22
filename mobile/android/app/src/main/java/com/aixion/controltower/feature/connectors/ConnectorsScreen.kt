@@ -47,6 +47,7 @@ import com.aixion.controltower.core.ui.theme.TowerBackground
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.TowerTextMuted
 import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 private data class ConnectorSetupGuidance(
     val stage: String,
@@ -99,18 +100,18 @@ fun ConnectorsContent(
         modifier = Modifier
             .fillMaxSize()
             .background(TowerBackground)
-            .padding(18.dp),
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
             ConnectorsHero(state = state)
             if (state.notice.isNotBlank()) {
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(state.notice, color = RiskLow, fontSize = 13.sp, lineHeight = 18.sp)
+                Text(state.notice, color = RiskLow, fontSize = 14.sp, lineHeight = 21.sp)
             }
             if (state.error.isNotBlank()) {
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(state.error, color = RiskBlocked, fontSize = 13.sp, lineHeight = 18.sp)
+                Text(state.error, color = RiskBlocked, fontSize = 14.sp, lineHeight = 21.sp)
             }
             if (state.lastSecret.isNotBlank()) {
                 OneTimeCredentialPanel(
@@ -121,7 +122,7 @@ fun ConnectorsContent(
             }
             if (state.preview.isNotBlank()) {
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(state.preview, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+                Text(state.preview, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
             }
         }
 
@@ -215,8 +216,8 @@ private fun NativeAgentAccessPanel(onOpenAgentAccess: () -> Unit) {
         Text(
             "Connect the local Antigravity hook and its agent credentials. Keep the computer and the same agent session running while you wait for a phone decision.",
             color = TowerTextMuted,
-            fontSize = 13.sp,
-            lineHeight = 19.sp
+            fontSize = 14.sp,
+            lineHeight = 21.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Button(onClick = onOpenAgentAccess, modifier = Modifier.fillMaxWidth()) {
@@ -227,7 +228,7 @@ private fun NativeAgentAccessPanel(onOpenAgentAccess: () -> Unit) {
     TowerPanel {
         Text("Codex permission setup", color = TowerTextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text("A local PermissionRequest hook can be configured. Same-invocation phone approve/deny has not been verified yet.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("A local PermissionRequest hook can be configured. Same-invocation phone approve/deny has not been verified yet.", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         OutlinedButton(onClick = onOpenAgentAccess, modifier = Modifier.fillMaxWidth()) {
             Text("Open platform setup")
@@ -240,10 +241,10 @@ private fun FirstTimeConnectorGuide() {
     TowerPanel(elevated = true) {
         Text("Webhook task intake", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("1. Choose a webhook integration to submit task requests.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
-        Text("2. Create its connection and store the one-time credential securely.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
-        Text("3. Configure the external webhook and send a test task.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
-        Text("4. Review any resulting approval request in Approvals. Webhooks do not pause or resume a native agent session.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("1. Choose a webhook integration to submit task requests.", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
+        Text("2. Create its connection and store the one-time credential securely.", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
+        Text("3. Configure the external webhook and send a test task.", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
+        Text("4. Review any resulting approval request in Approvals. Webhooks do not pause or resume a native agent session.", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
     }
 }
 
@@ -256,8 +257,8 @@ private fun OneTimeCredentialPanel(
     TowerPanel(modifier = Modifier.padding(top = 10.dp), elevated = true) {
         Text("One-time connector credential", color = TowerTextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Copy this now. Hide it after storing it in the external agent config.", color = RiskMedium, fontSize = 12.sp, lineHeight = 17.sp)
-        Text(secret, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        Text("Copy this now. Hide it after storing it in the external agent config.", color = RiskMedium, fontSize = 14.sp, lineHeight = 21.sp)
+        Text(secret, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(onClick = onCopy, modifier = Modifier.fillMaxWidth()) { Text("Copy credential") }
             OutlinedButton(onClick = onHide, modifier = Modifier.fillMaxWidth()) { Text("Hide") }
@@ -275,7 +276,7 @@ private fun TemplatePanel(
     TowerPanel(elevated = true) {
         Text("Choose a webhook integration", color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("These integrations submit task requests. They do not install native approval hooks or resume a paused agent session.", color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+        Text("These integrations submit task requests. They do not install native approval hooks or resume a paused agent session.", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         val selectedTemplate = templates.firstOrNull { it.id == selectedTemplateId }
         var platformMenuExpanded by remember { mutableStateOf(false) }
@@ -285,7 +286,7 @@ private fun TemplatePanel(
                 enabled = templates.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(selectedTemplate?.display_name ?: "Select a platform", lineHeight = 18.sp)
+                Text(selectedTemplate?.display_name ?: "Select a platform", lineHeight = 21.sp)
             }
             DropdownMenu(
                 expanded = platformMenuExpanded,
@@ -303,14 +304,14 @@ private fun TemplatePanel(
             }
         }
         selectedTemplate?.let { template ->
-            Text(template.description, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+            Text(template.description, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
             webhookNativeSessionLimitation(template.provider_label, template.connector_type)?.let { limitation ->
-                Text(limitation, color = RiskMedium, fontSize = 12.sp, lineHeight = 17.sp)
+                Text(limitation, color = RiskMedium, fontSize = 14.sp, lineHeight = 21.sp)
             }
             if (template.setup_notes.isNotEmpty()) {
-                Text("Setup instructions", color = TowerTextPrimary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text("Setup instructions", color = TowerTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 template.setup_notes.forEach { note ->
-                    Text("• $note", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+                    Text("• $note", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
                 }
             }
         }
@@ -339,7 +340,7 @@ private fun ConnectorCard(
     TowerPanel(elevated = true) {
         Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
             Text(connector.name, color = TowerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, lineHeight = 23.sp)
-            Text(connector.provider_label, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+            Text(connector.provider_label, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
             StatusBadge(connector.status, if (connector.status == "ENABLED") RiskLow else RiskBlocked)
             StatusBadge(connector.health_status, if (connector.health_status == "HEALTHY") RiskLow else RiskMedium)
         }
@@ -349,12 +350,12 @@ private fun ConnectorCard(
             StatusBadge("STAGE ${guidance.stage.uppercase()}", if (guidance.healthy) RiskLow else RiskMedium)
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
             Text("Next action", color = TowerTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(guidance.nextAction, color = TowerTextMuted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text(guidance.nextAction, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
         }
 
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text("Webhook", color = TowerTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        Text(webhookUrl, color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        Text(webhookUrl, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
         Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(onClick = onCopyWebhook, modifier = Modifier.fillMaxWidth()) { Text("Copy webhook") }
             OutlinedButton(onClick = onCopySetup, modifier = Modifier.fillMaxWidth()) { Text("Copy setup block") }
@@ -375,13 +376,13 @@ private fun ConnectorCard(
 
         if (advancedSettingsExpanded) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Text("Actions: ${connector.allowed_actions.joinToString()}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
-                Text("Repositories: ${connector.allowed_repositories.joinToString().ifBlank { "wildcard" }}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
-                Text("Last used: ${connector.last_used_at ?: "never"}", color = TowerTextMuted, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("Actions: ${connector.allowed_actions.joinToString()}", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
+                Text("Repositories: ${connector.allowed_repositories.joinToString().ifBlank { "wildcard" }}", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
+                Text("Last used: ${connector.last_used_at ?: "never"}", color = TowerTextMuted, fontSize = 14.sp, lineHeight = 21.sp)
                 if (connector.failed_auth_count > 0 || !connector.last_error.isNullOrBlank()) {
-                    Text("Authentication failures: ${connector.failed_auth_count}", color = RiskBlocked, fontSize = 12.sp, lineHeight = 17.sp)
+                    Text("Authentication failures: ${connector.failed_auth_count}", color = RiskBlocked, fontSize = 14.sp, lineHeight = 21.sp)
                     connector.last_error?.takeIf(String::isNotBlank)?.let {
-                        Text("Last error: $it", color = RiskBlocked, fontSize = 12.sp, lineHeight = 17.sp)
+                        Text("Last error: $it", color = RiskBlocked, fontSize = 14.sp, lineHeight = 21.sp)
                     }
                 }
                 OutlinedButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {

@@ -1,11 +1,9 @@
 package com.aixion.controltower.notifications
 
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.aixion.controltower.MainActivity
@@ -70,7 +68,7 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
         notificationId: String?
     ) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        ensureChannel(manager)
+        ApprovalNotificationChannel.ensureCreated(this)
 
         val intent = Intent(this, MainActivity::class.java)
             .setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -101,30 +99,11 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
         manager.notify(requestCode, notification)
     }
 
-    private fun ensureChannel(manager: NotificationManager) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val existing = manager.getNotificationChannel(CHANNEL_ID)
-        if (existing != null) {
-            existing.name = "Aixion approval requests"
-            existing.description = "Approval requests that need your decision."
-            manager.createNotificationChannel(existing)
-            return
-        }
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Aixion approval requests",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "Approval requests that need your decision."
-        }
-        manager.createNotificationChannel(channel)
-    }
-
     companion object {
         private const val TAG = "AixionFCM"
-        private const val CHANNEL_ID = "aixion_agent_tasks"
         private const val PUSH_PREFERENCES = "aixion_push"
         private const val PENDING_FCM_TOKEN = "pending_fcm_token"
         private const val PUSH_TOKEN_KEY_ALIAS = "com.aixion.controltower.push.token.v1"
+        private const val CHANNEL_ID = ApprovalNotificationChannel.ID
     }
 }
