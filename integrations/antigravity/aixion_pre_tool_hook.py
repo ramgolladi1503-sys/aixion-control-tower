@@ -11,10 +11,16 @@ import stat
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from typing import Any
 from urllib.parse import urlencode, urlsplit
+
+# Antigravity launches this hook as a standalone script, where sys.path starts
+# at integrations/antigravity rather than at the repository root.
+_REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, _REPOSITORY_ROOT)
+
+from integrations.aixion_deadline_http import request as deadline_request  # noqa: E402
 
 MAX_INPUT_BYTES = 128 * 1024
 MAX_ARGUMENTS_BYTES = 48 * 1024
@@ -26,6 +32,8 @@ EXPIRY_CLEANUP_GRACE_SECONDS = 1
 MAX_RECONNECT_BACKOFF_SECONDS = 10
 MAX_CREATE_ATTEMPTS = 2
 CREATE_RETRY_DELAY_SECONDS = 0.25
+MAX_RESPONSE_BYTES = 256 * 1024
+MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 APPROVAL_PROTOCOL_VERSION = "1"
 DIAGNOSTIC_APPROVAL_ID = re.compile(r"^approval_[a-f0-9]{12}$")
 SENSITIVE_KEY = re.compile(r"(token|secret|password|credential|private.?key|api.?key)", re.I)
@@ -216,51 +224,46 @@ def _request(
     if not 0 < timeout_seconds <= REQUEST_TIMEOUT_SECONDS:
         raise GateError("Control Tower request timeout is outside the allowed range")
     payload = None if body is None else json.dumps(body, separators=(",", ":")).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=payload,
-        method=method,
-        headers={
+    headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
             "X-Aixion-Agent-Id": agent_id,
             "X-Aixion-Agent-Token": token,
             "X-Aixion-Approval-Protocol": APPROVAL_PROTOCOL_VERSION,
-        },
-    )
+    }
     try:
-        opener = urllib.request.build_opener(_NoRedirectHandler())
-        with opener.open(request, timeout=timeout_seconds) as response:
-            content = response.read(256 * 1024 + 1)
-            if len(content) > 256 * 1024:
-                raise AmbiguousRequestError("Control Tower response exceeds the size limit")
-            try:
-                result = json.loads(content)
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                raise AmbiguousRequestError("Control Tower returned invalid response data") from exc
-            if not isinstance(result, dict):
-                raise AmbiguousRequestError("Unexpected Control Tower response")
-            return result
-    except urllib.error.HTTPError as exc:
-        if exc.code == 429:
-            retry_after_header = exc.headers.get("Retry-After") if exc.headers else None
+        response = deadline_request(
+            method,
+            url,
+            headers,
+            payload,
+            timeout_seconds,
+            max_response_bytes=MAX_RESPONSE_BYTES,
+        )
+        if response.status == 429:
+            retry_after_header = next(
+                (value for key, value in response.headers.items() if key.lower() == "retry-after"),
+                None,
+            )
             try:
                 retry_after_seconds = int(retry_after_header) if retry_after_header else POLL_INTERVAL_SECONDS
             except (TypeError, ValueError):
                 retry_after_seconds = POLL_INTERVAL_SECONDS
-            raise RateLimitError(retry_after_seconds) from exc
-        if exc.code >= 500:
-            raise AmbiguousRequestError("Control Tower returned an ambiguous server failure") from exc
-        raise GateError(f"Control Tower returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
+            raise RateLimitError(retry_after_seconds)
+        if response.status >= 500:
+            raise AmbiguousRequestError("Control Tower returned an ambiguous server failure")
+        if not 200 <= response.status < 300:
+            raise GateError(f"Control Tower returned HTTP {response.status}")
+        content = response.body
+        try:
+            result = json.loads(content)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise AmbiguousRequestError("Control Tower returned invalid response data") from exc
+        if not isinstance(result, dict):
+            raise AmbiguousRequestError("Unexpected Control Tower response")
+        return result
+    except (TimeoutError, OSError) as exc:
         raise AmbiguousRequestError("Control Tower request outcome is unknown") from exc
-
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Never forward the agent token to a redirect destination."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 def _approval_snapshot(approval: dict[str, Any]) -> dict[str, Any]:
@@ -421,23 +424,21 @@ def check_connection(environ: dict[str, str] | None = None) -> dict[str, str]:
     if not all((config["agent_id"], config["project_id"])):
         raise GateError("Agent ID and project ID must be configured")
     token = _agent_token(env, config)
-    request = urllib.request.Request(
-        f"{api_base}/health",
-        method="GET",
-        headers={"Accept": "application/json"},
-    )
     try:
-        opener = urllib.request.build_opener(_NoRedirectHandler())
-        with opener.open(request, timeout=5) as response:
-            content = response.read(64 * 1024 + 1)
-            if len(content) > 64 * 1024:
-                raise GateError("Health response exceeds the size limit")
-            health = json.loads(content)
-            if not isinstance(health, dict) or health.get("status") != "ok":
-                raise GateError("Control Tower health check did not return status ok")
-    except urllib.error.HTTPError as exc:
-        raise GateError(f"Control Tower health check returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        response = deadline_request(
+            "GET",
+            f"{api_base}/health",
+            {"Accept": "application/json"},
+            None,
+            5,
+            max_response_bytes=MAX_HEALTH_RESPONSE_BYTES,
+        )
+        if not 200 <= response.status < 300:
+            raise GateError(f"Control Tower health check returned HTTP {response.status}")
+        health = json.loads(response.body)
+        if not isinstance(health, dict) or health.get("status") != "ok":
+            raise GateError("Control Tower health check did not return status ok")
+    except (TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise GateError("Control Tower health check failed") from exc
     identity_query = urlencode({"provider": "ANTIGRAVITY", "project_id": config["project_id"]})
     identity = _request(

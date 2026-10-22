@@ -4,6 +4,9 @@ import importlib.util
 import hashlib
 import io
 import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -438,34 +441,250 @@ def test_pending_poll_sleep_does_not_extend_configured_wait_deadline(
 
 
 def test_request_uses_the_supplied_transport_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    observed: list[float] = []
+    observed: list[tuple[object, ...]] = []
 
-    class Response:
-        def __enter__(self):
-            return self
+    def deadline_request(*args: object, **kwargs: object) -> SimpleNamespace:
+        observed.append((*args, kwargs.get("max_response_bytes")))
+        return SimpleNamespace(status=200, headers={}, body=b"{}")
 
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-        def read(self, _size: int) -> bytes:
-            return b"{}"
-
-    class Opener:
-        def open(self, _request: object, timeout: float) -> Response:
-            observed.append(timeout)
-            return Response()
-
-    monkeypatch.setattr(hook.urllib.request, "build_opener", lambda *_args: Opener())
+    monkeypatch.setattr(hook, "deadline_request", deadline_request)
 
     assert hook._request(
         "GET", "https://control.example/decision", "agent", "token", timeout_seconds=0.25
     ) == {}
-    assert observed == [0.25]
+    assert observed == [(
+        "GET",
+        "https://control.example/decision",
+        {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-Aixion-Agent-Id": "agent",
+            "X-Aixion-Agent-Token": "token",
+            "X-Aixion-Approval-Protocol": hook.APPROVAL_PROTOCOL_VERSION,
+        },
+        None,
+        0.25,
+        hook.MAX_RESPONSE_BYTES,
+    )]
 
     with pytest.raises(hook.GateError, match="outside the allowed range"):
         hook._request(
             "GET", "https://control.example/decision", "agent", "token", timeout_seconds=10.01
         )
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("private timeout detail"), OSError("private socket detail")])
+def test_deadline_transport_errors_are_sanitized_and_ambiguous(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(hook, "deadline_request", fail)
+    with pytest.raises(hook.AmbiguousRequestError, match="outcome is unknown") as raised:
+        hook._request("POST", "https://control.example/consume", "agent", "secret")
+    assert "private" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "error", "message"),
+    [
+        (429, {"retry-after": "7"}, hook.RateLimitError, "rate limit"),
+        (503, {}, hook.AmbiguousRequestError, "ambiguous server failure"),
+        (302, {"location": "https://attacker.example/"}, hook.GateError, "HTTP 302"),
+        (400, {}, hook.GateError, "HTTP 400"),
+    ],
+)
+def test_deadline_transport_status_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    headers: dict[str, str],
+    error: type[Exception],
+    message: str,
+) -> None:
+    monkeypatch.setattr(
+        hook,
+        "deadline_request",
+        lambda *_args, **_kwargs: SimpleNamespace(status=status, headers=headers, body=b"{}"),
+    )
+    with pytest.raises(error, match=message):
+        hook._request("GET", "https://control.example/decision", "agent", "secret")
+
+
+def _prepare_connection_check(monkeypatch: pytest.MonkeyPatch, api_base: str) -> None:
+    config = {"api_base_url": api_base, "agent_id": "agent", "project_id": "project"}
+    monkeypatch.setattr(hook, "_configuration", lambda _env, _payload: config)
+    monkeypatch.setattr(hook, "_agent_token", lambda _env, _config: "secret")
+    monkeypatch.setattr(
+        hook,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "agent_id": "agent",
+            "provider": "ANTIGRAVITY",
+            "project_id": "project",
+        },
+    )
+
+
+def test_check_connection_uses_deadline_health_transport_and_response_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_connection_check(monkeypatch, "http://127.0.0.1:8000")
+    observed: list[tuple[object, ...]] = []
+
+    def deadline_request(*args: object, **kwargs: object) -> SimpleNamespace:
+        observed.append((*args, kwargs.get("max_response_bytes")))
+        return SimpleNamespace(status=200, headers={}, body=b'{"status":"ok"}')
+
+    monkeypatch.setattr(hook, "deadline_request", deadline_request)
+    assert hook.check_connection({})["agent_id"] == "agent"
+    assert observed == [(
+        "GET",
+        "http://127.0.0.1:8000/health",
+        {"Accept": "application/json"},
+        None,
+        5,
+        hook.MAX_HEALTH_RESPONSE_BYTES,
+    )]
+
+
+@pytest.mark.parametrize(
+    ("response", "error", "message"),
+    [
+        (SimpleNamespace(status=302, headers={}, body=b"{}"), hook.GateError, "HTTP 302"),
+        (SimpleNamespace(status=503, headers={}, body=b"{}"), hook.GateError, "HTTP 503"),
+        (SimpleNamespace(status=200, headers={}, body=b'{"status":"degraded"}'), hook.GateError, "did not return status ok"),
+    ],
+)
+def test_check_connection_rejects_unhealthy_or_non_success_responses(
+    monkeypatch: pytest.MonkeyPatch,
+    response: SimpleNamespace,
+    error: type[Exception],
+    message: str,
+) -> None:
+    _prepare_connection_check(monkeypatch, "http://127.0.0.1:8000")
+    monkeypatch.setattr(hook, "deadline_request", lambda *_args, **_kwargs: response)
+    with pytest.raises(error, match=message):
+        hook.check_connection({})
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("private timeout"), OSError("private socket error")])
+def test_check_connection_sanitizes_health_transport_failures(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    _prepare_connection_check(monkeypatch, "http://127.0.0.1:8000")
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise failure
+
+    monkeypatch.setattr(hook, "deadline_request", fail)
+    with pytest.raises(hook.GateError, match="health check failed") as raised:
+        hook.check_connection({})
+    assert "private" not in str(raised.value)
+
+
+def test_check_connection_loopback_redirect_is_not_followed(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[str] = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", "/redirected")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    _prepare_connection_check(monkeypatch, f"http://127.0.0.1:{server.server_port}")
+    try:
+        with pytest.raises(hook.GateError, match="HTTP 302"):
+            hook.check_connection({})
+        assert requests == ["/health"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+@pytest.mark.parametrize("slow_stage", ["headers", "body"])
+def test_loopback_slow_response_obeys_absolute_transport_deadline(slow_stage: str) -> None:
+    class SlowHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if slow_stage == "headers":
+                time.sleep(0.2)
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(0.2)
+            try:
+                self.wfile.write(b"{}")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(hook.AmbiguousRequestError, match="outcome is unknown"):
+            hook._request(
+                "GET",
+                f"http://127.0.0.1:{server.server_port}/decision",
+                "agent",
+                "secret",
+                timeout_seconds=0.05,
+            )
+        assert time.monotonic() - started < 0.18
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+
+def test_loopback_redirect_is_not_followed() -> None:
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1/should-not-follow")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(hook.GateError, match="HTTP 302"):
+            hook._request(
+                "GET",
+                f"http://127.0.0.1:{server.server_port}/decision",
+                "agent",
+                "secret",
+                timeout_seconds=1,
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
 
 
 def test_slow_poll_and_expiry_cleanup_stay_within_deadline_plus_grace(

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import sys
+import threading
+import time
 
 import pytest
 
@@ -40,27 +43,12 @@ ENV = {
 def test_http_request_advertises_approval_protocol_v1(monkeypatch) -> None:
     captured = {}
 
-    class Response:
-        def __enter__(self):
-            return self
+    def request(method, url, headers, body, timeout_seconds, *, max_response_bytes):
+        captured.update(method=method, url=url, headers=headers, body=body,
+                        timeout=timeout_seconds, limit=max_response_bytes)
+        return type("Response", (), {"status": 200, "headers": {}, "body": b"{}"})()
 
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _limit: int) -> bytes:
-            return b"{}"
-
-    class Opener:
-        def open(self, request, timeout: int):
-            captured["request"] = request
-            captured["timeout"] = timeout
-            return Response()
-
-    monkeypatch.setattr(
-        hook.urllib.request,
-        "build_opener",
-        lambda *_handlers: Opener(),
-    )
+    monkeypatch.setattr(hook, "deadline_request", request)
     assert hook._request(
         "GET",
         "http://127.0.0.1:8012/agents/approvals/id/decision",
@@ -68,44 +56,147 @@ def test_http_request_advertises_approval_protocol_v1(monkeypatch) -> None:
         ENV["AIXION_AGENT_TOKEN"],
     ) == {}
 
-    assert captured["request"].get_header("X-aixion-approval-protocol") == "1"
+    assert captured["headers"]["X-Aixion-Approval-Protocol"] == "1"
     assert captured["timeout"] == 10
+    assert captured["limit"] == hook.MAX_RESPONSE_BYTES
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "exception", "message"),
+    [
+        (429, {"Retry-After": "7"}, hook.RateLimitError, "rate limit"),
+        (503, {}, hook.AmbiguousRequestError, "ambiguous server failure"),
+        (302, {}, hook.GateError, "HTTP 302"),
+        (400, {}, hook.GateError, "HTTP 400"),
+    ],
+)
+def test_http_status_mapping_remains_fail_closed(
+    status: int, headers: dict, exception: type[Exception], message: str, monkeypatch
+) -> None:
+    response = type("Response", (), {"status": status, "headers": headers, "body": b"{}"})()
+    monkeypatch.setattr(hook, "deadline_request", lambda *_args, **_kwargs: response)
+    with pytest.raises(exception, match=message) as raised:
+        hook._request(
+            "POST", "http://127.0.0.1:8012/agents/approvals",
+            {"agent_id": ENV["AIXION_AGENT_ID"]}, ENV["AIXION_AGENT_TOKEN"], {},
+        )
+    if isinstance(raised.value, hook.RateLimitError):
+        assert raised.value.retry_after_seconds == 7
+
+
+@pytest.mark.parametrize("stall", ["headers", "body"])
+def test_loopback_slow_response_is_bounded_and_denies_without_late_consume(
+    stall: str, monkeypatch
+) -> None:
+    """A timed-out HTTP attempt can never become a late Codex allow/consume."""
+    paths: list[str] = []
+    created_records: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_args) -> None:
+            return
+
+        def _json(self, value: dict) -> None:
+            raw = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            self.wfile.flush()
+
+        def do_POST(self) -> None:
+            paths.append(self.path)
+            if self.path == "/agents/approvals":
+                size = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(size))
+                record = _record(body)
+                created_records.append(record)
+                if stall == "headers":
+                    time.sleep(0.35)
+                self._json(record)
+                return
+            if self.path.endswith("/consume"):
+                # The server accepts the one-shot consume, then stalls before
+                # returning the response. The hook must deny and must not retry.
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "17")
+                self.end_headers()
+                self.wfile.write(b'{"consumed":')
+                self.wfile.flush()
+                time.sleep(1.3)
+                try:
+                    self.wfile.write(b'true}')
+                    self.wfile.flush()
+                except OSError:
+                    pass
+                return
+            self._json({"status": "ok"})
+
+        def do_GET(self) -> None:
+            paths.append(self.path)
+            record = dict(created_records[0])
+            record["status"] = "APPROVED"
+            record["approved_payload_hash"] = hook._hash(record)
+            self._json(record)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    monkeypatch.setattr(hook, "MAX_REQUEST_TIMEOUT_SECONDS", 0.1 if stall == "headers" else 10.0)
+    env = {
+        **ENV,
+        "AIXION_API_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+        "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "1",
+    }
+    started = time.monotonic()
+    try:
+        result = hook.run(_event(), env)
+        elapsed = time.monotonic() - started
+        # Let a late response reach the server before inspecting one-shot calls.
+        time.sleep(0.4)
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1)
+
+    assert result[0] == "deny"
+    if stall == "headers":
+        assert elapsed < 0.8
+        assert paths.count("/agents/approvals") == hook.MAX_CREATE_ATTEMPTS
+        assert not any(path.endswith("/consume") for path in paths)
+    else:
+        assert elapsed < 1.2
+        assert sum(path.endswith("/consume") for path in paths) == 1
 
 
 def test_preflight_checks_health_without_token_then_authenticates_connector_scope(monkeypatch) -> None:
-    class Response:
-        def __init__(self, body: bytes) -> None:
-            self.body = body
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _size: int) -> bytes:
-            return self.body
-
-    class PreflightOpener:
-        def open(self, request, timeout: int):
-            if request.full_url.endswith("/health"):
-                assert request.get_header("X-aixion-agent-token") is None
-                assert request.get_header("X-aixion-agent-id") is None
-                assert timeout == 5
-                return Response(b'{"status":"ok"}')
-            assert request.full_url == (
+    def request(method, url, headers, _body, timeout_seconds, *, max_response_bytes):
+        if url.endswith("/health"):
+            assert method == "GET"
+            assert "X-Aixion-Agent-Token" not in headers
+            assert "X-Aixion-Agent-Id" not in headers
+            assert timeout_seconds == 5
+            body = b'{"status":"ok"}'
+        else:
+            assert url == (
                 "http://127.0.0.1:8012/agents/identity?provider=CODEX&project_id=project-codex-test"
             )
-            assert request.get_header("X-aixion-agent-token") == "test-token"
-            assert request.get_header("X-aixion-agent-id") == "agent-codex-test"
-            assert request.get_header("X-aixion-approval-protocol") == "1"
-            assert timeout == 10
-            return Response(
+            assert headers["X-Aixion-Agent-Token"] == "test-token"
+            assert headers["X-Aixion-Agent-Id"] == "agent-codex-test"
+            assert headers["X-Aixion-Approval-Protocol"] == "1"
+            assert timeout_seconds == 10
+            body = (
                 b'{"agent_id":"agent-codex-test","provider":"CODEX",'
                 b'"workspace_id":"workspace-test","project_id":"project-codex-test"}'
             )
+        return type("Response", (), {"status": 200, "headers": {}, "body": body})()
 
-    monkeypatch.setattr(hook.urllib.request, "build_opener", lambda *_handlers: PreflightOpener())
+    monkeypatch.setattr(hook, "deadline_request", request)
 
     assert hook.check_connection(ENV) == {
         "api_base_url": "http://127.0.0.1:8012",
@@ -115,22 +206,11 @@ def test_preflight_checks_health_without_token_then_authenticates_connector_scop
 
 
 def test_preflight_rejects_authenticated_identity_mismatch(monkeypatch) -> None:
-    class Response:
-        def __enter__(self):
-            return self
+    def request(_method, url, _headers, _body, _timeout, *, max_response_bytes):
+        assert url.endswith("/health")
+        return type("Response", (), {"status": 200, "headers": {}, "body": b'{"status":"ok"}'})()
 
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _size: int) -> bytes:
-            return b'{"status":"ok"}'
-
-    class HealthOnlyOpener:
-        def open(self, request, timeout: int):
-            assert request.full_url.endswith("/health")
-            return Response()
-
-    monkeypatch.setattr(hook.urllib.request, "build_opener", lambda *_handlers: HealthOnlyOpener())
+    monkeypatch.setattr(hook, "deadline_request", request)
     monkeypatch.setattr(hook, "_request", lambda *_args, **_kwargs: {
         "agent_id": "agent-other",
         "provider": "CODEX",

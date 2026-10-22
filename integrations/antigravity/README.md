@@ -108,24 +108,25 @@ the exact same invocation once after 250 ms. Each create attempt has a
 10-second timeout; if the retry is also ambiguous, the hook denies and emits a
 generic diagnostic to stderr. The server's invocation idempotency prevents a
 duplicate approval when the first request committed. During the decision wait,
-each poll's transport timeout and each sleep are capped to the time remaining
-in `AIXION_APPROVAL_TIMEOUT_SECONDS`; each poll's socket timeout is set to the
-remaining wait budget, and late responses are denied. At the deadline, the
-hook makes one best-effort expiry request with a socket timeout of at most one
-second, then denies if expiry cannot be confirmed within that grace. Approval
-creation happens before the decision-wait budget starts. The consume request is
-also capped to the remaining wait, and the hook denies if the consume response
-arrives at or after the decision deadline (the claim may then be consumed
-without the provider action running). If consume has an ambiguous outcome, its
-best-effort failure report uses only the remaining one-second cleanup grace and
-is skipped after that grace is exhausted. These monotonic checks and timeout caps
-bound the intended wait and cleanup behavior, but Python's `urllib` socket
-timeout is per socket operation, not a strict total wall-clock deadline: DNS
-lookup or a slow-drip response can outlast an individual operation timeout.
-Tests assert the timeout values and fake-clock behavior; absolute network
-deadline enforcement remains unverified. The backend also assigns its own
-expiry when the request is created. Late mobile decisions against expired
-approvals are rejected with HTTP 409.
+each poll's HTTP request deadline and sleep are capped to the time remaining in
+`AIXION_APPROVAL_TIMEOUT_SECONDS`; late responses are denied. The shared
+standard-library HTTP transport enforces one monotonic deadline across hostname
+resolution, connection, TLS, response headers, and the complete bounded response
+body. It caps responses at 256 KiB and does not follow redirects. Its DNS
+resolver uses at most two daemon workers. Python cannot stop an OS
+`getaddrinfo` call that never returns, so such a call retains its worker; if both
+workers become stuck, new hostname requests fail closed until capacity recovers.
+IP-literal endpoints do not use DNS. At the approval deadline, the hook makes
+one best-effort expiry request within the one-second cleanup grace, then denies
+if expiry cannot be confirmed. Approval creation happens before the decision-
+wait budget starts. Consume is capped to the remaining wait, and the hook denies
+if the consume response arrives at or after the decision deadline (the claim
+may then be consumed without the provider action running). An ambiguous consume
+outcome is reported only within the remaining cleanup grace; the report is
+skipped after that grace expires. Loopback tests cover slow headers, slow bodies,
+bounded stalled DNS, response limits, and no redirect following. The backend
+also assigns its own expiry when the request is created. Late mobile decisions
+against expired approvals are rejected with HTTP 409.
 The backend's `AIXION_AGENT_APPROVAL_TTL_SECONDS` (default 600, range 30–900)
 is a server-side backstop for an agent process that disappears before it can
 close its approval. When the hook reaches its own timeout, it attempts to expire

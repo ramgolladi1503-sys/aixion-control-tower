@@ -13,10 +13,16 @@ import subprocess
 import sys
 import time
 import uuid
-import urllib.error
-import urllib.request
 from typing import Any
 from urllib.parse import urlencode, urlsplit
+
+# The hook is launched as a standalone script by Codex, where sys.path starts
+# at integrations/codex rather than at the repository root.
+_REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPOSITORY_ROOT not in sys.path:
+    sys.path.insert(0, _REPOSITORY_ROOT)
+
+from integrations.aixion_deadline_http import request as deadline_request  # noqa: E402
 
 MAX_INPUT_BYTES = 128 * 1024
 MAX_ARGUMENTS_BYTES = 48 * 1024
@@ -261,11 +267,6 @@ def _agent_token(env: dict[str, str], config: dict[str, str]) -> str:
     return token
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
 def _request(method: str, url: str, config: dict[str, str], token: str,
              body: dict[str, Any] | None = None,
              timeout_seconds: float = MAX_REQUEST_TIMEOUT_SECONDS) -> dict[str, Any]:
@@ -283,16 +284,31 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise GateError("Control Tower request contains invalid JSON data") from exc
-    request = urllib.request.Request(url, data=encoded, method=method, headers={
+    headers = {
         "Accept": "application/json", "Content-Type": "application/json",
         "X-Aixion-Agent-Id": config["agent_id"], "X-Aixion-Agent-Token": token,
         "X-Aixion-Approval-Protocol": APPROVAL_PROTOCOL_VERSION,
-    })
+    }
     try:
-        with urllib.request.build_opener(_NoRedirectHandler()).open(
-            request, timeout=request_timeout
-        ) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
+        response = deadline_request(
+            method, url, headers, encoded, request_timeout,
+            max_response_bytes=MAX_RESPONSE_BYTES,
+        )
+        if response.status == 429:
+            retry_after = next(
+                (value for key, value in response.headers.items() if key.lower() == "retry-after"),
+                str(POLL_INTERVAL_SECONDS),
+            )
+            try:
+                delay = int(retry_after)
+            except (TypeError, ValueError):
+                delay = POLL_INTERVAL_SECONDS
+            raise RateLimitError(delay)
+        if response.status >= 500:
+            raise AmbiguousRequestError("Control Tower returned an ambiguous server failure")
+        if not 200 <= response.status < 300:
+            raise GateError(f"Control Tower returned HTTP {response.status}")
+        raw = response.body
         if len(raw) > MAX_RESPONSE_BYTES:
             raise AmbiguousRequestError("Control Tower response exceeds its size limit")
         try:
@@ -302,17 +318,7 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         if not isinstance(result, dict):
             raise AmbiguousRequestError("Control Tower returned an invalid response")
         return result
-    except urllib.error.HTTPError as exc:
-        if exc.code == 429:
-            try:
-                delay = int(exc.headers.get("Retry-After", str(POLL_INTERVAL_SECONDS)))
-            except (TypeError, ValueError):
-                delay = POLL_INTERVAL_SECONDS
-            raise RateLimitError(delay) from exc
-        if exc.code >= 500:
-            raise AmbiguousRequestError("Control Tower returned an ambiguous server failure") from exc
-        raise GateError(f"Control Tower returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
+    except (TimeoutError, OSError) as exc:
         raise AmbiguousRequestError("Control Tower request outcome is unknown") from exc
 
 
@@ -653,13 +659,14 @@ def check_connection(environ: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ if environ is None else environ
     config = _configuration(env)
     token = _agent_token(env, config)
-    request = urllib.request.Request(f"{config['api_base_url']}/health", headers={"Accept": "application/json"})
     try:
-        with urllib.request.build_opener(_NoRedirectHandler()).open(request, timeout=5) as response:
-            raw = response.read(64 * 1024 + 1)
-        if len(raw) > 64 * 1024 or json.loads(raw).get("status") != "ok":
+        response = deadline_request(
+            "GET", f"{config['api_base_url']}/health", {"Accept": "application/json"},
+            None, 5, max_response_bytes=64 * 1024,
+        )
+        if response.status != 200 or json.loads(response.body).get("status") != "ok":
             raise GateError("Control Tower health check did not return status ok")
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (OSError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise GateError("Control Tower health check failed") from exc
     identity_query = urlencode({"provider": "CODEX", "project_id": config["project_id"]})
     identity = _request(

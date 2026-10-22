@@ -98,15 +98,19 @@ is `AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS` (default 600, range 1–900 seconds).
 During the wait, the hook honors API `Retry-After` responses and retries
 ambiguous decision `GET` failures with exponential delays of 2, 4, then at most
 10 seconds, bounded by the configured deadline. Each decision read and consume
-request sets its socket timeout to no more than the remaining approval time
-and the 10-second per-request maximum. The hook never returns `allow` if the consume
-response arrives at or after that deadline. After timeout, it makes one
-best-effort expiry request with a 1-second socket timeout; a consume-failure
-report is skipped when no approval time remains. This cleanup can extend the
-hook by up to the bounded expiry request. Python's `urllib` timeout is a socket
-operation timeout, not a strict wall-clock deadline: DNS resolution and a
-slow-drip response can exceed it, but the hook still denies any decision that
-arrives after the approval deadline.
+request uses the remaining approval time and the 10-second per-request maximum
+as one monotonic HTTP deadline. The shared standard-library transport applies it
+to DNS resolution, connection, TLS, response headers, and the complete bounded
+response body; it caps responses at 256 KiB and does not follow redirects. The
+hook never returns `allow` if the consume response arrives at or after that
+deadline. After timeout, it makes one best-effort expiry request within a
+1-second cleanup grace; a consume-failure report is skipped when no approval
+time remains. This cleanup can extend the hook by up to the bounded expiry
+request. DNS uses at most two daemon workers. Python cannot stop an OS
+`getaddrinfo` call that never returns, so a stuck call retains its worker; if
+both workers become stuck, new hostname requests fail closed until capacity
+recovers. IP-literal endpoints do not use DNS. Loopback tests cover slow headers,
+slow bodies, bounded stalled DNS, response limits, and no redirect following.
 
 For an ambiguous approval creation outcome, the hook retries the exact same
 callback identity and body once after 250 ms; each create request has a
