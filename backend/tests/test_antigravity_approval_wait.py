@@ -8,12 +8,14 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -942,6 +944,66 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
     access_log_path = tmp_path / "api-restart-access.log"
     port = _free_loopback_port()
     base_url = f"http://127.0.0.1:{port}"
+    # Hold the hook's first decision read at a local forwarding proxy. This
+    # makes the crash window deterministic: the owner commits APPROVE, the API
+    # process is restarted against the same database, and only then can the
+    # still-running hook read and consume the decision.
+    decision_read_blocked = threading.Event()
+    release_decision_read = threading.Event()
+    proxy_upstream: dict[str, str] = {"base_url": base_url}
+
+    class ApprovalWaitProxyHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            if self.path.endswith("/decision") and not decision_read_blocked.is_set():
+                decision_read_blocked.set()
+                if not release_decision_read.wait(timeout=30):
+                    self.send_error(504, "Test decision-read gate timed out")
+                    return
+            self._forward()
+
+        def do_POST(self) -> None:
+            self._forward()
+
+        def _forward(self) -> None:
+            import httpx
+
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            forwarded_headers = {
+                key: value
+                for key, value in self.headers.items()
+                if key.lower() not in {"host", "connection", "content-length"}
+            }
+            try:
+                response = httpx.request(
+                    self.command,
+                    f"{proxy_upstream['base_url']}{self.path}",
+                    headers=forwarded_headers,
+                    content=body,
+                    timeout=10,
+                    trust_env=False,
+                )
+            except httpx.HTTPError:
+                self.send_error(502, "Test proxy could not reach the API")
+                return
+            self.send_response(response.status_code)
+            if "content-type" in response.headers:
+                self.send_header("Content-Type", response.headers["content-type"])
+            self.send_header("Content-Length", str(len(response.content)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(response.content)
+            self.close_connection = True
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    proxy_server = ThreadingHTTPServer(("127.0.0.1", 0), ApprovalWaitProxyHandler)
+    proxy_port = int(proxy_server.server_address[1])
+    proxy_url = f"http://127.0.0.1:{proxy_port}"
+    proxy_thread = threading.Thread(target=proxy_server.serve_forever, daemon=True)
+    proxy_thread.start()
     api_process = _start_isolated_api(
         db_path, port, access_log_path=access_log_path, auth_enabled=True
     )
@@ -999,7 +1061,7 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
         hook_environment = os.environ.copy()
         hook_environment.update(
             {
-                "AIXION_API_BASE_URL": base_url,
+                "AIXION_API_BASE_URL": proxy_url,
                 "AIXION_AGENT_ID": agent_id,
                 "AIXION_AGENT_TOKEN": agent_token,
                 "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
@@ -1078,6 +1140,9 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
         assert approval["source_session_id"] == hook_payload["conversationId"]
         assert approval["source_invocation_id"] == original_invocation_id
         assert hook_process.poll() is None, "Hook did not remain blocked on the pending approval"
+        assert decision_read_blocked.wait(timeout=10), (
+            "Hook did not reach the gated decision read after creating its approval"
+        )
 
         with httpx.Client(base_url=base_url, timeout=5) as api:
             matching = [
@@ -1086,6 +1151,14 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
                 if item.get("source_invocation_id") == original_invocation_id
             ]
         assert [item["id"] for item in matching] == [approval["id"]]
+
+        with httpx.Client(base_url=base_url, timeout=5) as api:
+            decision = api.post(
+                f"/approvals/{approval['id']}/decision",
+                headers=owner_headers,
+                json={"decision": "approve"},
+            )
+            assert decision.status_code == 200, decision.text
 
         old_pid = api_process.pid
         _stop_isolated_api(api_process)
@@ -1097,19 +1170,33 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
         )
         assert restarted_api.pid != old_pid
         _wait_for_isolated_api(restarted_api, base_url)
-        with httpx.Client(base_url=base_url, timeout=5) as api:
-            decision = api.post(
-                f"/approvals/{approval['id']}/decision",
-                headers=owner_headers,
-                json={"decision": "approve"},
-            )
-            assert decision.status_code == 200, decision.text
+        release_decision_read.set()
 
         stdout, stderr = hook_process.communicate(timeout=20)
         assert hook_process.returncode == 0, stderr
         result = json.loads(stdout.strip().splitlines()[-1])
         assert result["decision"] == "allow"
         assert result["reason"] == "Approved from Aixion Control Tower"
+        with httpx.Client(base_url=base_url, timeout=5) as api:
+            recovered = api.get("/approvals", headers=owner_headers)
+        assert recovered.status_code == 200, recovered.text
+        recovered_approval = next(
+            item for item in recovered.json() if item["id"] == approval["id"]
+        )
+        assert recovered_approval["source_session_id"] == hook_payload["conversationId"]
+        assert recovered_approval["source_invocation_id"] == original_invocation_id
+        assert recovered_approval["files"] == [
+            {
+                "path": "antigravity://tool/run_command",
+                "change_type": "tool_call",
+                "diff": json.dumps(
+                    hook_payload["toolCall"]["args"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "new_content": None,
+            }
+        ]
 
         # A different provider invocation after the restart must receive its
         # own approval row. The approved original invocation cannot authorize it.
@@ -1173,11 +1260,17 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
                 (approval["id"],),
             ).fetchone()[0]
+            claim_identity = connection.execute(
+                "SELECT source_agent_id,source_invocation_id FROM approval_delivery_claims "
+                "WHERE approval_id=?",
+                (approval["id"],),
+            ).fetchone()
             second_claim_count = connection.execute(
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
                 (second_approval["id"],),
             ).fetchone()[0]
         assert claim_count == 1
+        assert claim_identity == (agent_id, original_invocation_id)
         assert second_claim_count == 0
     finally:
         if hook_process is not None and hook_process.poll() is None:
@@ -1186,6 +1279,10 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
         if restarted_api is not None:
             _stop_isolated_api(restarted_api)
         _stop_isolated_api(api_process)
+        release_decision_read.set()
+        proxy_server.shutdown()
+        proxy_server.server_close()
+        proxy_thread.join(timeout=5)
 
 
 def test_mobile_approval_list_expires_overdue_agent_requests() -> None:
