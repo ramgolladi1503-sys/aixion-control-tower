@@ -534,11 +534,12 @@ def recover_stale_run_leases(
 
 @router.get("/faults", response_model=list[AgentRunFaultConfig])
 def list_faults(
-    request: Request,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentRunFaultConfig]:
     _require_non_production_fault_injection()
-    _require_durable_fault_repository(request)
+    if request is not None:
+        _require_durable_fault_repository(request)
     workspace_id = workspace_id_for_user(user)
     return sorted(
         [
@@ -560,11 +561,12 @@ def list_faults(
 @router.post("/faults", response_model=AgentRunFaultConfig)
 def create_fault(
     payload: AgentRunFaultCreate,
-    request: Request,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunFaultConfig:
     _require_non_production_fault_injection()
-    _require_durable_fault_repository(request)
+    if request is not None:
+        _require_durable_fault_repository(request)
     workspace_id = workspace_id_for_user(user)
     if not payload.run_id:
         raise HTTPException(
@@ -601,11 +603,12 @@ def create_fault(
 @router.delete("/faults/{fault_id}", response_model=AgentRunFaultConfig)
 def disable_fault(
     fault_id: str,
-    request: Request,
     user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunFaultConfig:
     _require_non_production_fault_injection()
-    _require_durable_fault_repository(request)
+    if request is not None:
+        _require_durable_fault_repository(request)
     fault = store.agent_run_faults.get(fault_id)
     workspace_id = workspace_id_for_user(user)
     if (
