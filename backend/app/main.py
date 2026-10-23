@@ -94,6 +94,7 @@ from .postgres_runtime import PostgresRuntime
 from .project_repository import ProjectRepository, SQLiteProjectRepository
 from .notification_outbox_repository import PostgresNotificationOutboxRepository
 from .postgres_notification_dispatcher import postgres_notification_dispatch_loop
+from .postgres_audit_repository import PostgresAuditEventRepository
 from .ops_routes import router as ops_router
 from .risk_engine import assess_approval_request, assess_work_order
 from .role_routes import router as role_router
@@ -1522,17 +1523,52 @@ def list_audit_events(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[AuditEvent]:
     if http_request is not None:
-        if (
-            get_settings().postgres_auth_enabled
-            or getattr(http_request.app.state, "postgres_runtime", None) is not None
-        ):
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Audit reads are unavailable while PostgreSQL is configured without "
-                    "a unified audit writer and recovery repository."
-                ),
-            )
+        state = http_request.app.state
+        postgres_runtime = getattr(state, "postgres_runtime", None)
+        if get_settings().postgres_auth_enabled or postgres_runtime is not None:
+            repositories = getattr(state, "postgres_repositories", None)
+            runtime_repositories = getattr(postgres_runtime, "repositories", None)
+            runtime_audit_repository = getattr(repositories, "audit_events", None)
+            if (
+                postgres_runtime is None
+                or repositories is None
+                or runtime_repositories is not repositories
+                or not isinstance(runtime_audit_repository, PostgresAuditEventRepository)
+                or getattr(state, "audit_event_repository", None)
+                is not runtime_audit_repository
+            ):
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Audit reads are unavailable: PostgreSQL runtime is unavailable or "
+                        "mismatched and a unified audit writer is required."
+                    ),
+                )
+            try:
+                repository = audit_event_repository_for_request(http_request)
+                if repository is not runtime_audit_repository:
+                    raise RuntimeError(
+                        "PostgreSQL audit repository differs from the active runtime"
+                    )
+                workspace_id = _workspace_id_for_route(user, http_request)
+                if workspace_id is None:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Workspace membership is required",
+                    )
+                events = repository.list_for_workspace(workspace_id)
+            except HTTPException:
+                raise
+            except Exception as error:
+                logger.error(
+                    "PostgreSQL audit listing failed error_type=%s",
+                    type(error).__name__,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="Audit data is temporarily unavailable",
+                ) from error
+            return [redact_audit_event(event) for event in events]
         repository = audit_event_repository_for_request(http_request)
         if not isinstance(repository, SQLiteAuditEventRepository):
             workspace_id = _workspace_id_for_route(user, http_request)

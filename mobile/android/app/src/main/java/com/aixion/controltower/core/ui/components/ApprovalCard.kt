@@ -46,6 +46,7 @@ fun ApprovalCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
+            SourceBadge(approval = approval)
             Text(
                 text = approval.projectName,
                 color = palette.inkMuted,
@@ -99,7 +100,6 @@ fun ApprovalCard(
                 fontSize = 14.sp,
                 uppercase = false
             )
-            SourceBadge(approval = approval)
             StatusBadge(label = "${approval.files.size} files", color = palette.inkMuted, fontSize = 14.sp, uppercase = false)
         }
         if (onClick != null) {
