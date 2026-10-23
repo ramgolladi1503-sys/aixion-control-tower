@@ -1793,7 +1793,11 @@ def test_separate_connections_allow_only_one_terminal_decision(tmp_path: Path) -
 
 
 def _delivery_approval(
-    approval_id: str, workspace_id: str, agent_id: str, invocation_id: str
+    approval_id: str,
+    workspace_id: str,
+    agent_id: str,
+    invocation_id: str,
+    **changes: object,
 ) -> ApprovalRequest:
     approval = _approval().model_copy(
         update={
@@ -1802,6 +1806,7 @@ def _delivery_approval(
             "workspace_id": workspace_id,
             "source_agent_id": agent_id,
             "source_invocation_id": invocation_id,
+            **changes,
         }
     )
     return _approved_decision(approval)
@@ -1866,14 +1871,50 @@ def test_sqlite_delivery_outcomes_are_batched_scoped_and_explicit(tmp_path: Path
     )
 
     assert outcomes == {
-        claimed.id: "CLAIM_RECORDED",
-        failed.id: "FAILURE_REPORTED",
+        claimed.id: "CONSUMED",
+        failed.id: "DELIVERY_UNCONFIRMED",
         "approval-without-evidence": "NOT_CONFIRMED",
     }
-    with pytest.raises(ApprovalDeliveryEvidenceIntegrityError, match="workspace approval"):
+    with pytest.raises(ApprovalDeliveryEvidenceIntegrityError, match="workspace"):
         _repository(database).list_delivery_outcomes(
             workspace_id="workspace-a", approval_ids=[foreign.id]
         )
+
+
+def test_sqlite_delivery_outcomes_distinguish_waiting_expired_and_non_applicable(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "approval_delivery_states.sqlite3"
+    waiting = _delivery_approval(
+        "approval-waiting", "workspace-a", "agent-a", "invocation-w",
+        expires_at=now_utc() + timedelta(minutes=5),
+    )
+    expired = _delivery_approval(
+        "approval-expired", "workspace-a", "agent-a", "invocation-e",
+        expires_at=now_utc() - timedelta(seconds=1),
+    )
+    denied = _delivery_approval(
+        "approval-denied", "workspace-a", "agent-a", "invocation-d",
+        expires_at=now_utc() + timedelta(minutes=5),
+    ).model_copy(
+        update={"status": ApprovalStatus.DENIED}
+    )
+    _seed_database(database, waiting)
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            (("approval_request", item.id, item.model_dump_json()) for item in (expired, denied)),
+        )
+
+    outcomes = _repository(database).list_delivery_outcomes(
+        workspace_id="workspace-a", approval_ids=[waiting.id, expired.id, denied.id]
+    )
+
+    assert outcomes == {
+        waiting.id: "AWAITING_DELIVERY",
+        expired.id: "EXPIRED",
+        denied.id: "NOT_APPLICABLE",
+    }
 
 
 def test_sqlite_delivery_outcomes_reject_detached_claim_rows(tmp_path: Path) -> None:

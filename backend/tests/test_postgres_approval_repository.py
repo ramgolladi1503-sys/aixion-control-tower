@@ -755,8 +755,8 @@ def test_postgres_delivery_outcomes_are_batched_scoped_and_explicit(
     )
 
     assert outcomes == {
-        claimed.id: "CLAIM_RECORDED",
-        failed.id: "FAILURE_REPORTED",
+        claimed.id: "CONSUMED",
+        failed.id: "DELIVERY_UNCONFIRMED",
         "approval-without-evidence": "NOT_CONFIRMED",
     }
 
@@ -787,7 +787,7 @@ def test_postgres_delivery_outcomes_are_batched_scoped_and_explicit(
                 claimed_at,
             ),
         )
-    with pytest.raises(ApprovalDeliveryEvidenceIntegrityError, match="workspace approval"):
+    with pytest.raises(ApprovalDeliveryEvidenceIntegrityError, match="workspace"):
         repository.list_delivery_outcomes(
             workspace_id=workspace.id, approval_ids=[foreign_approved.id]
         )

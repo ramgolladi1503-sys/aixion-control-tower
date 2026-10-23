@@ -142,8 +142,11 @@ class ApprovalRepositoryTest {
             ApprovalHistoryResponseDto(
                 events = listOf(
                     historyStatusDto("not-confirmed", "NOT_CONFIRMED"),
-                    historyStatusDto("claim", "CLAIM_RECORDED"),
-                    historyStatusDto("failure", "FAILURE_REPORTED"),
+                    historyStatusDto("awaiting", "AWAITING_DELIVERY"),
+                    historyStatusDto("expired", "EXPIRED"),
+                    historyStatusDto("consumed", "CONSUMED"),
+                    historyStatusDto("failure", "DELIVERY_UNCONFIRMED"),
+                    historyStatusDto("not-applicable", "NOT_APPLICABLE"),
                     historyStatusDto("unknown", "FUTURE_STATUS"),
                     historyStatusDto("missing", null)
                 )
@@ -155,8 +158,11 @@ class ApprovalRepositoryTest {
         assertEquals(
             listOf(
                 ApprovalDeliveryStatus.NOT_CONFIRMED,
-                ApprovalDeliveryStatus.CLAIM_RECORDED,
-                ApprovalDeliveryStatus.FAILURE_REPORTED,
+                ApprovalDeliveryStatus.AWAITING_DELIVERY,
+                ApprovalDeliveryStatus.EXPIRED,
+                ApprovalDeliveryStatus.CONSUMED,
+                ApprovalDeliveryStatus.DELIVERY_UNCONFIRMED,
+                ApprovalDeliveryStatus.NOT_APPLICABLE,
                 ApprovalDeliveryStatus.NOT_CONFIRMED,
                 ApprovalDeliveryStatus.NOT_CONFIRMED
             ),

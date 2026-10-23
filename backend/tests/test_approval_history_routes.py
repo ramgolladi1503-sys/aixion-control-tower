@@ -367,8 +367,8 @@ def test_history_cursor_pages_are_stable_and_do_not_overlap(monkeypatch) -> None
         events=events,
         approvals=approvals,
         delivery_outcomes={
-            first_page_approvals[0]: "CLAIM_RECORDED",
-            first_page_approvals[1]: "FAILURE_REPORTED",
+            first_page_approvals[0]: "CONSUMED",
+            first_page_approvals[1]: "DELIVERY_UNCONFIRMED",
         },
     )
 
@@ -381,7 +381,7 @@ def test_history_cursor_pages_are_stable_and_do_not_overlap(monkeypatch) -> None
         entry["approval_id"]: entry["delivery_status"]
         for entry in first_payload["events"]
     }
-    assert set(first_statuses.values()) == {"CLAIM_RECORDED", "FAILURE_REPORTED"}
+    assert set(first_statuses.values()) == {"CONSUMED", "DELIVERY_UNCONFIRMED"}
 
     second = client.get(
         "/approvals/history?limit=2&cursor=" + first_payload["next_cursor"]

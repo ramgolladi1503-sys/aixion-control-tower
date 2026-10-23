@@ -141,14 +141,45 @@ def _validate_delivery_evidence_row(
         failure_reason_code,
         reported_at,
     )
-    if claim_id is None:
-        if any(value is not None for value in claim_values) or any(
-            value is not None for value in failure_values
-        ):
-            raise ApprovalDeliveryEvidenceIntegrityError(
-                "Stored delivery failure is detached from its claim"
-            )
+    if claim_id is None and (
+        any(value is not None for value in claim_values)
+        or any(value is not None for value in failure_values)
+    ):
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery failure is detached from its claim"
+        )
+    if approval_id is None:
         return "NOT_CONFIRMED"
+    if (
+        approval_id != requested_id
+        or approval_workspace_id != workspace_id
+        or approval_payload is None
+    ):
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery approval does not match its workspace"
+        )
+    try:
+        approval = (
+            ApprovalRequest.model_validate(approval_payload)
+            if postgres
+            else ApprovalRequest.model_validate_json(approval_payload)
+        )
+    except Exception as error:
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery approval payload is invalid"
+        ) from error
+    if approval.id != requested_id or approval.workspace_id != workspace_id:
+        raise ApprovalDeliveryEvidenceIntegrityError(
+            "Stored delivery approval identity does not match its workspace"
+        )
+    if claim_id is None:
+        if approval.status != ApprovalStatus.APPROVED:
+            return "NOT_APPLICABLE"
+        if approval.expires_at is None or approval.expires_at.utcoffset() is None:
+            return "NOT_CONFIRMED"
+        if approval.expires_at <= now_utc():
+            return "EXPIRED"
+        return "AWAITING_DELIVERY"
     if (
         claim_id != requested_id
         or claim_workspace_id != workspace_id
@@ -163,16 +194,6 @@ def _validate_delivery_evidence_row(
         raise ApprovalDeliveryEvidenceIntegrityError(
             "Stored delivery claim is detached from its workspace approval"
         )
-    try:
-        approval = (
-            ApprovalRequest.model_validate(approval_payload)
-            if postgres
-            else ApprovalRequest.model_validate_json(approval_payload)
-        )
-    except Exception as error:
-        raise ApprovalDeliveryEvidenceIntegrityError(
-            "Stored delivery approval payload is invalid"
-        ) from error
     if (
         approval.id != requested_id
         or approval.workspace_id != workspace_id
@@ -191,7 +212,7 @@ def _validate_delivery_evidence_row(
             raise ApprovalDeliveryEvidenceIntegrityError(
                 "Stored delivery failure identity is incomplete"
             )
-        return "CLAIM_RECORDED"
+        return "CONSUMED"
     if (
         failure_id != requested_id
         or failure_workspace_id != claim_workspace_id
@@ -207,7 +228,7 @@ def _validate_delivery_evidence_row(
         raise ApprovalDeliveryEvidenceIntegrityError(
             "Stored delivery failure predates its claim"
         )
-    return "FAILURE_REPORTED"
+    return "DELIVERY_UNCONFIRMED"
 
 
 @dataclass(frozen=True)

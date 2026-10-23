@@ -416,7 +416,12 @@ class ApprovalDecisionHistoryEntry(BaseModel):
     decided_at: datetime
     reviewer_label: str
     delivery_status: Literal[
-        "NOT_CONFIRMED", "CLAIM_RECORDED", "FAILURE_REPORTED"
+        "NOT_CONFIRMED",
+        "NOT_APPLICABLE",
+        "AWAITING_DELIVERY",
+        "EXPIRED",
+        "CONSUMED",
+        "DELIVERY_UNCONFIRMED",
     ] = "NOT_CONFIRMED"
     request_snapshot_verified: bool
     request_snapshot: ApprovalHistoryRequestSnapshot | None = None

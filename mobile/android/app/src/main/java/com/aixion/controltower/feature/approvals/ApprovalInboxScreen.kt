@@ -550,16 +550,31 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
         val (deliveryLabel, deliveryExplanation, deliveryColor) = when (event.deliveryStatus) {
             ApprovalDeliveryStatus.NOT_CONFIRMED -> Triple(
                 "Delivery not confirmed",
-                "There is no confirmation that the connector received this decision or that the agent executed or resumed.",
+                "The server has no usable delivery evidence for this decision.",
                 palette.caution
             )
-            ApprovalDeliveryStatus.CLAIM_RECORDED -> Triple(
-                "Connector claim recorded",
-                "The server recorded an at-most-once claim for this decision. Connector receipt and agent execution or resumption remain unconfirmed.",
+            ApprovalDeliveryStatus.NOT_APPLICABLE -> Triple(
+                "No delivery expected",
+                "This decision does not authorize an external agent to resume.",
+                palette.inkMuted
+            )
+            ApprovalDeliveryStatus.AWAITING_DELIVERY -> Triple(
+                "Awaiting agent delivery",
+                "The approval is still within its delivery window. The connector has not claimed it yet.",
+                palette.caution
+            )
+            ApprovalDeliveryStatus.EXPIRED -> Triple(
+                "Approval expired before delivery",
+                "The delivery window elapsed before the connector claimed this decision.",
+                palette.danger
+            )
+            ApprovalDeliveryStatus.CONSUMED -> Triple(
+                "Decision consumed",
+                "The connector claimed this decision once. This confirms protocol consumption, not agent execution or task completion.",
                 palette.info
             )
-            ApprovalDeliveryStatus.FAILURE_REPORTED -> Triple(
-                "Claim response ambiguous",
+            ApprovalDeliveryStatus.DELIVERY_UNCONFIRMED -> Triple(
+                "Delivery response ambiguous",
                 "The connector reported an ambiguous claim response. The server may have recorded the claim; connector receipt and agent execution or resumption remain unconfirmed.",
                 palette.danger
             )

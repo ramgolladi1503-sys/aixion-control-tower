@@ -599,9 +599,17 @@ class ApprovalInboxScreenTest {
                 requestSnapshot = null
             ),
             historyEvent(
-                id = "audit-claim",
+                id = "audit-consumed",
+                decision = "approve",
+                deliveryStatus = ApprovalDeliveryStatus.CONSUMED,
+                reviewerLabel = "You",
+                requestSnapshotVerified = false,
+                requestSnapshot = null
+            ),
+            historyEvent(
+                id = "audit-denied",
                 decision = "reject",
-                deliveryStatus = ApprovalDeliveryStatus.CLAIM_RECORDED,
+                deliveryStatus = ApprovalDeliveryStatus.NOT_APPLICABLE,
                 reviewerLabel = "You",
                 requestSnapshotVerified = false,
                 requestSnapshot = null
@@ -609,7 +617,7 @@ class ApprovalInboxScreenTest {
             historyEvent(
                 id = "audit-failure",
                 decision = "approve",
-                deliveryStatus = ApprovalDeliveryStatus.FAILURE_REPORTED,
+                deliveryStatus = ApprovalDeliveryStatus.DELIVERY_UNCONFIRMED,
                 reviewerLabel = "You",
                 requestSnapshotVerified = false,
                 requestSnapshot = null
@@ -628,17 +636,21 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onNodeWithText("History").performClick()
-        composeRule.onAllNodesWithText("Approved").assertCountEquals(2)
+        composeRule.onAllNodesWithText("Approved").assertCountEquals(3)
         // One matching node is the selected filter chip, the other is the history status.
-        composeRule.onAllNodesWithText("Denied").assertCountEquals(2)
+        composeRule.onAllNodesWithText("Denied").assertCountEquals(3)
         composeRule.onNodeWithText("Delivery not confirmed").assertExists()
         composeRule.onNodeWithText(
-            "There is no confirmation that the connector received this decision or that the agent executed or resumed."
+            "The server has no usable delivery evidence for this decision."
         ).assertExists()
-        composeRule.onNodeWithText("Connector claim recorded").assertExists()
-        composeRule.onNodeWithText("Claim response ambiguous").assertExists()
+        composeRule.onNodeWithText("Decision consumed").assertExists()
+        composeRule.onNodeWithText("No delivery expected").assertExists()
         composeRule.onNodeWithText(
-            "The server recorded an at-most-once claim for this decision. Connector receipt and agent execution or resumption remain unconfirmed."
+            "This decision does not authorize an external agent to resume."
+        ).assertExists()
+        composeRule.onNodeWithText("Delivery response ambiguous").assertExists()
+        composeRule.onNodeWithText(
+            "The connector claimed this decision once. This confirms protocol consumption, not agent execution or task completion."
         ).assertExists()
         composeRule.onNodeWithText(
             "The connector reported an ambiguous claim response. The server may have recorded the claim; connector receipt and agent execution or resumption remain unconfirmed."

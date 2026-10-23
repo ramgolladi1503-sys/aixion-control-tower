@@ -130,8 +130,11 @@ data class ApprovalHistoryEvent(
 
 enum class ApprovalDeliveryStatus {
     NOT_CONFIRMED,
-    CLAIM_RECORDED,
-    FAILURE_REPORTED
+    NOT_APPLICABLE,
+    AWAITING_DELIVERY,
+    EXPIRED,
+    CONSUMED,
+    DELIVERY_UNCONFIRMED
 }
 
 data class ApprovalHistoryPage(
