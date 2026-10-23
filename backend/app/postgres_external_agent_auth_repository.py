@@ -148,6 +148,21 @@ class PostgresExternalAgentAuthRepository:
             self._insert_audit(conn, audit_event)
 
     def get(self, agent_id: str) -> tuple[ExternalAgent, AgentCredentialRecord] | None:
+        return self._get(agent_id, workspace_id=None)
+
+    def get_for_workspace(
+        self, agent_id: str, *, workspace_id: str
+    ) -> tuple[ExternalAgent, AgentCredentialRecord] | None:
+        """Read an agent and credential only within the caller's workspace."""
+        if not workspace_id:
+            raise ValueError("External-agent reads require a workspace")
+        return self._get(agent_id, workspace_id=workspace_id)
+
+    def _get(
+        self, agent_id: str, *, workspace_id: str | None
+    ) -> tuple[ExternalAgent, AgentCredentialRecord] | None:
+        workspace_clause = " AND a.workspace_id=%s" if workspace_id is not None else ""
+        params = (agent_id, workspace_id) if workspace_id is not None else (agent_id,)
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT a.payload,a.agent_id,a.workspace_id,a.provider,a.auth_type,a.enabled,a.secret_hash,"
@@ -156,8 +171,8 @@ class PostgresExternalAgentAuthRepository:
                 "c.rate_limit_window_started_at,c.rate_limit_request_count,c.created_at,c.updated_at "
                 "FROM external_agents AS a LEFT JOIN external_agent_credentials AS c "
                 "ON c.agent_id=a.agent_id AND c.workspace_id=a.workspace_id "
-                "WHERE a.agent_id=%s",
-                (agent_id,),
+                "WHERE a.agent_id=%s" + workspace_clause,
+                params,
             ).fetchone()
         if row is None:
             return None

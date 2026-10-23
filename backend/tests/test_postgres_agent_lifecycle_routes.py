@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from app import main
 from app import application_repository_access
+from app import agent_routes
 from app.application_repositories import ApplicationRepositories
 from app.agent_routes import APPROVAL_CONNECTOR_ACTIONS
 from app.auth import require_owner
@@ -92,6 +93,31 @@ def test_external_agent_repository_keeps_explicit_local_binding(
         application_repository_access.external_agent_auth_repository_for_request(request)
         is local_repository
     )
+
+
+def test_postgres_agent_detail_requires_workspace_before_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PostgresRepositoryStub:
+        def get_for_workspace(self, agent_id: str, *, workspace_id: str):
+            raise AssertionError("unscoped requests must not query agent records")
+
+    user = AuthUser(
+        id="owner-without-membership", email="owner@example.test", display_name="Owner",
+        role=UserRole.OWNER, workspace_id=None,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        agent_routes, "external_agent_auth_repository_for_request",
+        lambda _request: PostgresRepositoryStub(),
+    )
+    monkeypatch.setattr(agent_routes, "workspace_id_for_request", lambda _user, _request: None)
+
+    with pytest.raises(agent_routes.HTTPException) as error:
+        agent_routes._get_agent_or_404("known-agent-id", user, request)
+
+    assert error.value.status_code == 403
+    assert error.value.detail == "Workspace membership is required"
 
 
 @pytest.fixture

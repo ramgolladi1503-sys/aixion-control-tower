@@ -213,9 +213,16 @@ def _get_agent_or_404(
         None if http_request is None
         else external_agent_auth_repository_for_request(http_request)
     )
+    workspace_id = None
+    if repository is not None and not is_sqlite_external_agent_auth_repository(repository):
+        if user is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        workspace_id = workspace_id_for_request(user, http_request)
+        if not workspace_id:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
     record = (
         None if repository is None or is_sqlite_external_agent_auth_repository(repository)
-        else repository.get(agent_id)
+        else repository.get_for_workspace(agent_id, workspace_id=workspace_id)
     )
     agent = (
         store.external_agents.get(agent_id)
@@ -235,10 +242,11 @@ def _get_agent_or_404(
     if not consistent:
         raise HTTPException(status_code=404, detail="External agent not found")
     if user is not None:
-        workspace_id = (
-            workspace_id_for_user(user) if http_request is None
-            else workspace_id_for_request(user, http_request)
-        )
+        if workspace_id is None:
+            workspace_id = (
+                workspace_id_for_user(user) if http_request is None
+                else workspace_id_for_request(user, http_request)
+            )
         if workspace_id is not None and agent.workspace_id != workspace_id:
             raise HTTPException(status_code=404, detail="External agent not found")
     return agent, (record[1] if record else None)

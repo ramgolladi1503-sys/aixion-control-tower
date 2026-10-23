@@ -178,6 +178,8 @@ def test_create_get_and_workspace_list_round_trip(agent_repository) -> None:
     _create_agent(repository, agent, credential)
 
     assert repository.get(agent.id) == (agent, credential)
+    assert repository.get_for_workspace(agent.id, workspace_id=workspace_id) == (agent, credential)
+    assert repository.get_for_workspace(agent.id, workspace_id="another-workspace") is None
     assert repository.list_for_workspace(workspace_id) == [(agent, credential)]
     assert repository.list_for_workspace("another-workspace") == []
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import socket
@@ -1014,22 +1015,40 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
                 "args": {"CommandLine": "echo restart-recovery"},
             },
         }
-        hook_process = subprocess.Popen(
-            [sys.executable, str(HOOK_PATH)],
-            env=hook_environment,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        hook_stdin = hook_process.stdin
-        assert hook_stdin is not None
-        hook_stdin.write(json.dumps(hook_payload) + "\n")
-        hook_stdin.close()
-        # communicate() flushes stdin when it is set, even after close().
-        # Clear the reference after delivering EOF so output collection works
-        # on Python versions that reject flushing a closed stream.
-        hook_process.stdin = None
+
+        def expected_invocation_id(payload: dict) -> str:
+            call = payload["toolCall"]
+            material = json.dumps(
+                [
+                    payload["conversationId"],
+                    payload["stepIdx"],
+                    call["name"],
+                    call["args"],
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return "antigravity:v1:" + hashlib.sha256(material).hexdigest()
+
+        original_invocation_id = expected_invocation_id(hook_payload)
+
+        def launch_hook(payload: dict) -> subprocess.Popen[str]:
+            process = subprocess.Popen(
+                [sys.executable, str(HOOK_PATH)],
+                env=hook_environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            assert process.stdin is not None
+            process.stdin.write(json.dumps(payload) + "\n")
+            process.stdin.close()
+            # communicate() may flush stdin even after close().
+            process.stdin = None
+            return process
+
+        hook_process = launch_hook(hook_payload)
 
         approval: dict | None = None
         deadline = time.monotonic() + 10
@@ -1056,11 +1075,21 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
                 )
                 time.sleep(0.1)
         assert approval is not None, "Hook did not create an approval through the local API"
+        assert approval["source_session_id"] == hook_payload["conversationId"]
+        assert approval["source_invocation_id"] == original_invocation_id
         assert hook_process.poll() is None, "Hook did not remain blocked on the pending approval"
+
+        with httpx.Client(base_url=base_url, timeout=5) as api:
+            matching = [
+                item
+                for item in api.get("/approvals", headers=owner_headers).json()
+                if item.get("source_invocation_id") == original_invocation_id
+            ]
+        assert [item["id"] for item in matching] == [approval["id"]]
 
         old_pid = api_process.pid
         _stop_isolated_api(api_process)
-        time.sleep(2.5)
+        assert api_process.poll() is not None, "Original API subprocess did not stop"
         assert hook_process.poll() is None, "Hook failed open or exited while the API was unavailable"
 
         restarted_api = _start_isolated_api(
@@ -1082,12 +1111,74 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
         assert result["decision"] == "allow"
         assert result["reason"] == "Approved from Aixion Control Tower"
 
+        # A different provider invocation after the restart must receive its
+        # own approval row. The approved original invocation cannot authorize it.
+        changed_payload = json.loads(json.dumps(hook_payload))
+        changed_payload["conversationId"] = "session-api-process-restart-new-invocation"
+        changed_invocation_id = expected_invocation_id(changed_payload)
+        assert changed_invocation_id != original_invocation_id
+        second_hook_process = launch_hook(changed_payload)
+        try:
+            second_approval: dict | None = None
+            deadline = time.monotonic() + 10
+            with httpx.Client(base_url=base_url, timeout=5) as api:
+                while time.monotonic() < deadline:
+                    response = api.get("/approvals", headers=owner_headers)
+                    assert response.status_code == 200, response.text
+                    second_approval = next(
+                        (
+                            item
+                            for item in response.json()
+                            if item.get("source_invocation_id") == changed_invocation_id
+                        ),
+                        None,
+                    )
+                    if second_approval is not None:
+                        break
+                    assert second_hook_process.poll() is None, (
+                        "Hook exited before its distinct invocation approval was observed"
+                    )
+                    time.sleep(0.1)
+                assert second_approval is not None, (
+                    "Restarted API did not create an approval for the distinct invocation"
+                )
+                assert second_approval["id"] != approval["id"]
+                assert second_approval["source_session_id"] == changed_payload["conversationId"]
+                second_matches = [
+                    item
+                    for item in response.json()
+                    if item.get("source_invocation_id") == changed_invocation_id
+                ]
+                assert [item["id"] for item in second_matches] == [second_approval["id"]]
+
+                rejected = api.post(
+                    f"/approvals/{second_approval['id']}/decision",
+                    headers=owner_headers,
+                    json={"decision": "deny"},
+                )
+                assert rejected.status_code == 200, rejected.text
+
+            second_stdout, second_stderr = second_hook_process.communicate(timeout=20)
+            assert second_hook_process.returncode == 0, second_stderr
+            second_result = json.loads(second_stdout.strip().splitlines()[-1])
+            assert second_result["decision"] == "deny"
+            assert second_result["reason"] == "Control Tower decision: DENIED"
+        finally:
+            if second_hook_process.poll() is None:
+                second_hook_process.kill()
+                second_hook_process.wait(timeout=5)
+
         with sqlite3.connect(db_path) as connection:
             claim_count = connection.execute(
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
                 (approval["id"],),
             ).fetchone()[0]
+            second_claim_count = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (second_approval["id"],),
+            ).fetchone()[0]
         assert claim_count == 1
+        assert second_claim_count == 0
     finally:
         if hook_process is not None and hook_process.poll() is None:
             hook_process.kill()
