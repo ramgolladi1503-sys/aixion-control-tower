@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -61,6 +62,15 @@ def postgres_mcp_pending_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Itera
             arguments={"path": "README.md"},
             created_at=now_utc() - timedelta(minutes=4),
         )
+        registered_test_server = MCPChildServer(
+            id=f"mcp_server_{uuid.uuid4().hex}",
+            project_id=project.id,
+            workspace_id=workspace.id,
+            name="test-child",
+            transport="test",
+            enabled=True,
+            tools=[MCPToolDefinition(name="write_file", mutating=True)],
+        )
         approval_payload = {
             "id": pending.approval_request_id,
             "project_id": project.id,
@@ -106,6 +116,20 @@ def postgres_mcp_pending_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Itera
                     pending.created_at,
                     pending.updated_at,
                     Jsonb(pending.model_dump(mode="json")),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO mcp_child_servers(server_id,project_id,workspace_id,name,enabled,"
+                "created_at,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    registered_test_server.id,
+                    registered_test_server.project_id,
+                    registered_test_server.workspace_id,
+                    registered_test_server.name,
+                    registered_test_server.enabled,
+                    registered_test_server.created_at,
+                    registered_test_server.updated_at,
+                    Jsonb(registered_test_server.model_dump(mode="json")),
                 ),
             )
 
@@ -170,7 +194,34 @@ def postgres_mcp_pending_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Itera
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
-def _create_approved_mcp_forwarding_case(connect, project: Project, user: AuthUser) -> tuple[str, MCPChildServer]:
+def _create_approved_mcp_forwarding_case(
+    connect,
+    project: Project,
+    user: AuthUser,
+    *,
+    transport: str = "test",
+    endpoint: str = "",
+) -> tuple[str, MCPChildServer]:
+    repositories = main.app.state.postgres_repositories
+    server = MCPChildServer(
+        project_id=project.id,
+        workspace_id=project.workspace_id,
+        name="route-test-child",
+        transport=transport,
+        endpoint=endpoint,
+        enabled=True,
+        tools=[MCPToolDefinition(name="write_file", mutating=True)],
+    )
+    repositories.mcp_child_servers.create(
+        server=server,
+        audit_event=AuditEvent(
+            event_type="mcp.child_server.created",
+            actor=user.email,
+            entity_id=server.id,
+            workspace_id=server.workspace_id,
+            details={"project_id": project.id, "name": server.name},
+        ),
+    )
     client = TestClient(main.app)
     submitted = client.post(
         "/mcp-gateway/requests",
@@ -189,7 +240,6 @@ def _create_approved_mcp_forwarding_case(connect, project: Project, user: AuthUs
     )
     assert submitted.status_code == 200, submitted.text
     approval_id = submitted.json()["approval_request_id"]
-    repositories = main.app.state.postgres_repositories
     approval = repositories.approval_decisions.get(approval_id)
     assert approval is not None
     approved = approval.model_copy(
@@ -211,25 +261,23 @@ def _create_approved_mcp_forwarding_case(connect, project: Project, user: AuthUs
             (approved.status.value, approved.updated_at, Jsonb(approved.model_dump(mode="json")), approval_id),
         )
 
-    server = MCPChildServer(
-        project_id=project.id,
-        workspace_id=project.workspace_id,
-        name="route-test-child",
-        transport="test",
-        enabled=True,
-        tools=[MCPToolDefinition(name="write_file", mutating=True)],
-    )
-    repositories.mcp_child_servers.create(
-        server=server,
+    return approval_id, server
+
+
+def _update_mcp_server_endpoint(server: MCPChildServer, user: AuthUser, endpoint: str) -> MCPChildServer:
+    updated = server.model_copy(update={"endpoint": endpoint, "updated_at": now_utc()})
+    main.app.state.postgres_repositories.mcp_child_servers.update(
+        server=updated,
         audit_event=AuditEvent(
-            event_type="mcp.child_server.created",
+            event_type="mcp.child_server.updated",
             actor=user.email,
             entity_id=server.id,
             workspace_id=server.workspace_id,
-            details={"project_id": project.id, "name": server.name},
+            details={"project_id": server.project_id, "name": server.name},
         ),
+        expected_updated_at=server.updated_at.isoformat(),
     )
-    return approval_id, server
+    return updated
 
 
 def test_postgres_mcp_pending_reads_are_workspace_scoped_and_do_not_project_to_sqlite(
@@ -529,6 +577,12 @@ def test_postgres_mcp_resolve_forwards_one_claim_and_persists_final_audit(
 ) -> None:
     connect, _workspace, project, user, _pending = postgres_mcp_pending_route_runtime
     approval_id, server = _create_approved_mcp_forwarding_case(connect, project, user)
+    approval = main.app.state.postgres_repositories.approval_decisions.get(approval_id)
+    assert approval is not None
+    approved_action = json.loads(approval.files[0].new_content)
+    assert approved_action["target_server_id"] == server.id
+    assert approved_action["target_server_revision"] == server.updated_at.isoformat()
+    assert "endpoint" not in approved_action
     client = TestClient(main.app)
     before_calls = mcp_gateway_routes.child_received_count_for_server_for_test(server.name)
 
@@ -582,6 +636,68 @@ def test_postgres_mcp_resolve_rejects_unbound_action_before_child_call(
             (pending.id,),
         ).fetchone()
     assert row == (MCPPendingStatus.WAITING_FOR_APPROVAL.value, 0)
+
+
+def test_postgres_mcp_resolve_rejects_server_revision_changed_before_claim(
+    postgres_mcp_pending_route_runtime,
+) -> None:
+    connect, _workspace, project, user, _pending = postgres_mcp_pending_route_runtime
+    approval_id, server = _create_approved_mcp_forwarding_case(connect, project, user)
+    _update_mcp_server_endpoint(server, user, "https://changed-before-claim.example/mcp")
+    before_calls = mcp_gateway_routes.child_received_count_for_server_for_test(server.name)
+
+    response = TestClient(main.app).post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert response.status_code == 409
+    pending = main.app.state.postgres_repositories.mcp_pending_requests.get_for_approval(approval_id)
+    assert pending is not None
+    assert pending.status == MCPPendingStatus.WAITING_FOR_APPROVAL
+    assert pending.attempts == 0
+    assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == before_calls
+
+
+def test_postgres_mcp_resolve_dispatches_claimed_server_snapshot_after_registry_change(
+    postgres_mcp_pending_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, _workspace, project, user, _pending = postgres_mcp_pending_route_runtime
+    original_endpoint = "https://approved-target.example/mcp"
+    changed_endpoint = "https://retargeted.example/mcp"
+    approval_id, server = _create_approved_mcp_forwarding_case(
+        connect,
+        project,
+        user,
+        transport="http",
+        endpoint=original_endpoint,
+    )
+    pending_repository = main.app.state.postgres_repositories.mcp_pending_requests
+    claim_forwarding = pending_repository.claim_forwarding
+    dispatched_endpoints: list[str] = []
+
+    def claim_then_change_registry(**kwargs):
+        claimed = claim_forwarding(**kwargs)
+        assert claimed is not None
+        _update_mcp_server_endpoint(server, user, changed_endpoint)
+        return claimed
+
+    def record_dispatch(child_server, _call):
+        dispatched_endpoints.append(child_server.endpoint)
+        return {"ok": True, "server_name": child_server.name, "tool_name": "write_file"}
+
+    monkeypatch.setattr(pending_repository, "claim_forwarding", claim_then_change_registry)
+    monkeypatch.setattr(
+        mcp_gateway_routes.MCPChildServerRouter,
+        "_call_http_server",
+        staticmethod(record_dispatch),
+    )
+
+    response = TestClient(main.app).post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert response.status_code == 200, response.text
+    assert dispatched_endpoints == [original_endpoint]
+    current_server = main.app.state.postgres_repositories.mcp_child_servers.get(server.id)
+    assert current_server is not None
+    assert current_server.endpoint == changed_endpoint
 
 
 def test_postgres_mcp_resolve_marks_failed_child_response_unknown_and_never_replays(
@@ -675,6 +791,15 @@ def test_postgres_mcp_idempotency_key_isolated_between_workspaces(
         name="Second MCP project",
         workspace_id=workspace_b.id,
     )
+    child_server_b = MCPChildServer(
+        id=f"mcp_server_{uuid.uuid4().hex}",
+        project_id=project_b.id,
+        workspace_id=workspace_b.id,
+        name="test-child",
+        transport="test",
+        enabled=True,
+        tools=[MCPToolDefinition(name="write_file", mutating=True)],
+    )
     user_b = AuthUser(
         id=workspace_b.owner_user_id,
         email=f"mcp-owner-{uuid.uuid4().hex}@example.test",
@@ -712,6 +837,20 @@ def test_postgres_mcp_idempotency_key_isolated_between_workspaces(
         connection.execute(
             "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
             (project_b.id, workspace_b.id, Jsonb(project_b.model_dump(mode="json"))),
+        )
+        connection.execute(
+            "INSERT INTO mcp_child_servers(server_id,project_id,workspace_id,name,enabled,"
+            "created_at,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                child_server_b.id,
+                child_server_b.project_id,
+                child_server_b.workspace_id,
+                child_server_b.name,
+                child_server_b.enabled,
+                child_server_b.created_at,
+                child_server_b.updated_at,
+                Jsonb(child_server_b.model_dump(mode="json")),
+            ),
         )
     for dependency in (mcp_gateway_routes.ReviewerDependency, mcp_gateway_routes.MaintainerDependency):
         monkeypatch.setitem(main.app.dependency_overrides, dependency.dependency, lambda: user_a)

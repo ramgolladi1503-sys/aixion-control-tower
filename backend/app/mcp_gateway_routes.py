@@ -260,6 +260,30 @@ def _postgres_mcp_submission(
     if project is None or project.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    try:
+        registered_servers = request.app.state.postgres_repositories.mcp_child_servers.list_for_workspace(
+            workspace_id,
+            project_id=project.id,
+            enabled=True,
+        )
+    except (RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP child server registry is unavailable") from error
+    matching_servers = [server for server in registered_servers if server.name == call.server_name]
+    if len(matching_servers) != 1:
+        raise HTTPException(status_code=404, detail="Enabled MCP child server not found")
+    registered_server = matching_servers[0]
+    registered_tool = next(
+        (tool for tool in registered_server.tools if tool.name == call.tool_name),
+        None,
+    )
+    if registered_tool is None or not registered_tool.mutating:
+        raise HTTPException(status_code=409, detail="MCP tool is not registered as mutating on this server")
+    approved_action = {
+        **approved_call.model_dump(mode="json"),
+        "target_server_id": registered_server.id,
+        "target_server_revision": registered_server.updated_at.isoformat(),
+    }
+
     # A deterministic pending primary key gives this route an idempotency
     # constraint without fabricating a source_agent_id: PostgreSQL requires
     # non-null source_agent_id values to reference a registered external agent.
@@ -286,6 +310,10 @@ def _postgres_mcp_submission(
         existing: tuple[ApprovalRequest, MCPPendingRequest],
     ) -> MCPGatewayDecision:
         approval, pending = existing
+        try:
+            approved_action = json.loads(approval.files[0].new_content or "")
+        except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+            approved_action = {}
         same_call = (
             approval.project_id == project.id
             and pending.server_name == call.server_name
@@ -293,6 +321,8 @@ def _postgres_mcp_submission(
             and pending.arguments == call.arguments
             and pending.session_id == call.session_id
             and pending.requested_by == call.requested_by
+            and approved_action.get("target_server_id") == registered_server.id
+            and approved_action.get("target_server_revision") == registered_server.updated_at.isoformat()
         )
         if not same_call:
             raise HTTPException(status_code=409, detail="Idempotency-Key was already used for a different MCP request")
@@ -321,9 +351,9 @@ def _postgres_mcp_submission(
         files=[FileChange(
             path=f"mcp://{call.server_name}/{call.tool_name}",
             change_type="mcp_tool_call",
-            diff=f"MCP mutating tool call requires approval: {approved_call.model_dump(mode='json')}",
+            diff=f"MCP mutating tool call requires approval: {approved_action}",
             new_content=json.dumps(
-                approved_call.model_dump(mode="json"),
+                approved_action,
                 sort_keys=True,
                 separators=(",", ":"),
             ),
@@ -727,6 +757,42 @@ def _resolve_postgres_gateway_request(
             or pending.approval_request_id != approval.id
         ):
             raise HTTPException(status_code=404, detail="MCP pending request not found")
+        if len(approval.files) != 1:
+            raise HTTPException(status_code=409, detail="Approved MCP target binding is invalid")
+        try:
+            approved_action = json.loads(approval.files[0].new_content or "")
+            target_server_id = approved_action["target_server_id"]
+            target_revision_text = approved_action["target_server_revision"]
+            if not isinstance(target_server_id, str) or not isinstance(target_revision_text, str):
+                raise ValueError("MCP target identity fields must be strings")
+            target_server_revision = datetime.fromisoformat(target_revision_text)
+            if target_server_revision.tzinfo is None:
+                raise ValueError("MCP target revision must have a timezone")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise HTTPException(status_code=409, detail="Approved MCP target binding is invalid") from error
+        child_server = repositories.mcp_child_servers.get(target_server_id)
+        if (
+            child_server is None
+            or child_server.id != target_server_id
+            or child_server.workspace_id != workspace_id
+            or child_server.project_id != pending.project_id
+            or child_server.name != pending.server_name
+            or not child_server.enabled
+            or child_server.updated_at != target_server_revision
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Approved MCP server configuration changed; create a new request",
+            )
+        registered_tool = next(
+            (tool for tool in child_server.tools if tool.name == pending.tool_name),
+            None,
+        )
+        if registered_tool is None or not registered_tool.mutating:
+            raise HTTPException(
+                status_code=409,
+                detail="Approved MCP tool is no longer registered as mutating",
+            )
         now = now_utc()
         claimed = pending_repository.claim_forwarding(
             pending_id=pending.id,
@@ -734,6 +800,8 @@ def _resolve_postgres_gateway_request(
             workspace_id=workspace_id,
             project_id=approval.project_id,
             server_name=pending.server_name,
+            expected_server_id=target_server_id,
+            expected_server_revision=target_server_revision,
             owner="mcp-gateway-resolver",
             now=now,
             lease_expires_at=now + timedelta(seconds=30),
@@ -757,31 +825,8 @@ def _resolve_postgres_gateway_request(
             )
         raise HTTPException(status_code=409, detail="MCP request is not eligible for another forwarding attempt")
 
-    # The claim transaction verifies the enabled child row together with the
-    # approval and pending action. Re-read its configuration for dispatch and
-    # fail closed if it was disabled or changed immediately after that claim.
-    try:
-        servers = repositories.mcp_child_servers.list_for_workspace(
-            workspace_id,
-            project_id=claimed.project_id,
-            enabled=True,
-        )
-    except (RuntimeError, psycopg.Error) as error:
-        raise HTTPException(status_code=503, detail="MCP child server registry is unavailable") from error
-    matching_servers = [server for server in servers if server.name == claimed.server_name]
-    if len(matching_servers) != 1:
-        _finish_postgres_mcp_forwarding(
-            pending_repository,
-            expected=claimed,
-            status=MCPPendingStatus.DEAD_LETTER,
-            actor="mcp-gateway",
-            event_type="mcp.forward_not_started",
-            reason_code="CHILD_SERVER_UNAVAILABLE",
-            details={"server_name": claimed.server_name, "tool_name": claimed.tool_name},
-        )
-        raise HTTPException(status_code=409, detail="Approved MCP child server is no longer enabled")
-
-    child_server = matching_servers[0]
+    # Dispatch the exact server snapshot whose ID and revision were verified
+    # under the forwarding claim. Never re-resolve the target by mutable name.
     child_call = ChildMCPToolCall(
         server_name=claimed.server_name,
         tool_name=claimed.tool_name,

@@ -5,7 +5,7 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import psycopg
@@ -41,6 +41,9 @@ from app.models import (
 from app.postgres_database import POSTGRES_MIGRATIONS, run_postgres_migrations
 
 
+SERVER_REVISION = datetime.fromisoformat("2026-10-23T00:00:00+00:00")
+
+
 def _records() -> tuple[ApprovalRequest, MCPPendingRequest, AuditEvent, Notification]:
     call_snapshot = {
         "server_name": "server",
@@ -49,6 +52,8 @@ def _records() -> tuple[ApprovalRequest, MCPPendingRequest, AuditEvent, Notifica
         "session_id": None,
         "requested_by": "test-client",
         "mutating": True,
+        "target_server_id": "mcp-server-pending-test",
+        "target_server_revision": SERVER_REVISION.isoformat(),
     }
     approval = ApprovalRequest(
         id="approval-mcp-pending-test",
@@ -362,6 +367,8 @@ def _seed_postgres_project(connect: Callable[[], Connection]) -> None:
         name="server",
         enabled=True,
         tools=[MCPToolDefinition(name="write_file", mutating=True)],
+        created_at=SERVER_REVISION,
+        updated_at=SERVER_REVISION,
     )
     with connect() as connection:
         connection.execute(
@@ -387,6 +394,16 @@ def _postgres_create(repository: PostgresMCPPendingRepository, connect: Callable
         approval=records[0], pending=records[1], audit_event=records[2], notification=records[3]
     )
     return records
+
+
+def _target_server_binding(connect: Callable[[], Connection]) -> tuple[str, datetime]:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT server_id,updated_at FROM mcp_child_servers WHERE name=%s",
+            ("server",),
+        ).fetchone()
+    assert row is not None
+    return row[0], row[1]
 
 
 def test_postgres_approval_pending_notification_and_audit_share_transaction(
@@ -451,12 +468,15 @@ def test_postgres_approved_request_claim_and_expired_lease_fail_closed(
             (approved.status.value, Jsonb(approved.model_dump(mode="json")), approval.id),
         )
     now = now_utc()
+    server_id, server_revision = _target_server_binding(connect)
     claimed = repository.claim_forwarding(
         pending_id=pending.id,
         approval_id=approval.id,
         workspace_id=approval.workspace_id,
         project_id=approval.project_id,
         server_name=pending.server_name,
+        expected_server_id=server_id,
+        expected_server_revision=server_revision,
         owner="worker-one",
         now=now,
         lease_expires_at=now + timedelta(seconds=10),
@@ -470,6 +490,8 @@ def test_postgres_approved_request_claim_and_expired_lease_fail_closed(
         workspace_id=approval.workspace_id,
         project_id=approval.project_id,
         server_name=pending.server_name,
+        expected_server_id=server_id,
+        expected_server_revision=server_revision,
         owner="worker-two",
         now=now + timedelta(seconds=11),
         lease_expires_at=now + timedelta(seconds=41),
@@ -519,12 +541,15 @@ def test_postgres_forward_claim_is_workspace_and_child_server_scoped(
             (approved.status.value, Jsonb(approved.model_dump(mode="json")), approval.id),
         )
     now = now_utc()
+    server_id, server_revision = _target_server_binding(connect)
     common = {
         "pending_id": pending.id,
         "approval_id": approval.id,
         "workspace_id": approval.workspace_id,
         "project_id": approval.project_id,
         "server_name": pending.server_name,
+        "expected_server_id": server_id,
+        "expected_server_revision": server_revision,
         "owner": "worker-one",
         "now": now,
         "lease_expires_at": now + timedelta(seconds=30),
@@ -532,14 +557,119 @@ def test_postgres_forward_claim_is_workspace_and_child_server_scoped(
     assert repository.claim_forwarding(**{**common, "workspace_id": "workspace-other"}) is None
     assert repository.claim_forwarding(**{**common, "project_id": "project-other"}) is None
     assert repository.claim_forwarding(**{**common, "server_name": "other-server"}) is None
+    assert repository.claim_forwarding(
+        **{**common, "expected_server_id": "different-server-id"}
+    ) is None
+    assert repository.claim_forwarding(
+        **{**common, "expected_server_revision": server_revision + timedelta(seconds=1)}
+    ) is None
+    current = repository.get(pending.id)
+    assert current is not None
+    assert current.status == MCPPendingStatus.WAITING_FOR_APPROVAL
+    assert current.attempts == 0
+
+
+def test_postgres_forward_claim_rejects_stale_child_config_revision_without_attempt(
+    postgres_mcp_pending_repository,
+) -> None:
+    repository, connect = postgres_mcp_pending_repository
+    approval, pending, _, _ = _postgres_create(repository, connect)
+    approved = _approved(approval)
     with connect() as connection:
         connection.execute(
-            "UPDATE mcp_child_servers SET enabled=FALSE,"
-            "payload=jsonb_set(payload,'{enabled}','false'::jsonb) WHERE name=%s",
+            "UPDATE approval_requests SET status=%s,payload=%s WHERE approval_id=%s",
+            (approved.status.value, Jsonb(approved.model_dump(mode="json")), approval.id),
+        )
+        row = connection.execute(
+            "SELECT payload FROM mcp_child_servers WHERE name=%s",
             (pending.server_name,),
+        ).fetchone()
+        child = MCPChildServer.model_validate(row[0])
+        stale = child.model_copy(update={
+            "updated_at": child.updated_at + timedelta(seconds=1),
+        })
+        connection.execute(
+            "UPDATE mcp_child_servers SET updated_at=%s,payload=%s WHERE server_id=%s",
+            (stale.updated_at, Jsonb(stale.model_dump(mode="json")), child.id),
+        )
+    server_id, approved_revision = _target_server_binding(connect)
+    # The database now returns the changed revision; use the revision bound in
+    # the approval snapshot (the fixture's original revision) for the claim.
+    assert approved_revision != SERVER_REVISION
+    now = now_utc()
+    claimed = repository.claim_forwarding(
+        pending_id=pending.id,
+        approval_id=approval.id,
+        workspace_id=approval.workspace_id,
+        project_id=approval.project_id,
+        server_name=pending.server_name,
+        expected_server_id=server_id,
+        expected_server_revision=SERVER_REVISION,
+        owner="worker-one",
+        now=now,
+        lease_expires_at=now + timedelta(seconds=30),
+    )
+    assert claimed is None
+    current = repository.get(pending.id)
+    assert current is not None
+    assert current.status == MCPPendingStatus.WAITING_FOR_APPROVAL
+    assert current.attempts == 0
+
+
+def test_postgres_forward_claim_rejects_disabled_child_and_tool_mismatch_without_attempt(
+    postgres_mcp_pending_repository,
+) -> None:
+    repository, connect = postgres_mcp_pending_repository
+    approval, pending, _, _ = _postgres_create(repository, connect)
+    approved = _approved(approval)
+    with connect() as connection:
+        connection.execute(
+            "UPDATE approval_requests SET status=%s,payload=%s WHERE approval_id=%s",
+            (approved.status.value, Jsonb(approved.model_dump(mode="json")), approval.id),
+        )
+    server_id, server_revision = _target_server_binding(connect)
+    now = now_utc()
+    common = {
+        "pending_id": pending.id,
+        "approval_id": approval.id,
+        "workspace_id": approval.workspace_id,
+        "project_id": approval.project_id,
+        "server_name": pending.server_name,
+        "expected_server_id": server_id,
+        "expected_server_revision": server_revision,
+        "owner": "worker-one",
+        "now": now,
+        "lease_expires_at": now + timedelta(seconds=30),
+    }
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT payload FROM mcp_child_servers WHERE server_id=%s", (server_id,)
+        ).fetchone()
+        child_payload = dict(row[0])
+        child_payload["enabled"] = False
+        connection.execute(
+            "UPDATE mcp_child_servers SET enabled=FALSE,payload=%s WHERE server_id=%s",
+            (Jsonb(child_payload), server_id),
         )
     assert repository.claim_forwarding(**common) is None
-    assert repository.get(pending.id).status == MCPPendingStatus.WAITING_FOR_APPROVAL
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT payload FROM mcp_child_servers WHERE server_id=%s", (server_id,)
+        ).fetchone()
+        child_payload = dict(row[0])
+        child_payload["enabled"] = True
+        child_payload["tools"] = [
+            {"name": "write_file", "description": "", "input_schema": {"type": "object", "properties": {}}, "mutating": False}
+        ]
+        connection.execute(
+            "UPDATE mcp_child_servers SET enabled=TRUE,payload=%s WHERE server_id=%s",
+            (Jsonb(child_payload), server_id),
+        )
+    assert repository.claim_forwarding(**common) is None
+    current = repository.get(pending.id)
+    assert current is not None
+    assert current.status == MCPPendingStatus.WAITING_FOR_APPROVAL
+    assert current.attempts == 0
 
 
 @pytest.mark.parametrize(
@@ -550,6 +680,8 @@ def test_postgres_forward_claim_is_workspace_and_child_server_scoped(
         ("arguments", {"path": "different.txt", "text": "reviewed"}),
         ("session_id", "different-session"),
         ("requested_by", "different-client"),
+        ("target_server_id", "different-server-id"),
+        ("target_server_revision", "2026-10-23T00:00:01+00:00"),
     ],
 )
 def test_postgres_forward_claim_rejects_validly_rehashed_but_mismatched_mcp_action(
@@ -581,12 +713,15 @@ def test_postgres_forward_claim_rejects_validly_rehashed_but_mismatched_mcp_acti
             (approved.status.value, Jsonb(approved.model_dump(mode="json")), approval.id),
         )
     now = now_utc()
+    server_id, server_revision = _target_server_binding(connect)
     assert repository.claim_forwarding(
         pending_id=pending.id,
         approval_id=approval.id,
         workspace_id=approval.workspace_id,
         project_id=approval.project_id,
         server_name=pending.server_name,
+        expected_server_id=server_id,
+        expected_server_revision=server_revision,
         owner="worker-one",
         now=now,
         lease_expires_at=now + timedelta(seconds=30),

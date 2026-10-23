@@ -4,7 +4,7 @@ import ast
 import json
 import sqlite3
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Protocol
 
 import psycopg
@@ -72,6 +72,8 @@ class MCPPendingRepository(Protocol):
         approval_id: str | None = None,
         project_id: str | None = None,
         server_name: str | None = None,
+        expected_server_id: str | None = None,
+        expected_server_revision: datetime | None = None,
     ) -> MCPPendingRequest | None: ...
 
     def finish_forwarding(
@@ -358,6 +360,8 @@ class SQLiteMCPPendingRepository:
         approval_id: str | None = None,
         project_id: str | None = None,
         server_name: str | None = None,
+        expected_server_id: str | None = None,
+        expected_server_revision: datetime | None = None,
     ) -> MCPPendingRequest | None:
         if not owner or lease_expires_at <= now:
             raise ValueError("MCP forwarding lease owner and future expiry are required")
@@ -720,6 +724,8 @@ class PostgresMCPPendingRepository:
         workspace_id: str,
         project_id: str,
         server_name: str,
+        expected_server_id: str,
+        expected_server_revision: datetime,
         owner: str,
         now: datetime,
         lease_expires_at: datetime,
@@ -730,7 +736,13 @@ class PostgresMCPPendingRepository:
         decision writer takes approval before pending, and the server lock
         prevents a concurrent disable from racing past this claim check.
         """
-        if not all((pending_id, approval_id, workspace_id, project_id, server_name, owner)):
+        if (
+            not all((pending_id, approval_id, workspace_id, project_id, server_name,
+                     expected_server_id, owner))
+            or not isinstance(expected_server_revision, datetime)
+            or expected_server_revision.tzinfo is None
+            or expected_server_revision.utcoffset() is None
+        ):
             raise MCPPendingRepositoryScopeError(
                 "PostgreSQL MCP forwarding claims require complete request scope"
             )
@@ -828,20 +840,25 @@ class PostgresMCPPendingRepository:
                 or approval.approved_payload_hash_version != 2
                 or approval.approved_payload_hash is None
                 or approval.approved_payload_hash != compute_approval_payload_hash(approval)
-                or not self._approved_mcp_action_matches(approval, current)
+                or not self._approved_mcp_action_matches(
+                    approval,
+                    current,
+                    expected_server_id=expected_server_id,
+                    expected_server_revision=expected_server_revision,
+                )
             ):
                 return None
 
             child_row = conn.execute(
-                "SELECT server_id,project_id,workspace_id,name,enabled,payload "
-                "FROM mcp_child_servers WHERE project_id=%s AND workspace_id=%s "
-                "AND name=%s FOR UPDATE",
-                (project_id, workspace_id, server_name),
+                "SELECT server_id,project_id,workspace_id,name,enabled,updated_at,payload "
+                "FROM mcp_child_servers WHERE server_id=%s AND project_id=%s "
+                "AND workspace_id=%s AND name=%s FOR UPDATE",
+                (expected_server_id, project_id, workspace_id, server_name),
             ).fetchone()
             if child_row is None:
                 return None
             try:
-                child = MCPChildServer.model_validate(child_row[5])
+                child = MCPChildServer.model_validate(child_row[6])
             except Exception as error:
                 raise MCPPendingRepositoryError(
                     "Stored MCP child-server payload is invalid"
@@ -852,14 +869,18 @@ class PostgresMCPPendingRepository:
                 or child.workspace_id != child_row[2]
                 or child.name != child_row[3]
                 or child.enabled != child_row[4]
+                or child.updated_at != child_row[5]
             ):
                 raise MCPPendingRepositoryScopeError(
                     "Stored MCP child-server columns do not match their payload"
                 )
-            if not child.enabled:
-                return None
-            tool = next((item for item in child.tools if item.name == current.tool_name), None)
-            if tool is None or not tool.mutating or current.server_name != server_name:
+            if (
+                not child.enabled
+                or child.updated_at != expected_server_revision
+                or not self._registered_tool_is_mutating(child, current.tool_name)
+                or current.server_name != server_name
+                or child.id != expected_server_id
+            ):
                 return None
 
             claimed = current.model_copy(update={
@@ -890,6 +911,9 @@ class PostgresMCPPendingRepository:
     def _approved_mcp_action_matches(
         approval: ApprovalRequest,
         pending: MCPPendingRequest,
+        *,
+        expected_server_id: str,
+        expected_server_revision: datetime,
     ) -> bool:
         """Bind the approved, hash-frozen MCP tool call to the pending row."""
         prefix = "MCP mutating tool call requires approval: "
@@ -920,8 +944,35 @@ class PostgresMCPPendingRepository:
             "session_id": pending.session_id,
             "requested_by": pending.requested_by,
             "mutating": True,
+            "target_server_id": expected_server_id,
         }
-        return set(new_content) == set(expected) and new_content == diff_call == expected
+        if set(new_content) != {*expected, "target_server_revision"}:
+            return False
+        if any(new_content.get(key) != value for key, value in expected.items()):
+            return False
+        revision_text = new_content.get("target_server_revision")
+        if not isinstance(revision_text, str):
+            return False
+        try:
+            approved_revision = datetime.fromisoformat(
+                revision_text.replace("Z", "+00:00")
+            )
+        except ValueError:
+            return False
+        if approved_revision.tzinfo is None or approved_revision.utcoffset() is None:
+            return False
+        same_revision = approved_revision.astimezone(timezone.utc) == (
+            expected_server_revision.astimezone(timezone.utc)
+        )
+        return new_content == diff_call and same_revision
+
+    @staticmethod
+    def _registered_tool_is_mutating(
+        child: MCPChildServer,
+        tool_name: str,
+    ) -> bool:
+        tool = next((item for item in child.tools if item.name == tool_name), None)
+        return bool(tool is not None and tool.mutating)
 
     @staticmethod
     def _mark_outcome_unknown_postgres(
