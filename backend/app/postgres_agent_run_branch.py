@@ -598,7 +598,6 @@ class PostgresAgentRunBranchIntentRepository:
                     or durable_step.id != step_row[0]
                     or durable_step.run_id != step_row[1]
                     or durable_step.task_id != step_row[2]
-                    or durable_step.workspace_id != step_row[3]
                     or durable_step.status.value != step_row[4]
                     or durable_step.updated_at != step_row[5]
                     or durable_run != expected_run
@@ -784,7 +783,7 @@ class PostgresAgentRunBranchIntentRepository:
                     or run.status.value != run_row[4] or run.current_step_id != run_row[5]
                     or run.updated_at != run_row[6]
                     or step.id != step_row[0] or step.run_id != step_row[1]
-                    or step.task_id != step_row[2] or step.workspace_id != step_row[3]
+                    or step.task_id != step_row[2]
                     or step.status.value != step_row[4] or step.updated_at != step_row[5]
                     or current.run_revision != run.updated_at
                     or current.step_revision != step.updated_at
@@ -832,7 +831,7 @@ class PostgresAgentRunBranchIntentRepository:
                     )
                 if (
                     task.id != current.task_id or task.workspace_id != current.workspace_id
-                    or task.project_id != task_row[2] or task.project_id != run.project_id
+                    or task.project_id != task_row[1] or task.project_id != run.project_id
                     or task.approval_request_id != task_row[3]
                     or task.approval_request_id != current.approval_id
                     or task.status != AgentTaskStatus.APPROVED or task_row[4] != "APPROVED"

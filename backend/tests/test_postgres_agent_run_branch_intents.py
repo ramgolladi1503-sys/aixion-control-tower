@@ -30,7 +30,6 @@ from app.postgres_database import run_postgres_migrations
 from app.postgres_trust_repository import (
     PostgresTrustRepository,
     PostgresTrustRepositoryConflict,
-    PostgresTrustRepositoryError,
 )
 from app.trust_models import (
     CapabilityActionType,
@@ -82,6 +81,7 @@ def pg_branch_context() -> Iterator[dict]:
         title="Branch intent approval",
         summary="Approved test branch operation",
         target_branch=target_ref,
+        files=[],
         status=ApprovalStatus.APPROVED,
         risk=RiskAssessment(level=RiskLevel.LOW),
         approved_by_user_id=owner_id,
@@ -355,7 +355,7 @@ def test_postgres_branch_intent_read_is_workspace_scoped(pg_branch_context) -> N
     ) is None
 
 
-@pytest.mark.parametrize("mutation", ["task_repository", "task_branch", "lease_scope", "lease_signature", "approval_target", "decision_lease"])
+@pytest.mark.parametrize("mutation", ["task_repository", "task_branch", "lease_scope", "lease_signature", "approval_target"])
 def test_postgres_branch_claim_fences_authority_mutated_after_intent(
     pg_branch_context, mutation: str
 ) -> None:
@@ -405,16 +405,7 @@ def test_postgres_branch_claim_fences_authority_mutated_after_intent(
                 "UPDATE capability_leases SET payload=%s WHERE lease_id=%s",
                 (Jsonb(changed_lease.model_dump(mode="json")), changed_lease.id),
             )
-        else:
-            # The schema's composite FK binds decision.lease_id to its action;
-            # changing only the JSON payload must fail indexed/payload integrity.
-            changed = c["decision"].model_copy(update={"lease_id": "lease_wrong"})
-            conn.execute(
-                "UPDATE policy_decisions SET payload=%s WHERE decision_id=%s",
-                (Jsonb(changed.model_dump(mode="json")), changed.id),
-            )
-    expected_error = PostgresTrustRepositoryError if mutation == "decision_lease" else PostgresTrustRepositoryConflict
-    with pytest.raises(expected_error):
+    with pytest.raises(PostgresTrustRepositoryConflict):
         c["repository"].claim_create_once(
             intent=c["intent"], expected_run=c["run"], expected_step=c["step"],
             worker_lease_token=c["token"], now=now_utc(),
@@ -423,6 +414,28 @@ def test_postgres_branch_claim_fences_authority_mutated_after_intent(
         assert conn.execute(
             "SELECT status FROM agent_run_branch_intents WHERE intent_id=%s", (c["intent"].id,)
         ).fetchone()[0] == "INTENT"
+
+
+def test_postgres_branch_policy_decision_lease_binding_is_database_enforced(pg_branch_context) -> None:
+    c = pg_branch_context
+    changed = c["decision"].model_copy(update={"lease_id": "lease_wrong"})
+    with pytest.raises(psycopg.Error):
+        with c["connect"]() as conn:
+            conn.execute(
+                "UPDATE policy_decisions SET payload=%s WHERE decision_id=%s",
+                (Jsonb(changed.model_dump(mode="json")), changed.id),
+            )
+    with c["connect"]() as conn:
+        persisted = conn.execute(
+            "SELECT payload->>'lease_id' FROM policy_decisions WHERE decision_id=%s",
+            (c["decision"].id,),
+        ).fetchone()[0]
+    assert persisted == c["lease"].id
+    claimed = c["repository"].claim_create_once(
+        intent=c["intent"], expected_run=c["run"], expected_step=c["step"],
+        worker_lease_token=c["token"], now=now_utc(),
+    )
+    assert claimed.status == BranchIntentStatus.POST_CLAIMED
 
 
 def test_postgres_branch_observation_revalidates_lease_scope(pg_branch_context) -> None:
@@ -568,9 +581,9 @@ def test_postgres_verified_effect_can_be_reported_after_lease_revocation(pg_bran
     })
     with c["connect"]() as conn:
         conn.execute(
-            "UPDATE capability_leases SET status=%s,revoked_at=%s,updated_at=%s,payload=%s "
+            "UPDATE capability_leases SET status=%s,updated_at=%s,payload=%s "
             "WHERE lease_id=%s AND workspace_id=%s",
-            (revoked.status.value, revoked.revoked_at, revoked.updated_at,
+            (revoked.status.value, revoked.updated_at,
              Jsonb(revoked.model_dump(mode="json")), revoked.id, c["workspace_id"]),
         )
 
