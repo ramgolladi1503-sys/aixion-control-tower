@@ -2989,6 +2989,7 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     from app.agent_run_models import AgentRunStatus
     from app.agent_worker_github_branch import GitHubBranchObservation
     from app.postgres_agent_run_branch import BranchIntentStatus
+    from app.postgres_agent_run_branch_executor import PostgresCreateBranchCoordinator
     from app.postgres_runtime import PostgresRuntime
 
     connect, workspace, _project, _other_workspace, _other_project, state = (
@@ -3137,6 +3138,17 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     monkeypatch.setattr(
         "app.postgres_agent_run_branch_route._default_client", lambda: provider
     )
+    branch_errors: list[str] = []
+    original_execute = PostgresCreateBranchCoordinator.execute
+
+    def capture_branch_error(coordinator, branch_request):
+        try:
+            return original_execute(coordinator, branch_request)
+        except Exception as error:
+            branch_errors.append(f"{type(error).__name__}: {error}")
+            raise
+
+    monkeypatch.setattr(PostgresCreateBranchCoordinator, "execute", capture_branch_error)
     run_ids_before = set(store.agent_runs)
     step_ids_before = set(store.agent_run_steps)
     task_snapshot_before = store.agent_tasks.get(task_id)
@@ -3158,6 +3170,7 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     assert final_run.status == AgentRunStatus.SUCCEEDED, (
         f"run_status={final_run.status.value}; step_status={completed_step.status.value}; "
         f"step_reason={completed_step.reason!r}; evidence={completed_step.evidence!r}; "
+        f"branch_errors={branch_errors!r}; "
         f"events={[event.model_dump(mode='json') for event in run_events]!r}"
     )
     assert completed_step.status == AgentRunStepStatus.SUCCEEDED
