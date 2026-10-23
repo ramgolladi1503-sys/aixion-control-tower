@@ -253,3 +253,37 @@ def test_root_audit_read_fails_closed_instead_of_serving_sqlite_during_postgres_
     assert response.status_code == 503
     assert "unified audit writer" in response.json()["detail"]
     assert len(store.audit_events) == len(events)
+
+
+def test_audit_and_recovery_reads_fail_closed_when_postgres_auth_is_selected_without_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import audit_routes, main
+    from app.recovery_routes import recovery_snapshot_repository
+
+    settings = SimpleNamespace(postgres_auth_enabled=True)
+    monkeypatch.setattr(audit_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(app.state, "postgres_runtime", None, raising=False)
+
+    def unexpected_audit_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite audit repository must not be read in PostgreSQL auth mode")
+
+    def unexpected_snapshot_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite recovery snapshot must not be read in PostgreSQL auth mode")
+
+    monkeypatch.setattr(audit_routes._local_audit_repository, "list_for_workspace", unexpected_audit_read)
+    monkeypatch.setattr(audit_routes._local_audit_repository, "get_for_workspace", unexpected_audit_read)
+    monkeypatch.setattr(recovery_snapshot_repository, "read_snapshot", unexpected_snapshot_read)
+
+    responses = [
+        client.get("/audit"),
+        client.get("/audit/events"),
+        client.get("/audit/export"),
+        client.get("/audit/events/nonexistent"),
+        client.get("/audit/recovery/export"),
+        client.post("/audit/recovery/validate", json={"snapshot": {}}),
+    ]
+
+    assert [response.status_code for response in responses] == [503] * len(responses)
+    assert all("unified audit writer" in response.json()["detail"] for response in responses)

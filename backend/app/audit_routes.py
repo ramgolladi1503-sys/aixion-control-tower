@@ -21,6 +21,7 @@ from .recovery_routes import (
     validate_recovery_snapshot,
 )
 from .store import store
+from .settings import get_settings
 from .workspace_access import workspace_id_for_user
 
 router = APIRouter(prefix="/audit", tags=["audit"])
@@ -101,8 +102,11 @@ def _audit_repository_for_route(request: Request | None) -> AuditEventRepository
 
 
 def _require_authoritative_audit_runtime(request: Request) -> None:
-    """Fail closed while PostgreSQL is present without a complete audit cutover."""
-    if getattr(request.app.state, "postgres_runtime", None) is not None:
+    """Fail closed when PostgreSQL is selected without a complete audit cutover."""
+    if (
+        get_settings().postgres_auth_enabled
+        or getattr(request.app.state, "postgres_runtime", None) is not None
+    ):
         raise HTTPException(
             status_code=503,
             detail=(

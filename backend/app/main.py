@@ -1522,7 +1522,10 @@ def list_audit_events(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[AuditEvent]:
     if http_request is not None:
-        if getattr(http_request.app.state, "postgres_runtime", None) is not None:
+        if (
+            get_settings().postgres_auth_enabled
+            or getattr(http_request.app.state, "postgres_runtime", None) is not None
+        ):
             raise HTTPException(
                 status_code=503,
                 detail=(
