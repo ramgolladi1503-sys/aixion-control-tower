@@ -27,6 +27,7 @@ class FakeRuntime:
             approval_decisions=object(),
             agent_tasks=object(),
             agent_runs=object(),
+            agent_run_validation_intents=object(),
             projects=object(),
             workspace_membership=object(),
             external_agent_auth=object(),

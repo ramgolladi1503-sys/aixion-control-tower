@@ -237,7 +237,9 @@ def test_execute_route_expands_lease_to_cover_bounded_validation_budget() -> Non
         if event["event_type"] == "RUN_LEASE_ACQUIRED"
     ]
     assert lease_events
-    assert lease_events[-1]["metadata"]["lease_seconds"] == 1500
+    # The lease covers five 120-second validation commands, their per-command
+    # overhead, and the global safety margin.
+    assert lease_events[-1]["metadata"]["lease_seconds"] == 1860
 
 
 def test_execute_route_rehydrates_run_from_configured_repository() -> None:
