@@ -76,7 +76,7 @@ class FakeIntentRepository:
             decision=PolicyDecisionType.ALLOW if self.allow else PolicyDecisionType.BLOCK,
             risk_level=RiskLevel.MEDIUM,
         )
-        return decision
+        return decision, SimpleNamespace(id=kwargs["action"].lease_id)
 
     def begin_intent(self, *, record, **kwargs):
         self.log.append(("begin", record.source_sha))

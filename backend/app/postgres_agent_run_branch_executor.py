@@ -158,7 +158,7 @@ class PostgresCreateBranchCoordinator:
                 raise PostgresTrustRepositoryConflict(
                     "Unclaimed action identity differs from the durable intent"
                 )
-            decision = self._intents.evaluate_action(
+            decision, evaluated_lease = self._intents.evaluate_action(
                 action=action,
                 workspace_id=request.workspace_id,
                 run_id=request.expected_run.id,
@@ -168,6 +168,7 @@ class PostgresCreateBranchCoordinator:
             )
             if (
                 decision is None
+                or evaluated_lease.id != action.lease_id
                 or decision.decision.value != "ALLOW"
                 or decision.proposed_action_id != action.id
                 or decision.lease_id != action.lease_id
