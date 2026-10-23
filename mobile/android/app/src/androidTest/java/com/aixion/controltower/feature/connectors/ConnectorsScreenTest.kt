@@ -27,14 +27,15 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Antigravity").assertExists()
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
+        composeRule.onNodeWithText(
+            "Install the Control Tower tool hook in this project workspace. Same-session phone approval and resume still need verification."
+        ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Set up Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText(
-            "Capture local Codex permission prompts. Codex Desktop approval interception is not verified."
+            "Codex Desktop approval interception and same-session phone resume are not verified."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Phone approval return not verified").assertExists()
-        composeRule.onNodeWithText(
-            "Setup is available. The same-session phone approval flow still needs live verification."
-        ).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Setup available").assertExists()
+        composeRule.onNodeWithText("Not verified for native sessions").performScrollTo().assertExists()
         composeRule.onNodeWithText("When an approval is needed").performScrollTo().assertExists()
 
         composeRule.onAllNodesWithText("Other integrations and webhooks").assertCountEquals(0)
@@ -73,12 +74,14 @@ class ConnectorsScreenTest {
     }
 
     @Test
-    fun connectionScreenDoesNotClaimEitherProviderIsVerified() {
+    fun providerReadinessStatesAreDistinctAndDoNotClaimLiveConnection() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("Phone approval return not verified").assertExists()
+        composeRule.onNodeWithText("Setup available").assertExists()
+        composeRule.onNodeWithText("Not verified for native sessions").assertExists()
         composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("FIRST SUPPORTED").assertCountEquals(0)
     }
 }

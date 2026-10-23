@@ -88,28 +88,20 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupCard(
             name = "Antigravity",
-            description = "Install the Control Tower tool hook in this Antigravity project workspace.",
+            status = "Setup available",
+            statusColor = palette.brand,
+            description = "Install the Control Tower tool hook in this project workspace. Same-session phone approval and resume still need verification.",
             buttonLabel = "Set up Antigravity",
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         ProviderSetupCard(
             name = "Codex",
-            description = "Capture local Codex permission prompts. Codex Desktop approval interception is not verified.",
+            status = "Not verified for native sessions",
+            statusColor = palette.caution,
+            description = "Codex Desktop approval interception and same-session phone resume are not verified.",
             buttonLabel = "Set up Codex",
             onClick = { onOpenAgentAccess("CODEX") }
-        )
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
-        StatusBadge(
-            label = "Phone approval return not verified",
-            color = palette.caution,
-            uppercase = false
-        )
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text(
-            text = "Setup is available. The same-session phone approval flow still needs live verification.",
-            color = palette.inkMuted,
-            style = MaterialTheme.typography.bodySmall
         )
     }
 }
@@ -117,6 +109,8 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
 @Composable
 private fun ProviderSetupCard(
     name: String,
+    status: String,
+    statusColor: androidx.compose.ui.graphics.Color,
     description: String,
     buttonLabel: String,
     onClick: () -> Unit
@@ -128,6 +122,8 @@ private fun ProviderSetupCard(
             color = palette.ink,
             style = MaterialTheme.typography.titleMedium
         )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        StatusBadge(label = status, color = statusColor, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
             text = description,
