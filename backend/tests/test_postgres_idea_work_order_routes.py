@@ -210,6 +210,80 @@ def test_approval_route_links_postgres_only_work_order_without_sqlite_fallback(
     assert {event.id for event in store.audit_events} == before_audits
 
 
+@pytest.mark.parametrize(
+    ("failed_insert_table", "trigger_condition"),
+    [
+        ("audit_events", "NEW.event_type = 'approval.created'"),
+        ("notifications", "TRUE"),
+    ],
+    ids=("audit-write-fails", "notification-outbox-write-fails"),
+)
+def test_approval_route_rolls_back_postgres_and_local_projections_on_side_effect_failure(
+    postgres_idea_work_order_runtime,
+    failed_insert_table: str,
+    trigger_condition: str,
+) -> None:
+    connect, workspace, project = postgres_idea_work_order_runtime
+    with connect() as connection:
+        connection.execute(
+            "CREATE FUNCTION fail_approval_side_effect_insert() RETURNS trigger AS $$ "
+            "BEGIN RAISE EXCEPTION 'injected approval side-effect failure'; END; "
+            "$$ LANGUAGE plpgsql"
+        )
+        connection.execute(
+            f"CREATE TRIGGER fail_approval_side_effect BEFORE INSERT ON {failed_insert_table} "
+            f"FOR EACH ROW WHEN ({trigger_condition}) "
+            "EXECUTE FUNCTION fail_approval_side_effect_insert()"
+        )
+        before_approval_count = connection.execute(
+            "SELECT count(*) FROM approval_requests WHERE workspace_id=%s", (workspace.id,)
+        ).fetchone()[0]
+        before_creation_audit_count = connection.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s "
+            "AND event_type='approval.created'",
+            (workspace.id,),
+        ).fetchone()[0]
+        before_notification_count = connection.execute(
+            "SELECT count(*) FROM notifications WHERE workspace_id=%s "
+            "AND entity_type='approval_request'",
+            (workspace.id,),
+        ).fetchone()[0]
+
+    before_approvals = set(store.approval_requests)
+    before_notifications = set(store.notifications)
+    before_audits = {event.id for event in store.audit_events}
+    client = TestClient(main.app, raise_server_exceptions=False)
+    response = client.post(
+        "/approvals",
+        json={
+            "project_id": project.id,
+            "title": "Failure injection must not leave a partial approval",
+            "summary": "The approval, audit, and outbox must commit or roll back together.",
+            "target_branch": "main",
+            "files": [{"path": "README.md", "diff": "+atomic write"}],
+        },
+    )
+
+    assert response.status_code == 500, response.text
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_requests WHERE workspace_id=%s", (workspace.id,)
+        ).fetchone()[0] == before_approval_count
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s "
+            "AND event_type='approval.created'",
+            (workspace.id,),
+        ).fetchone()[0] == before_creation_audit_count
+        assert connection.execute(
+            "SELECT count(*) FROM notifications WHERE workspace_id=%s "
+            "AND entity_type='approval_request'",
+            (workspace.id,),
+        ).fetchone()[0] == before_notification_count
+    assert set(store.approval_requests) == before_approvals
+    assert set(store.notifications) == before_notifications
+    assert {event.id for event in store.audit_events} == before_audits
+
+
 def test_external_agent_work_order_uses_postgres_project_and_idea_scope(
     postgres_idea_work_order_runtime, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
