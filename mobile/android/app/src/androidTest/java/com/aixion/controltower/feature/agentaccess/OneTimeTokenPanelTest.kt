@@ -48,6 +48,7 @@ class OneTimeTokenPanelTest {
         composeRule.onNodeWithText(
             "It is held only in screen memory and is cleared when you hide it or leave the app."
         ).assertExists()
+        composeRule.onNodeWithText("One-time secret").assertExists()
         composeRule.onNodeWithText(
             "Store the token in macOS Keychain. This command contains no token; Terminal prompts you to enter it securely."
         ).assertExists()

@@ -69,9 +69,9 @@ internal object NotificationPermissionCopy {
     }
 
     fun badge(state: NotificationPermissionState): String = when (state) {
-        NotificationPermissionState.GRANTED -> "PERMISSION ALLOWED"
-        NotificationPermissionState.DENIED -> "PERMISSION OFF"
-        NotificationPermissionState.NOT_REQUIRED -> "SYSTEM MANAGED"
+        NotificationPermissionState.GRANTED -> "Permission allowed"
+        NotificationPermissionState.DENIED -> "Permission off"
+        NotificationPermissionState.NOT_REQUIRED -> "System managed"
     }
 }
 
@@ -150,7 +150,8 @@ internal fun NotificationPermissionPanel() {
     TowerPanel(elevated = true) {
         StatusBadge(
             label = NotificationPermissionCopy.badge(permissionState),
-            color = if (permissionState == NotificationPermissionState.GRANTED) palette.positive else palette.caution
+            color = if (permissionState == NotificationPermissionState.GRANTED) palette.positive else palette.caution,
+            uppercase = false
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text("Approval notifications", color = palette.ink)

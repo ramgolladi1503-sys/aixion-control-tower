@@ -20,7 +20,7 @@ class ConnectorsScreenTest {
     fun showsSimpleNativeProviderSetupAndDoesNotExposeWebhookTaskIntake() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("SET UP A PROJECT").assertExists()
+        composeRule.onNodeWithText("Set up a project").assertExists()
         composeRule.onNodeWithText("Connect your coding agent").assertExists()
         composeRule.onAllNodesWithText("CONNECT ONCE").assertCountEquals(0)
         composeRule.onNodeWithText("Choose a provider").assertExists()
@@ -31,7 +31,7 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText(
             "Capture local Codex permission prompts. Codex Desktop approval interception is not verified."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("PHONE RETURN NOT VERIFIED").assertExists()
+        composeRule.onNodeWithText("Phone approval return not verified").assertExists()
         composeRule.onNodeWithText(
             "Setup is available. The same-session phone approval flow still needs live verification."
         ).performScrollTo().assertIsDisplayed()
@@ -76,7 +76,7 @@ class ConnectorsScreenTest {
     fun connectionScreenDoesNotClaimEitherProviderIsVerified() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("PHONE RETURN NOT VERIFIED").assertExists()
+        composeRule.onNodeWithText("Phone approval return not verified").assertExists()
         composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("FIRST SUPPORTED").assertCountEquals(0)

@@ -71,7 +71,7 @@ fun DiffViewerScreen(viewModel: ApprovalsViewModel = viewModel()) {
                     verticalAlignment = Alignment.Top
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        StatusBadge(label = "FULL DIFF REVIEW", color = palette.caution)
+                        StatusBadge(label = "Full diff review", color = palette.caution, uppercase = false)
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         Text(
                             text = approval.title,
@@ -93,8 +93,8 @@ fun DiffViewerScreen(viewModel: ApprovalsViewModel = viewModel()) {
                 Spacer(modifier = Modifier.height(TowerSpacing.lg))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RiskBadge(approval.risk)
-                    StatusBadge("${approval.files.size} files", palette.brand)
-                    StatusBadge("Review gate", palette.positive)
+                    StatusBadge("${approval.files.size} files", palette.brand, uppercase = false)
+                    StatusBadge("Review gate", palette.positive, uppercase = false)
                 }
             }
         }

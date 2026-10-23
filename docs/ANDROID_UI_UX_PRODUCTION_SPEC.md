@@ -8,6 +8,8 @@ Current gaps include adaptive navigation, provider liveness/last-seen health on 
 
 **Code-only UI audit checkpoint (2026-10-22; pre-polish snapshot):** The Android UI/UX audit scored the then-current implementation **16/24** across copywriting, visuals, color, typography, spacing, and experience design. This is a pre-polish code-only score, not a visual score or release certification. Subsequent local polish includes the Connect Link icon, route-specific detail titles, 14sp core Home/history text, and 16dp card corners. Local Android JVM UI tests passed and Android instrumentation sources compiled; instrumentation was not run on hardware. Screenshots, physical-device rendering, TalkBack, 200% font scaling, final composited contrast, and adaptive-window behavior remain unverified; ADB reported no connected device during the audit. The audit did not authorize broader navigation: the four-destination release-one contract remains locked and secondary technical/admin screens remain hidden.
 
+**Screen-by-screen source audit (2026-10-23):** Inspected the actual release-one route table and shell, all four primary destination composables, authentication/account states, approval inbox/history/card/detail/decision and diff flows, provider setup and project-scoped Agent Access, shared panels/badges/diff components, theme tokens, spacing, and relevant JVM/instrumentation tests. The source correction in this audit caps approval-card previews at three lines while preserving the full summary in accessibility semantics, changes auth/connect/account-notification/provider-credential/diff-review state labels to sentence case, raises Home technical diagnostics to the 14sp shared body style, and corrects the stale token/contrast values in this document. The code audit does not certify rendered behavior. `adb devices -l` returned no attached device in this pass.
+
 **Scope lock:** this is a design contract for release one only. User-facing destinations are Home, Approvals (including History and request detail), Connect, and Account (including sign-in/register/logout). Agent Work, projects, command chat, MCP, technical audit, diagnostics, and administration remain outside release-one navigation. Billing and cloud deployment are outside this document. The UI must not imply that a local computer is online or that an agent resumed unless the backend/connector provides fresh evidence.
 
 ## 1. Product outcome and design principles
@@ -58,24 +60,24 @@ The current theme selects semantic light or dark palettes from the Android syste
 
 | Token | Light | Dark | Use |
 |---|---:|---:|---|
-| `canvas` | `#F4F2EC` | `#171916` | Main app background |
-| `surface` | `#FBFAF6` | `#20231F` | Cards, sheets, fields |
-| `surfaceRaised` | `#FFFFFF` | `#292D28` | Dialogs, selected panels |
-| `surfaceSubtle` | `#EAE8E0` | `#30352F` | Secondary cards and chips |
-| `ink` | `#20241F` | `#F1F0E9` | Primary text and icons |
-| `inkMuted` | `#596057` | `#B7BDB2` | Supporting text |
-| `inkDisabled` | `#777D73` | `#92998F` | Disabled text; never the only state cue |
-| `line` | `#D4D5CC` | `#41473F` | Dividers and card boundaries |
-| `brand` | `#53664D` | `#B0C1A4` | Primary action, selected destination, links |
-| `onBrand` | `#FFFFFF` | `#172016` | Text/icons on brand |
-| `positive` | `#286348` | `#9BD0AF` | Confirmed success only |
-| `caution` | `#805600` | `#E8C66E` | Attention and approaching expiry |
-| `danger` | `#A23F35` | `#F0A097` | Reject, revoke, blocked, destructive errors |
-| `info` | `#3B6178` | `#9FC5D8` | Neutral information |
+| `canvas` | `#F4F2EC` | `#171A16` | Main app background |
+| `surface` | `#FBFAF6` | `#20241F` | Cards, sheets, fields |
+| `surfaceRaised` | `#FFFFFF` | `#292E28` | Dialogs, selected panels |
+| `surfaceSubtle` | `#EAE8E0` | `#343B33` | Secondary cards and chips |
+| `ink` | `#20241F` | `#E9EEE5` | Primary text and icons |
+| `inkMuted` | `#596057` | `#C2C9BE` | Supporting text |
+| `inkDisabled` | `#656B61` | `#AAB2A5` | Disabled text; never the only state cue |
+| `line` | `#D4D5CC` | `#515A4F` | Dividers and card boundaries |
+| `brand` | `#53664D` | `#A9C19B` | Primary action, selected destination, links |
+| `onBrand` | `#FFFFFF` | `#1C261A` | Text/icons on brand |
+| `positive` | `#286348` | `#79D5A4` | Confirmed success only |
+| `caution` | `#805600` | `#F3C96D` | Attention and approaching expiry |
+| `danger` | `#A23F35` | `#FF9287` | Reject, revoke, blocked, destructive errors |
+| `info` | `#3B6178` | `#91C4E7` | Neutral information |
 
 Neutral surfaces should occupy roughly 85–90% of the screen. Brand olive is reserved for the primary action, selected navigation, and connection CTA. Positive, caution, and danger colors are reserved for explicit semantic states; do not use them as decoration. Pair every semantic color with text/icon/shape, never color alone.
 
-**Contrast baseline:** calculated ratios for the current solid light token pairs are `ink/canvas 14.07:1`, `inkMuted/canvas 5.80:1`, `inkDisabled/canvas 4.90:1`, `onBrand/brand 6.22:1`, `positive/canvas 6.32:1`, `caution/canvas 5.77:1`, `danger/canvas 5.69:1`, and `info/canvas 5.92:1`. These ratios do not establish that every rendered component passes. Both light and dark semantic palettes are implemented in source; verify composited backgrounds, focus indicators, borders, disabled controls, and semantic overlays on device, then change token values where needed. Do not use `line` as the only boundary for a meaningful control unless its contrast is independently verified. Rendered contrast and dark-mode consistency remain release gates.
+**Contrast baseline (source tokens, calculated 2026-10-23):** solid light ratios are `ink/canvas 15.08:1`, `inkMuted/canvas 6.21:1`, `inkDisabled/canvas 4.90:1`, `onBrand/brand 6.22:1`, `positive/canvas 6.32:1`, `caution/canvas 5.77:1`, `danger/canvas 5.69:1`, and `info/canvas 5.92:1`. Solid dark ratios are `ink/canvas 13.37:1`, `inkMuted/canvas 9.29:1`, `inkDisabled/canvas 8.05:1`, `onBrand/brand 8.04:1`, `positive/canvas 9.92:1`, `caution/canvas 11.19:1`, `danger/canvas 8.12:1`, and `info/canvas 9.41:1`. The JVM contrast test checks primary/supporting text on canvas and surface, on-brand text, and semantic status text on its 11% tinted badge surface in both palettes. These checks do not establish every composited component, focus indicator, border, disabled control, or rendered screen; those still require device validation. Do not use `line` as the only boundary for a meaningful control unless its contrast is independently verified.
 
 ### Typography
 
@@ -129,7 +131,7 @@ Top area has two labeled filters: **Needs review** and **History**. Current impl
 
 Every card shows provider badge (Antigravity/Codex/other explicitly supported), project/workspace, readable action summary, risk and state labels, expiry/countdown where applicable, and a text affordance “Review request”. Show the status through a labeled icon and text; never color-only dots. Do not show approve/reject buttons inside list cards; decisions require opening the full details.
 
-The target design for history entries is decision, reviewer, date/time with timezone, exact request title, and delivery outcome as separate fields (e.g., “Approved · Delivery not confirmed”). The current history UI renders decision, reviewer, decision time, reason, and a verified request snapshot when available. It does not show connector delivery/resume outcome; do not imply that an approved request proves local agent continuation.
+The target design for history entries is decision, reviewer, date/time with timezone, exact request title, and delivery outcome as separate fields (e.g., “Approved · Delivery not confirmed”). The current history UI renders decision, delivery status/explanation, decision time, reviewer, reason, and a verified request snapshot when available. It still must not imply that a server-side connector claim proves agent execution or resumption.
 
 **List interaction:** retain the selected tab and history filter when opening a detail and returning. Each row is one clear tap target with a concise accessible name; do not put nested decision buttons in a row. Needs review is sorted by earliest known expiry, with missing expiry last. History offers All/Approved/Rejected/Revision requested filters and labels each entry as a decision record without delivery or execution confirmation. An empty state links to Connect only when no connector has been configured; otherwise explain that new approvals appear here.
 
@@ -179,6 +181,25 @@ Keep the primary Account surface short: identity and workspace, notification per
 ### 4.8 Hidden routes and later-release screens
 
 Do not expose Agent Work, Projects, Command, Work Orders, Agent Runs, Agent Access, Audit, Diagnostics/Ops, Test Runs, MCP, webhooks, or other admin/operations routes through any release-one navigation surface. Retain source routes only where needed for later work and existing internal validation. Do not bring dormant feature routes into navigation simply because their composables exist. Approval decision history remains in the Approvals destination and is distinct from the hidden technical audit route.
+
+### 4.9 Inspected release-one screen matrix and source evidence
+
+This matrix records source-level behavior and existing automated coverage. Test files are evidence of the named assertions only; they do not prove a physical-device or native-provider round trip.
+
+| Route/surface | Source inspected | Current source behavior and state handling | Automated evidence inspected | Remaining design/release gap |
+|---|---|---|---|---|
+| Sign in / register (`auth`) | `feature/auth/AuthScreen.kt`, `AuthUxCopy.kt`, `AuthViewModel.kt` | Single-column email/password form; registration is opt-in on the same surface; show/hide password, IME submit, verification step, loading/error copy, scrollable keyboard-safe content. Auth status copy now uses sentence case. | `AuthFormContentTest`, `AuthUxCopyTest`, `AuthSessionEstablishmentTest` | Password reset is absent. Verify autofill, IME, validation/error announcement, and 200% font scale on device. |
+| Home (`home`) | `feature/home/HomeScreen.kt`, `HomeViewModel.kt` | Fresh backend state gates “No approvals waiting”/pending previews; sync time and retry/error are explicit; no synthetic requests; setup action goes to Connect. Technical error details are opt-in and now use 14sp body typography. | `HomeScreenTest`, `HomeApprovalSafetyTest`, `HomeScreenCopyTest` | Provider heartbeat/last-seen health is not available here. Device layout, loading motion, and high font scaling remain unverified. |
+| Approval inbox (`inbox`, Needs review) | `feature/approvals/ApprovalInboxScreen.kt`, `ApprovalsViewModel.kt`, `core/ui/components/ApprovalCard.kt` | Refresh/loading/error/empty and unsupported/blocked cases are represented; unsafe/stale data hides selection or decision paths; approval rows open detail and contain no decision buttons. Summary preview is capped at three lines with an ellipsis; full text remains in accessibility semantics and detail review. | `ApprovalInboxScreenTest`, `ApprovalInboxFilterTest`, `ApprovalSelectionTest`, `ApprovalCardPreviewTest` | Physical scrolling, 200% wrapping, TalkBack traversal, and touch-target audit remain. |
+| Decision history (`inbox`, History) | `feature/approvals/ApprovalInboxScreen.kt` | Separate history query and filters; decision, reviewer, timestamp, reason, verified request snapshot, and connector delivery state are distinct; delivery text does not claim execution. | `ApprovalInboxScreenTest`, `ApprovalRepositoryTest` | Validate older/unverified snapshots and delivery labels visually and with TalkBack. |
+| Approval detail / decision | `feature/approvals/ApprovalDetailScreen.kt`, `ApprovalDecisionPolicy.kt`, `core/ui/components/DiffBlock.kt` | Decision context precedes technical details; exact tool args and file diffs are selectable; expired/blocked/unknown/stale/reconciliation states disable decisions; high/critical approvals confirm; high/critical file changes require opening and acknowledging full diff; decision panel stays below the scrollable request. | `ApprovalDetailScreenTest`, `ApprovalRiskConfirmationUiTest`, `ApprovalDecisionPolicyTest`, `ApprovalDecisionReconciliationTest`, `ApprovalStaleDecisionViewModelTest` | Device proof is still required for footer association, dialog focus, long payloads, TalkBack, and risky review flow. |
+| Full diff (`diff`) | `feature/diff/DiffViewerScreen.kt`, `core/ui/components/DiffBlock.kt` | Dedicated route has explicit title/up navigation; displays affected paths, risk, selectable line-by-line diff; “Full diff review” label is sentence case; detail acknowledgement is bound to opening the route and payload. | `ApprovalDetailScreenTest`, `ApprovalRiskConfirmationUiTest` | Long unbroken lines and screen-reader interpretation need device review. |
+| Provider selection (`connectors`) | `feature/connectors/ConnectorsScreen.kt`, `ConnectorsViewModel.kt` | Antigravity and Codex options link to their specific setup route; Codex Desktop support and same-session phone return are explicitly marked unverified; setup copy says the agent/computer must remain available. State labels now use sentence case. | `ConnectorsScreenTest` | Content is setup guidance, not live provider status; verify exact onboarding steps with current adapters. |
+| Provider setup (`agent_access/{provider}`) | `feature/agentaccess/AgentAccessScreen.kt`, `AgentAccessViewModel.kt` | Project-scoped credential setup, provider/project selection, sentence-case token state, one-time secret masking/clipboard clearing on background/disposal, secure-window flag while visible, and confirmation for rotate/revoke. | `AgentAccessPermissionsTest`, `OneTimeTokenPanelTest`, `AgentAccessProviderNavigationTest` | Requires device verification for secret masking, clipboard, secure flag, dialogs, and screen-reader labels. Do not equate registration with heartbeat. |
+| Account / logout (`account`) | `ControlTowerApp.kt`, `feature/auth/AuthScreen.kt`, `LogoutConfirmation.kt`, `NotificationPermissionPanel.kt` | Authenticated account shows identity/session, sentence-case notification permission state, and logout; logout is confirmed in shell and returns to sign-in. It does not display the unused owner admin panels. | `LogoutConfirmationCopyTest`, `NotificationPermissionAnnouncementsTest`, `NotificationPermissionPanelTest`, `AuthRepositoryLogoutTest`, `ControlTowerAdaptiveNavigationTest` | Password reset and user-facing privacy/account-removal entry point are absent; notification permission does not guarantee push delivery. |
+| Navigation shell | `ControlTowerApp.kt`, `navigation/Routes.kt`, `core/ui/theme/Spacing.kt` | Four compact destinations are Home, Approvals, Connect, Account; an 840dp width threshold selects rail. Secondary routes are not navigation destinations. Approval badge is suppressed while data is loading, refreshing, or errored. | `ControlTowerAdaptiveNavigationTest`, `NavigationDestinationsTest`, `NotificationNavigationTest` | Width-based rail is source-tested but not verified in resized/foldable windows; no list-detail pane is implemented. |
+
+**Shared-system inspection:** `Theme.kt` uses system sans typography, 14sp minimum Material labels/body-small, 16sp body-large, and 14sp monospace action text; `Color.kt` selects explicit light/dark semantic palettes without dynamic colors; `Spacing.kt` centralizes 4dp-grid spacing, 16dp card corners, content widths, and padding. `TowerPanel`, `TowerHeroPanel`, `RiskBadge`, `StatusBadge`, `ApprovalCard`, `DiffBlock`, and `StatusCard` were inspected. Existing contrast tests cover primary/supporting text, on-brand text, and semantic badge foregrounds in both palettes. Approval-card summaries use a three-line visual preview with ellipsis; Compose semantics retain the full text and opening the card remains the review path. An instrumentation assertion checks full accessible text and stable card height for long previews; remaining tiny typography on hidden later-release screens is outside the four-destination release-one surface. No custom motion or animation was added: state changes use Compose/Material behavior, so reduced-motion and transition behavior still need device assessment. Source inspection cannot verify final contrast after system bars, font scaling/line breaks, TalkBack focus order, actual target bounds, animation smoothness, or visual balance.
 
 ## 5. Shared states and copy
 
@@ -287,6 +308,8 @@ Design choices are informed by Android's native Material and accessibility guida
 - [Use window size classes](https://developer.android.com/develop/adaptive-apps/guides/use-window-size-classes) — layout decisions from dynamic app window size.
 - [Compose accessibility API defaults](https://developer.android.com/develop/ui/compose/accessibility/api-defaults) — semantics and minimum interactive target guidance.
 - [Accessibility in Jetpack Compose](https://developer.android.com/develop/ui/compose/quick-guides/content/video/accessibility-in-compose) — content descriptions and semantics.
+- [Android app accessibility guidance](https://developer.android.com/guide/topics/ui/accessibility/apps) — touch-target and contrast baselines for Android apps.
+- [Test Compose accessibility](https://developer.android.com/develop/ui/compose/accessibility/testing) — automated contrast, target-size, and traversal checks.
 - [W3C WCAG 2.2](https://www.w3.org/TR/wcag/) — contrast, target size, and accessibility requirements.
 - [GitHub Mobile](https://docs.github.com/en/get-started/using-github/github-mobile) and [GitHub notification configuration](https://docs.github.com/en/subscriptions-and-notifications/get-started/configuring-notifications) — notification-to-review workflows and user-controlled notification settings.
 

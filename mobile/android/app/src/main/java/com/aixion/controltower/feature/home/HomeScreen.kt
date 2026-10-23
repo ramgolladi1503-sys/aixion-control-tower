@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -319,8 +320,7 @@ private fun ErrorPanel(
                 Text(
                     text = technicalDetails,
                     color = palette.inkMuted,
-                    fontSize = 13.sp,
-                    lineHeight = 19.sp,
+                    style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier
                         .heightIn(max = 192.dp)
                         .verticalScroll(rememberScrollState())

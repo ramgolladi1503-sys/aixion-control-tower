@@ -55,6 +55,49 @@ class ApprovalCardPreviewTest {
     }
 
     @Test
+    fun longSummaryPreviewStaysCompactWhileFullAccessibleTextIsPreserved() {
+        val longSummary = List(24) { index ->
+            "step $index explains the requested action and its target"
+        }.joinToString(" ")
+        val otherLongSummary = List(32) { index ->
+            "action $index describes the requested change in detail"
+        }.joinToString(" ")
+        val firstHeight = renderCardHeight(longSummary)
+        val secondHeight = renderCardHeight(otherLongSummary)
+
+        assertTrue(
+            "Long approval previews should remain compact and use the same visual line limit",
+            kotlin.math.abs(firstHeight - secondHeight) < 1f
+        )
+        composeRule.onNodeWithTag("approval-card-summary-preview").assertTextEquals(otherLongSummary)
+    }
+
+    private fun renderCardHeight(summary: String): Float {
+        val approval = ApprovalSummary(
+            id = "approval_summary_height",
+            projectName = "Project",
+            title = "Review request",
+            summary = summary,
+            agentName = "Antigravity",
+            targetBranch = "main",
+            status = ApprovalStatus.REQUESTED,
+            risk = RiskLevel.MEDIUM,
+            files = emptyList(),
+            requiredActions = emptyList(),
+            testPlan = emptyList(),
+            rollbackPlan = "Revert"
+        )
+        composeRule.setContent {
+            ControlTowerTheme {
+                Box(modifier = Modifier.width(280.dp)) {
+                    ApprovalCard(approval = approval)
+                }
+            }
+        }
+        return composeRule.onNodeWithTag("approval-card").fetchSemanticsNode().boundsInRoot.height
+    }
+
+    @Test
     fun providerAndRiskArePlacedBeforeRequestSummaryAndExpiry() {
         val approval = ApprovalSummary(
             id = "approval_provider_priority",

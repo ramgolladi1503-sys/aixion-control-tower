@@ -434,7 +434,11 @@ private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRota
                 "UNKNOWN", "EXPIRED" -> palette.caution
                 else -> palette.danger
             }
-            StatusBadge(label = "TOKEN $credentialState", color = statusColor)
+            StatusBadge(
+                label = "Token ${credentialState.lowercase().replace('_', ' ')}",
+                color = statusColor,
+                uppercase = false
+            )
         }
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
@@ -494,7 +498,7 @@ internal fun OneTimeTokenPanel(
         null
     }
     TowerPanel(elevated = true) {
-        StatusBadge(label = "ONE-TIME SECRET", color = palette.caution)
+        StatusBadge(label = "One-time secret", color = palette.caution, uppercase = false)
         Spacer(Modifier.height(TowerSpacing.sm))
         Text("Save this $providerName token in macOS Keychain now", color = palette.ink, fontWeight = FontWeight.SemiBold)
         Text(

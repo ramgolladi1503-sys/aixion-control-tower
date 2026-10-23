@@ -10,12 +10,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -40,7 +40,7 @@ fun ApprovalCard(
         modifier
     }
 
-    TowerPanel(modifier = clickableModifier, elevated = true) {
+    TowerPanel(modifier = clickableModifier.testTag("approval-card"), elevated = true) {
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -76,7 +76,7 @@ fun ApprovalCard(
             text = approval.summary,
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyLarge,
-            maxLines = 2,
+            maxLines = 3,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.testTag("approval-card-summary-preview")
         )

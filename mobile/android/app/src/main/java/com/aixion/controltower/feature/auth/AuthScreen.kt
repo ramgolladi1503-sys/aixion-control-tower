@@ -94,12 +94,13 @@ private fun AccountHero(state: AuthUiState) {
             Column(modifier = Modifier.weight(1f)) {
                 StatusBadge(
                     label = when {
-                        state.authenticated -> "SESSION ACTIVE"
-                        state.verificationRequired -> "EMAIL VERIFICATION REQUIRED"
-                        state.emailVerified -> "READY TO LOGIN"
-                        else -> "ACCESS REQUIRED"
+                        state.authenticated -> "Session active"
+                        state.verificationRequired -> "Email verification required"
+                        state.emailVerified -> "Ready to log in"
+                        else -> "Sign in required"
                     },
-                    color = if (state.authenticated || state.emailVerified) palette.positive else palette.caution
+                    color = if (state.authenticated || state.emailVerified) palette.positive else palette.caution,
+                    uppercase = false
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
@@ -364,7 +365,7 @@ private fun PrivacyControlsPanel(state: AuthUiState, viewModel: AuthViewModel) {
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
-        StatusBadge("PRIVACY POLICY: DRAFT", palette.brand)
+        StatusBadge("Privacy policy: draft", palette.brand, uppercase = false)
         Text(
             "Account removal requests disable app access immediately. Audit and security records may be retained or anonymized according to the published retention policy.",
             color = palette.inkMuted,

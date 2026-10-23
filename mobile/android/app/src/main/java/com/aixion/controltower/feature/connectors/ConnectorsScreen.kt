@@ -101,7 +101,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         StatusBadge(
-            label = "PHONE RETURN NOT VERIFIED",
+            label = "Phone approval return not verified",
             color = palette.caution,
             uppercase = false
         )
