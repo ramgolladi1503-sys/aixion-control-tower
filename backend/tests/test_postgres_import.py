@@ -408,6 +408,19 @@ def _snapshot(
     os.chmod(path, 0o600)
 
 
+def _set_approval_status(path, status):
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id='a1'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["status"] = status
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id='a1'",
+            (json.dumps(payload),),
+        )
+
+
 def _trust_event_payload():
     event = TrustEvent(
         sequence=1,
@@ -498,6 +511,7 @@ def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
 def test_plan_blocks_approved_unconsumed_native_invocation_with_live_lease(tmp_path, monkeypatch):
     path = tmp_path / "live_approved_native_snapshot.sqlite3"
     _snapshot(path)
+    _set_approval_status(path, "APPROVED")
     heartbeat = datetime.now(timezone.utc)
     expiry = heartbeat + timedelta(minutes=5)
     with sqlite3.connect(path) as conn:
@@ -522,6 +536,7 @@ def test_plan_blocks_approved_unconsumed_native_invocation_with_live_lease(tmp_p
 def test_plan_blocks_approved_unconsumed_invocation_without_valid_lease(tmp_path, lease_state):
     path = tmp_path / f"approved_unconsumed_{lease_state}.sqlite3"
     _snapshot(path)
+    _set_approval_status(path, "APPROVED")
     with sqlite3.connect(path) as conn:
         if lease_state == "missing_row":
             conn.execute("DELETE FROM approval_invocation_leases WHERE approval_id='a1'")
@@ -539,6 +554,7 @@ def test_plan_blocks_approved_unconsumed_invocation_without_valid_lease(tmp_path
 def test_plan_blocks_approved_unconsumed_invocation_when_lease_schema_is_missing(tmp_path):
     path = tmp_path / "missing_invocation_lease_schema.sqlite3"
     _snapshot(path)
+    _set_approval_status(path, "APPROVED")
     with sqlite3.connect(path) as conn:
         conn.execute("DROP TABLE approval_invocation_leases")
     with pytest.raises(ImportBlocked, match="approved but unconsumed native invocation"):
