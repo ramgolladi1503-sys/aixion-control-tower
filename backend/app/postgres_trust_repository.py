@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 import re
+import unicodedata
 from typing import Any, TypeVar
 
 from psycopg import Connection, sql
@@ -29,7 +30,6 @@ from .models import AgentProvider, ApprovalRequest, RiskLevel
 from .trust_models import (
     ActionConsumption,
     AgentReliabilityScorecard,
-    CapabilityActionType,
     CapabilityLease,
     CapabilityLeaseStatus,
     CredentialGrant,
@@ -208,26 +208,48 @@ class PostgresTrustRepository:
         """Create/evaluate one exact run action while locking its authority.
 
         This is deliberately narrower than the standalone action evaluator:
-        it accepts only a CREATE_BRANCH action for the current leased run step.
+        it accepts only a CREATE_BRANCH action or one exact MODIFY_FILES action
+        for the current leased run step.
         Callers must use the returned persisted decision and must not perform a
         remote side effect in this transaction.
         """
         self._require_scope(workspace_id)
         if conn.autocommit or not actor or not run_id or not step_id:
             raise ValueError("Run action evaluation requires a transaction and full identity")
+        action_type = action.action_type.value
+        apply_change = action_type == "MODIFY_FILES"
+        expected_step_type = "APPLY_CHANGES" if apply_change else "CREATE_BRANCH"
         if (
             action.workspace_id != workspace_id
             or action.run_id != run_id
             or not action.task_id
-            or action.action_type.value != "CREATE_BRANCH"
+            or action_type not in {"CREATE_BRANCH", "MODIFY_FILES"}
             or action.lease_id is None
             or action.repository is None
             or not action.branch
-            or not re.fullmatch(r"[0-9a-f]{40}", str(action.metadata.get("source_sha", "")))
             or action.metadata.get("step_id") != step_id
-            or action.metadata.get("step_type") != "CREATE_BRANCH"
+            or action.metadata.get("step_type") != expected_step_type
             or not action.metadata.get("idempotency_key")
-            or not action.metadata.get("source_sha")
+            or (
+                apply_change
+                and (
+                    len(action.paths) != 1
+                    or action.paths[0] != action.metadata.get("path")
+                    or action.paths[0].startswith("/")
+                    or "\\" in action.paths[0]
+                    or any(part in {"", ".", ".."} for part in action.paths[0].split("/"))
+                    or any(unicodedata.category(char) in {"Cc", "Cf"} for char in action.paths[0])
+                    or action.metadata.get("change_type") not in {"create", "update"}
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(action.metadata.get("content_sha256", "")))
+                    or not re.fullmatch(r"[0-9a-f]{40}", str(action.metadata.get("base_commit_sha", "")))
+                    or (action.metadata.get("change_type") == "create" and action.metadata.get("before_sha") is not None)
+                    or (action.metadata.get("change_type") == "update" and not re.fullmatch(r"[0-9a-f]{40}", str(action.metadata.get("before_sha", ""))))
+                )
+            )
+            or (
+                not apply_change
+                and not re.fullmatch(r"[0-9a-f]{40}", str(action.metadata.get("source_sha", "")))
+            )
         ):
             raise PostgresTrustRepositoryConflict("Run branch action scope is incomplete")
 
@@ -319,7 +341,7 @@ class PostgresTrustRepository:
             or step.run_id != run_id
             or step.task_id != run.task_id
             or step.status.value != step_row[4]
-            or step.step_type.value != "CREATE_BRANCH"
+            or step.step_type.value != expected_step_type
             or step.idempotency_key != action.metadata.get("idempotency_key")
             or action.metadata.get("task_id") != run.task_id
             or action.metadata.get("approval_id") != run.approval_request_id
@@ -375,7 +397,7 @@ class PostgresTrustRepository:
             or lease.approved_payload_hash != approval.approved_payload_hash
             or lease.scope.repository != action.repository
             or lease.scope.branch != action.branch
-            or CapabilityActionType.CREATE_BRANCH not in lease.scope.allowed_actions
+            or action.action_type not in lease.scope.allowed_actions
             or action.provider != task.provider
             or action.agent_id != task.external_agent_id
             or action.project_id != task.project_id
@@ -392,6 +414,49 @@ class PostgresTrustRepository:
         decision = evaluate_action_policy(action, lease, now=now)
         self.insert_proposed_action(conn, action)
         self.insert_policy_decision(conn, decision, workspace_id=workspace_id)
+        event_payload = {
+            "provider": action.provider,
+            "agent_id": action.agent_id,
+            "lease_id": action.lease_id,
+            "action_type": action.action_type,
+            "run_id": run.id,
+            "step_id": step.id,
+            "idempotency_key": step.idempotency_key,
+        }
+        if apply_change:
+            allowed_prefixes = lease.scope.allowed_path_prefixes
+            path = action.paths[0]
+            if (
+                not allowed_prefixes
+                or not any(path == prefix.rstrip("/") or path.startswith(prefix.rstrip("/") + "/") for prefix in allowed_prefixes)
+                or path.startswith("/")
+                or ".." in path.split("/")
+            ):
+                raise PostgresTrustRepositoryConflict("Run file action exceeds approved path prefixes")
+            file_changes = [item for item in approval.files if item.path == path]
+            if len(approval.files) != 1 or len(file_changes) != 1:
+                raise PostgresTrustRepositoryConflict("Run file action requires exactly one approved file")
+            approved_file = file_changes[0]
+            import hashlib
+            if (
+                approved_file.change_type.strip().lower() != action.metadata.get("change_type")
+                or approved_file.new_content is None
+                or hashlib.sha256(approved_file.new_content.encode("utf-8")).hexdigest() != action.metadata.get("content_sha256")
+            ):
+                raise PostgresTrustRepositoryConflict("Run file action differs from exact approved content")
+            if action.metadata.get("before_sha") is not None and action.metadata.get("before_sha") == action.metadata.get("content_sha256"):
+                raise PostgresTrustRepositoryConflict("Run file action has an invalid before/after digest binding")
+            event_payload.update({
+                "path": path,
+                "change_type": action.metadata["change_type"],
+                "content_sha256": action.metadata["content_sha256"],
+                "before_sha": action.metadata.get("before_sha"),
+            })
+        else:
+            event_payload.update({
+                "source_sha": action.metadata["source_sha"],
+                "target_ref": action.branch,
+            })
         trust_event_repository.append_in_transaction(
             conn,
             TrustEventType.ACTION_RECEIVED,
@@ -400,17 +465,7 @@ class PostgresTrustRepository:
             actor=actor,
             workspace_id=workspace_id,
             correlation_id=run.id,
-            payload={
-                "provider": action.provider,
-                "agent_id": action.agent_id,
-                "lease_id": action.lease_id,
-                "action_type": action.action_type,
-                "run_id": run.id,
-                "step_id": step.id,
-                "idempotency_key": step.idempotency_key,
-                "source_sha": action.metadata["source_sha"],
-                "target_ref": action.branch,
-            },
+            payload=event_payload,
         )
         event_type = {
             PolicyDecisionType.ALLOW: TrustEventType.ACTION_ALLOWED,

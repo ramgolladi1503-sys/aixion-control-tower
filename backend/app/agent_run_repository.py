@@ -24,6 +24,7 @@ from .agent_run_models import (
 from .agent_run_state_machine import can_transition_run, can_transition_step
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from .postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus, _payload as branch_intent_payload
+from .postgres_agent_run_apply_changes import AgentRunApplyChangeIntent, ApplyChangeIntentStatus
 from .approval_integrity import compute_approval_payload_hash
 from .models import ApprovalRequest, ApprovalStatus, AuditEvent, Project
 from .postgres_trust_repository import PostgresTrustRepository
@@ -116,6 +117,7 @@ class AgentRunRepository(Protocol):
         branch_intent_id: str | None = None,
         branch_task_event: AgentTaskEvent | None = None,
         branch_task_audit: AuditEvent | None = None,
+        apply_change_intent_id: str | None = None,
     ) -> None: ...
 
     def recover_expired_lease(
@@ -1156,9 +1158,14 @@ class SQLiteAgentRunRepository:
         branch_intent_id: str | None = None,
         branch_task_event: AgentTaskEvent | None = None,
         branch_task_audit: AuditEvent | None = None,
+        apply_change_intent_id: str | None = None,
     ) -> None:
-        if any(item is not None for item in (branch_intent_id, branch_task_event, branch_task_audit)):
-            raise AgentRunRepositoryConflict("SQLite does not support PostgreSQL branch intent completion")
+        if any(item is not None for item in (
+            branch_intent_id, branch_task_event, branch_task_audit, apply_change_intent_id
+        )):
+            raise AgentRunRepositoryConflict(
+                "SQLite does not support PostgreSQL governed intent completion"
+            )
         _validate_step_completion(
             expected_run=expected_run,
             updated_run=updated_run,
@@ -2443,6 +2450,7 @@ class PostgresAgentRunRepository:
         branch_intent_id: str | None = None,
         branch_task_event: AgentTaskEvent | None = None,
         branch_task_audit: AuditEvent | None = None,
+        apply_change_intent_id: str | None = None,
     ) -> None:
         _validate_step_completion(
             expected_run=expected_run,
@@ -2457,6 +2465,8 @@ class PostgresAgentRunRepository:
             branch_intent_id is None
         ) != (branch_task_audit is None):
             raise ValueError("Branch intent completion requires its task event and audit together")
+        if branch_intent_id is not None and apply_change_intent_id is not None:
+            raise ValueError("A completion cannot bind both branch and file mutation intents")
         if not expected_run.workspace_id:
             raise AgentRunRepositoryConflict("PostgreSQL step completion requires workspace scope")
         with self._connect() as conn:
@@ -2605,7 +2615,50 @@ class PostgresAgentRunRepository:
                     raise AgentRunRepositoryConflict("Branch intent completion CAS or task audit binding is invalid")
             elif any(item is not None for item in (branch_task_event, branch_task_audit)):
                 raise ValueError("Branch completion records require a branch intent")
-
+            apply_intent = None
+            if apply_change_intent_id is not None:
+                apply_row = conn.execute(
+                    "SELECT intent_id,workspace_id,run_id,task_id,approval_id,step_id,action_id,lease_id,"
+                    "idempotency_key,repository,branch,path,change_type,before_sha,desired_content_sha256,"
+                    "lease_token_hash,run_revision,step_revision,status,commit_sha,reason,created_at,updated_at,payload "
+                    "FROM agent_run_apply_change_intents WHERE intent_id=%s AND workspace_id=%s FOR UPDATE",
+                    (apply_change_intent_id, expected_run.workspace_id),
+                ).fetchone()
+                if apply_row is None:
+                    raise AgentRunRepositoryConflict("Apply-change intent is missing during completion")
+                try:
+                    apply_intent = AgentRunApplyChangeIntent.model_validate(apply_row[23])
+                except Exception as error:
+                    raise AgentRunRepositoryIntegrityError("Stored apply-change intent is invalid") from error
+                apply_indexed = (
+                    apply_intent.id, apply_intent.workspace_id, apply_intent.run_id,
+                    apply_intent.task_id, apply_intent.approval_id, apply_intent.step_id,
+                    apply_intent.action_id, apply_intent.lease_id, apply_intent.idempotency_key,
+                    apply_intent.repository, apply_intent.branch, apply_intent.path,
+                    apply_intent.change_type, apply_intent.before_sha,
+                    apply_intent.desired_content_sha256, apply_intent.lease_token_hash,
+                    apply_intent.run_revision, apply_intent.step_revision,
+                    apply_intent.status.value, apply_intent.commit_sha, apply_intent.reason,
+                    apply_intent.created_at, apply_intent.updated_at,
+                )
+                apply_step = next((item for item in expected_steps if item.id == apply_intent.step_id), None)
+                if (
+                    apply_indexed != tuple(apply_row[:23])
+                    or apply_intent.status != ApplyChangeIntentStatus.REMOTE_VERIFIED
+                    or apply_intent.workspace_id != expected_run.workspace_id
+                    or apply_intent.run_id != expected_run.id
+                    or apply_intent.task_id != expected_run.task_id
+                    or apply_intent.approval_id != expected_run.approval_request_id
+                    or apply_intent.lease_id != expected_run.capability_lease_id
+                    or apply_step is None
+                    or apply_step.step_type != AgentRunStepType.APPLY_CHANGES
+                    or apply_step.idempotency_key != apply_intent.idempotency_key
+                    or apply_intent.run_revision != expected_run.updated_at
+                    or apply_intent.step_revision != apply_step.updated_at
+                    or apply_intent.lease_token_hash != sha256_hex({"lease_token": expected_run.lease_token})
+                    or not apply_intent.commit_sha
+                ):
+                    raise AgentRunRepositoryConflict("Apply-change intent completion binding is invalid")
             changed = conn.execute(
                 "UPDATE agent_runs SET status=%s,current_step_id=%s,lease_owner=%s,lease_token=%s,"
                 "lease_expires_at=%s,updated_at=%s,payload=%s WHERE run_id=%s AND workspace_id=%s "
@@ -2683,6 +2736,24 @@ class PostgresAgentRunRepository:
                      Jsonb(branch_task_audit.details), branch_task_audit.created_at,
                      Jsonb(branch_task_audit.model_dump(mode="json"))),
                 )
+            if apply_intent is not None:
+                completed_intent = apply_intent.model_copy(update={
+                    "status": ApplyChangeIntentStatus.COMPLETED,
+                    "reason": "Verified file mutation committed with AgentRun outcome.",
+                    "updated_at": now,
+                })
+                changed = conn.execute(
+                    "UPDATE agent_run_apply_change_intents SET status=%s,reason=%s,updated_at=%s,payload=%s "
+                    "WHERE intent_id=%s AND workspace_id=%s AND status='REMOTE_VERIFIED' "
+                    "AND run_revision=%s AND step_revision=%s AND lease_token_hash=%s AND commit_sha=%s",
+                    (completed_intent.status.value, completed_intent.reason, now,
+                     Jsonb(completed_intent.model_dump(mode="json")), apply_intent.id,
+                     apply_intent.workspace_id, apply_intent.run_revision,
+                     apply_intent.step_revision, apply_intent.lease_token_hash,
+                     apply_intent.commit_sha),
+                )
+                if changed.rowcount != 1:
+                    raise AgentRunRepositoryConflict("Apply-change intent completion lost its CAS")
             conn.execute(
                 "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
                 "event_type,actor,details,created_at,payload) "

@@ -55,6 +55,10 @@ from app.models import (
     now_utc,
 )
 from app.postgres_database import run_postgres_migrations
+from app.postgres_agent_run_apply_changes import (
+    AgentRunApplyChangeIntent,
+    ApplyChangeIntentStatus,
+)
 from app.store import store
 from app.trust_crypto import sign_payload
 from app.trust_models import (
@@ -67,7 +71,7 @@ from app.trust_models import (
     CredentialGrantType,
     TrustEventType,
 )
-from app.postgres_trust_repository import PostgresTrustRepository
+from app.postgres_trust_repository import PostgresTrustRepository, PostgresTrustRepositoryConflict
 from app.trust_policy import lease_receipt_payload
 
 
@@ -2634,6 +2638,8 @@ def _create_run_with_postgres_capability_lease(
     valid_signature: bool = True,
     lease_branch: str = "feature/approved-branch",
     lease_max_retries: int = 3,
+    lease_actions: list[CapabilityActionType] | None = None,
+    allowed_path_prefixes: list[str] | None = None,
 ) -> tuple[str, CapabilityLease]:
     with connect() as conn:
         task_row = conn.execute(
@@ -2666,7 +2672,8 @@ def _create_run_with_postgres_capability_lease(
         scope=CapabilityScope(
             repository="owner/approved-repository",
             branch=lease_branch,
-            allowed_actions=[CapabilityActionType.CREATE_BRANCH],
+            allowed_actions=lease_actions or [CapabilityActionType.CREATE_BRANCH],
+            allowed_path_prefixes=allowed_path_prefixes or [],
             max_retries=lease_max_retries,
         ),
         issued_by_user_id=workspace.owner_user_id,
@@ -3161,7 +3168,7 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
         json={"worker_id": "postgres-branch-route-test", "timeout_seconds": 10},
     )
 
-    assert executed.status_code == 200, executed.text
+    assert executed.status_code == 200, f"{executed.text}; branch_errors={branch_errors!r}"
     final_run = runtime_repositories.agent_runs.get(run_id)
     final_steps = runtime_repositories.agent_runs.list_steps_for_run(run_id)
     assert final_run is not None
@@ -3253,6 +3260,272 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     assert projected_audits[0].event_type == "agent_run.step_started"
     assert projected_audits[0].actor == "postgres-branch-route-test"
     assert len(store.audit_events) == len(audit_ids_before) + 1
+    assert store.approval_requests.get(approval.id) == approval_snapshot_before
+
+
+@pytest.mark.parametrize("rollback_completion", [False, True])
+def test_postgres_apply_changes_route_is_atomic_and_recovers_without_second_write(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    rollback_completion: bool,
+) -> None:
+    """Exercise durable approval, one GitHub mutation, and atomic PG outcome/recovery."""
+    import base64
+    from app.agent_run_models import AgentRunStatus
+    from app.postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus
+    from app.postgres_runtime import PostgresRuntime
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    path = "src/approved.txt"
+    content = "durably approved file content\n"
+    source_sha = "a" * 40
+    commit_sha = "b" * 40
+    blob_sha = "c" * 40
+
+    # Bind the owner-approved payload to one create operation before issuing
+    # its capability lease and creating the AgentRun.
+    with connect() as conn:
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=("
+            "SELECT approval_request_id FROM agent_tasks WHERE task_id=%s) AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+        approval.target_branch = "feature/approved-branch"
+        approval.files = [FileChange(
+            path=path, change_type="create", diff="+approved\n", new_content=content,
+        )]
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
+        )
+
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect, workspace=workspace, task_id=task_id, state=state, client=client,
+        lease_actions=[CapabilityActionType.CREATE_BRANCH, CapabilityActionType.MODIFY_FILES],
+        allowed_path_prefixes=["src"],
+    )
+    attached = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    assert attached.status_code == 200, attached.text
+
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None
+    steps = repositories.agent_runs.list_steps_for_run(run_id)
+    branch_step = next(item for item in steps if item.step_type == AgentRunStepType.CREATE_BRANCH)
+    apply_step = next(item for item in steps if item.step_type == AgentRunStepType.APPLY_CHANGES)
+    run.status = AgentRunStatus.RUNNING
+    run.current_step_id = apply_step.id
+    run.current_step_index = apply_step.sequence
+    run.updated_at = now_utc()
+    for item in steps:
+        item.updated_at = run.updated_at
+        if item.sequence < apply_step.sequence:
+            item.status = AgentRunStepStatus.SUCCEEDED
+        elif item.id == apply_step.id:
+            item.status = AgentRunStepStatus.READY
+    branch_intent = AgentRunBranchIntent(
+        id=f"branch_intent_{uuid.uuid4().hex}", workspace_id=workspace.id,
+        run_id=run_id, task_id=task_id, approval_id=approval.id, step_id=branch_step.id,
+        action_id=f"branch_action_{uuid.uuid4().hex}", lease_id=lease.id,
+        idempotency_key=branch_step.idempotency_key,
+        repository="owner/approved-repository", source_branch="main",
+        target_ref="feature/approved-branch", source_sha=source_sha,
+        lease_token_hash="d" * 64, initial_lease_token_hash="d" * 64,
+        run_revision=run.updated_at, step_revision=branch_step.updated_at,
+        status=BranchIntentStatus.COMPLETED,
+        branch_url="https://github.com/owner/approved-repository/tree/feature/approved-branch",
+        reason="Approved branch fixture", created_at=run.updated_at, updated_at=run.updated_at,
+    )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status=%s,current_step_id=%s,updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (run.status.value, run.current_step_id, run.updated_at,
+             Jsonb(run.model_dump(mode="json")), run_id, workspace.id),
+        )
+        for item in steps:
+            conn.execute(
+                "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+                (item.status.value, item.updated_at, Jsonb(item.model_dump(mode="json")),
+                 item.id, run_id, workspace.id),
+            )
+        conn.execute(
+            "INSERT INTO agent_run_branch_intents("
+            "intent_id,workspace_id,run_id,task_id,approval_id,step_id,action_id,lease_id,"
+            "idempotency_key,repository,source_branch,target_ref,source_sha,lease_token_hash,"
+            "initial_lease_token_hash,run_revision,step_revision,status,branch_url,reason,created_at,updated_at,payload"
+            ") VALUES(" + ",".join(["%s"] * 22) + ",%s)",
+            (
+                branch_intent.id, branch_intent.workspace_id, branch_intent.run_id,
+                branch_intent.task_id, branch_intent.approval_id, branch_intent.step_id,
+                branch_intent.action_id, branch_intent.lease_id, branch_intent.idempotency_key,
+                branch_intent.repository, branch_intent.source_branch, branch_intent.target_ref,
+                branch_intent.source_sha, branch_intent.lease_token_hash,
+                branch_intent.initial_lease_token_hash, branch_intent.run_revision,
+                branch_intent.step_revision, branch_intent.status.value, branch_intent.branch_url,
+                branch_intent.reason, branch_intent.created_at, branch_intent.updated_at,
+                Jsonb(branch_intent.model_dump(mode="json")),
+            ),
+        )
+
+    runtime = PostgresRuntime(
+        _dsn="postgresql://test-runtime/agent-run-routes", profile="test", _connector=connect,
+    )
+    runtime_repositories = runtime.repositories
+    monkeypatch.setattr(main.app.state, "postgres_runtime", runtime, raising=False)
+    monkeypatch.setattr(main.app.state, "postgres_repositories", runtime_repositories, raising=False)
+    for state_name, repository_name in {
+        "agent_run_repository": "agent_runs",
+        "agent_task_repository": "agent_tasks",
+        "approval_decision_repository": "approval_decisions",
+        "trust_repository": "trust",
+        "trust_event_repository": "trust_events",
+        "agent_run_branch_intent_repository": "agent_run_branch_intents",
+    }.items():
+        monkeypatch.setattr(main.app.state, state_name, getattr(runtime_repositories, repository_name), raising=False)
+
+    monkeypatch.setenv("AIXION_POSTGRES_APPLY_CHANGES_ENABLED", "true")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    http_calls: list[tuple[str, dict]] = []
+    remote_written = False
+    intent_marker = ""
+
+    class FakeResponse:
+        def __init__(self, status_code: int, payload: object) -> None:
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    def fake_get(url: str, **kwargs):
+        nonlocal remote_written
+        http_calls.append(("GET", {"url": url, **kwargs}))
+        if "/git/ref/heads/" in url:
+            return FakeResponse(200, {"object": {"sha": source_sha}})
+        if "/contents/" in url:
+            requested_ref = kwargs.get("params", {}).get("ref")
+            if not remote_written or requested_ref == source_sha:
+                return FakeResponse(404, {})
+            return FakeResponse(200, {
+                "type": "file", "sha": blob_sha,
+                "content": base64.b64encode(content.encode()).decode(),
+            })
+        if url.endswith("/commits"):
+            return FakeResponse(200, [{
+                "sha": commit_sha,
+                "commit": {"message": f"approved [aixion-apply-intent:{intent_marker}]"},
+            }])
+        raise AssertionError(f"Unexpected GitHub GET: {url}")
+
+    def fake_post(url: str, **kwargs):
+        nonlocal remote_written, intent_marker
+        http_calls.append(("POST", {"url": url, **kwargs}))
+        assert url == "https://api.github.com/graphql"
+        mutation_input = kwargs["json"]["variables"]["input"]
+        intent_marker = mutation_input["clientMutationId"]
+        assert mutation_input["expectedHeadOid"] == source_sha
+        assert mutation_input["fileChanges"]["additions"] == [{
+            "path": path, "contents": base64.b64encode(content.encode()).decode(),
+        }]
+        remote_written = True
+        return FakeResponse(200, {"data": {"createCommitOnBranch": {
+            "commit": {"oid": commit_sha,
+                       "message": f"approved [aixion-apply-intent:{intent_marker}]"},
+            "ref": {"target": {"oid": commit_sha}},
+        }}})
+
+    monkeypatch.setattr("app.postgres_agent_run_apply_changes_route.httpx.get", fake_get)
+    monkeypatch.setattr("app.postgres_agent_run_apply_changes_route.httpx.post", fake_post)
+    original_commit = runtime_repositories.agent_runs.commit_step_completion
+    if rollback_completion:
+        first_apply_commit = True
+
+        def fail_first_apply_commit(**kwargs):
+            nonlocal first_apply_commit
+            if kwargs.get("apply_change_intent_id") and first_apply_commit:
+                first_apply_commit = False
+                raise RuntimeError("simulated outcome transaction rollback")
+            return original_commit(**kwargs)
+
+        monkeypatch.setattr(runtime_repositories.agent_runs, "commit_step_completion", fail_first_apply_commit)
+
+    task_snapshot_before = store.agent_tasks.get(task_id)
+    task_event_ids_before = set(store.agent_task_events)
+    approval_snapshot_before = store.approval_requests.get(approval.id)
+    first = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-apply-route-test", "timeout_seconds": 10},
+    )
+    assert first.status_code == 200, first.text
+
+    intents = runtime_repositories.agent_run_apply_change_intents
+    persisted = intents.get_for_step(
+        workspace_id=workspace.id, run_id=run_id, step_id=apply_step.id,
+        idempotency_key=apply_step.idempotency_key,
+    )
+    assert persisted is not None
+    if rollback_completion:
+        assert persisted.status == ApplyChangeIntentStatus.REMOTE_VERIFIED
+        retry = client.post(
+            f"/agent/runs/{run_id}/retry",
+            json={"step_id": apply_step.id, "reason": "Recover verified outcome"},
+        )
+        assert retry.status_code == 200, retry.text
+        monkeypatch.setattr(runtime_repositories.agent_runs, "commit_step_completion", original_commit)
+        recovered = client.post(
+            f"/agent/runs/{run_id}/execute-next",
+            json={"worker_id": "postgres-apply-recovery-test", "timeout_seconds": 10},
+        )
+        assert recovered.status_code == 200, recovered.text
+    assert sum(method == "POST" for method, _call in http_calls) == 1
+    assert intent_marker == persisted.id
+
+    final_run = runtime_repositories.agent_runs.get(run_id)
+    final_steps = runtime_repositories.agent_runs.list_steps_for_run(run_id)
+    completed_step = next(item for item in final_steps if item.id == apply_step.id)
+    run_events = runtime_repositories.agent_runs.list_events_for_run(run_id)
+    assert final_run is not None and final_run.status == AgentRunStatus.RUNNING
+    assert completed_step.status == AgentRunStepStatus.SUCCEEDED
+    assert completed_step.output_reference == commit_sha
+    completed_intent = intents.get_for_step(
+        workspace_id=workspace.id, run_id=run_id, step_id=apply_step.id,
+        idempotency_key=apply_step.idempotency_key,
+    )
+    assert completed_intent is not None
+    assert completed_intent.status == ApplyChangeIntentStatus.COMPLETED
+    assert completed_intent.commit_sha == commit_sha
+    assert sum(
+        event.step_id == apply_step.id and event.event_type == AgentRunEventType.STEP_SUCCEEDED
+        for event in run_events
+    ) == 1
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_type='agent_run' "
+            "AND entity_id=%s AND event_type='agent_run.step_completed' "
+            "AND details->>'apply_change_intent_id'=%s",
+            (workspace.id, run_id, persisted.id),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM action_consumptions WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT status FROM agent_run_apply_change_intents WHERE intent_id=%s",
+            (persisted.id,),
+        ).fetchone()[0] == ApplyChangeIntentStatus.COMPLETED.value
+    assert store.agent_tasks.get(task_id) == task_snapshot_before
+    assert set(store.agent_task_events) == task_event_ids_before
     assert store.approval_requests.get(approval.id) == approval_snapshot_before
 
 
@@ -3551,6 +3824,184 @@ def test_postgres_agent_run_capability_binding_rejects_invalid_leases(
             ).fetchone()[0]
             == 0
         )
+
+
+def test_postgres_apply_change_intent_repository_persists_observation_cas(
+    postgres_agent_run_route_runtime,
+) -> None:
+    """Intent indexed state and GET-only recovery transitions are PostgreSQL durable."""
+    import hashlib
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect, workspace=workspace, task_id=task_id, state=state, client=client,
+    )
+    attached = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    assert attached.status_code == 200, attached.text
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None
+    step = repositories.agent_runs.list_steps_for_run(run_id)[2]
+    now = now_utc()
+    content = "persisted intent content\n"
+    intent = AgentRunApplyChangeIntent(
+        id=f"intent_{uuid.uuid4().hex}", workspace_id=workspace.id,
+        run_id=run_id, task_id=task_id, approval_id=run.approval_request_id or "",
+        step_id=step.id, action_id=f"action_{uuid.uuid4().hex}", lease_id=lease.id,
+        idempotency_key=step.idempotency_key, repository="owner/approved-repository",
+        branch="feature/approved-branch", path="src/intent.txt", change_type="create",
+        before_sha=None, desired_content_sha256=hashlib.sha256(content.encode()).hexdigest(),
+        lease_token_hash="a" * 64, run_revision=run.updated_at, step_revision=step.updated_at,
+        status=ApplyChangeIntentStatus.POST_CLAIMED, commit_sha=None,
+        reason="one-shot claim persisted", created_at=now, updated_at=now,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO agent_run_apply_change_intents("
+            "intent_id,workspace_id,run_id,task_id,approval_id,step_id,action_id,lease_id,"
+            "idempotency_key,repository,branch,path,change_type,before_sha,desired_content_sha256,"
+            "lease_token_hash,run_revision,step_revision,status,commit_sha,reason,created_at,updated_at,payload"
+            ") VALUES(" + ",".join(["%s"] * 23) + ",%s)",
+            (
+                intent.id, intent.workspace_id, intent.run_id, intent.task_id, intent.approval_id,
+                intent.step_id, intent.action_id, intent.lease_id, intent.idempotency_key,
+                intent.repository, intent.branch, intent.path, intent.change_type, intent.before_sha,
+                intent.desired_content_sha256, intent.lease_token_hash, intent.run_revision,
+                intent.step_revision, intent.status.value, intent.commit_sha, intent.reason,
+                intent.created_at, intent.updated_at, Jsonb(intent.model_dump(mode="json")),
+            ),
+        )
+
+    repository = repositories.agent_run_apply_change_intents
+    fetched = repository.get_for_step(
+        workspace_id=workspace.id, run_id=run_id, step_id=step.id,
+        idempotency_key=step.idempotency_key,
+    )
+    assert fetched == intent
+    recovered = repository.record_observation(
+        intent=fetched, expected_status=ApplyChangeIntentStatus.POST_CLAIMED,
+        status=ApplyChangeIntentStatus.RECONCILIATION_REQUIRED, commit_sha=None,
+        reason="remote result not attributable", now=now_utc(),
+    )
+    assert repository.get_for_step(
+        workspace_id=workspace.id, run_id=run_id, step_id=step.id,
+        idempotency_key=step.idempotency_key,
+    ) == recovered
+    with pytest.raises(ValueError, match="compare-and-swap"):
+        repository.record_observation(
+            intent=fetched, expected_status=ApplyChangeIntentStatus.POST_CLAIMED,
+            status=ApplyChangeIntentStatus.RECONCILIATION_REQUIRED, commit_sha=None,
+            reason="stale retry", now=now_utc(),
+        )
+
+
+def test_postgres_apply_change_claim_rejects_cancelled_run_without_consuming_intent(
+    postgres_agent_run_route_runtime,
+) -> None:
+    """A cancellation observed under the DB claim locks leaves the intent unclaimed."""
+    import hashlib
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect, workspace=workspace, task_id=task_id, state=state, client=client,
+    )
+    attached = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    assert attached.status_code == 200, attached.text
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None
+    steps = repositories.agent_runs.list_steps_for_run(run_id)
+    step = steps[2]
+    now = now_utc()
+    run.status = AgentRunStatus.RUNNING
+    run.current_step_index = step.sequence
+    run.current_step_id = step.id
+    run.lease_owner = "apply-claim-test"
+    run.lease_token = "apply-worker-token"
+    run.lease_expires_at = now + timedelta(minutes=3)
+    run.cancel_requested = True
+    run.updated_at = now
+    step.status = AgentRunStepStatus.RUNNING
+    step.lease_token = run.lease_token
+    step.updated_at = now
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status=%s,current_step_id=%s,lease_owner=%s,lease_token=%s,"
+            "lease_expires_at=%s,updated_at=%s,payload=%s WHERE run_id=%s AND workspace_id=%s",
+            (
+                run.status.value, run.current_step_id, run.lease_owner, run.lease_token,
+                run.lease_expires_at, run.updated_at, Jsonb(run.model_dump(mode="json")),
+                run_id, workspace.id,
+            ),
+        )
+        conn.execute(
+            "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+            "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+            (
+                step.status.value, step.updated_at, Jsonb(step.model_dump(mode="json")),
+                step.id, run_id, workspace.id,
+            ),
+        )
+    content = "cancelled write must not run\n"
+    intent = AgentRunApplyChangeIntent(
+        id=f"intent_{uuid.uuid4().hex}", workspace_id=workspace.id,
+        run_id=run_id, task_id=task_id, approval_id=run.approval_request_id or "",
+        step_id=step.id, action_id=f"action_{uuid.uuid4().hex}", lease_id=lease.id,
+        idempotency_key=step.idempotency_key, repository="owner/approved-repository",
+        branch="feature/approved-branch", path="src/cancelled.txt", change_type="create",
+        before_sha=None, desired_content_sha256=hashlib.sha256(content.encode()).hexdigest(),
+        lease_token_hash=hashlib.sha256(b'{"lease_token":"apply-worker-token"}').hexdigest(),
+        run_revision=run.updated_at, step_revision=step.updated_at,
+        status=ApplyChangeIntentStatus.INTENT, created_at=now, updated_at=now,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO agent_run_apply_change_intents("
+            "intent_id,workspace_id,run_id,task_id,approval_id,step_id,action_id,lease_id,"
+            "idempotency_key,repository,branch,path,change_type,before_sha,desired_content_sha256,"
+            "lease_token_hash,run_revision,step_revision,status,commit_sha,reason,created_at,updated_at,payload"
+            ") VALUES(" + ",".join(["%s"] * 23) + ",%s)",
+            (
+                intent.id, intent.workspace_id, intent.run_id, intent.task_id, intent.approval_id,
+                intent.step_id, intent.action_id, intent.lease_id, intent.idempotency_key,
+                intent.repository, intent.branch, intent.path, intent.change_type, intent.before_sha,
+                intent.desired_content_sha256, intent.lease_token_hash, intent.run_revision,
+                intent.step_revision, intent.status.value, intent.commit_sha, intent.reason,
+                intent.created_at, intent.updated_at, Jsonb(intent.model_dump(mode="json")),
+            ),
+        )
+    repository = repositories.agent_run_apply_change_intents
+    persisted = repository.get_for_step(
+        workspace_id=workspace.id, run_id=run_id, step_id=step.id,
+        idempotency_key=step.idempotency_key,
+    )
+    assert persisted == intent
+    with pytest.raises(
+        PostgresTrustRepositoryConflict,
+        match="authority changed before one-shot write",
+    ):
+        repository.claim_write_once(
+            intent=intent, expected_run=run, expected_step=step,
+            worker_lease_token=run.lease_token, now=now,
+        )
+    assert repository.get_for_step(
+        workspace_id=workspace.id, run_id=run_id, step_id=step.id,
+        idempotency_key=step.idempotency_key,
+    ) == intent
 
 
 def test_postgres_agent_run_capability_binding_hides_other_workspace_lease(

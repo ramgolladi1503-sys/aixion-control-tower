@@ -299,6 +299,15 @@ fun ApprovalDetailContent(
             }
 
             item {
+                DetailPanel(
+                    title = "Risk rationale",
+                    body = approval.riskReasons.ifEmpty {
+                        listOf("No risk rationale was supplied by the backend.")
+                    }.joinToString("\n")
+                )
+            }
+
+            item {
                 TechnicalDetailsDisclosure(
                     approval = approval,
                     expanded = showTechnicalDetails,
@@ -620,11 +629,6 @@ private fun ApprovalHeroPanel(
             Text(text = approval.summary, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
         }
 
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        DecisionContextBody(
-            label = "Risk rationale",
-            value = approval.riskReasons.ifEmpty { listOf("No risk rationale was supplied.") }.joinToString("\n")
-        )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Column(
             modifier = Modifier
@@ -633,7 +637,7 @@ private fun ApprovalHeroPanel(
                 .padding(TowerSpacing.md),
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
-            Text("Decision context", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("Decision context", color = palette.ink, style = MaterialTheme.typography.titleSmall)
             DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
             DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
             DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
@@ -654,15 +658,12 @@ private fun DecisionContextLine(label: String, value: String) {
                 Text(
                     label,
                     color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                    lineHeight = 20.sp
+                    style = MaterialTheme.typography.labelLarge
                 )
                 Text(
                     value,
                     color = palette.ink,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp
+                    style = MaterialTheme.typography.bodyMedium
                 )
             }
         } else {
@@ -674,16 +675,13 @@ private fun DecisionContextLine(label: String, value: String) {
                 Text(
                     label,
                     color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium,
-                    lineHeight = 20.sp,
+                    style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier.width(96.dp)
                 )
                 Text(
                     value,
                     color = palette.ink,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp,
+                    style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -701,9 +699,7 @@ private fun DecisionContextBody(label: String, value: String) {
         Text(
             label,
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            lineHeight = 20.sp
+            style = MaterialTheme.typography.labelLarge
         )
         Text(value, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
     }
@@ -714,11 +710,9 @@ private fun DetailPanel(title: String, body: String, modifier: Modifier = Modifi
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
-                title,
+            title,
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 1.2.sp
+            style = MaterialTheme.typography.labelLarge
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(body, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
@@ -735,7 +729,7 @@ private fun WarningPanel(title: String, body: String) {
             .border(1.dp, palette.danger.copy(alpha = 0.32f), RoundedCornerShape(24.dp))
             .padding(16.dp)
     ) {
-        Text(title, color = palette.danger, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(title, color = palette.danger, style = MaterialTheme.typography.titleSmall)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(body, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
     }
@@ -751,7 +745,7 @@ private fun RequiredActionsPanel(actions: List<String>) {
             .border(1.dp, palette.danger.copy(alpha = 0.28f), RoundedCornerShape(24.dp))
             .padding(16.dp)
     ) {
-        Text("Required Before Approval", color = palette.danger, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text("Required Before Approval", color = palette.danger, style = MaterialTheme.typography.titleSmall)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         actions.forEach { action -> Text("• $action", color = palette.ink, style = MaterialTheme.typography.bodyLarge) }
     }
@@ -778,8 +772,7 @@ private fun DecisionPanel(
         Text(
             text = "Decision Gate",
             color = palette.ink,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold
+            style = MaterialTheme.typography.titleMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(

@@ -1407,6 +1407,63 @@ POSTGRES_MIGRATIONS = (
             "WHERE status IN ('INTENT','POST_CLAIMED','RECONCILIATION_REQUIRED')",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0032_agent_run_apply_change_intents",
+        name="Persist one-shot AgentRun file mutation intents",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS agent_run_apply_change_intents (
+                intent_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                approval_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                action_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                repository TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                path TEXT NOT NULL,
+                change_type TEXT NOT NULL CHECK (change_type IN ('create','update')),
+                before_sha TEXT,
+                desired_content_sha256 TEXT NOT NULL,
+                lease_token_hash TEXT NOT NULL,
+                run_revision TIMESTAMPTZ NOT NULL,
+                step_revision TIMESTAMPTZ NOT NULL,
+                status TEXT NOT NULL CHECK (status IN (
+                    'INTENT','POST_CLAIMED','RECONCILIATION_REQUIRED','REMOTE_VERIFIED','COMPLETED'
+                )),
+                commit_sha TEXT,
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                payload JSONB NOT NULL,
+                UNIQUE (workspace_id,run_id,step_id,idempotency_key),
+                UNIQUE (action_id,workspace_id),
+                FOREIGN KEY (run_id,workspace_id) REFERENCES agent_runs(run_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (task_id,workspace_id) REFERENCES agent_tasks(task_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (approval_id,workspace_id) REFERENCES approval_requests(approval_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (step_id,workspace_id) REFERENCES agent_run_steps(step_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (lease_id,workspace_id) REFERENCES capability_leases(lease_id,workspace_id) ON DELETE RESTRICT,
+                CHECK (payload ? 'id' AND payload->>'id'=intent_id),
+                CHECK (payload ? 'workspace_id' AND payload->>'workspace_id'=workspace_id),
+                CHECK (payload ? 'run_id' AND payload->>'run_id'=run_id),
+                CHECK (payload ? 'step_id' AND payload->>'step_id'=step_id),
+                CHECK (payload ? 'action_id' AND payload->>'action_id'=action_id),
+                CHECK (payload ? 'path' AND payload->>'path'=path),
+                CHECK (payload ? 'change_type' AND payload->>'change_type'=change_type),
+                CHECK (payload ? 'desired_content_sha256' AND payload->>'desired_content_sha256'=desired_content_sha256),
+                CHECK (payload ? 'status' AND payload->>'status'=status),
+                CHECK (desired_content_sha256 ~ '^[a-f0-9]{64}$'),
+                CHECK (lease_token_hash ~ '^[a-f0-9]{64}$')
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_agent_run_apply_change_reconcile "
+            "ON agent_run_apply_change_intents(workspace_id,status,updated_at,intent_id) "
+            "WHERE status IN ('POST_CLAIMED','RECONCILIATION_REQUIRED','REMOTE_VERIFIED')",
+        ),
+    ),
 )
 
 

@@ -198,27 +198,24 @@ fun ApprovalInboxContent(
                     .testTag("approval-inbox-sync-status")
                     .semantics { liveRegion = LiveRegionMode.Polite },
                 color = palette.inkMuted,
-                fontSize = 14.sp,
-                lineHeight = 20.sp
+                style = MaterialTheme.typography.bodyMedium
             )
         }
 
         state.errorMessage?.let { message ->
             item {
                 TowerPanel(elevated = true) {
-                    StatusBadge("Real data required", palette.danger, fontSize = 14.sp, uppercase = false)
+                    StatusBadge("Real data required", palette.danger, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
                         text = "Approval data unavailable",
                         color = palette.ink,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold
+                        style = MaterialTheme.typography.titleMedium
                     )
                     Text(
                         text = message,
                         color = palette.inkMuted,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp
+                        style = MaterialTheme.typography.bodyMedium
                     )
                     if (state.approvals.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(TowerSpacing.sm))
@@ -228,8 +225,7 @@ fun ApprovalInboxContent(
                                 .testTag("approval-inbox-stale-data-warning")
                                 .semantics { liveRegion = LiveRegionMode.Polite },
                             color = palette.danger,
-                            fontSize = 14.sp,
-                            lineHeight = 21.sp
+                            style = MaterialTheme.typography.bodyMedium
                         )
                     }
                     if (listOf("demo approvals", "mock approvals", "fallback approvals").none {
@@ -239,8 +235,7 @@ fun ApprovalInboxContent(
                         Text(
                             text = "Demo approvals are never shown.",
                             color = palette.inkMuted,
-                            fontSize = 14.sp,
-                            lineHeight = 21.sp
+                            style = MaterialTheme.typography.bodyMedium
                         )
                     }
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
@@ -261,10 +256,10 @@ fun ApprovalInboxContent(
                 verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
             ) {
                 if (pendingCount > 0) {
-                    StatusBadge("$pendingCount pending", palette.caution, fontSize = 14.sp, uppercase = false)
+                    StatusBadge("$pendingCount pending", palette.caution, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
                 }
                 if (blocked.isNotEmpty()) {
-                    StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = 14.sp, uppercase = false)
+                    StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
                 }
             }
         }
@@ -304,8 +299,7 @@ fun ApprovalInboxContent(
                 Text(
                     "Immutable reviewer decisions for recent requests. Decision records do not confirm delivery to the agent or execution.",
                     color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 21.sp
+                    style = MaterialTheme.typography.bodyMedium
                 )
             }
             item {
@@ -344,7 +338,7 @@ fun ApprovalInboxContent(
                             .testTag("approval-history-loading-status")
                             .semantics { liveRegion = LiveRegionMode.Polite },
                         color = palette.inkMuted,
-                        fontSize = 14.sp
+                        style = MaterialTheme.typography.bodyMedium
                     )
                 }
             }
@@ -356,8 +350,8 @@ fun ApprovalInboxContent(
             state.historyErrorMessage?.let { message ->
                 item {
                     TowerPanel(elevated = true) {
-                        Text("Decision history unavailable", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                        Text(message, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
+                        Text("Decision history unavailable", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+                        Text(message, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
                         TextButton(onClick = onHistoryRetry, enabled = !state.historyLoading) {
                             Text(if (state.historyLoading) "Retrying…" else "Retry history")
                         }
@@ -385,14 +379,12 @@ fun ApprovalInboxContent(
                     Text(
                         text = "No requests need review",
                         color = palette.ink,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold
+                        style = MaterialTheme.typography.titleMedium
                     )
                     Text(
                         text = "New requests will appear here when an agent needs your decision.",
                         color = palette.inkMuted,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp
+                        style = MaterialTheme.typography.bodyMedium
                     )
                 }
             }
@@ -404,12 +396,11 @@ fun ApprovalInboxContent(
         ) {
             item {
                 TowerPanel(elevated = true) {
-                    Text("No decisions recorded", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text("No decisions recorded", color = palette.ink, style = MaterialTheme.typography.titleMedium)
                     Text(
                         "Recorded approve, deny, and revision decisions will appear here.",
                         color = palette.inkMuted,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp
+                        style = MaterialTheme.typography.bodyMedium
                     )
                 }
             }
@@ -437,7 +428,7 @@ fun ApprovalInboxContent(
                         if (unsupported.isNotEmpty()) "Unsupported data · decisions disabled"
                         else "Policy blocked · decisions disabled",
                         palette.danger,
-                        fontSize = 14.sp,
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize,
                         uppercase = false
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
@@ -449,8 +440,7 @@ fun ApprovalInboxContent(
                             add("These requests remain visible below for review; update the app or backend if the data is unsupported.")
                         }.joinToString(" "),
                         color = palette.inkMuted,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp
+                        style = MaterialTheme.typography.bodyMedium
                     )
                 }
             }

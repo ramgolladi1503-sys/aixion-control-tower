@@ -105,6 +105,7 @@ class HomeScreenTest {
         }
 
         composeRule.onNodeWithText("Backend synced").assertExists()
+        composeRule.onNodeWithText("Synced").assertDoesNotExist()
         composeRule.onAllNodesWithText("No approvals waiting").assertCountEquals(1)
         composeRule.onAllNodesWithText("All clear").assertCountEquals(0)
         composeRule.onAllNodesWithText("Command state").assertCountEquals(0)

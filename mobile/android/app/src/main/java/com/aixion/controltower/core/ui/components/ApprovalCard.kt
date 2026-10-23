@@ -16,8 +16,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
@@ -50,9 +48,7 @@ fun ApprovalCard(
             Text(
                 text = approval.projectName,
                 color = palette.inkMuted,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                lineHeight = 20.sp,
+                style = MaterialTheme.typography.labelLarge,
                 modifier = Modifier.weight(1f, fill = false)
             )
             RiskBadge(risk = approval.risk, readable = true)
@@ -61,9 +57,7 @@ fun ApprovalCard(
         Text(
             text = approval.title,
             color = palette.ink,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.SemiBold,
-            lineHeight = 22.sp
+            style = MaterialTheme.typography.titleMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
@@ -85,9 +79,7 @@ fun ApprovalCard(
         Text(
             text = expiryLabel,
             color = if (expiryLabel == EXPIRY_UNAVAILABLE) palette.caution else palette.inkMuted,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            lineHeight = 20.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.lg))
         FlowRow(
@@ -97,19 +89,17 @@ fun ApprovalCard(
             StatusBadge(
                 label = approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() },
                 color = palette.inkMuted,
-                fontSize = 14.sp,
+                fontSize = MaterialTheme.typography.labelLarge.fontSize,
                 uppercase = false
             )
-            StatusBadge(label = "${approval.files.size} files", color = palette.inkMuted, fontSize = 14.sp, uppercase = false)
+            StatusBadge(label = "${approval.files.size} files", color = palette.inkMuted, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
         }
         if (onClick != null) {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
             Text(
                 text = "Review request",
                 color = palette.brand,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                lineHeight = 20.sp,
+                style = MaterialTheme.typography.labelLarge,
                 textAlign = TextAlign.End,
                 modifier = Modifier.fillMaxWidth()
             )

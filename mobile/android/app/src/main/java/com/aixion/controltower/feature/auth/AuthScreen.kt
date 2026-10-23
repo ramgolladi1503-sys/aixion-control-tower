@@ -14,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -107,16 +108,13 @@ private fun AccountHero(state: AuthUiState) {
                 Text(
                     text = AuthUxCopy.heroTitle(state),
                     color = palette.ink,
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 32.sp
+                    style = MaterialTheme.typography.headlineLarge
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
                     text = AuthUxCopy.heroSubtitle(state),
                     color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp
+                    style = MaterialTheme.typography.bodyMedium
                 )
             }
             ForgedLogoMark(size = 52.dp, color = palette.ink.copy(alpha = 0.78f))
@@ -133,13 +131,12 @@ internal fun AccountInfoPanel(
     TowerPanel(elevated = true) {
         StatusBadge(label = "Signed in", color = palette.positive, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Account information", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Account information", color = palette.ink, style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = state.userLabel ?: "Current session is active.",
             color = palette.ink,
-            fontSize = 14.sp,
-            lineHeight = 20.sp
+            style = MaterialTheme.typography.bodyLarge
         )
         state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
@@ -194,8 +191,7 @@ internal fun AuthFormContent(
                 else -> "Welcome back"
             },
             color = palette.ink,
-            fontSize = 26.sp,
-            fontWeight = FontWeight.SemiBold
+            style = MaterialTheme.typography.headlineMedium
         )
         Text(
             text = when {
@@ -205,7 +201,7 @@ internal fun AuthFormContent(
                 else -> "Log in to review and decide on pending approvals."
             },
             color = palette.inkMuted,
-            fontSize = 14.sp
+            style = MaterialTheme.typography.bodyMedium
         )
 
         TowerPanel(elevated = true) {

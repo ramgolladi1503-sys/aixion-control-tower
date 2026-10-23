@@ -26,7 +26,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -83,10 +82,6 @@ internal fun HomeContent(
     ) {
         item {
             HomeHeader(
-                loading = state.loading,
-                refreshing = state.refreshing,
-                hasError = state.hasError,
-                hasSuccessfulSync = state.hasSuccessfulSync,
                 lastSuccessfulSyncAt = state.lastSuccessfulSyncAt
             )
         }
@@ -108,23 +103,20 @@ internal fun HomeContent(
                                     state.loading || state.refreshing || !state.hasSuccessfulSync -> palette.caution
                                     else -> palette.positive
                                 },
-                                fontSize = 14.sp,
+                                fontSize = MaterialTheme.typography.labelLarge.fontSize,
                                 uppercase = false
                             )
                             Spacer(modifier = Modifier.height(TowerSpacing.md))
                             Text(
                                 text = homeHeroTitle(state),
                                 color = palette.ink,
-                                fontSize = 28.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                lineHeight = 33.sp
+                                style = MaterialTheme.typography.headlineLarge
                             )
                             Spacer(modifier = Modifier.height(TowerSpacing.sm))
                             Text(
                                 text = homeHeroSubtitle(state),
                                 color = palette.inkMuted,
-                                fontSize = 14.sp,
-                                lineHeight = 20.sp
+                                style = MaterialTheme.typography.bodyMedium
                             )
                         }
                         ForgedLogoMark(size = 56.dp, color = palette.ink.copy(alpha = 0.82f))
@@ -194,15 +186,13 @@ internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
         Text(
             text = "Agent connections",
             color = palette.ink,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
+            style = MaterialTheme.typography.titleMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = "Set up Antigravity or Codex for the project on the computer where the agent runs. Keep that computer online while approvals are pending.",
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
@@ -232,38 +222,8 @@ internal fun HomeApprovalPreview(
 }
 
 @Composable
-private fun HomeHeader(
-    loading: Boolean,
-    refreshing: Boolean,
-    hasError: Boolean,
-    hasSuccessfulSync: Boolean,
-    lastSuccessfulSyncAt: Instant?
-) {
-    val palette = LocalTowerPalette.current
-    Column {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            StatusBadge(
-                label = homeBackendStatusLabel(
-                    loading = loading,
-                    refreshing = refreshing,
-                    hasError = hasError,
-                    hasSuccessfulSync = hasSuccessfulSync
-                ),
-                color = when {
-                    hasError -> palette.danger
-                    loading || refreshing || !hasSuccessfulSync -> palette.caution
-                    else -> palette.positive
-                },
-                fontSize = 14.sp,
-                uppercase = false
-            )
-        }
-        lastSuccessfulSyncAt?.let { syncedAt -> HomeSyncTimestamp(syncedAt) }
-    }
+private fun HomeHeader(lastSuccessfulSyncAt: Instant?) {
+    lastSuccessfulSyncAt?.let { syncedAt -> HomeSyncTimestamp(syncedAt) }
 }
 
 @Composable
@@ -272,8 +232,7 @@ internal fun HomeSyncTimestamp(syncedAt: Instant) {
     Text(
         text = "Last successful sync · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(syncedAt))}",
         color = palette.inkMuted,
-        fontSize = 14.sp,
-        lineHeight = 20.sp,
+        style = MaterialTheme.typography.bodySmall,
         modifier = Modifier.padding(top = TowerSpacing.sm)
     )
 }
@@ -295,15 +254,13 @@ private fun ErrorPanel(
         Text(
             text = title,
             color = palette.ink,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
+            style = MaterialTheme.typography.titleMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = body,
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Button(onClick = onRetry, enabled = retryEnabled) {

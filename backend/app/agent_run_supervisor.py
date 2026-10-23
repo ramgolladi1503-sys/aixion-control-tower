@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
@@ -50,6 +51,11 @@ from .postgres_agent_run_branch_executor import (
     PostgresCreateBranchCoordinator,
 )
 from .postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus
+from .postgres_agent_run_apply_changes import AgentRunApplyChangeIntent
+from .postgres_agent_run_apply_changes_executor import (
+    ApplyChangeRequest, ApplyChangeState, PostgresApplyChangesCoordinator,
+    postgres_apply_changes_enabled,
+)
 from .agent_task_repository import (
     AgentTaskRepository,
     PostgresAgentTaskRepository,
@@ -87,6 +93,9 @@ from .workspace_access import agent_run_scope_is_consistent
 StepExecutor = Callable[[AgentRun, AgentRunStep, int], AgentRunStepExecutionResult]
 PostgresBranchRequestFactory = Callable[
     [AgentRun, AgentRunStep, str, int], BranchExecutionRequest
+]
+PostgresApplyChangeRequestFactory = Callable[
+    [AgentRun, AgentRunStep, str, int], ApplyChangeRequest
 ]
 
 
@@ -912,6 +921,8 @@ def build_postgres_branch_completion(
         evidence={"operation_type": "github_branch_creation", **facts},
         output_reference=branch_url,
     )
+
+
     updated_run, updated_steps, events, audit = (
         _build_postgres_agent_run_step_completion_records(
             run=run,
@@ -954,6 +965,61 @@ def build_postgres_branch_completion(
     )
 
 
+@dataclass(frozen=True)
+class ApplyChangeCompletion:
+    expected_run: AgentRun
+    updated_run: AgentRun
+    expected_steps: list[AgentRunStep]
+    updated_steps: list[AgentRunStep]
+    events: list[AgentRunEvent]
+    audit: AuditEvent
+    now: datetime
+
+
+def build_postgres_apply_change_completion(
+    *, run: AgentRun, steps: list[AgentRunStep], intent: AgentRunApplyChangeIntent,
+    commit_sha: str, actor: str, worker_lease_token: str,
+    now: datetime | None = None,
+) -> ApplyChangeCompletion:
+    if not commit_sha or run.id != intent.run_id or run.workspace_id != intent.workspace_id:
+        raise AgentRunConflict("Verified PostgreSQL file completion is incomplete.")
+    if run.task_id != intent.task_id or run.current_step_id != intent.step_id:
+        raise AgentRunConflict("File completion does not match current run scope.")
+    step = next((item for item in steps if item.id == intent.step_id), None)
+    if (
+        step is None or step.step_type != AgentRunStepType.APPLY_CHANGES
+        or step.status != AgentRunStepStatus.RUNNING
+        or step.lease_token != worker_lease_token
+        or run.lease_token != worker_lease_token
+    ):
+        raise AgentRunConflict("File completion step is not the current leased step.")
+    facts = {
+        "apply_change_intent_id": intent.id, "repository": intent.repository,
+        "branch": intent.branch, "path": intent.path, "change_type": intent.change_type,
+        "content_sha256": intent.desired_content_sha256, "commit_sha": commit_sha,
+    }
+    result = AgentRunStepExecutionResult(
+        success=True, decision=VerificationDecision.PASS,
+        reason="One approved file change was written once and exact remote content was verified.",
+        evidence={"operation_type": "github_file_application", **facts},
+        output_reference=commit_sha,
+    )
+    updated_run, updated_steps, events, audit = _build_postgres_agent_run_step_completion_records(
+        run=run, steps=steps, step_type=AgentRunStepType.APPLY_CHANGES,
+        result=result, worker_id=actor, lease_token=worker_lease_token,
+        already_running=True,
+    )
+    for event in events:
+        if event.step_id == intent.step_id and event.event_type == AgentRunEventType.STEP_SUCCEEDED:
+            event.metadata.update(facts)
+    audit.details.update(facts)
+    return ApplyChangeCompletion(
+        expected_run=run.model_copy(deep=True), updated_run=updated_run,
+        expected_steps=[item.model_copy(deep=True) for item in steps],
+        updated_steps=updated_steps, events=events, audit=audit, now=now or _now(),
+    )
+
+
 def execute_next_step(
     run_id: str,
     *,
@@ -966,6 +1032,8 @@ def execute_next_step(
     run_repository: AgentRunRepository | None = None,
     postgres_branch_coordinator: PostgresCreateBranchCoordinator | None = None,
     postgres_branch_request_factory: PostgresBranchRequestFactory | None = None,
+    postgres_apply_change_coordinator: PostgresApplyChangesCoordinator | None = None,
+    postgres_apply_change_request_factory: PostgresApplyChangeRequestFactory | None = None,
 ) -> AgentRunStepExecutionResult:
     if (postgres_branch_coordinator is None) != (postgres_branch_request_factory is None):
         raise AgentRunConflict(
@@ -976,6 +1044,13 @@ def execute_next_step(
         or not callable(postgres_branch_request_factory)
     ):
         raise AgentRunConflict("PostgreSQL branch execution injections have invalid types.")
+    if (postgres_apply_change_coordinator is None) != (postgres_apply_change_request_factory is None):
+        raise AgentRunConflict("PostgreSQL apply coordinator and request factory must be injected together.")
+    if postgres_apply_change_coordinator is not None and (
+        not isinstance(postgres_apply_change_coordinator, PostgresApplyChangesCoordinator)
+        or not callable(postgres_apply_change_request_factory)
+    ):
+        raise AgentRunConflict("PostgreSQL apply execution injections have invalid types.")
     active_run_repository = run_repository
     if active_run_repository is not None and not isinstance(
         active_run_repository,
@@ -997,6 +1072,8 @@ def execute_next_step(
     postgres_repository_execution = isinstance(active_run_repository, PostgresAgentRunRepository)
     if postgres_branch_coordinator is not None and not postgres_repository_execution:
         raise AgentRunConflict("PostgreSQL CREATE_BRANCH injection is unavailable for SQLite runs.")
+    if postgres_apply_change_coordinator is not None and not postgres_repository_execution:
+        raise AgentRunConflict("PostgreSQL APPLY_CHANGES injection is unavailable for SQLite runs.")
     if postgres_repository_execution:
         current_step = store.agent_run_steps.get(run.current_step_id or "")
         if current_step is None or current_step.step_type not in {
@@ -1007,10 +1084,16 @@ def execute_next_step(
             current_step.step_type == AgentRunStepType.CREATE_BRANCH
             and postgres_branch_coordinator is not None
             and postgres_branch_request_factory is not None
+        ) and not (
+            current_step.step_type == AgentRunStepType.APPLY_CHANGES
+            and postgres_apply_changes_enabled()
+            and postgres_apply_change_coordinator is not None
+            and postgres_apply_change_request_factory is not None
         ):
             raise AgentRunConflict(
                 "PostgreSQL AgentRun execution currently supports only the "
-                "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), "
+                "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), and "
+                "explicitly enabled APPLY_CHANGES (with its dedicated coordinator), "
                 "VERIFY_RESULT, and SEAL_EVIDENCE steps."
             )
         if current_step.step_type in {
@@ -1099,6 +1182,11 @@ def execute_next_step(
         step.step_type == AgentRunStepType.CREATE_BRANCH
         and postgres_branch_coordinator is not None
         and postgres_branch_request_factory is not None
+    ) and not (
+        step.step_type == AgentRunStepType.APPLY_CHANGES
+        and postgres_apply_changes_enabled()
+        and postgres_apply_change_coordinator is not None
+        and postgres_apply_change_request_factory is not None
     ):
         release_run_lease(
             run,
@@ -1108,7 +1196,8 @@ def execute_next_step(
         )
         raise AgentRunConflict(
             "PostgreSQL AgentRun execution currently supports only the "
-            "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), "
+            "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), and "
+            "explicitly enabled APPLY_CHANGES (with its dedicated coordinator), "
             "VERIFY_RESULT, and SEAL_EVIDENCE steps."
         )
 
@@ -1485,6 +1574,7 @@ def execute_next_step(
     persisted_event_ids = {event.id for event in _run_events(run.id)}
 
     coordinated_branch_result: AgentRunStepExecutionResult | None = None
+    coordinated_apply_result: AgentRunStepExecutionResult | None = None
     if postgres_repository_execution and step.step_type == AgentRunStepType.CREATE_BRANCH:
         if postgres_branch_coordinator is None or postgres_branch_request_factory is None:
             raise AgentRunConflict(
@@ -1565,6 +1655,60 @@ def execute_next_step(
                     "intent_status": branch_result.intent.status.value if branch_result.intent else None,
                     "verified_sha": branch_result.verified_sha,
                     "branch_url": branch_result.branch_url,
+                },
+            )
+
+    if postgres_repository_execution and step.step_type == AgentRunStepType.APPLY_CHANGES:
+        if postgres_apply_change_coordinator is None or postgres_apply_change_request_factory is None:
+            raise AgentRunConflict("PostgreSQL APPLY_CHANGES requires its dedicated coordinator and request factory.")
+        try:
+            apply_request = postgres_apply_change_request_factory(
+                expected_run, step.model_copy(deep=True), lease_token, timeout_seconds
+            )
+            apply_step_snapshot = next((item for item in expected_steps if item.id == step.id), None)
+            if (
+                not isinstance(apply_request, ApplyChangeRequest)
+                or apply_request.expected_run != expected_run
+                or apply_request.expected_step != apply_step_snapshot
+                or apply_request.worker_lease_token != lease_token
+                or apply_request.timeout_seconds != timeout_seconds
+            ):
+                raise AgentRunConflict("PostgreSQL APPLY_CHANGES request factory returned a mismatched run or lease.")
+            apply_result = postgres_apply_change_coordinator.execute(apply_request)
+        except Exception as error:
+            coordinated_apply_result = AgentRunStepExecutionResult(
+                success=False, decision=VerificationDecision.NEEDS_HUMAN,
+                reason=f"PostgreSQL file application could not be reconciled safely: {type(error).__name__}.",
+                evidence={"operation_type": "github_file_application", "reconciliation_required": True},
+            )
+        else:
+            if apply_result.state == ApplyChangeState.COMPLETED:
+                committed_run = active_run_repository.get(run.id)
+                committed_steps = active_run_repository.list_steps_for_run(run.id)
+                committed_events = active_run_repository.list_events_for_run(run.id)
+                if committed_run is None:
+                    raise AgentRunConflict("Committed PostgreSQL file completion could not be reloaded.")
+                store.project_agent_run_snapshot(committed_run, committed_steps, committed_events)
+                completed = next((item for item in committed_steps if item.id == step.id), None)
+                if completed is None or completed.status != AgentRunStepStatus.SUCCEEDED:
+                    raise AgentRunConflict("PostgreSQL file completion transaction returned without a succeeded step.")
+                return AgentRunStepExecutionResult(
+                    success=True, decision=completed.decision or VerificationDecision.PASS,
+                    reason=completed.reason, evidence=completed.evidence,
+                    output_reference=completed.output_reference,
+                )
+            unresolved = apply_result.state == ApplyChangeState.RECONCILIATION_REQUIRED
+            coordinated_apply_result = AgentRunStepExecutionResult(
+                success=False,
+                decision=VerificationDecision.NEEDS_HUMAN if unresolved else VerificationDecision.BLOCK_POLICY,
+                reason=apply_result.reason,
+                evidence={
+                    "operation_type": "github_file_application",
+                    "apply_change_intent_id": apply_result.intent.id if apply_result.intent else None,
+                    "intent_status": apply_result.intent.status.value if apply_result.intent else None,
+                    "path": apply_result.intent.path if apply_result.intent else None,
+                    "commit_sha": apply_result.commit_sha,
+                    "reconciliation_required": unresolved,
                 },
             )
 
@@ -1656,7 +1800,9 @@ def execute_next_step(
 
     try:
         raise_if_fault_configured(run.id, step.step_type)
-        if coordinated_branch_result is not None:
+        if coordinated_apply_result is not None:
+            result = coordinated_apply_result
+        elif coordinated_branch_result is not None:
             result = coordinated_branch_result
         else:
             effective_executor = executor or DefaultAgentRunStepExecutor(

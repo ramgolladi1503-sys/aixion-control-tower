@@ -65,6 +65,8 @@ from .notification_outbox_repository import PostgresNotificationOutboxRepository
 from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .postgres_trust_repository import PostgresTrustRepository
 from .postgres_agent_run_branch_route import postgres_branch_execution_dependencies
+from .postgres_agent_run_apply_changes_route import postgres_apply_changes_execution_dependencies
+from .postgres_agent_run_apply_changes_executor import postgres_apply_changes_enabled
 from .approval_decisions import (
     agent_task_repository,
     approval_decision_repository,
@@ -798,13 +800,18 @@ def execute_run_next_step(
         } or (
             isinstance(run_repository, PostgresAgentRunRepository)
             and current_step.step_type == AgentRunStepType.CREATE_BRANCH
+        ) or (
+            isinstance(run_repository, PostgresAgentRunRepository)
+            and current_step.step_type == AgentRunStepType.APPLY_CHANGES
+            and postgres_apply_changes_enabled()
         )
         if isinstance(run_repository, PostgresAgentRunRepository) and not postgres_supported_step:
             raise HTTPException(
                 status_code=409,
                 detail=(
                     "PostgreSQL AgentRun execution supports VALIDATE_SCOPE, VERIFY_RESULT, "
-                    "SEAL_EVIDENCE, and CREATE_BRANCH with complete durable branch authority."
+                    "SEAL_EVIDENCE, CREATE_BRANCH, and explicitly enabled APPLY_CHANGES "
+                    "with complete durable authority."
                 ),
             )
         if (
@@ -833,6 +840,8 @@ def execute_run_next_step(
             )
             branch_coordinator = None
             branch_request_factory = None
+            apply_change_coordinator = None
+            apply_change_request_factory = None
             if (
                 isinstance(run_repository, PostgresAgentRunRepository)
                 and current_step.step_type == AgentRunStepType.CREATE_BRANCH
@@ -845,6 +854,17 @@ def execute_run_next_step(
                         run=run,
                         step=current_step,
                         actor=payload.worker_id,
+                    )
+                )
+            if (
+                isinstance(run_repository, PostgresAgentRunRepository)
+                and current_step.step_type == AgentRunStepType.APPLY_CHANGES
+            ):
+                if request is None:
+                    raise AgentRunConflict("PostgreSQL APPLY_CHANGES requires an app-bound request.")
+                apply_change_coordinator, apply_change_request_factory = (
+                    postgres_apply_changes_execution_dependencies(
+                        request=request, run=run, step=current_step, actor=payload.worker_id,
                     )
                 )
             trust_actions = []
@@ -866,6 +886,8 @@ def execute_run_next_step(
                 run_repository=run_repository,
                 postgres_branch_coordinator=branch_coordinator,
                 postgres_branch_request_factory=branch_request_factory,
+                postgres_apply_change_coordinator=apply_change_coordinator,
+                postgres_apply_change_request_factory=apply_change_request_factory,
             )
             consume_run_step_actions(
                 trust_actions,

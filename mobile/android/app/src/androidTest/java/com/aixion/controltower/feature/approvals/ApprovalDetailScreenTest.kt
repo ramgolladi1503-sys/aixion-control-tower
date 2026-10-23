@@ -586,6 +586,30 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun riskRationaleRemainsVisibleAndWrapsAtLargeFontScale() {
+        val rationale = "This command can modify project files, run external processes, and change configuration used by the connected agent session. Review the exact target and requested arguments before deciding."
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                ApprovalDetailContent(
+                    approval(ApprovalStatus.REQUESTED).copy(riskReasons = listOf(rationale)),
+                    null,
+                    {},
+                    {},
+                    {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Risk rationale").performScrollTo().assertIsDisplayed()
+        val rationaleNode = composeRule.onNodeWithText(rationale).performScrollTo()
+        rationaleNode.assertIsDisplayed()
+        assertTrue(
+            "Risk rationale should wrap into multiple readable lines at 200% text scale",
+            rationaleNode.fetchSemanticsNode().boundsInRoot.height >= 96f
+        )
+    }
+
+    @Test
     fun approvalDecisionContextIsReachableFromSummaryBeforeDecision() {
         val longInvocationId = "antigravity:" + "session-42:tool-19/".repeat(12)
         val request = approval(ApprovalStatus.REQUESTED).copy(
