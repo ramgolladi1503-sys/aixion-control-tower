@@ -83,8 +83,10 @@ def postgres_agent_run_route_runtime(
     with psycopg.connect(dsn, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
 
-    def connect(_dsn: str = dsn, **connect_kwargs: object) -> Connection:
-        connection = psycopg.connect(_dsn, **connect_kwargs)
+    def connect(_runtime_dsn: str = dsn, **connect_kwargs: object) -> Connection:
+        # PostgresRuntime receives a deliberately invalid placeholder DSN in
+        # tests; this fixture must stay bound to its isolated schema database.
+        connection = psycopg.connect(dsn, **connect_kwargs)
         connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
         return connection
 
