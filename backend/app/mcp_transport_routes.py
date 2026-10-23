@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import anyio
 from datetime import timedelta
 import json
 from typing import Any
@@ -307,7 +308,7 @@ def _gateway_decision_to_mcp_result(decision: MCPGatewayDecision) -> dict[str, A
     }
 
 
-def _postgres_mcp_tool_call(
+async def _postgres_mcp_tool_call(
     *,
     project_id: str,
     payload: MCPJsonRpcRequest,
@@ -350,23 +351,27 @@ def _postgres_mcp_tool_call(
             message="Mutating MCP tools/call request ID is too long.",
         )
 
-    submission = _postgres_mcp_submission(
-        payload=GatewaySubmitRequest(project_id=project_id, request=call),
-        user=user,
-        request=request,
-        idempotency_key=idempotency_key,
+    submission = await anyio.to_thread.run_sync(
+        lambda: _postgres_mcp_submission(
+            payload=GatewaySubmitRequest(project_id=project_id, request=call),
+            user=user,
+            request=request,
+            idempotency_key=idempotency_key,
+        )
     )
     approval_id = submission.approval_request_id
     if not approval_id:
         raise HTTPException(status_code=503, detail="MCP approval identity was not persisted")
 
     try:
-        approval_repository = approval_decision_repository_for_request(request)
-        approval = approval_repository.get(approval_id)
+        approval_repository = await anyio.to_thread.run_sync(
+            lambda: approval_decision_repository_for_request(request)
+        )
+        approval = await anyio.to_thread.run_sync(lambda: approval_repository.get(approval_id))
     except (RuntimeError, psycopg.Error, MCPPendingRepositoryError) as error:
         raise HTTPException(status_code=503, detail="MCP approval state is unavailable") from error
     try:
-        workspace_id = workspace_id_for_request(user, request)
+        workspace_id = await anyio.to_thread.run_sync(lambda: workspace_id_for_request(user, request))
     except (RuntimeError, psycopg.Error) as error:
         raise HTTPException(status_code=503, detail="MCP approval workspace is unavailable") from error
     if approval is None or workspace_id is None or approval.workspace_id != workspace_id:
@@ -405,18 +410,20 @@ def _postgres_mcp_tool_call(
 
     while True:
         try:
-            approval = approval_repository.get(approval_id)
+            approval = await anyio.to_thread.run_sync(lambda: approval_repository.get(approval_id))
         except (RuntimeError, psycopg.Error, MCPPendingRepositoryError) as error:
             raise HTTPException(status_code=503, detail="MCP approval state is unavailable") from error
         if approval is None or workspace_id is None or approval.workspace_id != workspace_id:
             raise HTTPException(status_code=503, detail="MCP approval state is unavailable")
 
         if approval.status == ApprovalStatus.APPROVED:
-            decision = _resolve_postgres_gateway_request(
-                approval_request_id=approval_id,
-                user=user,
-                request=request,
-                pending_repository=request.app.state.postgres_repositories.mcp_pending_requests,
+            decision = await anyio.to_thread.run_sync(
+                lambda: _resolve_postgres_gateway_request(
+                    approval_request_id=approval_id,
+                    user=user,
+                    request=request,
+                    pending_repository=request.app.state.postgres_repositories.mcp_pending_requests,
+                )
             )
             return _result_response(payload.id, _gateway_decision_to_mcp_result(decision))
 
@@ -437,14 +444,16 @@ def _postgres_mcp_tool_call(
             try:
                 # The shared expiry path handles both explicit deadlines and
                 # legacy rows whose deadline is derived from the configured TTL.
-                expire_approval(
-                    approval,
-                    actor="system:mcp-transport-timeout",
-                    reason="deadline_elapsed",
-                    now=now,
-                    repository=approval_repository,
+                await anyio.to_thread.run_sync(
+                    lambda: expire_approval(
+                        approval,
+                        actor="system:mcp-transport-timeout",
+                        reason="deadline_elapsed",
+                        now=now,
+                        repository=approval_repository,
+                    )
                 )
-                approval = approval_repository.get(approval_id)
+                approval = await anyio.to_thread.run_sync(lambda: approval_repository.get(approval_id))
             except Exception as error:
                 raise HTTPException(status_code=503, detail="MCP approval expiry could not be persisted") from error
             if approval is None or approval.status not in {
@@ -465,15 +474,17 @@ def _postgres_mcp_tool_call(
             return _result_response(payload.id, result)
         if time.monotonic() >= monotonic_deadline:
             try:
-                expire_approval(
-                    approval,
-                    actor="system:mcp-transport-timeout",
-                    reason="transport_wait_timeout",
-                    now=now,
-                    force=True,
-                    repository=approval_repository,
+                await anyio.to_thread.run_sync(
+                    lambda: expire_approval(
+                        approval,
+                        actor="system:mcp-transport-timeout",
+                        reason="transport_wait_timeout",
+                        now=now,
+                        force=True,
+                        repository=approval_repository,
+                    )
                 )
-                approval = approval_repository.get(approval_id)
+                approval = await anyio.to_thread.run_sync(lambda: approval_repository.get(approval_id))
             except Exception as error:
                 raise HTTPException(status_code=503, detail="MCP approval timeout could not be persisted") from error
             if approval is None or approval.status not in {
@@ -492,11 +503,11 @@ def _postgres_mcp_tool_call(
             result = _gateway_decision_to_mcp_result(decision)
             result["isError"] = True
             return _result_response(payload.id, result)
-        time.sleep(min(0.5, max(0.0, monotonic_deadline - time.monotonic())))
+        await anyio.sleep(min(0.5, max(0.0, monotonic_deadline - time.monotonic())))
 
 
 @router.post("/{project_id}/jsonrpc", response_model=MCPJsonRpcResponse)
-def handle_mcp_jsonrpc(
+async def handle_mcp_jsonrpc(
     project_id: str,
     payload: MCPJsonRpcRequest,
     user: AuthUser = MaintainerDependency,
@@ -505,14 +516,20 @@ def handle_mcp_jsonrpc(
     postgres_child_servers: list[MCPChildServer] | None = None
     if http_request is not None:
         try:
-            repository = mcp_child_server_repository_for_request(http_request)
+            repository = await anyio.to_thread.run_sync(
+                lambda: mcp_child_server_repository_for_request(http_request)
+            )
         except (RuntimeError, psycopg.Error) as error:
             raise HTTPException(status_code=503, detail="MCP server registry is unavailable") from error
         if isinstance(repository, PostgresMCPChildServerRepository):
             try:
-                project_repository = project_repository_for_request(http_request)
-                workspace_id = workspace_id_for_request(user, http_request)
-                project = project_repository.get(project_id)
+                project_repository, workspace_id = await anyio.to_thread.run_sync(
+                    lambda: (
+                        project_repository_for_request(http_request),
+                        workspace_id_for_request(user, http_request),
+                    )
+                )
+                project = await anyio.to_thread.run_sync(lambda: project_repository.get(project_id))
             except (RuntimeError, psycopg.Error) as error:
                 raise HTTPException(status_code=503, detail="MCP project data is unavailable") from error
             if (
@@ -523,18 +540,25 @@ def handle_mcp_jsonrpc(
                 raise HTTPException(status_code=404, detail="Project not found")
             if payload.method in {"tools/list", "tools/call"}:
                 try:
-                    postgres_child_servers = repository.list_for_workspace(
-                        workspace_id,
-                        project_id=project_id,
-                        enabled=True,
+                    postgres_child_servers = await anyio.to_thread.run_sync(
+                        lambda: repository.list_for_workspace(
+                            workspace_id,
+                            project_id=project_id,
+                            enabled=True,
+                        )
                     )
                 except (RuntimeError, psycopg.Error) as error:
                     raise HTTPException(status_code=503, detail="MCP server registry is unavailable") from error
         elif isinstance(repository, SQLiteMCPChildServerRepository):
             if project_id not in store.projects:
                 raise HTTPException(status_code=404, detail="Project not found")
-            workspace_id = workspace_id_for_request(user, http_request)
-            if workspace_id is not None and project_workspace_id(project_id) != workspace_id:
+            workspace_id, project_workspace = await anyio.to_thread.run_sync(
+                lambda: (
+                    workspace_id_for_request(user, http_request),
+                    project_workspace_id(project_id),
+                )
+            )
+            if workspace_id is not None and project_workspace != workspace_id:
                 raise HTTPException(status_code=404, detail="Project not found")
         else:
             raise HTTPException(
@@ -574,7 +598,7 @@ def handle_mcp_jsonrpc(
         return _result_response(payload.id, {"tools": tools})
 
     if postgres_child_servers is not None:
-        return _postgres_mcp_tool_call(
+        return await _postgres_mcp_tool_call(
             project_id=project_id,
             payload=payload,
             user=user,
@@ -586,5 +610,7 @@ def handle_mcp_jsonrpc(
     except ValueError as exc:
         return _error_response(payload.id, code=-32602, message=str(exc))
 
-    decision = gateway_for_project(project_id).submit_tool_call(tool_call)
+    decision = await anyio.to_thread.run_sync(
+        lambda: gateway_for_project(project_id).submit_tool_call(tool_call)
+    )
     return _result_response(payload.id, _gateway_decision_to_mcp_result(decision))

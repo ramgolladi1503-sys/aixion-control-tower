@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
@@ -126,7 +127,7 @@ def _postgres_transport_unit_case(monkeypatch, *, final_status: ApprovalStatus |
             status=ApprovalStatus.REQUESTED,
         )
 
-    def sleep(_seconds):
+    async def sleep(_seconds):
         if final_status is not None:
             approval.status = final_status
 
@@ -146,7 +147,7 @@ def _postgres_transport_unit_case(monkeypatch, *, final_status: ApprovalStatus |
         "get_settings",
         lambda: SimpleNamespace(agent_approval_ttl_seconds=600),
     )
-    monkeypatch.setattr(mcp_transport_routes.time, "sleep", sleep)
+    monkeypatch.setattr(mcp_transport_routes.anyio, "sleep", sleep)
     monkeypatch.setattr(
         mcp_transport_routes,
         "_resolve_postgres_gateway_request",
@@ -170,7 +171,7 @@ def test_postgres_transport_wait_for_approval_then_use_durable_resolver(monkeypa
         final_status=ApprovalStatus.APPROVED,
     )
 
-    response = mcp_transport_routes._postgres_mcp_tool_call(
+    response = asyncio.run(mcp_transport_routes._postgres_mcp_tool_call(
         project_id=server.project_id,
         payload=mcp_transport_routes.MCPJsonRpcRequest(
             id="request-1",
@@ -185,11 +186,57 @@ def test_postgres_transport_wait_for_approval_then_use_durable_resolver(monkeypa
         user=user,
         request=request,
         registered_servers=[server],
-    )
+    ))
 
     assert response.result["structuredContent"]["forwarded"] is True
     assert submitted[0]["idempotency_key"] == f"{server.project_id}:session-1:request-1"
     assert resolved == [approval.id]
+
+
+def test_postgres_pending_transport_yields_event_loop(monkeypatch) -> None:
+    server, approval, request, user, _submitted, resolved = _postgres_transport_unit_case(
+        monkeypatch,
+        final_status=None,
+    )
+    loop_progress: list[bool] = []
+
+    async def exercise() -> None:
+        sleeping = asyncio.Event()
+
+        async def yielding_sleep(_seconds: float) -> None:
+            sleeping.set()
+            await asyncio.sleep(0)
+            approval.status = ApprovalStatus.APPROVED
+
+        monkeypatch.setattr(mcp_transport_routes.anyio, "sleep", yielding_sleep)
+        call = asyncio.create_task(
+            mcp_transport_routes._postgres_mcp_tool_call(
+                project_id=server.project_id,
+                payload=mcp_transport_routes.MCPJsonRpcRequest(
+                    id="request-loop-progress",
+                    method="tools/call",
+                    params={"name": "mutate", "server_name": server.name, "arguments": {}},
+                ),
+                user=user,
+                request=request,
+                registered_servers=[server],
+            )
+        )
+
+        async def observe_pending_wait() -> None:
+            await asyncio.wait_for(sleeping.wait(), timeout=1)
+            assert not call.done(), "pending tools/call returned before approval changed"
+            loop_progress.append(True)
+
+        await asyncio.wait_for(observe_pending_wait(), timeout=1)
+        loop_progress.append(True)
+        response = await call
+        assert response.result["structuredContent"]["forwarded"] is True
+
+    asyncio.run(exercise())
+
+    assert loop_progress == [True, True]
+    assert resolved == ["approval-unit"]
 
 
 def test_postgres_transport_denial_returns_tool_error_without_resolver(monkeypatch) -> None:
@@ -198,7 +245,7 @@ def test_postgres_transport_denial_returns_tool_error_without_resolver(monkeypat
         final_status=ApprovalStatus.DENIED,
     )
 
-    response = mcp_transport_routes._postgres_mcp_tool_call(
+    response = asyncio.run(mcp_transport_routes._postgres_mcp_tool_call(
         project_id=server.project_id,
         payload=mcp_transport_routes.MCPJsonRpcRequest(
             id="request-denied",
@@ -208,7 +255,7 @@ def test_postgres_transport_denial_returns_tool_error_without_resolver(monkeypat
         user=user,
         request=request,
         registered_servers=[server],
-    )
+    ))
 
     assert response.result["isError"] is True
     assert response.result["structuredContent"]["forwarded"] is False
@@ -222,7 +269,11 @@ def test_postgres_transport_timeout_expires_approval_and_never_resolves(monkeypa
         final_status=None,
     )
     monotonic_values = iter((100.0, 701.0))
-    monkeypatch.setattr(mcp_transport_routes.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        mcp_transport_routes,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values, 701.0)),
+    )
 
     def expire(_approval, **kwargs):
         assert kwargs["force"] is True
@@ -230,7 +281,7 @@ def test_postgres_transport_timeout_expires_approval_and_never_resolves(monkeypa
         return True
 
     monkeypatch.setattr(mcp_transport_routes, "expire_approval", expire)
-    response = mcp_transport_routes._postgres_mcp_tool_call(
+    response = asyncio.run(mcp_transport_routes._postgres_mcp_tool_call(
         project_id=server.project_id,
         payload=mcp_transport_routes.MCPJsonRpcRequest(
             id="request-timeout",
@@ -240,7 +291,7 @@ def test_postgres_transport_timeout_expires_approval_and_never_resolves(monkeypa
         user=user,
         request=request,
         registered_servers=[server],
-    )
+    ))
 
     assert response.result["isError"] is True
     assert response.result["structuredContent"]["status"] == ApprovalStatus.EXPIRED
@@ -261,7 +312,7 @@ def test_postgres_transport_persists_due_expiry_without_forwarding(monkeypatch) 
         return True
 
     monkeypatch.setattr(mcp_transport_routes, "expire_approval", expire)
-    response = mcp_transport_routes._postgres_mcp_tool_call(
+    response = asyncio.run(mcp_transport_routes._postgres_mcp_tool_call(
         project_id=server.project_id,
         payload=mcp_transport_routes.MCPJsonRpcRequest(
             id="request-expired",
@@ -271,7 +322,7 @@ def test_postgres_transport_persists_due_expiry_without_forwarding(monkeypatch) 
         user=user,
         request=request,
         registered_servers=[server],
-    )
+    ))
 
     assert response.result["isError"] is True
     assert response.result["structuredContent"]["status"] == ApprovalStatus.EXPIRED
