@@ -1604,10 +1604,12 @@ def test_postgres_run_validation_requires_bundle_provider_before_acquiring_lease
     assert persisted_run.lease_owner is None
 
 
+@pytest.mark.parametrize("simulate_process_death", [False, True], ids=["success", "restart-after-claim"])
 def test_postgres_run_validation_executes_exact_approved_command_once(
     postgres_agent_run_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    simulate_process_death: bool,
 ) -> None:
     """Execute one approved command from a clean bundle and prove durable replay fencing."""
     import hashlib
@@ -1846,6 +1848,11 @@ def test_postgres_run_validation_executes_exact_approved_command_once(
 
         def run_validation(self, *, command, cwd, policy, timeout_seconds):
             self.calls.append((command, str(cwd)))
+            if simulate_process_death:
+                # BaseException bypasses the coordinator's normal ambiguous
+                # outcome handler, like a worker process disappearing after
+                # its durable one-shot claim and before recording a result.
+                raise SimulatedValidationWorkerDeath
             return CommandExecutionResult(
                 command=command,
                 exit_code=0,
@@ -1856,14 +1863,84 @@ def test_postgres_run_validation_executes_exact_approved_command_once(
                 stream_evidence_complete=True,
             )
 
+    class SimulatedValidationWorkerDeath(BaseException):
+        pass
+
     container = DeterministicContainerRuntime()
     monkeypatch.setattr(main.app.state, "agent_run_validation_bundle_provider", BundleProvider(), raising=False)
     monkeypatch.setattr(main.app.state, "agent_run_validation_container_runtime", container, raising=False)
 
-    response = client.post(
-        f"/agent/runs/{run_id}/execute-next",
-        json={"worker_id": "validation-route-test", "timeout_seconds": 30},
-    )
+    execute_payload = {"worker_id": "validation-route-test", "timeout_seconds": 30}
+    if simulate_process_death:
+        with pytest.raises(SimulatedValidationWorkerDeath):
+            client.post(f"/agent/runs/{run_id}/execute-next", json=execute_payload)
+
+        intent = runtime_repositories.agent_run_validation_intents.get_for_step(
+            workspace_id=workspace.id,
+            run_id=run_id,
+            step_id=validation_step.id,
+            idempotency_key=validation_step.idempotency_key,
+        )
+        assert intent is not None
+        claims = runtime_repositories.agent_run_validation_intents.list_command_claims(
+            intent_id=intent.id, workspace_id=workspace.id,
+        )
+        assert len(claims) == 1
+        assert claims[0].status.value == "CLAIMED"
+        assert claims[0].exit_code is None
+        assert container.calls == [(command, str(bundle_path))]
+
+        # Recreate the runtime and repository bundle against the same schema,
+        # as a restarted API worker would after the previous process died.
+        restarted_runtime = PostgresRuntime(
+            _dsn="postgresql://fixture", profile="test", _connector=connect
+        )
+        restarted_repositories = restarted_runtime.repositories
+        monkeypatch.setattr(main.app.state, "postgres_runtime", restarted_runtime, raising=False)
+        monkeypatch.setattr(main.app.state, "postgres_repositories", restarted_repositories, raising=False)
+        for name, value in {
+            "agent_run_repository": restarted_repositories.agent_runs,
+            "agent_task_repository": restarted_repositories.agent_tasks,
+            "approval_decision_repository": restarted_repositories.approval_decisions,
+            "trust_repository": restarted_repositories.trust,
+            "agent_run_validation_intent_repository": restarted_repositories.agent_run_validation_intents,
+        }.items():
+            monkeypatch.setattr(main.app.state, name, value, raising=False)
+
+        # A dead worker's lease is allowed to expire before the fresh worker
+        # retries. Keep the durable claim intact; only the run lease expires.
+        stale_run = restarted_repositories.agent_runs.get(run_id)
+        assert stale_run is not None
+        expired_at = now_utc() - timedelta(seconds=1)
+        stale_run.lease_expires_at = expired_at
+        stale_run.updated_at = expired_at
+        with connect() as conn:
+            conn.execute(
+                "UPDATE agent_runs SET lease_expires_at=%s,updated_at=%s,payload=%s "
+                "WHERE run_id=%s AND workspace_id=%s",
+                (expired_at, expired_at, Jsonb(stale_run.model_dump(mode="json")), run_id, workspace.id),
+            )
+
+        recovered = client.post("/agent/runs/watchdog/recover-stale")
+        assert recovered.status_code == 200, recovered.text
+        assert recovered.json()["recovered"] == 1
+        restarted = client.post(f"/agent/runs/{run_id}/execute-next", json=execute_payload)
+        assert restarted.status_code == 409, restarted.text
+        claims = restarted_repositories.agent_run_validation_intents.list_command_claims(
+            intent_id=intent.id, workspace_id=workspace.id,
+        )
+        assert len(claims) == 1
+        assert claims[0].status.value == "RECONCILIATION_REQUIRED"
+        assert claims[0].exit_code is None
+        assert container.calls == [(command, str(bundle_path))]
+        assert not any(
+            event.step_id == validation_step.id
+            and event.event_type == AgentRunEventType.STEP_SUCCEEDED
+            for event in restarted_repositories.agent_runs.list_events_for_run(run_id)
+        )
+        return
+
+    response = client.post(f"/agent/runs/{run_id}/execute-next", json=execute_payload)
     assert response.status_code == 200, response.text
     assert response.json()["run"]["status"] == AgentRunStatus.RUNNING.value
     validation_result = next(
