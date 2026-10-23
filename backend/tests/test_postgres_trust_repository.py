@@ -2346,7 +2346,11 @@ def test_postgres_runtime_reads_durable_scorecards_without_sqlite_projection(
         list_scorecards(user=user, request=request)
     assert unavailable.value.status_code == 503
     request.app.state.agent_run_repository = bound
-    assert list_exceptions(user=user, request=request) == []
+    exceptions = list_exceptions(user=user, request=request)
+    failed_run = next(run for run in scored_runs if run.status == AgentRunStatus.FAILED)
+    assert [(item.run_id, item.category) for item in exceptions] == [
+        (failed_run.id, AgentRunStatus.FAILED.value)
+    ]
 
 
 def test_postgres_exception_queue_reads_workspace_scoped_durable_actions(
