@@ -5,22 +5,31 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+import re
 from typing import Any, TypeVar
 
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from .agent_run_models import AgentRun, AgentRunEvent, AgentRunStatus, AgentRunStep
+from .agent_run_models import (
+    AgentRun,
+    AgentRunEvent,
+    AgentRunStatus,
+    AgentRunStep,
+    AgentRunStepStatus,
+)
 from .agent_task_models import AgentTask
+from .approval_integrity import compute_approval_payload_hash
 from .trust_action_authorization_models import (
     ActionAuthorization,
     ActionAuthorizationDecision,
 )
 from .trust_crypto import sha256_hex, verify_payload_signature
-from .models import AgentProvider, RiskLevel
+from .models import AgentProvider, ApprovalRequest, RiskLevel
 from .trust_models import (
     ActionConsumption,
     AgentReliabilityScorecard,
+    CapabilityActionType,
     CapabilityLease,
     CapabilityLeaseStatus,
     CredentialGrant,
@@ -183,6 +192,248 @@ class PostgresTrustRepository:
                 "Proposed action does not match the durable AgentRun step identity"
             )
         return action
+
+    def evaluate_agent_run_action(
+        self,
+        conn: Connection,
+        *,
+        action: ProposedAction,
+        workspace_id: str,
+        run_id: str,
+        step_id: str,
+        actor: str,
+        now: datetime,
+        trust_event_repository: PostgresTrustEventRepository,
+    ) -> tuple[PolicyDecision, CapabilityLease]:
+        """Create/evaluate one exact run action while locking its authority.
+
+        This is deliberately narrower than the standalone action evaluator:
+        it accepts only a CREATE_BRANCH action for the current leased run step.
+        Callers must use the returned persisted decision and must not perform a
+        remote side effect in this transaction.
+        """
+        self._require_scope(workspace_id)
+        if conn.autocommit or not actor or not run_id or not step_id:
+            raise ValueError("Run action evaluation requires a transaction and full identity")
+        if (
+            action.workspace_id != workspace_id
+            or action.run_id != run_id
+            or not action.task_id
+            or action.action_type.value != "CREATE_BRANCH"
+            or action.lease_id is None
+            or action.repository is None
+            or not action.branch
+            or not re.fullmatch(r"[0-9a-f]{40}", str(action.metadata.get("source_sha", "")))
+            or action.metadata.get("step_id") != step_id
+            or action.metadata.get("step_type") != "CREATE_BRANCH"
+            or not action.metadata.get("idempotency_key")
+            or not action.metadata.get("source_sha")
+        ):
+            raise PostgresTrustRepositoryConflict("Run branch action scope is incomplete")
+
+        # Match governed-task mutations: approval -> task -> run -> step ->
+        # action/policy -> capability lease. All CREATE_BRANCH writers use
+        # this ordering to avoid cross-step/approval deadlocks.
+        approval_id = str(action.metadata.get("approval_id", ""))
+        approval_row = conn.execute(
+            "SELECT approval_id,project_id,workspace_id,status,payload "
+            "FROM approval_requests WHERE approval_id=%s AND workspace_id=%s FOR SHARE",
+            (approval_id, workspace_id),
+        ).fetchone()
+        task_row = conn.execute(
+            "SELECT task_id,project_id,workspace_id,approval_request_id,status,payload "
+            "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR SHARE",
+            (action.task_id, workspace_id),
+        ).fetchone()
+        if approval_row is None or task_row is None:
+            raise PostgresTrustRepositoryConflict("Run branch authority is missing")
+        try:
+            approval = ApprovalRequest.model_validate(approval_row[4])
+            task = AgentTask.model_validate(task_row[5])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored run branch authority is invalid") from error
+        if (
+            approval.id != approval_row[0]
+            or approval.project_id != approval_row[1]
+            or approval.workspace_id != approval_row[2]
+            or approval.status.value != approval_row[3]
+            or approval.status.value != "APPROVED"
+            or approval.approved_payload_hash is None
+            or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+            or task.id != task_row[0]
+            or task.project_id != task_row[1]
+            or task.workspace_id != task_row[2]
+            or task.approval_request_id != task_row[3]
+            or task.status.value != task_row[4]
+            or task.status.value != "APPROVED"
+            or task.approval_request_id != approval.id
+        ):
+            raise PostgresTrustRepositoryConflict("Run branch authority payload or status is invalid")
+
+        run_row = conn.execute(
+            "SELECT run_id,workspace_id,task_id,project_id,status,current_step_id,payload "
+            "FROM agent_runs WHERE run_id=%s AND workspace_id=%s FOR UPDATE",
+            (run_id, workspace_id),
+        ).fetchone()
+        if run_row is None:
+            raise PostgresTrustRepositoryConflict("AgentRun is not visible in this workspace")
+        try:
+            run = AgentRun.model_validate(run_row[6])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored AgentRun payload is invalid") from error
+        checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+        if (
+            run.id != run_row[0]
+            or run.workspace_id != workspace_id
+            or run.task_id != run_row[2]
+            or run.project_id != run_row[3]
+            or run.status.value != run_row[4]
+            or run.current_step_id != run_row[5]
+            or run.current_step_id != step_id
+            or run.task_id != action.task_id
+            or run.project_id != action.project_id
+            or run.approval_request_id != approval.id
+            or run.capability_lease_id != action.lease_id
+            or run.status != AgentRunStatus.RUNNING
+            or run.lease_owner is None
+            or actor != run.lease_owner
+            or run.lease_token is None
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= checked_at
+        ):
+            raise PostgresTrustRepositoryConflict("AgentRun lease or action binding is invalid")
+
+        step_row = conn.execute(
+            "SELECT step_id,run_id,task_id,workspace_id,status,payload FROM agent_run_steps "
+            "WHERE step_id=%s AND run_id=%s AND workspace_id=%s FOR UPDATE",
+            (step_id, run_id, workspace_id),
+        ).fetchone()
+        if step_row is None:
+            raise PostgresTrustRepositoryConflict("AgentRun step is not visible in this workspace")
+        try:
+            step = AgentRunStep.model_validate(step_row[5])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored AgentRun step payload is invalid") from error
+        if (
+            step.id != step_row[0]
+            or step.run_id != run_id
+            or step.task_id != run.task_id
+            or step.status.value != step_row[4]
+            or step.step_type.value != "CREATE_BRANCH"
+            or step.idempotency_key != action.metadata.get("idempotency_key")
+            or action.metadata.get("task_id") != run.task_id
+            or action.metadata.get("approval_id") != run.approval_request_id
+            or action.metadata.get("lease_id") != run.capability_lease_id
+            or action.metadata.get("repository") != action.repository
+            or action.metadata.get("target_ref") != action.branch
+            or step.status not in {AgentRunStepStatus.READY, AgentRunStepStatus.RUNNING}
+        ):
+            raise PostgresTrustRepositoryConflict("Run branch step identity or state is invalid")
+
+        # Global mutation lock order for this flow is run -> step -> action ->
+        # policy decision -> task/approval -> capability lease. Consumption uses
+        # the same action/policy-before-lease order.
+        existing = self.get_proposed_action(conn, action.id, workspace_id, for_update=True)
+        if existing is not None and existing.model_dump(mode="json") != action.model_dump(mode="json"):
+            raise PostgresTrustRepositoryConflict("Run branch action id is bound to other content")
+        existing_decision = (
+            self.get_latest_policy_decision_for_action(
+                conn, action.id, workspace_id, for_update=True
+            )
+            if existing is not None else None
+        )
+        if existing is not None and existing_decision is None:
+            raise PostgresTrustRepositoryError("Persisted run action has no policy decision")
+
+        if (
+            task.id != task_row[0]
+            or task.project_id != task_row[1]
+            or task.workspace_id != workspace_id
+            or task.approval_request_id != approval_row[0]
+            or task.status.value != task_row[4]
+            or task.status.value != "APPROVED"
+            or task.repository != action.repository
+            or task.branch_preference != action.branch
+            or task.project_id != run.project_id
+            or approval.id != approval_row[0]
+            or approval.project_id != approval_row[1]
+            or approval.workspace_id != workspace_id
+            or approval.status.value != approval_row[3]
+            or approval.status.value != "APPROVED"
+            or approval.approved_payload_hash is None
+            or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+        ):
+            raise PostgresTrustRepositoryConflict("Run branch approval scope is invalid")
+
+        lease = self.get_capability_lease(
+            conn, action.lease_id, workspace_id, for_update=True
+        )
+        if lease is None or lease.status != CapabilityLeaseStatus.ACTIVE or lease.expires_at <= checked_at:
+            raise PostgresTrustRepositoryConflict("Run branch capability lease is inactive")
+        if (
+            lease.approval_request_id != approval.id
+            or lease.approved_payload_hash != approval.approved_payload_hash
+            or lease.scope.repository != action.repository
+            or lease.scope.branch != action.branch
+            or CapabilityActionType.CREATE_BRANCH not in lease.scope.allowed_actions
+            or action.provider != task.provider
+            or action.agent_id != task.external_agent_id
+            or action.project_id != task.project_id
+            or action.task_id != task.id
+            or (task.branch_preference and action.branch != task.branch_preference)
+        ):
+            raise PostgresTrustRepositoryConflict("Run branch action exceeds approved capability scope")
+
+        if existing is not None:
+            if existing_decision.lease_id != action.lease_id:
+                raise PostgresTrustRepositoryConflict("Persisted policy decision is bound to a different lease")
+            return existing_decision, lease
+
+        decision = evaluate_action_policy(action, lease, now=now)
+        self.insert_proposed_action(conn, action)
+        self.insert_policy_decision(conn, decision, workspace_id=workspace_id)
+        trust_event_repository.append_in_transaction(
+            conn,
+            TrustEventType.ACTION_RECEIVED,
+            entity_type="proposed_action",
+            entity_id=action.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            correlation_id=run.id,
+            payload={
+                "provider": action.provider,
+                "agent_id": action.agent_id,
+                "lease_id": action.lease_id,
+                "action_type": action.action_type,
+                "run_id": run.id,
+                "step_id": step.id,
+                "idempotency_key": step.idempotency_key,
+                "source_sha": action.metadata["source_sha"],
+                "target_ref": action.branch,
+            },
+        )
+        event_type = {
+            PolicyDecisionType.ALLOW: TrustEventType.ACTION_ALLOWED,
+            PolicyDecisionType.REQUIRE_APPROVAL: TrustEventType.ACTION_REQUIRES_APPROVAL,
+            PolicyDecisionType.BLOCK: TrustEventType.ACTION_BLOCKED,
+        }[decision.decision]
+        trust_event_repository.append_in_transaction(
+            conn,
+            event_type,
+            entity_type="proposed_action",
+            entity_id=action.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            correlation_id=run.id,
+            payload={
+                "decision_id": decision.id,
+                "decision": decision.decision,
+                "risk_level": decision.risk_level,
+                "reasons": decision.reasons,
+                "obligations": decision.obligations,
+            },
+        )
+        return decision, lease
 
     def metrics_snapshot(
         self,

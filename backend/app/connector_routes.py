@@ -10,9 +10,6 @@ from .connector_credentials import (
     ConnectorSecretIssueResponse,
     connector_credential_status,
     issue_connector_secret,
-    mark_connector_health_check,
-    record_connector_auth_failure,
-    record_connector_auth_success,
     revoke_connector_secret,
 )
 from .connector_models import (
@@ -623,19 +620,18 @@ def mark_connector_success(
     connector_id: str, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
-    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
-    expected_updated_at = connector.updated_at
-    record_connector_auth_success(connector)
-    mark_connector_health_check(connector, healthy=True)
-    details = _connector_details(connector)
-    if bound is None:
-        _audit("connector.health_success", connector.id, details, actor=user.email)
-        store.persist()
+    # A management request cannot prove that the connector authenticated or is
+    # reachable. Only authenticated connector traffic may update last_used_at
+    # and runtime health, so retain this endpoint as a fail-closed compatibility
+    # response instead of accepting a manual liveness assertion.
+    if http_request is None:
+        _get_connector_or_404(connector_id, user)
     else:
-        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
-                                       event_type="connector.health_success", details=details, actor=user.email)
-    return _to_public(connector)
+        _get_bound_connector_or_404(connector_id, user, http_request)
+    raise HTTPException(
+        status_code=409,
+        detail="Connector health is established by authenticated connector traffic; manual success is not accepted",
+    )
 
 
 @router.post("/{connector_id}/health/failure", response_model=ConnectorPublic)
@@ -645,17 +641,14 @@ def mark_connector_failure(
     user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
-    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
-    expected_updated_at = connector.updated_at
-    reason = payload.note if payload and payload.note else "manual health failure"
-    record_connector_auth_failure(connector, reason)
-    mark_connector_health_check(connector, healthy=False, reason=reason)
-    details = {**_connector_details(connector), "reason": reason}
-    if bound is None:
-        _audit("connector.health_failure", connector.id, details, actor=user.email)
-        store.persist()
+    # A management request is not evidence of a connector authentication
+    # failure. Runtime health and failed-auth counters are updated only by
+    # observed connector traffic.
+    if http_request is None:
+        _get_connector_or_404(connector_id, user)
     else:
-        _commit_bound_connector_update(http_request, connector, expected_updated_at=expected_updated_at,
-                                       event_type="connector.health_failure", details=details, actor=user.email)
-    return _to_public(connector)
+        _get_bound_connector_or_404(connector_id, user, http_request)
+    raise HTTPException(
+        status_code=409,
+        detail="Connector health is derived from authenticated connector traffic; manual failure reports are not accepted",
+    )

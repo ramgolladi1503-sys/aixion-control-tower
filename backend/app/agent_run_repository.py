@@ -23,10 +23,11 @@ from .agent_run_models import (
 )
 from .agent_run_state_machine import can_transition_run, can_transition_step
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from .postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus, _payload as branch_intent_payload
 from .approval_integrity import compute_approval_payload_hash
 from .models import ApprovalRequest, ApprovalStatus, AuditEvent, Project
 from .postgres_trust_repository import PostgresTrustRepository
-from .trust_crypto import verify_payload_signature
+from .trust_crypto import sha256_hex, verify_payload_signature
 from .trust_models import CapabilityLeaseStatus
 from .trust_policy import lease_receipt_payload
 
@@ -112,6 +113,9 @@ class AgentRunRepository(Protocol):
         events: list[AgentRunEvent],
         audit: AuditEvent,
         now: datetime,
+        branch_intent_id: str | None = None,
+        branch_task_event: AgentTaskEvent | None = None,
+        branch_task_audit: AuditEvent | None = None,
     ) -> None: ...
 
     def recover_expired_lease(
@@ -1149,7 +1153,12 @@ class SQLiteAgentRunRepository:
         events: list[AgentRunEvent],
         audit: AuditEvent,
         now: datetime,
+        branch_intent_id: str | None = None,
+        branch_task_event: AgentTaskEvent | None = None,
+        branch_task_audit: AuditEvent | None = None,
     ) -> None:
+        if any(item is not None for item in (branch_intent_id, branch_task_event, branch_task_audit)):
+            raise AgentRunRepositoryConflict("SQLite does not support PostgreSQL branch intent completion")
         _validate_step_completion(
             expected_run=expected_run,
             updated_run=updated_run,
@@ -2431,6 +2440,9 @@ class PostgresAgentRunRepository:
         events: list[AgentRunEvent],
         audit: AuditEvent,
         now: datetime,
+        branch_intent_id: str | None = None,
+        branch_task_event: AgentTaskEvent | None = None,
+        branch_task_audit: AuditEvent | None = None,
     ) -> None:
         _validate_step_completion(
             expected_run=expected_run,
@@ -2441,9 +2453,54 @@ class PostgresAgentRunRepository:
             audit=audit,
             now=now,
         )
+        if (branch_intent_id is None) != (branch_task_event is None) or (
+            branch_intent_id is None
+        ) != (branch_task_audit is None):
+            raise ValueError("Branch intent completion requires its task event and audit together")
         if not expected_run.workspace_id:
             raise AgentRunRepositoryConflict("PostgreSQL step completion requires workspace scope")
         with self._connect() as conn:
+            if branch_intent_id is not None:
+                # Follow governed-step lock order. This completion reports an
+                # already verified remote side effect; it must not make another
+                # provider request. A later revocation cannot erase that fact.
+                if not expected_run.approval_request_id:
+                    raise AgentRunRepositoryConflict("Branch completion lacks approval scope")
+                approval_row = conn.execute(
+                    "SELECT approval_id,project_id,workspace_id,status,payload "
+                    "FROM approval_requests WHERE approval_id=%s AND workspace_id=%s FOR SHARE",
+                    (expected_run.approval_request_id, expected_run.workspace_id),
+                ).fetchone()
+                task_row = conn.execute(
+                    "SELECT task_id,project_id,workspace_id,approval_request_id,status,payload "
+                    "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR SHARE",
+                    (expected_run.task_id, expected_run.workspace_id),
+                ).fetchone()
+                if approval_row is None or task_row is None:
+                    raise AgentRunRepositoryConflict("Branch completion authority scope is missing")
+                try:
+                    approval_scope = ApprovalRequest.model_validate(approval_row[4])
+                    task_scope = AgentTask.model_validate(task_row[5])
+                except Exception as error:
+                    raise AgentRunRepositoryIntegrityError("Branch completion authority payload is invalid") from error
+                if (
+                    approval_scope.id != approval_row[0]
+                    or approval_scope.project_id != approval_row[1]
+                    or approval_scope.workspace_id != approval_row[2]
+                    or approval_scope.status.value != approval_row[3]
+                    or task_scope.id != task_row[0]
+                    or task_scope.project_id != task_row[1]
+                    or task_scope.workspace_id != task_row[2]
+                    or task_scope.approval_request_id != task_row[3]
+                    or task_scope.status.value != task_row[4]
+                    or task_scope.id != expected_run.task_id
+                    or task_scope.project_id != expected_run.project_id
+                    or task_scope.workspace_id != expected_run.workspace_id
+                    or task_scope.approval_request_id != expected_run.approval_request_id
+                    or approval_scope.id != expected_run.approval_request_id
+                    or approval_scope.project_id != expected_run.project_id
+                ):
+                    raise AgentRunRepositoryIntegrityError("Branch completion authority scope is inconsistent")
             run_row = conn.execute(
                 "SELECT run_id,workspace_id,task_id,project_id,payload FROM agent_runs "
                 "WHERE run_id=%s FOR UPDATE",
@@ -2487,6 +2544,67 @@ class PostgresAgentRunRepository:
                 ):
                     raise AgentRunRepositoryConflict("AgentRun step changed before completion")
                 step_rows[expected_step.id] = (expected_step, row[4])
+
+            branch_intent = None
+            if branch_intent_id is not None:
+                intent_row = conn.execute(
+                    "SELECT intent_id,workspace_id,run_id,task_id,approval_id,step_id,action_id,lease_id,"
+                    "idempotency_key,repository,source_branch,target_ref,source_sha,lease_token_hash,"
+                    "initial_lease_token_hash,run_revision,step_revision,status,branch_url,reason,created_at,updated_at,payload "
+                    "FROM agent_run_branch_intents WHERE intent_id=%s AND workspace_id=%s FOR UPDATE",
+                    (branch_intent_id, expected_run.workspace_id),
+                ).fetchone()
+                if intent_row is None:
+                    raise AgentRunRepositoryConflict("Branch intent is missing during completion")
+                try:
+                    branch_intent = AgentRunBranchIntent.model_validate(intent_row[22])
+                except Exception as error:
+                    raise AgentRunRepositoryIntegrityError("Stored branch intent is invalid") from error
+                indexed = (
+                    branch_intent.id, branch_intent.workspace_id, branch_intent.run_id,
+                    branch_intent.task_id, branch_intent.approval_id, branch_intent.step_id,
+                    branch_intent.action_id, branch_intent.lease_id, branch_intent.idempotency_key,
+                    branch_intent.repository, branch_intent.source_branch, branch_intent.target_ref,
+                    branch_intent.source_sha, branch_intent.lease_token_hash,
+                    branch_intent.initial_lease_token_hash, branch_intent.run_revision,
+                    branch_intent.step_revision, branch_intent.status.value,
+                    branch_intent.branch_url, branch_intent.reason,
+                    branch_intent.created_at, branch_intent.updated_at,
+                )
+                if indexed != tuple(intent_row[:22]):
+                    raise AgentRunRepositoryIntegrityError("Branch intent indexed state is inconsistent")
+                branch_steps = [item for item in expected_steps if item.id == branch_intent.step_id]
+                if (
+                    branch_intent.status != BranchIntentStatus.REMOTE_VERIFIED
+                    or branch_intent.workspace_id != expected_run.workspace_id
+                    or branch_intent.run_id != expected_run.id
+                    or branch_intent.task_id != expected_run.task_id
+                    or branch_intent.approval_id != expected_run.approval_request_id
+                    or branch_intent.lease_id != expected_run.capability_lease_id
+                    or len(branch_steps) != 1
+                    or branch_steps[0].step_type != AgentRunStepType.CREATE_BRANCH
+                    or branch_steps[0].idempotency_key != branch_intent.idempotency_key
+                    or branch_intent.run_revision != expected_run.updated_at
+                    or branch_intent.step_revision != branch_steps[0].updated_at
+                    or branch_intent.lease_token_hash
+                    != sha256_hex({"lease_token": expected_run.lease_token})
+                    or not expected_run.lease_owner
+                    or branch_task_event is None
+                    or branch_task_audit is None
+                    or branch_task_event.task_id != branch_intent.task_id
+                    or branch_task_event.actor != expected_run.lease_owner
+                    or branch_task_event.event_type != AgentTaskEventType.NOTE
+                    or branch_task_event.status is not None
+                    or branch_task_event.metadata.get("branch_intent_id") != branch_intent.id
+                    or branch_task_audit.workspace_id != branch_intent.workspace_id
+                    or branch_task_audit.entity_id != branch_intent.task_id
+                    or branch_task_audit.actor != expected_run.lease_owner
+                    or branch_task_audit.event_type != "agent_task.branch_created"
+                    or branch_task_audit.details.get("branch_intent_id") != branch_intent.id
+                ):
+                    raise AgentRunRepositoryConflict("Branch intent completion CAS or task audit binding is invalid")
+            elif any(item is not None for item in (branch_task_event, branch_task_audit)):
+                raise ValueError("Branch completion records require a branch intent")
 
             changed = conn.execute(
                 "UPDATE agent_runs SET status=%s,current_step_id=%s,lease_owner=%s,lease_token=%s,"
@@ -2532,6 +2650,38 @@ class PostgresAgentRunRepository:
                         event.created_at, event.event_type.value,
                         Jsonb(event.model_dump(mode="json")),
                     ),
+                )
+            if branch_intent is not None:
+                completed_intent = branch_intent.model_copy(update={
+                    "status": BranchIntentStatus.COMPLETED,
+                    "reason": "Verified remote branch completion committed with AgentRun outcome.",
+                    "updated_at": now,
+                })
+                changed = conn.execute(
+                    "UPDATE agent_run_branch_intents SET status=%s,reason=%s,updated_at=%s,payload=%s "
+                    "WHERE intent_id=%s AND workspace_id=%s AND status='REMOTE_VERIFIED' "
+                    "AND run_revision=%s AND step_revision=%s AND lease_token_hash=%s",
+                    (completed_intent.status.value, completed_intent.reason, now,
+                     Jsonb(branch_intent_payload(completed_intent)), branch_intent.id,
+                     branch_intent.workspace_id, branch_intent.run_revision,
+                     branch_intent.step_revision, branch_intent.lease_token_hash),
+                )
+                if changed.rowcount != 1:
+                    raise AgentRunRepositoryConflict("Branch intent completion lost its CAS")
+                conn.execute(
+                    "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    (branch_task_event.id, branch_task_event.task_id, branch_intent.workspace_id,
+                     branch_task_event.event_type.value, branch_task_event.actor,
+                     branch_task_event.created_at, Jsonb(branch_task_event.model_dump(mode="json"))),
+                )
+                conn.execute(
+                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,actor,details,created_at,payload) "
+                    "VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                    (branch_task_audit.id, branch_intent.workspace_id, branch_intent.task_id,
+                     branch_task_audit.event_type, branch_task_audit.actor,
+                     Jsonb(branch_task_audit.details), branch_task_audit.created_at,
+                     Jsonb(branch_task_audit.model_dump(mode="json"))),
                 )
             conn.execute(
                 "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"

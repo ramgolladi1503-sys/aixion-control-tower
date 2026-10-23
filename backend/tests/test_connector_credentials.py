@@ -88,34 +88,21 @@ def test_connector_credential_status_reflects_rotation_and_revocation() -> None:
     assert any(event.event_type == "connector.secret_revoked" for event in store.audit_events)
 
 
-def test_connector_health_success_updates_usage_and_health() -> None:
+def test_manual_connector_health_success_cannot_assert_liveness_or_clear_auth_error() -> None:
     project = _project()
     connector = _connector(project.id)
+    before = store.agent_connectors[connector["id"]].model_copy(deep=True)
+    audit_ids = {event.id for event in store.audit_events}
 
-    response = client.post(f"/connectors/{connector['id']}/health/success")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["health_status"] == "HEALTHY"
-    assert body["last_used_at"] is not None
-    assert body["last_health_check_at"] is not None
-    assert body["last_error"] in {None, ""}
-    assert any(event.event_type == "connector.health_success" for event in store.audit_events)
-
-
-def test_connector_health_failure_increments_failures_and_records_reason() -> None:
-    project = _project()
-    connector = _connector(project.id)
-
-    response = client.post(f"/connectors/{connector['id']}/health/failure", json={"note": "bad signature"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["health_status"] == "DEGRADED"
-    assert body["failed_auth_count"] == 1
-    assert body["last_error"] == "bad signature"
-    assert body["last_health_check_at"] is not None
-    assert any(event.event_type == "connector.health_failure" for event in store.audit_events)
+    for outcome in ("success", "failure"):
+        response = client.post(f"/connectors/{connector['id']}/health/{outcome}")
+        assert response.status_code == 409
+        assert "authenticated connector traffic" in response.json()["detail"]
+    after = store.agent_connectors[connector["id"]]
+    assert after == before
+    assert before.last_used_at is None
+    assert after.last_used_at is None
+    assert {event.id for event in store.audit_events} == audit_ids
 
 
 def test_public_connector_response_never_exposes_secret_material() -> None:

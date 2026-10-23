@@ -54,7 +54,7 @@ class AuthUxCopyTest {
     }
 
     @Test
-    fun authenticatedStateShowsConnectedCopy() {
+    fun authenticatedStateLabelsTheAccountWithoutImplyingAnAgentConnection() {
         val state = AuthUiState(
             email = "owner@example.com",
             authenticated = true,
@@ -62,10 +62,10 @@ class AuthUxCopyTest {
             userLabel = "Owner • owner@example.com • OWNER"
         )
 
-        assertEquals("You are connected", AuthUxCopy.heroTitle(state))
+        assertEquals("Your account", AuthUxCopy.heroTitle(state))
         assertEquals("Session active", AuthUxCopy.sessionLabel(state))
         assertEquals(
-            "This phone can now review and respond to approval requests.",
+            "You are signed in and can review approval requests on this phone.",
             AuthUxCopy.heroSubtitle(state)
         )
     }

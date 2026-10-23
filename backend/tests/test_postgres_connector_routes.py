@@ -347,12 +347,30 @@ def test_connector_credentials_and_status_transitions_commit_to_postgres(
     assert disabled.status_code == 200 and disabled.json()["status"] == "DISABLED"
     enabled = client.post(f"/connectors/{connector_id}/enable")
     assert enabled.status_code == 200 and enabled.json()["status"] == "ENABLED"
-    healthy = client.post(f"/connectors/{connector_id}/health/success")
-    assert healthy.status_code == 200 and healthy.json()["health_status"] == "HEALTHY"
-    failing = client.post(
-        f"/connectors/{connector_id}/health/failure", json={"note": "test failure"}
-    )
-    assert failing.status_code == 200 and failing.json()["health_status"] == "DEGRADED"
+    with connect() as conn:
+        before_manual_success = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        before_health_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s AND event_type='connector.health_success'",
+            (connector_id,),
+        ).fetchone()[0]
+    for outcome in ("success", "failure"):
+        manual_health = client.post(f"/connectors/{connector_id}/health/{outcome}")
+        assert manual_health.status_code == 409
+        assert "authenticated connector traffic" in manual_health.json()["detail"]
+    with connect() as conn:
+        after_manual_success = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        after_health_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s AND event_type='connector.health_success'",
+            (connector_id,),
+        ).fetchone()[0]
+    assert after_manual_success == before_manual_success
+    assert after_manual_success["last_used_at"] is None
+    assert after_manual_success == before_manual_success
+    assert after_health_audits == before_health_audits == 0
     mapper = client.put(
         f"/connectors/{connector_id}/schema-mapper",
         json={"enabled": True, "field_paths": {"title": "task.title"}, "defaults": {}},
@@ -382,8 +400,6 @@ def test_connector_credentials_and_status_transitions_commit_to_postgres(
         "connector.secret_revoked",
         "connector.disabled",
         "connector.enabled",
-        "connector.health_success",
-        "connector.health_failure",
         "connector.schema_mapper_updated",
     ]
     assert set(store.agent_connectors) == before_connectors
@@ -506,6 +522,7 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
     assert task_rows[0][2]["provider"] == "ANTIGRAVITY"
     assert task_rows[0][2]["external_agent_id"] is None
     assert task_rows[0][2]["metadata"]["connector_id"] == connector_id
+    assert connector_payload["last_used_at"] is not None
     assert replay_nonce in connector_payload["config"]["hmac_nonce_history"]
     assert limited_nonce in connector_payload["config"]["hmac_nonce_history"]
     assert connector_payload["config"]["rate_limit_request_count"] == 2

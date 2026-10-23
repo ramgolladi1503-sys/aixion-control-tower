@@ -1321,6 +1321,94 @@ POSTGRES_MIGRATIONS = (
     ),
 )
 
+POSTGRES_MIGRATIONS = (
+    *POSTGRES_MIGRATIONS,
+    PostgresMigration(
+        migration_id="pg_0030_agent_run_branch_intents",
+        name="Persist idempotent AgentRun branch creation intents",
+        statements=(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_steps_id_workspace "
+            "ON agent_run_steps(step_id,workspace_id)",
+            """
+            CREATE TABLE IF NOT EXISTS agent_run_branch_intents (
+                intent_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                approval_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                action_id TEXT NOT NULL,
+                lease_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                repository TEXT NOT NULL,
+                source_branch TEXT NOT NULL,
+                target_ref TEXT NOT NULL,
+                source_sha TEXT NOT NULL,
+                lease_token_hash TEXT NOT NULL,
+                initial_lease_token_hash TEXT NOT NULL,
+                run_revision TIMESTAMPTZ NOT NULL,
+                step_revision TIMESTAMPTZ NOT NULL,
+                status TEXT NOT NULL CHECK (status IN (
+                    'INTENT','REMOTE_VERIFIED','RECONCILIATION_REQUIRED','COMPLETED'
+                )),
+                branch_url TEXT,
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                payload JSONB NOT NULL,
+                UNIQUE (workspace_id,run_id,step_id,idempotency_key),
+                UNIQUE (action_id,workspace_id),
+                FOREIGN KEY (run_id,workspace_id)
+                    REFERENCES agent_runs(run_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (task_id,workspace_id)
+                    REFERENCES agent_tasks(task_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (approval_id,workspace_id)
+                    REFERENCES approval_requests(approval_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (step_id,workspace_id)
+                    REFERENCES agent_run_steps(step_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (lease_id,workspace_id)
+                    REFERENCES capability_leases(lease_id,workspace_id) ON DELETE RESTRICT,
+                CHECK (payload ? 'id' AND payload->>'id'=intent_id),
+                CHECK (payload ? 'workspace_id' AND payload->>'workspace_id'=workspace_id),
+                CHECK (payload ? 'run_id' AND payload->>'run_id'=run_id),
+                CHECK (payload ? 'task_id' AND payload->>'task_id'=task_id),
+                CHECK (payload ? 'approval_id' AND payload->>'approval_id'=approval_id),
+                CHECK (payload ? 'step_id' AND payload->>'step_id'=step_id),
+                CHECK (payload ? 'action_id' AND payload->>'action_id'=action_id),
+                CHECK (payload ? 'lease_id' AND payload->>'lease_id'=lease_id),
+                CHECK (payload ? 'idempotency_key' AND payload->>'idempotency_key'=idempotency_key),
+                CHECK (payload ? 'repository' AND payload->>'repository'=repository),
+                CHECK (payload ? 'source_branch' AND payload->>'source_branch'=source_branch),
+                CHECK (payload ? 'target_ref' AND payload->>'target_ref'=target_ref),
+                CHECK (payload ? 'source_sha' AND payload->>'source_sha'=source_sha),
+                CHECK (payload ? 'lease_token_hash' AND payload->>'lease_token_hash'=lease_token_hash),
+                CHECK (payload ? 'initial_lease_token_hash' AND payload->>'initial_lease_token_hash'=initial_lease_token_hash),
+                CHECK (payload ? 'status' AND payload->>'status'=status),
+                CHECK (source_sha ~ '^[a-f0-9]{40}$'),
+                CHECK (lease_token_hash ~ '^[a-f0-9]{64}$'),
+                CHECK (initial_lease_token_hash ~ '^[a-f0-9]{64}$')
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_agent_run_branch_intents_reconcile "
+            "ON agent_run_branch_intents(workspace_id,status,updated_at,intent_id) "
+            "WHERE status IN ('INTENT','RECONCILIATION_REQUIRED')",
+        ),
+    ),
+    PostgresMigration(
+        migration_id="pg_0031_agent_run_branch_post_claim",
+        name="Fence one-shot AgentRun branch create operations",
+        statements=(
+            "ALTER TABLE agent_run_branch_intents DROP CONSTRAINT IF EXISTS agent_run_branch_intents_status_check",
+            "ALTER TABLE agent_run_branch_intents ADD CONSTRAINT agent_run_branch_intents_status_check "
+            "CHECK (status IN ('INTENT','POST_CLAIMED','REMOTE_VERIFIED','RECONCILIATION_REQUIRED','COMPLETED'))",
+            "DROP INDEX IF EXISTS idx_agent_run_branch_intents_reconcile",
+            "CREATE INDEX idx_agent_run_branch_intents_reconcile "
+            "ON agent_run_branch_intents(workspace_id,status,updated_at,intent_id) "
+            "WHERE status IN ('INTENT','POST_CLAIMED','RECONCILIATION_REQUIRED')",
+        ),
+    ),
+)
+
 
 def run_postgres_migrations(connect: Callable[[], Connection]) -> list[dict[str, str]]:
     """Apply PostgreSQL migrations under a database-wide transaction lock."""

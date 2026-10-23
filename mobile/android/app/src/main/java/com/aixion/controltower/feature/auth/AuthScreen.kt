@@ -124,7 +124,7 @@ private fun AccountHero(state: AuthUiState) {
 }
 
 @Composable
-private fun AccountInfoPanel(
+internal fun AccountInfoPanel(
     state: AuthUiState,
     onLogout: () -> Unit
 ) {
@@ -139,12 +139,6 @@ private fun AccountInfoPanel(
             color = palette.ink,
             fontSize = 14.sp,
             lineHeight = 20.sp
-        )
-        Text(
-            text = "Registration, login, and verification controls are hidden because this session is already active.",
-            color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
         )
         state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
