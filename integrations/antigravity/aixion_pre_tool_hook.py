@@ -160,12 +160,26 @@ def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"Non-standard JSON constant: {value}")
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous JSON objects instead of silently keeping the last key."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def _read_input() -> dict[str, Any]:
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
         raise GateError("Hook input exceeds the configured size limit")
     try:
-        value = json.loads(raw, parse_constant=_reject_nonstandard_json_constant)
+        value = json.loads(
+            raw,
+            parse_constant=_reject_nonstandard_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise GateError("Hook input is invalid JSON") from exc
     if not isinstance(value, dict):
@@ -269,7 +283,11 @@ def _request(
             raise GateError(f"Control Tower returned HTTP {response.status}")
         content = response.body
         try:
-            result = json.loads(content, parse_constant=_reject_nonstandard_json_constant)
+            result = json.loads(
+                content,
+                parse_constant=_reject_nonstandard_json_constant,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             raise AmbiguousRequestError("Control Tower returned invalid response data") from exc
         if not isinstance(result, dict):
@@ -456,8 +474,12 @@ def _configuration(env: dict[str, str], payload: dict[str, Any]) -> dict[str, st
                 raw_config = stream.read(MAX_CONFIG_BYTES + 1)
             if len(raw_config) > MAX_CONFIG_BYTES:
                 raise GateError("Agent config exceeds its size limit")
-            config = json.loads(raw_config)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            config = json.loads(
+                raw_config,
+                parse_constant=_reject_nonstandard_json_constant,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             raise GateError("Agent config is unreadable or invalid") from exc
         if not isinstance(config, dict):
             raise GateError("Agent config must be a JSON object")
@@ -520,10 +542,14 @@ def check_connection(environ: dict[str, str] | None = None) -> dict[str, str]:
         )
         if not 200 <= response.status < 300:
             raise GateError(f"Control Tower health check returned HTTP {response.status}")
-        health = json.loads(response.body)
+        health = json.loads(
+            response.body,
+            parse_constant=_reject_nonstandard_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
         if not isinstance(health, dict) or health.get("status") != "ok":
             raise GateError("Control Tower health check did not return status ok")
-    except (TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise GateError("Control Tower health check failed") from exc
     identity_query = urlencode({"provider": "ANTIGRAVITY", "project_id": config["project_id"]})
     identity = _request(

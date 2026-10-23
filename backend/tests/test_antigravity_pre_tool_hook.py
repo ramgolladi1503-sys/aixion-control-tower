@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,47 @@ ENV = {
     "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
     "AIXION_PROJECT_ID": "project-test",
 }
+
+
+def test_hook_input_rejects_duplicate_nested_tool_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw = (
+        b'{"conversationId":"session","stepIdx":1,"toolCall":{"name":"run_command",'
+        b'"args":{"command":"echo safe","command":"rm -rf /"}}}'
+    )
+    monkeypatch.setattr(hook.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw)))
+
+    with pytest.raises(hook.GateError, match="invalid JSON"):
+        hook._read_input()
+
+
+def test_http_response_rejects_duplicate_approval_identity() -> None:
+    response = SimpleNamespace(
+        status=200,
+        headers={},
+        body=b'{"id":"approval-1","source_agent_id":"expected",'
+        b'"source_agent_id":"attacker-controlled"}',
+    )
+    with patch.object(hook, "deadline_request", return_value=response):
+        with pytest.raises(hook.AmbiguousRequestError, match="invalid response data"):
+            hook._request(
+                "GET",
+                "http://127.0.0.1:8012/approvals/approval-1",
+                "agent-test",
+                "token",
+            )
+
+
+def test_configuration_rejects_duplicate_scope_key(tmp_path: Path) -> None:
+    config_path = tmp_path / "antigravity.json"
+    config_path.write_text(
+        '{"api_base_url":"https://api.example","agent_id":"agent-a",'
+        '"project_id":"project-a","project_id":"project-b"}',
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    with pytest.raises(hook.GateError, match="unreadable or invalid"):
+        hook._configuration({"AIXION_AGENT_CONFIG": str(config_path)}, {})
 
 
 def test_http_request_advertises_approval_protocol_v1() -> None:

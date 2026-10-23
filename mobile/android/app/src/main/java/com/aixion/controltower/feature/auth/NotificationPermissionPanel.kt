@@ -19,6 +19,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -151,8 +154,14 @@ internal fun NotificationPermissionPanel() {
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text("Approval notifications", color = palette.ink)
-        Text(NotificationPermissionCopy.status(permissionState), color = palette.inkMuted)
-        Text(PushRegistrationCopy.status(registrationState), color = palette.inkMuted)
+        NotificationStatusAnnouncement(
+            text = NotificationPermissionCopy.status(permissionState),
+            color = palette.inkMuted
+        )
+        NotificationStatusAnnouncement(
+            text = PushRegistrationCopy.status(registrationState),
+            color = palette.inkMuted
+        )
         if (shouldShowNotificationPermissionAction(
                 permissionState = permissionState,
                 registrationState = registrationState,
@@ -172,6 +181,15 @@ internal fun NotificationPermissionPanel() {
             }
         }
     }
+}
+
+@Composable
+internal fun NotificationStatusAnnouncement(text: String, color: androidx.compose.ui.graphics.Color) {
+    Text(
+        text = text,
+        color = color,
+        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+    )
 }
 
 internal fun shouldShowNotificationPermissionAction(

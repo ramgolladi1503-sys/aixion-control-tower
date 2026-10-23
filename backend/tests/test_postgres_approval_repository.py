@@ -559,6 +559,10 @@ def test_postgres_mcp_approval_and_forward_claim_race_has_consistent_lock_order(
         barrier.wait(timeout=10)
         return pending_repository.claim_forwarding(
             pending_id=pending.id,
+            approval_id=approval.id,
+            workspace_id=approval.workspace_id,
+            project_id=approval.project_id,
+            server_name=pending.server_name,
             owner="test-worker",
             now=now_utc(),
             lease_expires_at=now_utc() + timedelta(minutes=1),

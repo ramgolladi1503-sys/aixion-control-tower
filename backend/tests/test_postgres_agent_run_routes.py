@@ -2773,8 +2773,15 @@ def test_postgres_agent_run_capability_binding_is_durable_and_idempotent(
 
 def test_postgres_agent_run_rejects_side_effect_step_before_claim_or_trust_mutation(
     postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PostgreSQL must not execute a side effect without durable run/trust coupling."""
+    import app.agent_run_routes as agent_run_routes
+
+    def unexpected_execute(*_args, **_kwargs):
+        raise AssertionError("PostgreSQL side-effect rejection reached AgentRun execution")
+
+    monkeypatch.setattr(agent_run_routes, "execute_next_step", unexpected_execute)
     connect, workspace, _project, _other_workspace, _other_project, state = (
         postgres_agent_run_route_runtime
     )
