@@ -507,6 +507,23 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     devices = selected.get("device_registration", {})
     derived_workspace_scope_counts: Counter[str] = Counter()
     approvals = selected.get("approval_request", {})
+    invocation_drain = _native_invocation_drain_summary(approvals, delivery_claims)
+    if (
+        invocation_drain["pending_native_invocation_count"]
+        or invocation_drain["approved_unconsumed_invocation_count"]
+    ):
+        safe_fingerprints = ",".join(
+            invocation_drain["approval_id_sha256"]
+            + invocation_drain["approved_unconsumed_approval_id_sha256"]
+        )
+        raise ImportBlocked(
+            "source snapshot contains native invocations that must drain before import: "
+            f"{invocation_drain['pending_native_invocation_count']} pending native invocation approval(s), "
+            f"{invocation_drain['approved_unconsumed_invocation_count']} approved but unconsumed native invocation(s); "
+            "complete or explicitly reject/expire them through the owner flow "
+            "before creating the migration snapshot; approval_id_sha256="
+            f"{safe_fingerprints}"
+        )
     for approval_id, lease in invocation_leases.items():
         approval = approvals.get(approval_id)
         agent = agents.get(lease["source_agent_id"])
@@ -538,23 +555,6 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             raise ImportBlocked(
                 f"approval_invocation_lease/{approval_id} exceeds its approval expiry"
             )
-    invocation_drain = _native_invocation_drain_summary(approvals, delivery_claims)
-    if (
-        invocation_drain["pending_native_invocation_count"]
-        or invocation_drain["approved_unconsumed_invocation_count"]
-    ):
-        safe_fingerprints = ",".join(
-            invocation_drain["approval_id_sha256"]
-            + invocation_drain["approved_unconsumed_approval_id_sha256"]
-        )
-        raise ImportBlocked(
-            "source snapshot contains native invocations that must drain before import: "
-            f"{invocation_drain['pending_native_invocation_count']} pending native invocation approval(s), "
-            f"{invocation_drain['approved_unconsumed_invocation_count']} approved but unconsumed native invocation(s); "
-            "complete or explicitly reject/expire them through the owner flow "
-            "before creating the migration snapshot; approval_id_sha256="
-            f"{safe_fingerprints}"
-        )
     tasks = selected.get("agent_task", {})
     task_events = selected.get("agent_task_event", {})
     runs = selected.get("agent_run", {})

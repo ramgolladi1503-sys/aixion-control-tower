@@ -69,7 +69,10 @@ def _snapshot(
     approval = {
         "id": "a1", "project_id": "p1", "title": "Review", "summary": "Inspect change",
         "work_order_id": "w1", "target_branch": "main", "files": [], "risk": {"level": "LOW"},
-        "status": "APPROVED",
+        # Approved native invocations need an explicit durable delivery claim
+        # before a cutover plan may proceed. Keep the generic fixture terminal;
+        # the delivery-state fixtures below exercise the approved/consumed case.
+        "status": "APPROVED" if include_delivery_state else "DENIED",
         "workspace_id": "ws1", "source_provider": "ANTIGRAVITY",
         "source_agent_id": "agent1", "source_invocation_id": "inv1",
         "created_at": now, "updated_at": now,
@@ -365,16 +368,10 @@ def _snapshot(
                 "INSERT INTO auth_rate_limit_buckets VALUES (?,?,?)",
                 ("c" * 64, 1_800_000_000, 3),
             )
-        if include_delivery_state:
-            if not include_trust:
-                raise ValueError("delivery-state snapshots require an approved trust fixture")
+        if include_trust:
             conn.executemany(
                 "INSERT INTO approval_delivery_claims VALUES (?,?,?,?,?)",
                 [("a1", "ws1", "agent1", "inv1", now)],
-            )
-            conn.executemany(
-                "INSERT INTO approval_delivery_failures VALUES (?,?,?,?,?,?)",
-                [("a1", "ws1", "agent1", "inv1", "CLAIM_RESPONSE_AMBIGUOUS", now)],
             )
             conn.executemany(
                 "INSERT INTO kv_store VALUES (?,?,?)",
@@ -385,6 +382,18 @@ def _snapshot(
                         "details": {"source_agent_id": "agent1", "source_invocation_id": "inv1"},
                         "created_at": now,
                     })),
+                ],
+            )
+        if include_delivery_state:
+            if not include_trust:
+                raise ValueError("delivery-state snapshots require an approved trust fixture")
+            conn.executemany(
+                "INSERT INTO approval_delivery_failures VALUES (?,?,?,?,?,?)",
+                [("a1", "ws1", "agent1", "inv1", "CLAIM_RESPONSE_AMBIGUOUS", now)],
+            )
+            conn.executemany(
+                "INSERT INTO kv_store VALUES (?,?,?)",
+                [
                     ("audit_event", "delivery-failed", json.dumps({
                         "id": "delivery-failed", "event_type": "approval.delivery_failed",
                         "actor": "agent:agent1", "entity_id": "a1", "workspace_id": "ws1",
