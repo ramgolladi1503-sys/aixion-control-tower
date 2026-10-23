@@ -342,6 +342,21 @@ def _require_non_production_fault_injection() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
+def _require_durable_fault_repository(request: Request) -> None:
+    state = request.app.state
+    if (
+        getattr(state, "postgres_runtime", None) is not None
+        or getattr(state, "postgres_repositories", None) is not None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Agent-run fault controls require a durable PostgreSQL repository "
+                "and are unavailable while PostgreSQL is selected"
+            ),
+        )
+
+
 @router.get("/summary", response_model=AgentRunSummary)
 def get_run_summary(
     user: AuthUser = ReviewerDependency,
@@ -518,8 +533,12 @@ def recover_stale_run_leases(
 
 
 @router.get("/faults", response_model=list[AgentRunFaultConfig])
-def list_faults(user: AuthUser = MaintainerDependency) -> list[AgentRunFaultConfig]:
+def list_faults(
+    request: Request,
+    user: AuthUser = MaintainerDependency,
+) -> list[AgentRunFaultConfig]:
     _require_non_production_fault_injection()
+    _require_durable_fault_repository(request)
     workspace_id = workspace_id_for_user(user)
     return sorted(
         [
@@ -541,9 +560,11 @@ def list_faults(user: AuthUser = MaintainerDependency) -> list[AgentRunFaultConf
 @router.post("/faults", response_model=AgentRunFaultConfig)
 def create_fault(
     payload: AgentRunFaultCreate,
+    request: Request,
     user: AuthUser = MaintainerDependency,
 ) -> AgentRunFaultConfig:
     _require_non_production_fault_injection()
+    _require_durable_fault_repository(request)
     workspace_id = workspace_id_for_user(user)
     if not payload.run_id:
         raise HTTPException(
@@ -580,9 +601,11 @@ def create_fault(
 @router.delete("/faults/{fault_id}", response_model=AgentRunFaultConfig)
 def disable_fault(
     fault_id: str,
+    request: Request,
     user: AuthUser = MaintainerDependency,
 ) -> AgentRunFaultConfig:
     _require_non_production_fault_injection()
+    _require_durable_fault_repository(request)
     fault = store.agent_run_faults.get(fault_id)
     workspace_id = workspace_id_for_user(user)
     if (
