@@ -88,6 +88,34 @@ def test_install_is_idempotent_for_private_existing_config(tmp_path: Path) -> No
     assert hooks_path.read_bytes() == original_hooks
 
 
+@pytest.mark.parametrize("unsafe_mode", [0o622, 0o666])
+def test_install_rejects_group_or_other_writable_hooks_file_without_mutation(
+    tmp_path: Path, unsafe_mode: int,
+) -> None:
+    workspace = tmp_path / "project"
+    codex_dir = workspace / ".codex"
+    codex_dir.mkdir(parents=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    hooks_path = codex_dir / "hooks.json"
+    original_hooks = json.dumps({"hooks": {"SessionStart": []}}).encode()
+    hooks_path.write_bytes(original_hooks)
+    hooks_path.chmod(unsafe_mode)
+
+    with pytest.raises(setup.SetupError, match="must not be group- or other-writable"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://api.example.test",
+            agent_id="agent-codex-test",
+            project_id="project-codex-test",
+            home=home,
+        )
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert hooks_path.stat().st_mode & 0o777 == unsafe_mode
+    assert not (home / ".config" / "aixion").exists()
+
+
 def test_install_refuses_group_or_other_readable_config_without_mutation(
     tmp_path: Path,
 ) -> None:

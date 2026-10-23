@@ -171,6 +171,53 @@ def _hook_entry(config: Path, hook_script: Path, python: str) -> dict:
     }
 
 
+def _is_managed_hook(entry: object, config: Path, hook_script: Path) -> bool:
+    """Recognize only the exact hook shape emitted by this installer."""
+    if not isinstance(entry, dict) or set(entry) != {"PreToolUse"}:
+        return False
+    registrations = entry.get("PreToolUse")
+    if not isinstance(registrations, list) or len(registrations) != 1:
+        return False
+    registration = registrations[0]
+    if not isinstance(registration, dict) or set(registration) != {"matcher", "hooks"}:
+        return False
+    if registration.get("matcher") != "*":
+        return False
+    commands = registration.get("hooks")
+    if not isinstance(commands, list) or len(commands) != 1:
+        return False
+    command = commands[0]
+    if not isinstance(command, dict) or set(command) != {"type", "command", "timeout"}:
+        return False
+    if command.get("type") != "command" or command.get("timeout") != HOOK_TIMEOUT_SECONDS:
+        return False
+    try:
+        parts = shlex.split(command["command"])
+    except (TypeError, ValueError):
+        return False
+    return (
+        len(parts) == 4
+        and bool(parts[0])
+        and parts[1] == str(hook_script.resolve())
+        and parts[2:] == ["--config", str(config)]
+    )
+
+
+def _validate_managed_config(config: dict) -> None:
+    if set(config) != {"api_base_url", "agent_id", "project_id"}:
+        raise SetupError("Workspace config differs from this installer; refusing to remove it")
+    try:
+        if _api_url(config["api_base_url"]) != config["api_base_url"]:
+            raise SetupError("Workspace config differs from this installer; refusing to remove it")
+        if any(
+            _validate_identifier(label, config[key]) != config[key]
+            for key, label in (("agent_id", "Agent ID"), ("project_id", "Project ID"))
+        ):
+            raise SetupError("Workspace config differs from this installer; refusing to remove it")
+    except (TypeError, AttributeError) as exc:
+        raise SetupError("Workspace config differs from this installer; refusing to remove it") from exc
+
+
 def install_workspace(
     workspace: Path,
     *,
@@ -238,29 +285,17 @@ def remove_workspace(
         if not os.path.lexists(config_path):
             return False, False
         config = _read_json(config_path, allow_missing=False, require_private=True)
-        if set(config) != {"api_base_url", "agent_id", "project_id"}:
-            raise SetupError("Orphan workspace config differs from this installer; refusing to remove it")
-        try:
-            if _api_url(config["api_base_url"]) != config["api_base_url"]:
-                raise SetupError("Orphan workspace config differs from this installer; refusing to remove it")
-            if any(
-                _validate_identifier(label, config[key]) != config[key]
-                for key, label in (("agent_id", "Agent ID"), ("project_id", "Project ID"))
-            ):
-                raise SetupError("Orphan workspace config differs from this installer; refusing to remove it")
-        except (TypeError, AttributeError) as exc:
-            raise SetupError("Orphan workspace config differs from this installer; refusing to remove it") from exc
+        _validate_managed_config(config)
         config_path.unlink()
         return False, True
-    expected_prefix = str(hook_script.resolve())
-    serialized = json.dumps(entry)
-    if expected_prefix not in serialized or str(config_path) not in serialized:
+    if not _is_managed_hook(entry, config_path, hook_script):
         raise SetupError("Existing hook entry differs from this installer; refusing to remove it")
     # Validate every managed artifact before mutating either file. If config is
     # malformed or unsafe (for example, a symlink), leave the active hook intact.
     config_exists = os.path.lexists(config_path)
     if config_exists:
-        _read_json(config_path, allow_missing=False, require_private=True)
+        config = _read_json(config_path, allow_missing=False, require_private=True)
+        _validate_managed_config(config)
     del hooks[HOOK_NAME]
     mode = stat.S_IMODE(hooks_path.stat().st_mode)
     if hooks:

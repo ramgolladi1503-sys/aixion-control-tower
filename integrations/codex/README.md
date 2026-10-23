@@ -66,6 +66,16 @@ credentials, and timeout.
      --project-id "project_..."
    ```
 
+   If the project already has `.codex/hooks.json`, the installer requires the
+   file to be owned by the current user and not writable by group or other
+   users. It refuses installation without changing either the hook file or
+   managed config when those write bits are present. Review the file's sharing
+   requirements, then remove only the shared write bits before retrying:
+
+   ```sh
+   chmod go-w "/absolute/path/to/project/.codex/hooks.json"
+   ```
+
 3. Check connectivity and Keychain access. Preflight calls unauthenticated
    `/health` without the token, then authenticates `GET /agents/identity` to
    verify the registered CODEX installation, project scope, and required

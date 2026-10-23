@@ -46,7 +46,8 @@ def _identifier(label: str, value: str) -> str:
     return value
 
 
-def _read_json(path: Path, *, allow_missing: bool, require_private: bool = False) -> dict:
+def _read_json(path: Path, *, allow_missing: bool, require_private: bool = False,
+               reject_shared_write: bool = False) -> dict:
     if not os.path.lexists(path):
         if allow_missing:
             return {}
@@ -59,6 +60,10 @@ def _read_json(path: Path, *, allow_missing: bool, require_private: bool = False
                 raise SetupError(f"Managed file must be a regular file owned by this user: {path}")
             if require_private and stat.S_IMODE(metadata.st_mode) & 0o077:
                 raise SetupError(f"Managed config permissions must exclude group and other users: {path}")
+            if reject_shared_write and stat.S_IMODE(metadata.st_mode) & 0o022:
+                raise SetupError(
+                    f"Codex hooks file must not be group- or other-writable: {path}"
+                )
             raw = stream.read(MAX_JSON_BYTES + 1)
         if len(raw) > MAX_JSON_BYTES:
             raise SetupError(f"Managed JSON file exceeds {MAX_JSON_BYTES} bytes: {path}")
@@ -159,11 +164,12 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
     hook_script = hook_script or Path(__file__).with_name("aixion_permission_request_hook.py")
     workspace, config_path, hooks_path = _managed_paths(workspace, home, hook_script)
     config_dir = config_path.parent
-    _ensure_config_dir(home, config_dir)
     config = {"api_base_url": _api_url(api_base_url),
               "agent_id": _identifier("Agent ID", agent_id),
               "project_id": _identifier("Project ID", project_id)}
-    hooks_file = _read_json(hooks_path, allow_missing=True)
+    # Validate existing operator-owned files before creating the managed config
+    # directory or writing either installation file.
+    hooks_file = _read_json(hooks_path, allow_missing=True, reject_shared_write=True)
     hooks = hooks_file.get("hooks", {})
     if not isinstance(hooks, dict):
         raise SetupError("Codex hooks.json 'hooks' field must be an object")
@@ -180,6 +186,7 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
         existing_config = _read_json(config_path, allow_missing=False, require_private=True)
         if existing_config != config:
             raise SetupError("Workspace Codex config exists with different values; refusing overwrite")
+    _ensure_config_dir(home, config_dir)
     config_created = False
     if not config_exists:
         _atomic_write(config_path, (json.dumps(config, indent=2) + "\n").encode(), 0o600)
