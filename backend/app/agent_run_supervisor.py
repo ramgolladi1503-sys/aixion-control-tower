@@ -569,6 +569,7 @@ def _build_postgres_agent_run_step_completion_records(
     result: AgentRunStepExecutionResult,
     worker_id: str,
     lease_token: str,
+    already_running: bool = False,
 ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
     """Build governed-step completion records without touching process state."""
     updated_run = run.model_copy(deep=True)
@@ -577,9 +578,14 @@ def _build_postgres_agent_run_step_completion_records(
     if (
         current is None
         or current.step_type != step_type
-        or current.status != AgentRunStepStatus.READY
+        or current.status
+        != (AgentRunStepStatus.RUNNING if already_running else AgentRunStepStatus.READY)
         or run.lease_owner != worker_id
         or run.lease_token != lease_token
+        or (
+            already_running
+            and (current.lease_owner != worker_id or current.lease_token != lease_token)
+        )
     ):
         raise AgentRunRepositoryConflict("Scope validation snapshot is no longer executable.")
 
@@ -616,7 +622,10 @@ def _build_postgres_agent_run_step_completion_records(
             )
         )
 
-    if updated_run.status in {AgentRunStatus.SCHEDULED, AgentRunStatus.RETRY_WAIT}:
+    if not already_running and updated_run.status in {
+        AgentRunStatus.SCHEDULED,
+        AgentRunStatus.RETRY_WAIT,
+    }:
         previous_run, new_run = transition_run(updated_run, AgentRunStatus.RUNNING)
         append(
             AgentRunEventType.RUN_STATE_CHANGED,
@@ -625,29 +634,33 @@ def _build_postgres_agent_run_step_completion_records(
             message="Mission Control worker started or resumed execution.",
         )
 
-    previous_step, new_step = transition_step(current, AgentRunStepStatus.RUNNING)
-    current.lease_owner = worker_id
-    current.lease_token = lease_token
-    current.lease_expires_at = updated_run.lease_expires_at
-    current.heartbeat_at = _now()
+    if not already_running:
+        previous_step, new_step = transition_step(current, AgentRunStepStatus.RUNNING)
+        current.lease_owner = worker_id
+        current.lease_token = lease_token
+        current.lease_expires_at = updated_run.lease_expires_at
+        current.heartbeat_at = _now()
+    else:
+        previous_step, new_step = AgentRunStepStatus.READY, AgentRunStepStatus.RUNNING
     updated_run.current_step_id = current.id
     updated_run.current_step_index = current.sequence
-    append(
-        AgentRunEventType.STEP_STARTED,
-        step=current,
-        previous_status=previous_step.value,
-        new_status=new_step.value,
-        message=f"Executing {current.step_type.value}.",
-        input_hash=canonical_evidence_hash(
-            {
-                "run_id": updated_run.id,
-                "task_id": updated_run.task_id,
-                "step_type": current.step_type.value,
-                "attempt": current.attempt_count,
-            }
-        ),
-        metadata={"idempotency_key": current.idempotency_key},
-    )
+    if not already_running:
+        append(
+            AgentRunEventType.STEP_STARTED,
+            step=current,
+            previous_status=previous_step.value,
+            new_status=new_step.value,
+            message=f"Executing {current.step_type.value}.",
+            input_hash=canonical_evidence_hash(
+                {
+                    "run_id": updated_run.id,
+                    "task_id": updated_run.task_id,
+                    "step_type": current.step_type.value,
+                    "attempt": current.attempt_count,
+                }
+            ),
+            metadata={"idempotency_key": current.idempotency_key},
+        )
 
     current.decision = result.decision
     current.reason = result.reason
@@ -1346,6 +1359,76 @@ def execute_next_step(
     expected_steps = [item.model_copy(deep=True) for item in _run_steps(run.id)]
     persisted_event_ids = {event.id for event in _run_events(run.id)}
 
+    if (
+        postgres_repository_execution
+        and step.step_type == AgentRunStepType.SEAL_EVIDENCE
+        and isinstance(active_run_repository, PostgresAgentRunRepository)
+    ):
+        def build_seal_records(
+            locked_run: AgentRun,
+            locked_steps: list[AgentRunStep],
+            locked_events: list[AgentRunEvent],
+        ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+            if locked_run != expected_run or locked_steps != expected_steps:
+                raise AgentRunRepositoryConflict(
+                    "AgentRun changed while preparing evidence sealing."
+                )
+            locked_step = next(
+                (item for item in locked_steps if item.id == locked_run.current_step_id),
+                None,
+            )
+            if locked_step is None:
+                raise AgentRunRepositoryConflict(
+                    "SEAL_EVIDENCE current step is absent from the durable snapshot."
+                )
+            result = _seal_postgres_agent_run_evidence(
+                run=locked_run,
+                step=locked_step,
+                durable_steps=locked_steps,
+                durable_events=locked_events,
+            )
+            locked_run.final_evidence_hash = str(
+                result.evidence.get("final_evidence_hash", "")
+            )
+            return _build_postgres_agent_run_step_completion_records(
+                run=locked_run,
+                steps=locked_steps,
+                step_type=AgentRunStepType.SEAL_EVIDENCE,
+                result=result,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                already_running=True,
+            )
+
+        try:
+            updated_run, updated_steps, seal_events, seal_audit = (
+                active_run_repository.commit_evidence_seal(
+                    expected_run=expected_run,
+                    expected_steps=expected_steps,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    build_records=build_seal_records,
+                )
+            )
+        except Exception as error:
+            raise AgentRunConflict(
+                "PostgreSQL SEAL_EVIDENCE completion could not be committed."
+            ) from error
+        store.project_agent_run_control_transition(
+            updated_run,
+            updated_steps,
+            seal_events,
+            [seal_audit],
+        )
+        completed_step = next(item for item in updated_steps if item.id == step.id)
+        return AgentRunStepExecutionResult(
+            success=completed_step.status == AgentRunStepStatus.SUCCEEDED,
+            decision=completed_step.decision or VerificationDecision.FAIL_PERMANENT,
+            reason=completed_step.reason,
+            evidence=completed_step.evidence,
+            output_reference=completed_step.output_reference,
+        )
+
     def restore_completion_checkpoint() -> None:
         # Keep existing object references coherent while hiding any result that
         # failed to reach durable storage.
@@ -1601,28 +1684,18 @@ def _seal_postgres_agent_run_evidence(
     *,
     run: AgentRun,
     step: AgentRunStep,
-    repository: PostgresAgentRunRepository,
+    durable_steps: list[AgentRunStep],
+    durable_events: list[AgentRunEvent],
 ) -> AgentRunStepExecutionResult:
-    """Seal a canonical run from a consistent PostgreSQL step and event snapshot."""
-    durable_run = repository.get(run.id)
-    durable_steps = repository.list_steps_for_run(run.id)
-    durable_events = repository.list_events_for_run(run.id)
-    if durable_run != run:
-        return classify_execution_result(
-            success=False,
-            reason="PostgreSQL AgentRun changed while evidence was being sealed.",
-            evidence={"run_id": run.id, "snapshot_consistent": False},
-        )
+    """Build a seal only from the repository's locked durable snapshot."""
     if (
         [item.step_type for item in durable_steps] != list(DEFAULT_AGENT_RUN_STEPS)
         or [item.sequence for item in durable_steps] != list(range(len(DEFAULT_AGENT_RUN_STEPS)))
         or durable_steps[-1].id != step.id
         or durable_steps[-1] != step
     ):
-        return classify_execution_result(
-            success=False,
-            reason="PostgreSQL evidence does not match the canonical AgentRun step plan.",
-            evidence={"run_id": run.id, "canonical_step_plan": False},
+        raise AgentRunRepositoryConflict(
+            "PostgreSQL evidence does not match the canonical AgentRun step plan."
         )
 
     prior_steps = durable_steps[:-1]
@@ -1635,10 +1708,8 @@ def _seal_postgres_agent_run_evidence(
             or event.correlation_id != run.correlation_id
             or (event.step_id is not None and event.step_id not in event_step_ids)
         ):
-            return classify_execution_result(
-                success=False,
-                reason="PostgreSQL AgentRun event scope is inconsistent with the run.",
-                evidence={"run_id": run.id, "event_scope_consistent": False},
+            raise AgentRunRepositoryConflict(
+                "PostgreSQL AgentRun event scope is inconsistent with the run."
             )
         event_manifest.append(
             {
@@ -1664,14 +1735,8 @@ def _seal_postgres_agent_run_evidence(
             or not prior_step.evidence_hash
             or prior_step.evidence_hash != canonical_evidence_hash(prior_step.evidence)
         ):
-            return classify_execution_result(
-                success=False,
-                reason="A prior PostgreSQL AgentRun step is incomplete or its evidence hash is invalid.",
-                evidence={
-                    "run_id": run.id,
-                    "failed_step_id": prior_step.id,
-                    "prior_steps_valid": False,
-                },
+            raise AgentRunRepositoryConflict(
+                "A prior PostgreSQL AgentRun step is incomplete or its evidence hash is invalid."
             )
         matching_success_events = [
             event
@@ -1682,23 +1747,17 @@ def _seal_postgres_agent_run_evidence(
             and event.output_evidence_hash == prior_step.evidence_hash
         ]
         if len(matching_success_events) != 1:
-            return classify_execution_result(
-                success=False,
-                reason="A prior PostgreSQL AgentRun step lacks one matching durable success event.",
-                evidence={
-                    "run_id": run.id,
-                    "failed_step_id": prior_step.id,
-                    "matching_success_event_count": len(matching_success_events),
-                },
+            raise AgentRunRepositoryConflict(
+                "A prior PostgreSQL AgentRun step lacks one matching durable success event."
             )
 
     evidence_payload: dict[str, object] = {
-        "run_id": durable_run.id,
-        "workspace_id": durable_run.workspace_id,
-        "project_id": durable_run.project_id,
-        "task_id": durable_run.task_id,
-        "approval_request_id": durable_run.approval_request_id,
-        "correlation_id": durable_run.correlation_id,
+        "run_id": run.id,
+        "workspace_id": run.workspace_id,
+        "project_id": run.project_id,
+        "task_id": run.task_id,
+        "approval_request_id": run.approval_request_id,
+        "correlation_id": run.correlation_id,
         "steps": [
             {
                 "step_id": item.id,
@@ -1715,7 +1774,6 @@ def _seal_postgres_agent_run_evidence(
         "events": event_manifest,
     }
     final_hash = canonical_evidence_hash(evidence_payload)
-    run.final_evidence_hash = final_hash
     return classify_execution_result(
         success=True,
         reason="Mission Control evidence chain sealed from PostgreSQL records.",
@@ -1928,7 +1986,8 @@ class DefaultAgentRunStepExecutor:
                 return _seal_postgres_agent_run_evidence(
                     run=run,
                     step=step,
-                    repository=self.run_repository,
+                    durable_steps=self.run_repository.list_steps_for_run(run.id),
+                    durable_events=self.run_repository.list_events_for_run(run.id),
                 )
             steps = (
                 self.run_repository.list_steps_for_run(run.id)

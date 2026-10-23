@@ -2863,6 +2863,218 @@ class PostgresAgentRunRepository:
                 )
                 return updated_run, updated_steps, events, audit
 
+    def commit_evidence_seal(
+        self,
+        *,
+        expected_run: AgentRun,
+        expected_steps: list[AgentRunStep],
+        worker_id: str,
+        lease_token: str,
+        build_records: Callable[
+            [AgentRun, list[AgentRunStep], list[AgentRunEvent]],
+            tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent],
+        ],
+    ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+        """Build and commit SEAL_EVIDENCE from one locked durable snapshot.
+
+        The run row lock prevents new event rows from passing their FK check
+        until sealing commits. Existing event rows are locked against updates
+        and deletes. The callback is pure: it receives only validated durable
+        models and performs no I/O.
+        """
+        if (
+            not expected_run.workspace_id
+            or not expected_run.lease_token
+            or expected_run.lease_owner != worker_id
+            or expected_run.lease_token != lease_token
+        ):
+            raise AgentRunRepositoryConflict("Evidence seal lease identity is invalid")
+
+        with self._connect() as conn:
+            with conn.transaction():
+                durable_run, durable_steps = self.get_control_snapshot_in_transaction(
+                    conn,
+                    run_id=expected_run.id,
+                    workspace_id=expected_run.workspace_id,
+                )
+                if durable_run != expected_run:
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun revision changed before evidence sealing"
+                    )
+                if {item.id: item for item in durable_steps} != {
+                    item.id: item for item in expected_steps
+                }:
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun step revisions changed before evidence sealing"
+                    )
+                checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+                if (
+                    durable_run.lease_owner != worker_id
+                    or durable_run.lease_token != lease_token
+                    or durable_run.lease_expires_at is None
+                    or durable_run.lease_expires_at <= checked_at
+                ):
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun lease is stale before evidence sealing"
+                    )
+                if (
+                    [item.step_type for item in durable_steps]
+                    != list(DEFAULT_AGENT_RUN_STEPS)
+                    or [item.sequence for item in durable_steps]
+                    != list(range(len(DEFAULT_AGENT_RUN_STEPS)))
+                    or not durable_steps
+                    or durable_run.current_step_id != durable_steps[-1].id
+                    or durable_steps[-1].step_type != AgentRunStepType.SEAL_EVIDENCE
+                    or durable_steps[-1].status != AgentRunStepStatus.RUNNING
+                    or any(
+                        item.status != AgentRunStepStatus.SUCCEEDED
+                        for item in durable_steps[:-1]
+                    )
+                ):
+                    raise AgentRunRepositoryConflict(
+                        "SEAL_EVIDENCE requires the canonical plan and all prior steps succeeded"
+                    )
+                if durable_run.status != AgentRunStatus.RUNNING:
+                    raise AgentRunRepositoryConflict(
+                        "SEAL_EVIDENCE requires a running AgentRun"
+                    )
+
+                event_rows = conn.execute(
+                    "SELECT event_id,run_id,task_id,workspace_id,created_at,event_type,payload "
+                    "FROM agent_run_events WHERE run_id=%s AND workspace_id=%s "
+                    "ORDER BY created_at,event_id FOR SHARE",
+                    (durable_run.id, durable_run.workspace_id),
+                ).fetchall()
+                events_snapshot: list[AgentRunEvent] = []
+                for row in event_rows:
+                    try:
+                        event = AgentRunEvent.model_validate(row[6])
+                    except Exception as error:
+                        raise AgentRunRepositoryIntegrityError(
+                            "Stored AgentRun evidence event payload is invalid"
+                        ) from error
+                    if (
+                        event.id != row[0]
+                        or event.run_id != row[1]
+                        or event.task_id != row[2]
+                        or row[3] != durable_run.workspace_id
+                        or event.created_at != row[4]
+                        or event.event_type.value != row[5]
+                        or event.correlation_id != durable_run.correlation_id
+                        or (event.step_id is not None and event.step_id not in {
+                            item.id for item in durable_steps
+                        })
+                    ):
+                        raise AgentRunRepositoryIntegrityError(
+                            "Stored AgentRun evidence event identity or scope is inconsistent"
+                        )
+                    events_snapshot.append(event)
+
+                updated_run, updated_steps, events, audit = build_records(
+                    durable_run, durable_steps, events_snapshot
+                )
+                running_run = durable_run.model_copy(deep=True)
+                running_steps = [item.model_copy(deep=True) for item in durable_steps]
+                running_step = running_steps[-1]
+                running_step.lease_owner = worker_id
+                running_step.lease_token = lease_token
+                running_step.lease_expires_at = durable_run.lease_expires_at
+                _validate_step_completion(
+                    expected_run=running_run,
+                    updated_run=updated_run,
+                    expected_steps=running_steps,
+                    updated_steps=updated_steps,
+                    events=events,
+                    audit=audit,
+                    now=checked_at,
+                )
+                if (
+                    not updated_run.final_evidence_hash
+                    or updated_run.final_evidence_hash
+                    != updated_steps[-1].evidence.get("final_evidence_hash")
+                ):
+                    raise AgentRunRepositoryIntegrityError(
+                        "SEAL_EVIDENCE completion does not bind the final manifest"
+                    )
+
+                changed = conn.execute(
+                    "UPDATE agent_runs SET status=%s,current_step_id=%s,lease_owner=NULL,"
+                    "lease_token=NULL,lease_expires_at=NULL,updated_at=%s,payload=%s "
+                    "WHERE run_id=%s AND workspace_id=%s AND updated_at=%s "
+                    "AND lease_owner=%s AND lease_token=%s "
+                    "AND lease_expires_at>clock_timestamp()",
+                    (
+                        updated_run.status.value,
+                        updated_run.current_step_id,
+                        updated_run.updated_at,
+                        Jsonb(updated_run.model_dump(mode="json")),
+                        durable_run.id,
+                        durable_run.workspace_id,
+                        durable_run.updated_at,
+                        worker_id,
+                        lease_token,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun changed during evidence sealing"
+                    )
+                updated_by_id = {item.id: item for item in updated_steps}
+                for previous in durable_steps:
+                    updated = updated_by_id.get(previous.id)
+                    if updated is None:
+                        raise AgentRunRepositoryConflict(
+                            "SEAL_EVIDENCE changed the durable step set"
+                        )
+                    changed = conn.execute(
+                        "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                        "WHERE step_id=%s AND run_id=%s AND workspace_id=%s "
+                        "AND updated_at=%s",
+                        (
+                            updated.status.value,
+                            updated.updated_at,
+                            Jsonb(updated.model_dump(mode="json")),
+                            previous.id,
+                            durable_run.id,
+                            durable_run.workspace_id,
+                            previous.updated_at,
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise AgentRunRepositoryConflict(
+                            "AgentRun step changed during evidence sealing"
+                        )
+                for event in events:
+                    conn.execute(
+                        "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,"
+                        "created_at,event_type,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            event.id,
+                            event.run_id,
+                            event.task_id,
+                            durable_run.workspace_id,
+                            event.created_at,
+                            event.event_type.value,
+                            Jsonb(event.model_dump(mode="json")),
+                        ),
+                    )
+                conn.execute(
+                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,"
+                    "entity_id,event_type,actor,details,created_at,payload) "
+                    "VALUES(%s,%s,NULL,'agent_run',%s,%s,%s,%s,%s,%s)",
+                    (
+                        audit.id,
+                        durable_run.workspace_id,
+                        durable_run.id,
+                        audit.event_type,
+                        audit.actor,
+                        Jsonb(audit.details),
+                        audit.created_at,
+                        Jsonb(audit.model_dump(mode="json")),
+                    ),
+                )
+                return updated_run, updated_steps, events, audit
+
     def create(
         self,
         *,

@@ -1418,6 +1418,7 @@ def test_postgres_verify_result_rejects_stale_run_snapshot_without_completion_mu
 
 def test_postgres_agent_run_seals_durable_evidence_and_rejects_replay(
     postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connect, workspace, _project, _other_workspace, _other_project, state = (
         postgres_agent_run_route_runtime
@@ -1431,6 +1432,33 @@ def test_postgres_agent_run_seals_durable_evidence_and_rejects_replay(
         task_id=task_id,
         repositories=repositories,
         client=client,
+    )
+    original_commit = repositories.agent_runs.commit_evidence_seal
+    locked_events: list[AgentRunEvent] = []
+    fake_local_event = AgentRunEvent(
+        run_id=run_id,
+        task_id=task_id,
+        correlation_id=repositories.agent_runs.get(run_id).correlation_id,
+        event_type=AgentRunEventType.OPERATOR_ACTION,
+        message="Process-local event must not enter the PostgreSQL seal manifest.",
+        actor="test-local-projection",
+    )
+
+    def commit_capturing_durable_events(**kwargs):
+        builder = kwargs["build_records"]
+
+        def capture_locked_events(run, steps, events):
+            locked_events.extend(events)
+            return builder(run, steps, events)
+
+        kwargs["build_records"] = capture_locked_events
+        store.agent_run_events[fake_local_event.id] = fake_local_event
+        return original_commit(**kwargs)
+
+    monkeypatch.setattr(
+        repositories.agent_runs,
+        "commit_evidence_seal",
+        commit_capturing_durable_events,
     )
 
     response = client.post(
@@ -1452,6 +1480,26 @@ def test_postgres_agent_run_seals_durable_evidence_and_rejects_replay(
     assert final_hash == canonical_evidence_hash(
         {key: value for key, value in seal["evidence"].items() if key != "final_evidence_hash"}
     )
+    expected_manifest = [
+        {
+            "event_id": event.id,
+            "event_type": event.event_type.value,
+            "step_id": event.step_id,
+            "previous_status": event.previous_status,
+            "new_status": event.new_status,
+            "actor": event.actor,
+            "attempt_number": event.attempt_number,
+            "input_evidence_hash": event.input_evidence_hash,
+            "output_evidence_hash": event.output_evidence_hash,
+            "metadata_hash": canonical_evidence_hash(event.metadata),
+            "reason_hash": canonical_evidence_hash({"reason": event.reason}),
+            "created_at": event.created_at.isoformat(),
+        }
+        for event in locked_events
+    ]
+    assert seal["evidence"]["events"] == expected_manifest
+    assert fake_local_event.id not in {event["event_id"] for event in expected_manifest}
+    store.agent_run_events.pop(fake_local_event.id, None)
     durable_run = repositories.agent_runs.get(run_id)
     assert durable_run is not None
     assert durable_run.status == AgentRunStatus.SUCCEEDED
@@ -1680,6 +1728,268 @@ def test_postgres_agent_run_seal_audit_failure_rolls_back_completion_and_preserv
             ).fetchone()[0]
             == 0
         )
+
+
+def test_postgres_agent_run_seal_rejects_stale_snapshot_without_completion(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    original_commit = repositories.agent_runs.commit_evidence_seal
+
+    def commit_with_stale_snapshot(**kwargs):
+        kwargs["expected_run"] = kwargs["expected_run"].model_copy(
+            update={"heartbeat_at": now_utc()}
+        )
+        return original_commit(**kwargs)
+
+    monkeypatch.setattr(
+        repositories.agent_runs, "commit_evidence_seal", commit_with_stale_snapshot
+    )
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.final_evidence_hash is None
+    seal = next(
+        item
+        for item in repositories.agent_runs.list_steps_for_run(run_id)
+        if item.step_type == AgentRunStepType.SEAL_EVIDENCE
+    )
+    assert seal.status == AgentRunStepStatus.RUNNING
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='STEP_SUCCEEDED' "
+            "AND payload->>'step_id'=%s",
+            (run_id, seal.id),
+        ).fetchone()[0] == 0
+
+
+def test_postgres_agent_run_seal_rejects_expired_worker_lease(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    original_commit = repositories.agent_runs.commit_evidence_seal
+
+    def interrupt_seal(**_kwargs):
+        raise RuntimeError("stop after the durable RUNNING checkpoint")
+
+    monkeypatch.setattr(repositories.agent_runs, "commit_evidence_seal", interrupt_seal)
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    monkeypatch.setattr(repositories.agent_runs, "commit_evidence_seal", original_commit)
+    expected_run = repositories.agent_runs.get(run_id)
+    assert expected_run is not None and expected_run.lease_token is not None
+    expected_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    current = next(item for item in expected_steps if item.id == expected_run.current_step_id)
+    assert current.status == AgentRunStepStatus.RUNNING
+    expired_at = now_utc() - timedelta(seconds=2)
+    expired_run = expected_run.model_copy(update={"lease_expires_at": expired_at})
+    expired_steps = [item.model_copy(deep=True) for item in expected_steps]
+    expired_current = next(item for item in expired_steps if item.id == expired_run.current_step_id)
+    expired_current.lease_expires_at = expired_at
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET lease_expires_at=%s,payload=%s WHERE run_id=%s AND workspace_id=%s",
+            (
+                expired_at,
+                Jsonb(expired_run.model_dump(mode="json")),
+                run_id,
+                workspace.id,
+            ),
+        )
+        conn.execute(
+            "UPDATE agent_run_steps SET payload=%s "
+            "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+            (
+                Jsonb(expired_current.model_dump(mode="json")),
+                expired_current.id,
+                run_id,
+                workspace.id,
+            ),
+        )
+    callback_reached = Event()
+
+    def forbidden_builder(*_args):
+        callback_reached.set()
+        pytest.fail("expired lease reached the evidence builder")
+
+    with pytest.raises(AgentRunRepositoryConflict, match="lease is stale"):
+        original_commit(
+            expected_run=expired_run,
+            expected_steps=expired_steps,
+            worker_id="postgres-seal-worker",
+            lease_token=expired_run.lease_token,
+            build_records=forbidden_builder,
+        )
+    assert not callback_reached.is_set()
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.final_evidence_hash is None
+
+
+def test_postgres_agent_run_seal_rejects_malformed_locked_event_payload(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    original_commit = repositories.agent_runs.commit_evidence_seal
+
+    def commit_with_malformed_event(**kwargs):
+        with connect() as conn:
+            conn.execute(
+                "UPDATE agent_run_events SET payload=jsonb_set(payload,'{event_type}',%s::jsonb) "
+                "WHERE run_id=%s AND workspace_id=%s",
+                (Jsonb("NOT_A_REAL_EVENT"), run_id, workspace.id),
+            )
+        return original_commit(**kwargs)
+
+    monkeypatch.setattr(
+        repositories.agent_runs, "commit_evidence_seal", commit_with_malformed_event
+    )
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    durable_run = repositories.agent_runs.get(run_id)
+    assert durable_run is not None and durable_run.final_evidence_hash is None
+    seal = next(
+        item
+        for item in repositories.agent_runs.list_steps_for_run(run_id)
+        if item.step_type == AgentRunStepType.SEAL_EVIDENCE
+    )
+    assert seal.status == AgentRunStepStatus.RUNNING
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s AND event_type='STEP_SUCCEEDED' "
+            "AND payload->>'step_id'=%s",
+            (run_id, seal.id),
+        ).fetchone()[0] == 0
+
+
+def test_postgres_agent_run_seal_locks_event_snapshot_until_commit(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.agent_run_supervisor as supervisor
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _advance_postgres_agent_run_to_seal(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    event = repositories.agent_runs.list_events_for_run(run_id)[0]
+    snapshot_locked = Event()
+    release_builder = Event()
+    update_started = Event()
+    update_applied = Event()
+    original_seal = supervisor._seal_postgres_agent_run_evidence
+
+    def hold_builder_until_writer_is_blocked(**kwargs):
+        snapshot_locked.set()
+        assert release_builder.wait(timeout=10), "test did not release the evidence builder"
+        return original_seal(**kwargs)
+
+    def update_event_then_rollback() -> None:
+        update_started.set()
+        with connect() as conn:
+            try:
+                with conn.transaction():
+                    conn.execute(
+                        "UPDATE agent_run_events SET payload=jsonb_set(payload,'{message}',%s::jsonb) "
+                        "WHERE event_id=%s",
+                        (Jsonb("concurrent test mutation"), event.id),
+                    )
+                    update_applied.set()
+                    raise RuntimeError("rollback test-only event mutation")
+            except RuntimeError:
+                pass
+
+    monkeypatch.setattr(
+        supervisor, "_seal_postgres_agent_run_evidence", hold_builder_until_writer_is_blocked
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        seal_future = pool.submit(
+            client.post,
+            f"/agent/runs/{run_id}/execute-next",
+            json={"worker_id": "postgres-seal-worker", "timeout_seconds": 10},
+        )
+        assert snapshot_locked.wait(timeout=10), "sealer did not acquire its durable snapshot"
+        writer_future = pool.submit(update_event_then_rollback)
+        assert update_started.wait(timeout=10)
+        assert not update_applied.wait(timeout=0.25), "event update bypassed the seal row lock"
+        release_builder.set()
+        response = seal_future.result(timeout=10)
+        writer_future.result(timeout=10)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    seal = next(
+        item
+        for item in body["steps"]
+        if item["step_type"] == AgentRunStepType.SEAL_EVIDENCE.value
+    )
+    assert seal["status"] == AgentRunStepStatus.SUCCEEDED.value
+    assert event.id in {item["event_id"] for item in seal["evidence"]["events"]}
+    with connect() as conn:
+        persisted_message = conn.execute(
+            "SELECT payload->>'message' FROM agent_run_events WHERE event_id=%s",
+            (event.id,),
+        ).fetchone()[0]
+    assert persisted_message == event.message
 
 
 def test_postgres_agent_run_verify_result_ignores_process_local_fake_events(

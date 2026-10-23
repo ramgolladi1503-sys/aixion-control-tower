@@ -225,7 +225,27 @@ def remove_workspace(
     hooks = _read_json(hooks_path, allow_missing=True)
     entry = hooks.get(HOOK_NAME)
     if entry is None:
-        return False, False
+        # Installation writes the private config before the workspace hook.
+        # A host crash between those atomic writes leaves an orphan. Remove it
+        # only when it has the exact non-secret schema and valid values this
+        # installer emits; unknown files at the derived path remain untouched.
+        if not os.path.lexists(config_path):
+            return False, False
+        config = _read_json(config_path, allow_missing=False)
+        if set(config) != {"api_base_url", "agent_id", "project_id"}:
+            raise SetupError("Orphan workspace config differs from this installer; refusing to remove it")
+        try:
+            if _api_url(config["api_base_url"]) != config["api_base_url"]:
+                raise SetupError("Orphan workspace config differs from this installer; refusing to remove it")
+            if any(
+                _validate_identifier(label, config[key]) != config[key]
+                for key, label in (("agent_id", "Agent ID"), ("project_id", "Project ID"))
+            ):
+                raise SetupError("Orphan workspace config differs from this installer; refusing to remove it")
+        except (TypeError, AttributeError) as exc:
+            raise SetupError("Orphan workspace config differs from this installer; refusing to remove it") from exc
+        config_path.unlink()
+        return False, True
     expected_prefix = str(hook_script.resolve())
     serialized = json.dumps(entry)
     if expected_prefix not in serialized or str(config_path) not in serialized:

@@ -7,9 +7,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -29,6 +31,8 @@ class OneTimeTokenPanelTest {
                     agentId = "agent-example",
                     projectId = "project-example",
                     onCopy = {},
+                    onCopyKeychainCommand = { true },
+                    onCopyHookInstallCommand = { true },
                     onHide = {}
                 )
             }
@@ -38,11 +42,19 @@ class OneTimeTokenPanelTest {
             "It is held only in screen memory and is cleared when you hide it or leave the app."
         ).assertExists()
         composeRule.onNodeWithText(
-            "On the Mac, run: security add-generic-password -U -s com.aixion.controltower.agent -a agent-example -w\nThe command prompts for the token; do not put it in command arguments or shell history."
+            "Store the token in macOS Keychain. This command contains no token; Terminal prompts you to enter it securely."
         ).assertExists()
         composeRule.onNodeWithText(
-            "python3 /ABSOLUTE/PATH/integrations/antigravity/setup_workspace.py \\\n  --workspace \"/ABSOLUTE/PATH/TO/PROJECT\" \\\n  --api-base-url \"https://CONTROL-TOWER-URL\" \\\n  --agent-id \"agent-example\" \\\n  --project-id \"project-example\""
+            "security add-generic-password -U -s com.aixion.controltower.agent -a 'agent-example' -w"
         ).assertExists()
+        composeRule.onNodeWithText("Copy Keychain command").assertExists()
+        composeRule.onNodeWithText(
+            "Install the Antigravity hook only in the project you want to protect. Replace the project folder and API URL placeholders below with values reachable from your Mac. This does not install a Mac app; it adds project-scoped hook settings and preserves other hooks."
+        ).assertExists()
+        composeRule.onNodeWithText(
+            "python3 '/ABSOLUTE/PATH/integrations/antigravity/setup_workspace.py' \\\n  --workspace '/ABSOLUTE/PATH/TO/PROJECT' \\\n  --api-base-url 'https://CONTROL-TOWER-URL' \\\n  --agent-id 'agent-example' \\\n  --project-id 'project-example'"
+        ).assertExists()
+        composeRule.onNodeWithText("Copy hook install command").assertExists()
     }
 
     @Test
@@ -58,6 +70,8 @@ class OneTimeTokenPanelTest {
                             agentId = "agent-example",
                             projectId = "project-example",
                             onCopy = {},
+                            onCopyKeychainCommand = { true },
+                            onCopyHookInstallCommand = { true },
                             onHide = {}
                         )
                     }
@@ -66,8 +80,12 @@ class OneTimeTokenPanelTest {
         }
 
         val copyAction = composeRule.onNodeWithText("Copy sensitive token")
+        val keychainAction = composeRule.onNodeWithText("Copy Keychain command")
+        val hookAction = composeRule.onNodeWithText("Copy hook install command")
         val hideAction = composeRule.onNodeWithText("Hide now")
         copyAction.assertExists()
+        keychainAction.assertExists()
+        hookAction.assertExists()
         hideAction.assertExists()
         composeRule.runOnIdle {
             assertTrue(
@@ -75,9 +93,70 @@ class OneTimeTokenPanelTest {
                 copyAction.fetchSemanticsNode().boundsInRoot.right <= 240f
             )
             assertTrue(
+                "Keychain copy action should remain within the narrow viewport",
+                keychainAction.fetchSemanticsNode().boundsInRoot.right <= 240f
+            )
+            assertTrue(
+                "Hook install copy action should remain within the narrow viewport",
+                hookAction.fetchSemanticsNode().boundsInRoot.right <= 240f
+            )
+            assertTrue(
                 "Hide action should remain within the narrow viewport",
                 hideAction.fetchSemanticsNode().boundsInRoot.right <= 240f
             )
         }
+    }
+
+    @Test
+    fun copyActionsKeepTokenSeparateAndConfirmMacCommands() {
+        var sensitiveTokenCopied = false
+        var keychainCommandCopied: String? = null
+        var hookCommandCopied: String? = null
+        composeRule.setContent {
+            ControlTowerTheme {
+                OneTimeTokenPanel(
+                    token = "secret-example",
+                    provider = "ANTIGRAVITY",
+                    agentName = "Antigravity connector",
+                    agentId = "agent-example",
+                    projectId = "project-example",
+                    onCopy = { sensitiveTokenCopied = true },
+                    onCopyKeychainCommand = { command ->
+                        keychainCommandCopied = command
+                        true
+                    },
+                    onCopyHookInstallCommand = { command ->
+                        hookCommandCopied = command
+                        true
+                    },
+                    onHide = {}
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Copy Keychain command").performClick()
+        composeRule.onNodeWithText(
+            "Keychain command copied. Enter the token only at the secure prompt."
+        ).assertExists()
+        assertEquals(
+            "security add-generic-password -U -s com.aixion.controltower.agent -a 'agent-example' -w",
+            keychainCommandCopied
+        )
+        assertEquals(false, sensitiveTokenCopied)
+
+        composeRule.onNodeWithText("Copy hook install command").performClick()
+        composeRule.onNodeWithText(
+            "Hook install command copied. Replace the project folder and API URL before running."
+        ).assertExists()
+        assertEquals(
+            "python3 '/ABSOLUTE/PATH/integrations/antigravity/setup_workspace.py' \\\n  --workspace '/ABSOLUTE/PATH/TO/PROJECT' \\\n  --api-base-url 'https://CONTROL-TOWER-URL' \\\n  --agent-id 'agent-example' \\\n  --project-id 'project-example'",
+            hookCommandCopied
+        )
+        assertEquals(false, sensitiveTokenCopied)
+        assertEquals(false, keychainCommandCopied?.contains("secret-example") ?: false)
+        assertEquals(false, hookCommandCopied?.contains("secret-example") ?: false)
+
+        composeRule.onNodeWithText("Copy sensitive token").performClick()
+        assertEquals(true, sensitiveTokenCopied)
     }
 }

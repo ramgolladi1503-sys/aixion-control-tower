@@ -15,6 +15,10 @@ SPEC.loader.exec_module(setup)
 HOOK_PATH = SETUP_PATH.with_name("aixion_pre_tool_hook.py")
 
 
+class SimulatedInstallerCrash(BaseException):
+    """Model process termination that bypasses ordinary installer rollback."""
+
+
 def test_install_preserves_existing_hooks_and_writes_private_workspace_config(tmp_path: Path) -> None:
     workspace = tmp_path / "my project"
     workspace.mkdir()
@@ -70,6 +74,102 @@ def test_install_is_idempotent_and_remove_preserves_unrelated_hooks(tmp_path: Pa
     assert (removed_hook, removed_config) == (True, True)
     assert json.loads(hooks_path.read_text()) == {"other": {"Stop": []}}
     assert not config_path.exists()
+
+
+def test_install_recovers_after_config_write_interruption_and_remove_preserves_other_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agents_dir = workspace / ".agents"
+    agents_dir.mkdir()
+    hooks_path = agents_dir / "hooks.json"
+    original_hooks = {"user-hook": {"PostToolUse": []}}
+    hooks_path.write_text(json.dumps(original_hooks))
+    home = tmp_path / "home"
+    kwargs = dict(
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    atomic_write = setup._atomic_write
+    config_path = None
+
+    def interrupt_before_hook(path: Path, data: bytes, mode: int) -> None:
+        nonlocal config_path
+        if path.name == "hooks.json":
+            raise SimulatedInstallerCrash("simulated process interruption before hook registration")
+        config_path = path
+        atomic_write(path, data, mode)
+
+    monkeypatch.setattr(setup, "_atomic_write", interrupt_before_hook)
+    with pytest.raises(SimulatedInstallerCrash, match="simulated process interruption"):
+        setup.install_workspace(workspace, **kwargs)
+
+    assert config_path is not None and config_path.is_file()
+    assert json.loads(hooks_path.read_text()) == original_hooks
+
+    # A retry must accept the exact orphan config and finish registration.
+    monkeypatch.setattr(setup, "_atomic_write", atomic_write)
+    recovered_config, recovered_hooks = setup.install_workspace(workspace, **kwargs)
+    assert recovered_config == config_path
+    recovered = json.loads(recovered_hooks.read_text())
+    assert recovered["user-hook"] == original_hooks["user-hook"]
+    assert setup.HOOK_NAME in recovered
+
+    assert setup.remove_workspace(workspace, home=home, hook_script=HOOK_PATH, python="python3") == (True, True)
+    assert json.loads(hooks_path.read_text()) == original_hooks
+    assert not config_path.exists()
+
+
+def test_remove_cleans_only_valid_orphan_config_without_changing_hooks(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agents_dir = workspace / ".agents"
+    agents_dir.mkdir()
+    hooks_path = agents_dir / "hooks.json"
+    original_hooks = {"user-hook": {"PostToolUse": []}}
+    hooks_path.write_text(json.dumps(original_hooks))
+    home = tmp_path / "home"
+    config_path, expected_hooks = setup.install_workspace(
+        workspace,
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    assert hooks_path == expected_hooks
+    hooks_path.write_text(json.dumps(original_hooks))
+
+    assert setup.remove_workspace(workspace, home=home, hook_script=HOOK_PATH) == (False, True)
+    assert json.loads(hooks_path.read_text()) == original_hooks
+    assert not config_path.exists()
+
+
+def test_remove_preserves_unknown_orphan_config_and_hooks(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+    )
+    hooks_path.unlink()
+    config_path.write_text(json.dumps({"user_data": "preserve"}))
+
+    with pytest.raises(setup.SetupError, match="differs from this installer"):
+        setup.remove_workspace(workspace, home=home, hook_script=HOOK_PATH)
+
+    assert json.loads(config_path.read_text()) == {"user_data": "preserve"}
 
 
 def test_remove_validates_managed_config_before_changing_hook(tmp_path: Path) -> None:

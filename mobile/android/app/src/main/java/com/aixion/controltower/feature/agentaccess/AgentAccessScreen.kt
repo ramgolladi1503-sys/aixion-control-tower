@@ -39,6 +39,9 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -196,6 +199,12 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                         }
                         context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
                     },
+                    onCopyKeychainCommand = { command ->
+                        copyNonSecretCommand(context, "macOS Keychain command", command)
+                    },
+                    onCopyHookInstallCommand = { command ->
+                        copyNonSecretCommand(context, "Agent hook install command", command)
+                    },
                     onHide = {
                         clearClipboardToken(context, token)
                         viewModel.clearOneTimeToken()
@@ -322,6 +331,28 @@ private fun clearClipboardToken(context: android.content.Context, token: String?
     }
 }
 
+private fun copyNonSecretCommand(context: android.content.Context, label: String, command: String): Boolean =
+    runCatching {
+        val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+            ?: return false
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, command))
+        true
+    }.getOrDefault(false)
+
+internal fun keychainSetupCommand(agentId: String): String =
+    "security add-generic-password -U -s com.aixion.controltower.agent -a ${shellQuote(agentId)} -w"
+
+internal fun hookInstallCommand(provider: String, agentId: String, projectId: String): String {
+    val hookDirectory = if (provider == "CODEX") "codex" else "antigravity"
+    return "python3 ${shellQuote("/ABSOLUTE/PATH/integrations/$hookDirectory/setup_workspace.py")} \\\n" +
+        "  --workspace ${shellQuote("/ABSOLUTE/PATH/TO/PROJECT")} \\\n" +
+        "  --api-base-url ${shellQuote("https://CONTROL-TOWER-URL")} \\\n" +
+        "  --agent-id ${shellQuote(agentId)} \\\n" +
+        "  --project-id ${shellQuote(projectId)}"
+}
+
+private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
+
 internal fun authenticatedActivityLabel(credential: AgentCredentialStatusDto?): String = when {
     credential == null -> "Activity status unavailable"
     !credential.token_present -> "No active token; activity is unavailable"
@@ -381,11 +412,16 @@ internal fun OneTimeTokenPanel(
     agentId: String,
     projectId: String,
     onCopy: () -> Unit,
+    onCopyKeychainCommand: (String) -> Boolean,
+    onCopyHookInstallCommand: (String) -> Boolean,
     onHide: () -> Unit
 ) {
     val palette = LocalTowerPalette.current
     val providerName = agentProviderName(provider)
-    val hookDirectory = if (provider == "CODEX") "codex" else "antigravity"
+    var keychainCopyMessage by remember(provider, agentId, projectId) { mutableStateOf<String?>(null) }
+    var hookCopyMessage by remember(provider, agentId, projectId) { mutableStateOf<String?>(null) }
+    val keychainCommand = keychainSetupCommand(agentId)
+    val installCommand = hookInstallCommand(provider, agentId, projectId)
     TowerPanel(elevated = true) {
         StatusBadge(label = "ONE-TIME SECRET", color = palette.caution)
         Spacer(Modifier.height(TowerSpacing.sm))
@@ -410,21 +446,58 @@ internal fun OneTimeTokenPanel(
             TextButton(onClick = onHide) { Text("Hide now") }
         }
         Text(
-            "On the Mac, run: security add-generic-password -U -s com.aixion.controltower.agent -a $agentId -w\nThe command prompts for the token; do not put it in command arguments or shell history.",
+            "Store the token in macOS Keychain. This command contains no token; Terminal prompts you to enter it securely.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
+        Text(keychainCommand, color = palette.ink, style = TowerCodeTextStyle)
+        OutlinedButton(
+            onClick = {
+                keychainCopyMessage = if (onCopyKeychainCommand(keychainCommand)) {
+                    "Keychain command copied. Enter the token only at the secure prompt."
+                } else {
+                    "Could not copy the Keychain command. Try again."
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Copy Keychain command") }
+        keychainCopyMessage?.let { message ->
+            Text(
+                message,
+                color = if (message.startsWith("Could not")) palette.danger else palette.positive,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+            )
+        }
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
-            "Next, install the $providerName hook only in the project you want to protect. Use the Control Tower API URL reachable from your Mac and that project's absolute folder path. The installer writes project-scoped settings and preserves other hooks.",
+            "Install the ${providerName} hook only in the project you want to protect. Replace the project folder and API URL placeholders below with values reachable from your Mac. This does not install a Mac app; it adds project-scoped hook settings and preserves other hooks.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Text(
-            "python3 /ABSOLUTE/PATH/integrations/$hookDirectory/setup_workspace.py \\\n  --workspace \"/ABSOLUTE/PATH/TO/PROJECT\" \\\n  --api-base-url \"https://CONTROL-TOWER-URL\" \\\n  --agent-id \"$agentId\" \\\n  --project-id \"$projectId\"",
+            installCommand,
             color = palette.ink,
             style = TowerCodeTextStyle
         )
+        OutlinedButton(
+            onClick = {
+                hookCopyMessage = if (onCopyHookInstallCommand(installCommand)) {
+                    "Hook install command copied. Replace the project folder and API URL before running."
+                } else {
+                    "Could not copy the hook install command. Try again."
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Copy hook install command") }
+        hookCopyMessage?.let { message ->
+            Text(
+                message,
+                color = if (message.startsWith("Could not")) palette.danger else palette.positive,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+            )
+        }
         if (provider == "CODEX") {
             Spacer(Modifier.height(TowerSpacing.sm))
             Text(
