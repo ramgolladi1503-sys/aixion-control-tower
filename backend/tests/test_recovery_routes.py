@@ -185,6 +185,8 @@ def test_direct_recovery_export_fails_closed_when_postgres_repository_bundle_is_
         "read_snapshot",
         unexpected_snapshot_read,
     )
+    previous_runtime = getattr(app.state, "postgres_runtime", None)
+    previous_repositories = getattr(app.state, "postgres_repositories", None)
     app.state.postgres_runtime = None
     app.state.postgres_repositories = SimpleNamespace()
     request = Request({"type": "http", "app": app})
@@ -195,7 +197,10 @@ def test_direct_recovery_export_fails_closed_when_postgres_repository_bundle_is_
         assert raised.value.status_code == 503
         assert "authoritative recovery repository" in raised.value.detail
     finally:
+        app.state.postgres_runtime = previous_runtime
         app.state.postgres_repositories = None
+        if previous_repositories is not None:
+            app.state.postgres_repositories = previous_repositories
 
 
 def test_recovery_export_includes_durable_approval_missing_from_compatibility_cache() -> None:
