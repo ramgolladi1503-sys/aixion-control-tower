@@ -318,9 +318,9 @@ def test_connector_credentials_projects_exact_postgres_invocation_lease_liveness
         )
         conn.execute(
             "INSERT INTO approval_requests(approval_id,project_id,workspace_id,work_order_id,"
-            "source_agent_id,status,expires_at,created_at,updated_at,version,payload) "
-            "VALUES(%s,%s,%s,NULL,%s,%s,%s,%s,%s,0,%s)",
-            (approval.id, project.id, workspace.id, connector_id, approval.status.value,
+            "source_agent_id,source_invocation_id,status,expires_at,created_at,updated_at,version,payload) "
+            "VALUES(%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,0,%s)",
+            (approval.id, project.id, workspace.id, connector_id, invocation_id, approval.status.value,
              approval.expires_at, approval.created_at, approval.updated_at,
              Jsonb(approval.model_dump(mode="json"))),
         )
