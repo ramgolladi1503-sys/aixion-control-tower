@@ -12,6 +12,7 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 
 from .agent_run_models import (
+    DEFAULT_AGENT_RUN_STEPS,
     AgentRun,
     AgentRunEvent,
     AgentRunEventType,
@@ -21,7 +22,7 @@ from .agent_run_models import (
     AgentRunStepType,
 )
 from .agent_run_state_machine import can_transition_run, can_transition_step
-from .agent_task_models import AgentTask, AgentTaskStatus
+from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from .approval_integrity import compute_approval_payload_hash
 from .models import ApprovalRequest, ApprovalStatus, AuditEvent, Project
 from .postgres_trust_repository import PostgresTrustRepository
@@ -2555,20 +2556,49 @@ class PostgresAgentRunRepository:
             tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent],
         ],
     ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
-        """Read scope authority and atomically complete VALIDATE_SCOPE.
+        """Compatibility wrapper for the atomic VALIDATE_SCOPE transaction."""
+        def adapt_builder(task, approval, _task_events, run, steps):
+            return build_records(task, approval, run, steps)
+
+        return self.commit_authoritative_task_step(
+            expected_run=expected_run,
+            expected_steps=expected_steps,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            step_type=AgentRunStepType.VALIDATE_SCOPE,
+            build_records=adapt_builder,
+        )
+
+    def commit_authoritative_task_step(
+        self,
+        *,
+        expected_run: AgentRun,
+        expected_steps: list[AgentRunStep],
+        worker_id: str,
+        lease_token: str,
+        step_type: AgentRunStepType,
+        build_records: Callable[
+            [AgentTask, ApprovalRequest, list[AgentTaskEvent], AgentRun, list[AgentRunStep]],
+            tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent],
+        ],
+    ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+        """Read task authority/evidence and atomically complete a governed step.
 
         Lock order is approval -> task -> run -> steps, matching approval/task
-        transition writers. The callback must be pure: it only builds records
-        from the locked authority and durable run snapshot.
+        transition writers. VERIFY_RESULT also locks its event rows after the
+        task lock; the task row lock blocks repository event writers from
+        inserting phantom evidence while the result is computed. The callback
+        must be pure and must not perform I/O or side effects.
         """
         if (
-            not expected_run.workspace_id
+            step_type not in {AgentRunStepType.VALIDATE_SCOPE, AgentRunStepType.VERIFY_RESULT}
+            or not expected_run.workspace_id
             or not expected_run.approval_request_id
             or not expected_run.lease_token
             or expected_run.lease_owner != worker_id
             or expected_run.lease_token != lease_token
         ):
-            raise AgentRunRepositoryConflict("Scope validation lease identity is invalid")
+            raise AgentRunRepositoryConflict("Governed step lease identity is invalid")
 
         with self._connect() as conn:
             with conn.transaction():
@@ -2579,13 +2609,13 @@ class PostgresAgentRunRepository:
                 ).fetchone()
                 if approval_row is None:
                     raise AgentRunRepositoryNotFound(
-                        "Scope validation approval is not visible in this workspace"
+                        "Governed step approval is not visible in this workspace"
                     )
                 try:
                     approval = ApprovalRequest.model_validate(approval_row[0])
                 except Exception as error:
                     raise AgentRunRepositoryIntegrityError(
-                        "Stored scope validation approval payload is invalid"
+                        "Stored governed-step approval payload is invalid"
                     ) from error
                 if (
                     approval.id != approval_row[1]
@@ -2598,23 +2628,23 @@ class PostgresAgentRunRepository:
                     or int(approval_row[5]) < 0
                 ):
                     raise AgentRunRepositoryIntegrityError(
-                        "Scope validation approval identity or revision is inconsistent"
+                        "Governed-step approval identity or revision is inconsistent"
                     )
 
                 task_row = conn.execute(
                     "SELECT task_id,project_id,workspace_id,approval_request_id,status,updated_at,payload "
-                    "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR SHARE",
+                    "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR UPDATE",
                     (expected_run.task_id, expected_run.workspace_id),
                 ).fetchone()
                 if task_row is None:
                     raise AgentRunRepositoryNotFound(
-                        "Scope validation task is not visible in this workspace"
+                        "Governed-step task is not visible in this workspace"
                     )
                 try:
                     task = AgentTask.model_validate(task_row[6])
                 except Exception as error:
                     raise AgentRunRepositoryIntegrityError(
-                        "Stored scope validation task payload is invalid"
+                        "Stored governed-step task payload is invalid"
                     ) from error
                 if (
                     task.id != task_row[0]
@@ -2629,13 +2659,15 @@ class PostgresAgentRunRepository:
                     or task.approval_request_id != approval.id
                 ):
                     raise AgentRunRepositoryIntegrityError(
-                        "Scope validation task identity, revision, or approval link is inconsistent"
+                        "Governed-step task identity, revision, or approval link is inconsistent"
                     )
-                if task.status != AgentTaskStatus.APPROVED:
+                if (
+                    step_type == AgentRunStepType.VALIDATE_SCOPE
+                    and task.status != AgentTaskStatus.APPROVED
+                ):
                     raise AgentRunRepositoryConflict(
                         "Scope validation task is no longer approved"
                     )
-
                 durable_run, durable_steps = self.get_control_snapshot_in_transaction(
                     conn,
                     run_id=expected_run.id,
@@ -2643,13 +2675,13 @@ class PostgresAgentRunRepository:
                 )
                 if durable_run != expected_run:
                     raise AgentRunRepositoryConflict(
-                        "AgentRun revision changed before scope validation completion"
+                        "AgentRun revision changed before governed-step completion"
                     )
                 if {step.id: step for step in durable_steps} != {
                     step.id: step for step in expected_steps
                 }:
                     raise AgentRunRepositoryConflict(
-                        "AgentRun step revisions changed before scope validation completion"
+                        "AgentRun step revisions changed before governed-step completion"
                     )
                 checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
                 if (
@@ -2659,7 +2691,7 @@ class PostgresAgentRunRepository:
                     or durable_run.lease_expires_at <= checked_at
                 ):
                     raise AgentRunRepositoryConflict(
-                        "AgentRun lease is stale before scope validation completion"
+                        "AgentRun lease is stale before governed-step completion"
                     )
                 current_step = next(
                     (item for item in durable_steps if item.id == durable_run.current_step_id),
@@ -2667,15 +2699,62 @@ class PostgresAgentRunRepository:
                 )
                 if (
                     current_step is None
-                    or current_step.step_type != AgentRunStepType.VALIDATE_SCOPE
+                    or current_step.step_type != step_type
                     or current_step.status != AgentRunStepStatus.READY
                 ):
                     raise AgentRunRepositoryConflict(
-                        "VALIDATE_SCOPE step is no longer ready for completion"
+                        f"{step_type.value} step is no longer ready for completion"
+                    )
+                if step_type == AgentRunStepType.VERIFY_RESULT and (
+                    [item.step_type for item in durable_steps] != list(DEFAULT_AGENT_RUN_STEPS)
+                    or [item.sequence for item in durable_steps]
+                    != list(range(len(DEFAULT_AGENT_RUN_STEPS)))
+                    or any(
+                        item.sequence < current_step.sequence
+                        and item.status != AgentRunStepStatus.SUCCEEDED
+                        for item in durable_steps
+                    )
+                ):
+                    raise AgentRunRepositoryConflict(
+                        "VERIFY_RESULT requires the canonical plan with every prior step succeeded"
                     )
 
+                task_events: list[AgentTaskEvent] = []
+                if step_type == AgentRunStepType.VERIFY_RESULT:
+                    event_rows = conn.execute(
+                        "SELECT event_id,task_id,workspace_id,event_type,actor,created_at,payload "
+                        "FROM agent_task_events WHERE task_id=%s AND workspace_id=%s "
+                        "AND event_type IN (%s,%s,%s) ORDER BY created_at,event_id FOR SHARE",
+                        (
+                            task.id,
+                            task.workspace_id,
+                            AgentTaskEventType.PR_CREATED.value,
+                            AgentTaskEventType.TESTS_PASSED.value,
+                            AgentTaskEventType.TESTS_FAILED.value,
+                        ),
+                    ).fetchall()
+                    for event_row in event_rows:
+                        try:
+                            task_event = AgentTaskEvent.model_validate(event_row[6])
+                        except Exception as error:
+                            raise AgentRunRepositoryIntegrityError(
+                                "Stored task evidence event payload is invalid"
+                            ) from error
+                        if (
+                            task_event.id != event_row[0]
+                            or task_event.task_id != event_row[1]
+                            or event_row[2] != task.workspace_id
+                            or task_event.event_type.value != event_row[3]
+                            or task_event.actor != event_row[4]
+                            or task_event.created_at != event_row[5]
+                        ):
+                            raise AgentRunRepositoryIntegrityError(
+                                "Stored task evidence event identity or scope is inconsistent"
+                            )
+                        task_events.append(task_event)
+
                 updated_run, updated_steps, events, audit = build_records(
-                    task, approval, durable_run, durable_steps
+                    task, approval, task_events, durable_run, durable_steps
                 )
                 # Validate the generated completion using the existing shared
                 # state/identity contract, represented as its in-transaction
@@ -2727,7 +2806,7 @@ class PostgresAgentRunRepository:
                 )
                 if changed.rowcount != 1:
                     raise AgentRunRepositoryConflict(
-                        "AgentRun changed during scope validation completion"
+                        "AgentRun changed during governed-step completion"
                     )
                 updated_by_id = {item.id: item for item in updated_steps}
                 for durable_step in durable_steps:
@@ -2751,7 +2830,7 @@ class PostgresAgentRunRepository:
                     )
                     if changed.rowcount != 1:
                         raise AgentRunRepositoryConflict(
-                            "AgentRun step changed during scope validation completion"
+                            "AgentRun step changed during governed-step completion"
                         )
                 for event in events:
                     conn.execute(

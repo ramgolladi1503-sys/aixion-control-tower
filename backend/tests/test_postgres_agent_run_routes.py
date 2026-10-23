@@ -1192,6 +1192,230 @@ def test_postgres_agent_run_verifies_run_bound_durable_evidence_once(
         )
 
 
+def test_postgres_verify_result_serializes_concurrent_task_evidence_insert(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.agent_run_supervisor as supervisor
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    builder_entered = Event()
+    allow_completion = Event()
+    writer_started = Event()
+    writer_finished = Event()
+    original_builder = supervisor._build_postgres_agent_run_step_completion_records
+
+    def held_builder(**kwargs):
+        if kwargs["step_type"] == AgentRunStepType.VERIFY_RESULT:
+            builder_entered.set()
+            assert allow_completion.wait(timeout=10), "test did not release VERIFY_RESULT"
+        return original_builder(**kwargs)
+
+    monkeypatch.setattr(
+        supervisor,
+        "_build_postgres_agent_run_step_completion_records",
+        held_builder,
+    )
+    event = AgentTaskEvent(
+        task_id=task_id,
+        workspace_id=workspace.id,
+        event_type=AgentTaskEventType.TESTS_FAILED,
+        message="Concurrent evidence inserted after verification snapshot.",
+        status=AgentTaskStatus.READY_FOR_PR,
+        actor="concurrent-evidence-writer",
+        metadata={"results": [{"exit_code": 1}]},
+    )
+
+    def execute_verification():
+        return client.post(
+            f"/agent/runs/{run_id}/execute-next",
+            json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
+        )
+
+    def insert_concurrent_evidence() -> None:
+        writer_started.set()
+        with connect() as conn:
+            conn.execute(
+                "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    event.id,
+                    task_id,
+                    workspace.id,
+                    event.event_type.value,
+                    event.actor,
+                    event.created_at,
+                    Jsonb(event.model_dump(mode="json")),
+                ),
+            )
+        writer_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        completion = pool.submit(execute_verification)
+        assert builder_entered.wait(timeout=10), "VERIFY_RESULT did not reach its transaction builder"
+        writer = pool.submit(insert_concurrent_evidence)
+        assert writer_started.wait(timeout=10), "task evidence writer did not start"
+        assert not writer_finished.wait(timeout=0.25), (
+            "task evidence insert was not serialized behind the VERIFY_RESULT task lock"
+        )
+        allow_completion.set()
+        response = completion.result(timeout=10)
+        writer.result(timeout=10)
+
+    assert response.status_code == 200, response.text
+    verify_step = next(
+        item
+        for item in response.json()["steps"]
+        if item["step_type"] == AgentRunStepType.VERIFY_RESULT.value
+    )
+    assert verify_step["status"] == AgentRunStepStatus.SUCCEEDED.value
+    assert writer_finished.is_set()
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE event_id=%s",
+            (event.id,),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_verify_result_rejects_stale_lease_without_completion_mutation(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    repositories.agent_runs.acquire_lease(
+        run_id=run_id,
+        worker_id="verify-stale-lease-worker",
+        lease_seconds=120,
+        now=now_utc(),
+    )
+    before_run = repositories.agent_runs.get(run_id)
+    before_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    assert before_run is not None and before_run.lease_token is not None
+    stale_run = before_run.model_copy(deep=True)
+    stale_run.lease_expires_at = now_utc() - timedelta(seconds=1)
+    stale_run.updated_at = now_utc()
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET lease_expires_at=%s,updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (
+                stale_run.lease_expires_at,
+                stale_run.updated_at,
+                Jsonb(stale_run.model_dump(mode="json")),
+                run_id,
+                workspace.id,
+            ),
+        )
+    expected_stale_run = repositories.agent_runs.get(run_id)
+    assert expected_stale_run is not None
+    before_events = repositories.agent_runs.list_events_for_run(run_id)
+    builder_called = False
+
+    def forbidden_builder(*_args, **_kwargs):
+        nonlocal builder_called
+        builder_called = True
+        raise AssertionError("stale lease reached result builder")
+
+    with pytest.raises(AgentRunRepositoryConflict, match="lease is stale"):
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=expected_stale_run,
+            expected_steps=before_steps,
+            worker_id="verify-stale-lease-worker",
+            lease_token=expected_stale_run.lease_token or "",
+            step_type=AgentRunStepType.VERIFY_RESULT,
+            build_records=forbidden_builder,
+        )
+
+    assert not builder_called
+    assert repositories.agent_runs.get(run_id) == expected_stale_run
+    assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
+    assert repositories.agent_runs.list_events_for_run(run_id) == before_events
+
+
+def test_postgres_verify_result_rejects_stale_run_snapshot_without_completion_mutation(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id = _seed_postgres_verify_result_ready(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        repositories=repositories,
+        client=client,
+    )
+    repositories.agent_runs.acquire_lease(
+        run_id=run_id,
+        worker_id="verify-cas-worker",
+        lease_seconds=120,
+        now=now_utc(),
+    )
+    expected_run = repositories.agent_runs.get(run_id)
+    expected_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    before_events = repositories.agent_runs.list_events_for_run(run_id)
+    assert expected_run is not None and expected_run.lease_token is not None
+    changed_run = expected_run.model_copy(deep=True)
+    changed_run.updated_at = now_utc() + timedelta(seconds=1)
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET updated_at=%s,payload=%s WHERE run_id=%s AND workspace_id=%s",
+            (
+                changed_run.updated_at,
+                Jsonb(changed_run.model_dump(mode="json")),
+                run_id,
+                workspace.id,
+            ),
+        )
+    builder_called = False
+
+    def forbidden_builder(*_args, **_kwargs):
+        nonlocal builder_called
+        builder_called = True
+        raise AssertionError("stale run snapshot reached result builder")
+
+    with pytest.raises(AgentRunRepositoryConflict, match="revision changed"):
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=expected_run,
+            expected_steps=expected_steps,
+            worker_id="verify-cas-worker",
+            lease_token=expected_run.lease_token,
+            step_type=AgentRunStepType.VERIFY_RESULT,
+            build_records=forbidden_builder,
+        )
+
+    assert not builder_called
+    assert repositories.agent_runs.get(run_id) == changed_run
+    assert repositories.agent_runs.list_steps_for_run(run_id) == expected_steps
+    assert repositories.agent_runs.list_events_for_run(run_id) == before_events
+
+
 def test_postgres_agent_run_seals_durable_evidence_and_rejects_replay(
     postgres_agent_run_route_runtime,
 ) -> None:
@@ -1736,6 +1960,11 @@ def test_postgres_verify_result_rejects_task_snapshot_mutation(
 def test_postgres_agent_run_verify_result_rolls_back_completion_when_audit_fails(
     postgres_agent_run_route_runtime,
 ) -> None:
+    from app.agent_run_supervisor import (
+        _build_postgres_agent_run_step_completion_records,
+        _verify_postgres_agent_run_result,
+    )
+
     connect, workspace, _project, _other_workspace, _other_project, state = (
         postgres_agent_run_route_runtime
     )
@@ -1749,6 +1978,16 @@ def test_postgres_agent_run_verify_result_rolls_back_completion_when_audit_fails
         repositories=repositories,
         client=client,
     )
+    repositories.agent_runs.acquire_lease(
+        run_id=run_id,
+        worker_id="postgres-result-verifier",
+        lease_seconds=120,
+        now=now_utc(),
+    )
+    before_run = repositories.agent_runs.get(run_id)
+    before_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    before_events = repositories.agent_runs.list_events_for_run(run_id)
+    assert before_run is not None and before_run.lease_token is not None
     with connect() as conn:
         conn.execute(
             "CREATE FUNCTION reject_verify_result_audit() RETURNS trigger "
@@ -1762,21 +2001,41 @@ def test_postgres_agent_run_verify_result_rolls_back_completion_when_audit_fails
             "FOR EACH ROW EXECUTE FUNCTION reject_verify_result_audit()"
         )
 
-    response = client.post(
-        f"/agent/runs/{run_id}/execute-next",
-        json={"worker_id": "postgres-result-verifier", "timeout_seconds": 10},
-    )
+    def build_records(task, approval, task_events, durable_run, durable_steps):
+        result = _verify_postgres_agent_run_result(
+            run=durable_run,
+            task=task,
+            approval=approval,
+            events=task_events,
+            task_repository=repositories.agent_tasks,
+            approval_repository=repositories.approval_decisions,
+        )
+        return _build_postgres_agent_run_step_completion_records(
+            run=durable_run,
+            steps=durable_steps,
+            step_type=AgentRunStepType.VERIFY_RESULT,
+            result=result,
+            worker_id="postgres-result-verifier",
+            lease_token=durable_run.lease_token or "",
+        )
 
-    assert response.status_code == 409
-    assert "completion could not be committed" in response.json()["detail"]
-    durable_run = repositories.agent_runs.get(run_id)
-    assert durable_run is not None and durable_run.lease_token is not None
+    with pytest.raises(psycopg.Error, match="injected verify result audit failure"):
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=before_run,
+            expected_steps=before_steps,
+            worker_id="postgres-result-verifier",
+            lease_token=before_run.lease_token,
+            step_type=AgentRunStepType.VERIFY_RESULT,
+            build_records=build_records,
+        )
+
+    assert repositories.agent_runs.get(run_id) == before_run
+    assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
+    assert repositories.agent_runs.list_events_for_run(run_id) == before_events
     verify_step = next(
-        step
-        for step in repositories.agent_runs.list_steps_for_run(run_id)
-        if step.step_type == AgentRunStepType.VERIFY_RESULT
+        step for step in before_steps if step.step_type == AgentRunStepType.VERIFY_RESULT
     )
-    assert verify_step.status == AgentRunStepStatus.RUNNING
+    assert verify_step.status == AgentRunStepStatus.READY
     with connect() as conn:
         assert (
             conn.execute(

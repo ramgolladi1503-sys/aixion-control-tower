@@ -550,13 +550,33 @@ def _build_postgres_scope_validation_records(
     worker_id: str,
     lease_token: str,
 ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
-    """Build the scope-only completion records without touching process state."""
+    """Build scope validation output, then use the shared pure completion builder."""
+    return _build_postgres_agent_run_step_completion_records(
+        run=run,
+        steps=steps,
+        step_type=AgentRunStepType.VALIDATE_SCOPE,
+        result=validate_scope_contract(task, approval),
+        worker_id=worker_id,
+        lease_token=lease_token,
+    )
+
+
+def _build_postgres_agent_run_step_completion_records(
+    *,
+    run: AgentRun,
+    steps: list[AgentRunStep],
+    step_type: AgentRunStepType,
+    result: AgentRunStepExecutionResult,
+    worker_id: str,
+    lease_token: str,
+) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+    """Build governed-step completion records without touching process state."""
     updated_run = run.model_copy(deep=True)
     updated_steps = [item.model_copy(deep=True) for item in steps]
     current = next((item for item in updated_steps if item.id == run.current_step_id), None)
     if (
         current is None
-        or current.step_type != AgentRunStepType.VALIDATE_SCOPE
+        or current.step_type != step_type
         or current.status != AgentRunStepStatus.READY
         or run.lease_owner != worker_id
         or run.lease_token != lease_token
@@ -629,7 +649,6 @@ def _build_postgres_scope_validation_records(
         metadata={"idempotency_key": current.idempotency_key},
     )
 
-    result = validate_scope_contract(task, approval)
     current.decision = result.decision
     current.reason = result.reason
     current.evidence = result.evidence
@@ -1067,6 +1086,87 @@ def execute_next_step(
         return AgentRunStepExecutionResult(
             success=completed_step.status == AgentRunStepStatus.SUCCEEDED,
             decision=completed_step.decision or VerificationDecision.BLOCK_POLICY,
+            reason=completed_step.reason,
+            evidence=completed_step.evidence,
+            output_reference=completed_step.output_reference,
+        )
+
+    if (
+        postgres_repository_execution
+        and step.step_type == AgentRunStepType.VERIFY_RESULT
+        and isinstance(task_repository, PostgresAgentTaskRepository)
+        and isinstance(approval_repository, PostgresApprovalDecisionRepository)
+    ):
+        durable_run = active_run_repository.get(run.id)
+        durable_steps = active_run_repository.list_steps_for_run(run.id)
+        if durable_run is None:
+            release_run_lease(
+                run,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                run_repository=active_run_repository,
+            )
+            raise AgentRunConflict("AgentRun disappeared before result verification.")
+
+        def build_result_records(
+            task: AgentTask,
+            approval: ApprovalRequest,
+            task_events: list[AgentTaskEvent],
+            locked_run: AgentRun,
+            locked_steps: list[AgentRunStep],
+        ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+            if locked_run != durable_run or locked_steps != durable_steps:
+                raise AgentRunRepositoryConflict(
+                    "AgentRun changed while preparing result verification."
+                )
+            result = _verify_postgres_agent_run_result(
+                run=locked_run,
+                task=task,
+                approval=approval,
+                events=task_events,
+                task_repository=task_repository,
+                approval_repository=approval_repository,
+            )
+            return _build_postgres_agent_run_step_completion_records(
+                run=locked_run,
+                steps=locked_steps,
+                step_type=AgentRunStepType.VERIFY_RESULT,
+                result=result,
+                worker_id=worker_id,
+                lease_token=lease_token,
+            )
+
+        try:
+            updated_run, updated_steps, events, audit = (
+                active_run_repository.commit_authoritative_task_step(
+                    expected_run=durable_run,
+                    expected_steps=durable_steps,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    step_type=AgentRunStepType.VERIFY_RESULT,
+                    build_records=build_result_records,
+                )
+            )
+        except Exception as error:
+            release_run_lease(
+                run,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                run_repository=active_run_repository,
+            )
+            raise AgentRunConflict(
+                "PostgreSQL result verification could not be committed."
+            ) from error
+        store.project_agent_run_control_transition(
+            updated_run,
+            updated_steps,
+            events,
+            [audit],
+        )
+        completed_step = next(item for item in updated_steps if item.id == step.id)
+        return AgentRunStepExecutionResult(
+            success=completed_step.status == AgentRunStepStatus.SUCCEEDED,
+            decision=completed_step.decision or VerificationDecision.FAIL_PERMANENT,
             reason=completed_step.reason,
             evidence=completed_step.evidence,
             output_reference=completed_step.output_reference,
