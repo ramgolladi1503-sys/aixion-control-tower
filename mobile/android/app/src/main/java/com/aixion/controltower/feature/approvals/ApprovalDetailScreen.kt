@@ -229,17 +229,6 @@ fun ApprovalDetailContent(
                 .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
         ) {
-            item {
-                ApprovalHeroPanel(
-                    approval = approval,
-                    canApprove = canApprove,
-                    canDecide = canDecide,
-                    isBlocked = isBlocked,
-                    hasUnsupportedData = hasUnsupportedData,
-                    hasRequiredActions = hasRequiredActions
-                )
-            }
-
             if (hasExactToolRequest) {
                 item {
                     ExactToolRequestHeader()
@@ -251,6 +240,17 @@ fun ApprovalDetailContent(
                         onCheckedChange = { exactToolRequestReviewed = it }
                     )
                 }
+            }
+
+            item {
+                ApprovalHeroPanel(
+                    approval = approval,
+                    canApprove = canApprove,
+                    canDecide = canDecide,
+                    isBlocked = isBlocked,
+                    hasUnsupportedData = hasUnsupportedData,
+                    hasRequiredActions = hasRequiredActions
+                )
             }
 
             if (lastActionMessage != null && lastActionApprovalId == approval.id) {

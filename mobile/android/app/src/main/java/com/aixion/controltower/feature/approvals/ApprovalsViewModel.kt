@@ -555,19 +555,17 @@ class ApprovalsViewModel internal constructor(
             ""
         }
         val history = retainDecisionInHistory(_state.value.approvals, updated)
-        val otherApprovals = history.filterNot { it.id == updated.id }
-        val nextSelection = otherApprovals.firstOrNull {
-            it.status == com.aixion.controltower.core.model.ApprovalStatus.REQUESTED ||
-                it.status == com.aixion.controltower.core.model.ApprovalStatus.PENDING_REVIEW
-        } ?: otherApprovals.firstOrNull() ?: updated
         _state.value = _state.value.copy(
             decisionInFlight = false,
             decisionNeedsReconciliation = false,
             decisionBeingReconciled = null,
             approvals = history,
-            selectedApproval = nextSelection,
+            // Keep the just-decided request visible on the detail screen. Auto-selecting
+            // another history row here can make an unrelated terminal decision look like
+            // the result of this approval (for example, showing DENIED after an APPROVED).
+            selectedApproval = updated,
             openingApprovalId = null,
-            detailTargetApprovalId = null,
+            detailTargetApprovalId = updated.id,
             lastActionMessage = if (reconciled) {
                 "Server confirms the $decision decision was recorded. The response was lost, so status was reconciled.$resolveMessage"
             } else {

@@ -166,6 +166,85 @@ def test_main_denies_nonstandard_json_numbers(
     }
 
 
+@pytest.mark.parametrize("outcome", ["approved", "revoked", "stale_payload"])
+def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    outcome: str,
+) -> None:
+    """Exercise stdin -> main -> run -> protocol, without replacing run()."""
+    event = _codex_event()
+    # Include nested, nontrivial arguments so the test verifies that the
+    # approval record carries the exact tool payload used for this invocation.
+    event["tool_input"] = {
+        "command": "printf '%s\\n' 'same invocation'",
+        "workdir": "/tmp/codex-project",
+        "metadata": {"mode": "review", "attempt": 1},
+    }
+    monkeypatch.setattr(
+        hook.sys,
+        "stdin",
+        SimpleNamespace(buffer=io.BytesIO(json.dumps(event).encode("utf-8"))),
+    )
+    for key, value in _codex_environment().items():
+        monkeypatch.setenv(key, value)
+
+    calls: list[tuple[str, str, dict | None]] = []
+    created: dict = {}
+
+    def request(
+        method: str,
+        url: str,
+        _config: dict,
+        _token: str,
+        body: dict | None = None,
+        **_kwargs: object,
+    ) -> dict:
+        calls.append((method, url, body))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_codex_approval(body))
+            # The phone sees the canonical JSON encoding of these exact tool
+            # arguments, and the same source invocation identity follows them.
+            assert created["files"][0]["diff"] == json.dumps(
+                event["tool_input"], sort_keys=True, separators=(",", ":")
+            )
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            if outcome == "revoked":
+                raise hook.GateError("HTTP 401: token revoked")
+            if outcome == "stale_payload":
+                changed = {**created, "status": "PENDING_REVIEW"}
+                changed["summary"] = "different invocation payload"
+                return changed
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._hash(approved)
+            return approved
+        if method == "POST" and url.endswith("/consume"):
+            return {"consumed": True}
+        raise AssertionError(f"Unexpected protocol call: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+
+    assert hook.main([]) == 0
+
+    captured = capsys.readouterr()
+    decision = json.loads(captured.out)["hookSpecificOutput"]["decision"]
+    if outcome == "approved":
+        assert decision == {"behavior": "allow"}
+        assert [method for method, _url, _body in calls] == ["POST", "GET", "POST"]
+        assert calls[-1][1] == (
+            f"{_codex_environment()['AIXION_API_BASE_URL']}"
+            f"/agents/approvals/{created['id']}/consume"
+        )
+        assert created["source_invocation_id"].startswith("codex:v1:")
+    else:
+        assert decision["behavior"] == "deny"
+        assert [method for method, _url, _body in calls] == ["POST", "GET"]
+        assert not any(url.endswith("/consume") for _method, url, _body in calls)
+    assert captured.out.endswith("\n")
+
+
 def test_invocation_identity_is_stable_when_codex_provides_tool_use_id() -> None:
     event = {"session_id": "session-1", "turn_id": "turn-2", "tool_use_id": "call-3"}
 

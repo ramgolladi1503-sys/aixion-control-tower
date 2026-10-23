@@ -187,6 +187,15 @@ def test_postgres_notification_routes_use_scoped_repository_without_sqlite_proje
         assert connection.execute(
             "SELECT 1 FROM device_registrations WHERE device_id=%s", (device_id,)
         ).fetchone() is None
+        device_events = connection.execute(
+            "SELECT event_type FROM audit_events WHERE entity_type='device_registration' "
+            "AND entity_id=%s ORDER BY created_at,event_id",
+            (device_id,),
+        ).fetchall()
+        assert [row[0] for row in device_events] == [
+            "notification.device_registered",
+            "notification.device_unregistered",
+        ]
 
     assert set(store.notifications) == before_notifications
     assert set(store.device_registrations) == before_devices
@@ -244,6 +253,51 @@ def test_notification_routes_fail_closed_without_postgres_repository_when_auth_u
     assert set(store.notifications) == before_notifications
     assert set(store.device_registrations) == before_devices
     assert {event.id for event in store.audit_events} == before_audits
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "kwargs"),
+    [
+        (
+            "post",
+            "/notifications/devices",
+            {"json": {"token": f"fcm-token-{uuid.uuid4().hex}"}},
+        ),
+        ("delete", f"/notifications/devices/device_{uuid.uuid4().hex}", {}),
+    ],
+)
+def test_postgres_device_mutations_fail_closed_without_runtime_bundle(
+    method: str,
+    path: str,
+    kwargs: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = AuthUser(
+        id=f"user_{uuid.uuid4().hex}",
+        email="postgres-auth@example.test",
+        display_name="PostgreSQL auth user",
+        role=UserRole.OWNER,
+        workspace_id=f"workspace_{uuid.uuid4().hex}",
+    )
+    monkeypatch.setattr(
+        notifications,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(main.app.state, "postgres_runtime", None, raising=False)
+    monkeypatch.setattr(main.app.state, "postgres_repositories", None, raising=False)
+    monkeypatch.setattr(main.app.state, "notification_outbox_repository", None, raising=False)
+    monkeypatch.setitem(main.app.dependency_overrides, AuthDependency.dependency, lambda: user)
+    before_devices = set(store.device_registrations)
+    before_audits = {event.id for event in store.audit_events}
+
+    response = getattr(TestClient(main.app), method)(path, **kwargs)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "PostgreSQL notification runtime is unavailable"
+    assert set(store.device_registrations) == before_devices
+    assert {event.id for event in store.audit_events} == before_audits
+    main.app.dependency_overrides.pop(AuthDependency.dependency, None)
 
 
 def test_notification_route_rejects_repository_from_another_runtime(

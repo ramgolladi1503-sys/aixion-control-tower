@@ -229,6 +229,86 @@ def test_run_denial_never_consumes_or_allows_the_invocation(
     assert not any(url.endswith("/consume") for _method, url in calls)
 
 
+def test_revoked_connector_credentials_during_decision_poll_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A 401 after creation must become a provider deny, never a claim."""
+    created: dict = {}
+    calls: list[str] = []
+    payload = json.dumps(_hook_payload()).encode()
+    monkeypatch.setattr(hook.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(payload)))
+    for key, value in _test_environment().items():
+        monkeypatch.setenv(key, value)
+
+    def request(method: str, url: str, _agent_id: str, _token: str,
+                body: dict | None = None, **_kwargs: object) -> dict:
+        calls.append(url.rsplit("/", 1)[-1])
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            raise hook.GateError("HTTP 401")
+        raise AssertionError(f"Revoked connector must not continue: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+
+    assert hook.main([]) == 0
+
+    output = capsys.readouterr()
+    decision = json.loads(output.out)
+    assert decision["decision"] == "deny"
+    assert "GateError" in decision["reason"]
+    assert calls == ["approvals", "decision"]
+    assert "consume" not in calls
+
+
+def test_new_provider_session_cannot_reuse_previous_session_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restarted provider session gets a distinct invocation identity."""
+    calls: list[tuple[str, str, dict | None]] = []
+    previous_approval: dict | None = None
+
+    def request(method: str, url: str, _agent_id: str, _token: str,
+                body: dict | None = None, **_kwargs: object) -> dict:
+        nonlocal previous_approval
+        endpoint = url.rsplit("/", 1)[-1]
+        calls.append((method, endpoint, body))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            if body is None:
+                raise AssertionError("Create request must include its invocation")
+            if previous_approval is None:
+                previous_approval = _approval_from_request(body)
+                return dict(previous_approval)
+            # Simulate a stale response/cache returning the prior session's row.
+            return {**previous_approval, "status": "PENDING_REVIEW"}
+        if method == "GET" and url.endswith("/decision"):
+            assert previous_approval is not None
+            return {**previous_approval, "status": "DENIED"}
+        raise AssertionError(f"Stale approval must not advance: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    first = _hook_payload()
+    second = _hook_payload()
+    second["conversationId"] = "conversation-after-restart"
+
+    first_result = hook.run(first, _test_environment())
+    second_result = hook.run(second, _test_environment())
+
+    create_bodies = [body for method, endpoint, body in calls if method == "POST" and endpoint == "approvals"]
+    assert len(create_bodies) == 2
+    assert create_bodies[0] is not None and create_bodies[1] is not None
+    assert create_bodies[0]["source_invocation_id"] != create_bodies[1]["source_invocation_id"]
+    assert first_result["decision"] == "deny"
+    assert second_result == {
+        "decision": "deny",
+        "reason": "Control Tower approval does not match the original tool invocation",
+    }
+    assert not any(method == "POST" and endpoint == "consume" for method, endpoint, _body in calls)
+
+
 def test_run_denies_if_mobile_approval_payload_changes_after_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

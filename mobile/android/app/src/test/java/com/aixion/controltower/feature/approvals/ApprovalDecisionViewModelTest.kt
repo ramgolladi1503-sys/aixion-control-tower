@@ -97,6 +97,36 @@ class ApprovalDecisionViewModelTest {
     }
 
     @Test
+    fun successfulDecisionKeepsTheDecidedApprovalSelectedWhenOtherHistoryExists() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val otherId = "approval-prior-denied"
+            val api = RecordingApprovalApi().apply {
+                listResult = {
+                    listOf(
+                        approvalDto(otherId, "DENIED"),
+                        approvalDto(REQUEST_ID, "REQUESTED")
+                    )
+                }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+
+            assertEquals(1, api.decisionCalls)
+            assertEquals(REQUEST_ID, viewModel.state.value.selectedApproval?.id)
+            assertEquals(ApprovalStatus.APPROVED, viewModel.state.value.selectedApproval?.status)
+            assertEquals(ApprovalStatus.DENIED, viewModel.state.value.approvals.first { it.id == otherId }.status)
+            assertEquals(REQUEST_ID, viewModel.state.value.detailTargetApprovalId)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
     fun changedApprovalSnapshotIsUpdatedAndDecisionIsNotSent() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
