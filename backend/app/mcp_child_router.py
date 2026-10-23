@@ -7,6 +7,8 @@ from urllib.request import Request, urlopen
 from .child_mcp_test_server import ChildMCPTestServer, ChildMCPToolCall
 from .models import MCPChildServer
 from .store import store
+from .settings import get_settings
+from .application_repository_access import mcp_child_server_repository_for_request
 
 
 class MCPChildServerRouter:
@@ -20,8 +22,32 @@ class MCPChildServerRouter:
         self.default_test_server = ChildMCPTestServer()
         self.test_servers_by_name: dict[str, ChildMCPTestServer] = {}
 
-    def call_tool(self, call: ChildMCPToolCall) -> dict:
-        server = self._find_registered_server(call.server_name)
+    def call_tool(
+        self,
+        call: ChildMCPToolCall,
+        *,
+        request=None,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
+    ) -> dict:
+        if request is not None or get_settings().postgres_auth_enabled:
+            server = self._find_app_registered_server(
+                call.server_name,
+                request=request,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+            if server is None:
+                return {
+                    "ok": False,
+                    "server_name": call.server_name,
+                    "tool_name": call.tool_name,
+                    "error": "MCP child server is unavailable in the selected application repository.",
+                }
+        else:
+            # Compatibility path for isolated SQLite demos/tests that do not
+            # provide a FastAPI request context.
+            server = self._find_registered_server(call.server_name)
         if server is None:
             return self.default_test_server.call_tool(call)
         if server.transport == "test":
@@ -62,6 +88,43 @@ class MCPChildServerRouter:
             ),
             None,
         )
+
+    @staticmethod
+    def _find_app_registered_server(
+        server_name: str,
+        *,
+        request,
+        workspace_id: str | None,
+        project_id: str | None,
+    ) -> MCPChildServer | None:
+        """Resolve a server only from the repository bound to this app runtime.
+
+        PostgreSQL routing must never fall back to the process-local store. Both
+        workspace and project are mandatory so a same-name server in another
+        tenant or project cannot be selected.
+        """
+        if request is None or not workspace_id or not project_id:
+            return None
+        try:
+            repository = mcp_child_server_repository_for_request(request)
+            matches = repository.list_for_workspace(
+                workspace_id,
+                project_id=project_id,
+                enabled=True,
+            )
+        except Exception:
+            # Repository/runtime failures are fail-closed; callers receive no
+            # server and therefore cannot dispatch a tool call.
+            return None
+        exact = [
+            server
+            for server in matches
+            if server.name == server_name
+            and server.workspace_id == workspace_id
+            and server.project_id == project_id
+            and server.enabled
+        ]
+        return exact[0] if len(exact) == 1 else None
 
     def _call_test_server(self, server: MCPChildServer, call: ChildMCPToolCall) -> dict:
         test_server = self.test_servers_by_name.setdefault(server.name, ChildMCPTestServer())
