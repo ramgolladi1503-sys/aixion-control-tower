@@ -81,6 +81,43 @@ tool arguments are written to logs.
      --project-id "project_..."
    ```
 
+   For an isolated host-side hook simulation, create a disposable workspace
+   and a dedicated metadata home. This avoids writing any Aixion config under
+   the user's real home; the hook itself remains inside the disposable
+   workspace. Use the current checkout path and IDs returned by the app's
+   connector registration:
+
+   ```sh
+   E2E_ROOT="${TMPDIR:-/tmp}/aixion-antigravity-e2e"
+   : "${AIXION_E2E_API_URL:?Set this to one verified disposable local API URL}"
+   mkdir -m 700 -p "$E2E_ROOT/workspace" "$E2E_ROOT/config-home"
+   python3 /ABSOLUTE/PATH/integrations/antigravity/setup_workspace.py \
+     --workspace "$E2E_ROOT/workspace" \
+     --config-home "$E2E_ROOT/config-home" \
+     --api-base-url "$AIXION_E2E_API_URL" \
+     --agent-id "agent_..." \
+     --project-id "project_..."
+   ```
+
+   A loopback URL such as `http://127.0.0.1:<verified-port>` is only for
+   host-side simulation: `127.0.0.1` on the phone refers to the phone itself.
+   It cannot support phone approval. Do not use port 8002 on the current
+   workstation until its competing listeners have been resolved and the single
+   intended disposable database has been verified. Do not use `--config-home`
+   with the user's normal home, reuse the blocked disk-cleanup workspace, or
+   install a global Antigravity hook. Open the exact `$E2E_ROOT/workspace`
+   folder as a separate Antigravity project. If Antigravity reports a missing
+   folder, stop and select this exact directory; do not repair or repoint
+   another project.
+
+   A phone-reachable approval run requires one separately verified disposable
+   API instance reachable from both the Mac and phone. Use an HTTPS URL accepted
+   by the hook, bind and firewall the service deliberately, and configure the
+   Android build to use that same API and database. Do not substitute a
+   loopback URL in the Android build, mix different API instances, or start a
+   second service on port 8002. A passing host-side simulation is not evidence
+   of a phone approval or same-invocation Antigravity resume.
+
    Remote URLs must use HTTPS. Loopback HTTP is allowed only for local
    development. The generated matcher covers every tool; only the script's
    explicit read-only allowlist passes without phone approval.
@@ -105,6 +142,15 @@ To roll back, run `setup_workspace.py --workspace "/absolute/path/to/project"
 --remove`. It removes only this installer's hook entry and associated non-secret
 config, preserving unrelated hooks. Revoke the agent token from the phone if it
 is no longer needed.
+
+For the isolated E2E workspace, remove using the same explicit config home:
+
+```sh
+python3 /ABSOLUTE/PATH/integrations/antigravity/setup_workspace.py \
+  --workspace "$E2E_ROOT/workspace" \
+  --config-home "$E2E_ROOT/config-home" \
+  --remove
+```
 
 The generated Antigravity hook timeout is 960 seconds (15 minute maximum wait
 plus request margin).

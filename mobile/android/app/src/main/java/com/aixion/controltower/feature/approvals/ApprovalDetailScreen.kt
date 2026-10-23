@@ -63,6 +63,7 @@ import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
+import com.aixion.controltower.core.ui.components.formatApprovalExpiry
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
@@ -644,7 +645,7 @@ private fun ApprovalHeroPanel(
             DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
             DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
             DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
-            DecisionContextLine("Expires", approval.expiresAt?.ifBlank { null } ?: "Not provided")
+            DecisionContextLine("Expires", formatApprovalExpiry(approval.expiresAt))
         }
     }
 }

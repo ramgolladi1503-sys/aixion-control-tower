@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -84,3 +86,42 @@ def test_remove_deletes_only_exact_managed_hook_and_config(
 
     assert _read_hooks(hooks_path) == {"OtherProvider": {"enabled": True}}
     assert not config_path.exists()
+
+
+def test_cli_config_home_keeps_workspace_metadata_out_of_real_home(tmp_path: Path) -> None:
+    workspace = tmp_path / "isolated-workspace"
+    workspace.mkdir()
+    isolated_home = tmp_path / "isolated-config-home"
+    hook_script = Path(__file__).with_name("aixion_pre_tool_hook.py").resolve()
+    command = [
+        sys.executable,
+        str(SETUP_PATH),
+        "--workspace", str(workspace),
+        "--api-base-url", "http://127.0.0.1:8002",
+        "--agent-id", "agent_test",
+        "--project-id", "project_test",
+        "--config-home", str(isolated_home),
+    ]
+
+    installed = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    assert installed.returncode == 0, installed.stderr
+    assert (workspace / ".agents" / "hooks.json").is_file()
+    metadata_dir = isolated_home / ".config" / "aixion" / "workspaces"
+    configs = list(metadata_dir.glob("*.json"))
+    assert len(configs) == 1
+    hook_data = json.loads((workspace / ".agents" / "hooks.json").read_text())
+    managed_command = hook_data[setup.HOOK_NAME]["PreToolUse"][0]["hooks"][0]["command"]
+    assert str(configs[0]) in managed_command
+    assert str(hook_script) in managed_command
+
+    removed = subprocess.run(
+        [sys.executable, str(SETUP_PATH), "--workspace", str(workspace), "--config-home", str(isolated_home), "--remove"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert removed.returncode == 0, removed.stderr
+    assert not (workspace / ".agents" / "hooks.json").exists()
+    assert not configs[0].exists()

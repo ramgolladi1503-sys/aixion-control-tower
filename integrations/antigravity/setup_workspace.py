@@ -315,19 +315,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-base-url", help="HTTPS API URL (loopback HTTP only for development)")
     parser.add_argument("--agent-id", help="External Antigravity agent ID")
     parser.add_argument("--project-id", help="The single allowed project ID")
+    parser.add_argument(
+        "--config-home",
+        type=Path,
+        help=(
+            "Optional home directory for Aixion's non-secret workspace metadata. "
+            "Use a dedicated directory for isolated E2E runs; the default is the current user's home."
+        ),
+    )
     parser.add_argument("--remove", action="store_true", help="Remove this installer's workspace hook and metadata")
     args = parser.parse_args(argv)
     try:
         if args.remove:
             if any((args.api_base_url, args.agent_id, args.project_id)):
                 raise SetupError("Do not combine --remove with install options")
-            removed_hook, removed_config = remove_workspace(args.workspace)
+            removed_hook, removed_config = remove_workspace(args.workspace, home=args.config_home)
             print(f"Removed workspace hook={removed_hook}; removed non-secret config={removed_config}")
             return 0
         if not all((args.api_base_url, args.agent_id, args.project_id)):
             raise SetupError("Install requires --api-base-url, --agent-id, and --project-id")
         config, hooks = install_workspace(
-            args.workspace, api_base_url=args.api_base_url, agent_id=args.agent_id, project_id=args.project_id
+            args.workspace,
+            api_base_url=args.api_base_url,
+            agent_id=args.agent_id,
+            project_id=args.project_id,
+            home=args.config_home,
         )
         print(f"Installed workspace-scoped hook: {hooks}")
         print(f"Non-secret config: {config}")

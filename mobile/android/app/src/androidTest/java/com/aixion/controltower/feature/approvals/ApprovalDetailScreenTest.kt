@@ -27,6 +27,7 @@ import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
+import com.aixion.controltower.core.ui.components.formatApprovalExpiry
 import java.time.Instant
 import org.junit.Rule
 import org.junit.Assert.assertEquals
@@ -36,6 +37,23 @@ import org.junit.Test
 class ApprovalDetailScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun expiryInRequestSummaryUsesReadableLocalTimeInsteadOfRawTimestamp() {
+        val expiresAt = "2026-10-24T12:30:00Z"
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval(ApprovalStatus.EXPIRED).copy(expiresAt = expiresAt),
+                null,
+                {},
+                {},
+                {}
+            )
+        }
+
+        composeRule.onNodeWithText(formatApprovalExpiry(expiresAt)).assertExists()
+        composeRule.onNodeWithText(expiresAt).assertDoesNotExist()
+    }
 
     @Test
     fun unknownApprovalStatusDisablesEveryDecision() {
