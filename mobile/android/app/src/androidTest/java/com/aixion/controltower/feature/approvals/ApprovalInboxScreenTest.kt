@@ -115,7 +115,8 @@ class ApprovalInboxScreenTest {
 
         composeRule.onAllNodesWithText("Approvals").assertCountEquals(0)
         composeRule.onNodeWithText("Review pending requests and see the decisions recorded for each one.").assertExists()
-        composeRule.onNodeWithText("Needs review 2").assertExists()
+        composeRule.onNodeWithText("2 pending").assertExists()
+        composeRule.onAllNodesWithText("Needs review 2").assertCountEquals(0)
         composeRule.onNodeWithText("Status blocked 1").assertExists()
         composeRule.onNodeWithText("Pending approval").assertExists()
         composeRule.onNodeWithText("Blocked approval").assertExists()
@@ -200,6 +201,8 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onNodeWithText("Refreshing approval").assertExists()
+        composeRule.onNodeWithText("Refreshing. Requests are read-only until sync completes.").assertExists()
+        composeRule.onNodeWithText("1 pending").assertExists()
         composeRule.onAllNodesWithText("Review request").assertCountEquals(0)
     }
 
@@ -253,7 +256,8 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onNodeWithText("Loading approval decisions...").assertExists()
-        composeRule.onNodeWithText("Needs review 0").assertExists()
+        composeRule.onAllNodesWithText("0 pending").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Needs review 0").assertCountEquals(0)
     }
 
     @Test
@@ -276,6 +280,8 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithText("Backend unavailable: connection refused").assertCountEquals(1)
         composeRule.onAllNodesWithText("Demo approvals are never shown.").assertCountEquals(1)
         composeRule.onAllNodesWithText("Retry approvals").assertCountEquals(1)
+        composeRule.onNodeWithText("Approval sync unavailable.").assertExists()
+        composeRule.onAllNodesWithText("1 pending").assertCountEquals(0)
         composeRule.onAllNodesWithText("No fallback approvals loaded").assertCountEquals(0)
         composeRule.onAllNodesWithText("Must not be shown").assertCountEquals(0)
 
@@ -305,7 +311,9 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onAllNodesWithText("Status blocked 0").assertCountEquals(0)
-        composeRule.onNodeWithText("Needs review 0").assertExists()
+        composeRule.onAllNodesWithText("0 pending").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Needs review 0").assertCountEquals(0)
+        composeRule.onNodeWithText("No requests need review").assertExists()
     }
 
     @Test

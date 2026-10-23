@@ -236,12 +236,18 @@ fun ApprovalInboxContent(
             }
         }
 
-        if (!state.hasError && selectedSection == ApprovalInboxSection.NEEDS_REVIEW) item {
+        if (
+            !state.hasError &&
+            selectedSection == ApprovalInboxSection.NEEDS_REVIEW &&
+            (pendingCount > 0 || blocked.isNotEmpty())
+        ) item {
             FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
                 verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
             ) {
-                StatusBadge("Needs review $pendingCount", palette.caution, fontSize = 14.sp, uppercase = false)
+                if (pendingCount > 0) {
+                    StatusBadge("$pendingCount pending", palette.caution, fontSize = 14.sp, uppercase = false)
+                }
                 if (blocked.isNotEmpty()) {
                     StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = 14.sp, uppercase = false)
                 }
