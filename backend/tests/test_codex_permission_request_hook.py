@@ -302,7 +302,7 @@ def _event(args: object | None = None) -> dict:
 def _record(body: dict, *, status: str = "PENDING_REVIEW") -> dict:
     return {
         **body,
-        "id": "approval-codex-test",
+        "id": "approval_0123456789ab",
         "status": status,
         "source_provider": "CODEX",
         "source_agent_id": ENV["AIXION_AGENT_ID"],
@@ -343,8 +343,8 @@ def test_phone_approval_allows_exact_codex_permission_request(monkeypatch) -> No
     monkeypatch.setattr(hook, "_request", request)
     assert hook.run(_event(), ENV) == ("allow", "Approved from Aixion Control Tower")
     assert calls[0] == ("POST", "http://127.0.0.1:8012/agents/approvals")
-    assert calls[1] == ("GET", "http://127.0.0.1:8012/agents/approvals/approval-codex-test/decision")
-    assert calls[2] == ("POST", "http://127.0.0.1:8012/agents/approvals/approval-codex-test/consume")
+    assert calls[1] == ("GET", "http://127.0.0.1:8012/agents/approvals/approval_0123456789ab/decision")
+    assert calls[2] == ("POST", "http://127.0.0.1:8012/agents/approvals/approval_0123456789ab/consume")
 
 
 def test_ambiguous_decision_poll_reconnects_and_resumes_same_request(monkeypatch) -> None:
@@ -390,7 +390,7 @@ def test_repeated_ambiguous_decision_polls_expire_and_deny(monkeypatch) -> None:
             raise hook.AmbiguousRequestError("temporary network loss")
         if url.endswith("/expire"):
             return {
-                "id": "approval-codex-test",
+                "id": "approval_0123456789ab",
                 "project_id": ENV["AIXION_PROJECT_ID"],
                 "source_provider": "CODEX",
                 "source_agent_id": ENV["AIXION_AGENT_ID"],
