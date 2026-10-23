@@ -46,7 +46,7 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Unsupported data").assertExists()
         composeRule.onNodeWithText("Unsupported approval data").assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
-        composeRule.onNodeWithText("Reject").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
 
     @Test
@@ -64,7 +64,7 @@ class ApprovalDetailScreenTest {
                 "Decisions are disabled until the app and backend versions are compatible."
         ).assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
-        composeRule.onNodeWithText("Reject").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
 
     @Test
@@ -73,7 +73,7 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithText("Decision closed").assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
-        composeRule.onNodeWithText("Reject").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
 
     @Test
@@ -119,7 +119,24 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("+test"))
         composeRule.onNodeWithText("+test").assertExists()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
-        composeRule.onNodeWithText("Reject").assertIsEnabled()
+        composeRule.onNodeWithText("Deny").assertIsEnabled()
+    }
+
+    @Test
+    fun denyLabelStillInvokesExistingRejectDecisionCallback() {
+        var decisionSent = false
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = approval(ApprovalStatus.REQUESTED),
+                lastActionMessage = null,
+                onOpenDiff = {},
+                onApprove = {},
+                onReject = { decisionSent = true }
+            )
+        }
+
+        composeRule.onNodeWithText("Deny").performClick()
+        composeRule.runOnIdle { assertTrue(decisionSent) }
     }
 
     @Test
@@ -152,7 +169,7 @@ class ApprovalDetailScreenTest {
                 .assertIsDisplayed()
             composeRule.onNodeWithTag("approval-file-changes").assertDoesNotExist()
             composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
-            composeRule.onNodeWithText("Reject").assertIsEnabled()
+            composeRule.onNodeWithText("Deny").assertIsEnabled()
             composeRule.onNodeWithText("Review the exact tool name and arguments above, then acknowledge before approving.")
                 .assertExists()
             composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
@@ -191,7 +208,7 @@ class ApprovalDetailScreenTest {
         }
 
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
-        composeRule.onNodeWithText("Reject").assertIsEnabled()
+        composeRule.onNodeWithText("Deny").assertIsEnabled()
     }
 
     @Test
@@ -224,7 +241,7 @@ class ApprovalDetailScreenTest {
         composeRule.runOnIdle { currentApproval.value = original }
 
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
-        composeRule.onNodeWithText("Reject").assertIsEnabled()
+        composeRule.onNodeWithText("Deny").assertIsEnabled()
     }
 
     @Test
@@ -247,7 +264,7 @@ class ApprovalDetailScreenTest {
         }
 
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
-        composeRule.onNodeWithText("Reject").assertIsEnabled()
+        composeRule.onNodeWithText("Deny").assertIsEnabled()
         composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement")
             .performScrollTo()
             .assertIsNotEnabled()
@@ -262,7 +279,7 @@ class ApprovalDetailScreenTest {
             .performClick()
 
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
-        composeRule.onNodeWithText("Reject").assertIsEnabled()
+        composeRule.onNodeWithText("Deny").assertIsEnabled()
     }
 
     @Test
@@ -308,7 +325,7 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
         composeRule.runOnIdle { currentApproval.value = currentApproval.value.copy(status = ApprovalStatus.REQUESTED) }
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
-        composeRule.onNodeWithText("Reject").assertIsEnabled()
+        composeRule.onNodeWithText("Deny").assertIsEnabled()
 
         openAndAcknowledge()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
@@ -369,11 +386,11 @@ class ApprovalDetailScreenTest {
             }
         }
 
-        val rejectBounds = composeRule.onNodeWithText("Reject").fetchSemanticsNode().boundsInRoot
+        val rejectBounds = composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot
         val approveBounds = composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot
 
         assertTrue("Decision buttons should be separate vertical targets", rejectBounds.bottom < approveBounds.top)
-        assertTrue("Reject should remain a 48dp or taller target", rejectBounds.height >= 48f)
+        assertTrue("Deny should remain a 48dp or taller target", rejectBounds.height >= 48f)
         assertTrue("Approve should remain a 48dp or taller target", approveBounds.height >= 48f)
         assertTrue(
             "Decision buttons should use the same full-width size",
@@ -474,7 +491,7 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Decision blocked").assertExists()
         composeRule.onNodeWithText("This request has no valid expiry. Refresh it before deciding.").assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
-        composeRule.onNodeWithText("Reject").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
 
     @Test
@@ -491,7 +508,7 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithText("This request has expired. Refresh the inbox before deciding.").assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
-        composeRule.onNodeWithText("Reject").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
 
     @Test
@@ -508,7 +525,7 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithText("The connector installation, session, or invocation identity is missing.").assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
-        composeRule.onNodeWithText("Reject").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
 
     @Test
@@ -525,7 +542,7 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithText("Ready for decision").assertExists()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
-        composeRule.onNodeWithText("Reject").assertIsEnabled()
+        composeRule.onNodeWithText("Deny").assertIsEnabled()
     }
 
     @Test
@@ -545,7 +562,7 @@ class ApprovalDetailScreenTest {
         }
 
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
-        composeRule.onNodeWithText("Reject").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
         composeRule.onNodeWithText("Check server status").performClick()
         composeRule.runOnIdle { assertEquals(true, reconciled) }
     }
@@ -570,7 +587,7 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("main").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Show technical details").performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithText("Approval ID: approval-detail-test", substring = true).assertCountEquals(0)
-        composeRule.onNodeWithText("antigravity:session-codex-42:tool-19").assertExists()
+        composeRule.onNodeWithText("antigravity:session-codex-42:tool-19").assertDoesNotExist()
         composeRule.onNodeWithText("Show technical details").performClick()
         composeRule.onNodeWithText("Approval ID: approval-detail-test", substring = true).assertExists()
         composeRule.onNodeWithText("Project ID: project-production", substring = true).assertExists()
@@ -626,13 +643,13 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
-        composeRule.onNodeWithText("Decision context").assertExists()
+        composeRule.onNodeWithText("Request at a glance").assertExists()
         composeRule.onAllNodesWithText("Command may modify production configuration.", substring = true)
             .assertCountEquals(1)
         composeRule.onAllNodesWithText("Command runs with workspace write access.", substring = true)
             .assertCountEquals(1)
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
-        composeRule.onNodeWithText("Reject").assertIsDisplayed()
+        composeRule.onNodeWithText("Deny").assertIsDisplayed()
         composeRule.onNodeWithText("Command may modify production configuration.", substring = true)
             .performScrollTo()
         composeRule.onNodeWithText("Command may modify production configuration.", substring = true)
@@ -646,7 +663,10 @@ class ApprovalDetailScreenTest {
             .assertIsDisplayed()
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").performScrollTo()
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").assertIsDisplayed()
-        composeRule.onNodeWithText(longInvocationId).performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithText(longInvocationId).assertCountEquals(0)
+        composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
+        composeRule.onNodeWithText("Source invocation ID: $longInvocationId", substring = true)
+            .performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("2026-10-22T14:30:00Z").performScrollTo()
         composeRule.onNodeWithText("2026-10-22T14:30:00Z").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
@@ -664,10 +684,12 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
-        composeRule.onAllNodesWithText("Not provided").assertCountEquals(4)
+        composeRule.onAllNodesWithText("Not provided").assertCountEquals(3)
         composeRule.onNodeWithText("ANTIGRAVITY · Source not verified").assertExists()
         composeRule.onNodeWithText("No risk rationale was supplied.").assertExists()
-        composeRule.onNodeWithText("Invocation").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Expires").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
+        composeRule.onNodeWithText("Source invocation ID: Not provided", substring = true).assertExists()
     }
 
     @Test
@@ -678,7 +700,7 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithText("Loading requested approval…").assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
-        composeRule.onNodeWithText("Reject").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
 
     @Test

@@ -71,7 +71,7 @@ internal fun homeHeroSubtitle(state: HomeUiState): String = when {
     state.refreshing -> "Checking for current approval requests."
     state.hasError -> "We couldn't load your approvals. Check your connection, then retry."
     state.unsupportedApprovals.isNotEmpty() -> "The app cannot safely interpret some approval status or risk values. No decisions are enabled for them."
-    state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, reject, or request revision."
+    state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, deny, or request revision."
     state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
     state.hasSuccessfulSync -> "A fresh backend sync found no requests awaiting your decision. Agent connection status is not available here."
     else -> "A successful backend sync is required before approval status can be shown."

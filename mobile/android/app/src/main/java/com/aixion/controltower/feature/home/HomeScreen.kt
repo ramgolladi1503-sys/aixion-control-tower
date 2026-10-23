@@ -210,7 +210,7 @@ internal fun HomeApprovalPreview(
     Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)) {
         TowerSectionHeader(
             title = "Needs your decision",
-            subtitle = "Review the exact request before approving or rejecting it."
+            subtitle = "Review the exact request before approving or denying it."
         )
         approvals.take(3).forEach { approval ->
             ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })

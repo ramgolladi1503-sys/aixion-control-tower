@@ -108,7 +108,7 @@ fun ApprovalDetailScreen(
         onReject = {
             viewModel.decide(
                 decision = "reject",
-                reason = "Rejected from mobile detail review.",
+                reason = "Denied from mobile detail review.",
                 onCompleted = onDecisionSubmitted
             )
         },
@@ -293,8 +293,8 @@ fun ApprovalDetailContent(
 
             item {
                 TowerSectionHeader(
-                    title = "Safety Context",
-                    subtitle = "Review source, branch, test plan, and rollback before making a decision."
+                    title = "Review before deciding",
+                    subtitle = "Check the risk rationale, test plan, and rollback plan before making a decision."
                 )
             }
 
@@ -637,11 +637,10 @@ private fun ApprovalHeroPanel(
                 .padding(TowerSpacing.md),
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
-            Text("Decision context", color = palette.ink, style = MaterialTheme.typography.titleSmall)
+            Text("Request at a glance", color = palette.ink, style = MaterialTheme.typography.titleSmall)
             DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
             DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
             DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
-            DecisionContextLine("Invocation", approval.sourceInvocationId?.ifBlank { null } ?: "Not provided")
             DecisionContextLine("Expires", approval.expiresAt?.ifBlank { null } ?: "Not provided")
         }
     }
@@ -813,7 +812,7 @@ private fun DecisionPanel(
                     onClick = onReject,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     enabled = canDecide
-                ) { Text("Reject", color = palette.danger) }
+                ) { Text("Deny", color = palette.danger) }
                 Button(
                     onClick = onApprove,
                     enabled = canApprove,

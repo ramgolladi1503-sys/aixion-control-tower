@@ -317,7 +317,7 @@ fun ApprovalInboxContent(
                                     when (filter) {
                                         ApprovalHistoryFilter.ALL -> "All"
                                         ApprovalHistoryFilter.APPROVED -> "Approved"
-                                        ApprovalHistoryFilter.REJECTED -> "Rejected"
+                                        ApprovalHistoryFilter.REJECTED -> "Denied"
                                         ApprovalHistoryFilter.REVISION_REQUESTED -> "Revision requested"
                                     }
                                 )

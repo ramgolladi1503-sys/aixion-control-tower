@@ -236,7 +236,7 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onNodeWithText("History").performClick()
-        val filters = listOf("All", "Approved", "Rejected", "Revision requested")
+        val filters = listOf("All", "Approved", "Denied", "Revision requested")
             .map(composeRule::onNodeWithText)
         filters.forEach { it.assertExists() }
 
@@ -520,7 +520,8 @@ class ApprovalInboxScreenTest {
 
         composeRule.onNodeWithText("History").performClick()
 
-        composeRule.onNodeWithText("Denied").assertExists()
+        // The history filter and the decision record both use the same concise status label.
+        composeRule.onAllNodesWithText("Denied").assertCountEquals(2)
         composeRule.onNodeWithText("Original request that was denied").assertExists()
         composeRule.onNodeWithText("Reviewer · You").assertExists()
         composeRule.onNodeWithText(
@@ -628,7 +629,8 @@ class ApprovalInboxScreenTest {
 
         composeRule.onNodeWithText("History").performClick()
         composeRule.onAllNodesWithText("Approved").assertCountEquals(2)
-        composeRule.onNodeWithText("Denied").assertExists()
+        // One matching node is the selected filter chip, the other is the history status.
+        composeRule.onAllNodesWithText("Denied").assertCountEquals(2)
         composeRule.onNodeWithText("Delivery not confirmed").assertExists()
         composeRule.onNodeWithText(
             "There is no confirmation that the connector received this decision or that the agent executed or resumed."
