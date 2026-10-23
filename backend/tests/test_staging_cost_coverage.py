@@ -36,7 +36,7 @@ def test_adding_scheduler_without_cost_row_fails_closed() -> None:
 def test_cost_row_without_price_or_explicit_unpriced_treatment_fails() -> None:
     api, jobs, scheduler, cost = _inputs()
     cost = cost.replace(
-        "| Cloud Scheduler | **UNPRICED** until the owner-approved schedule count, region, and applicable pricing are entered in the dated calculator export. Two proposed schedules exist; do not treat them as zero-cost. |",
+        "| Cloud Scheduler | Two proposed schedules are modeled at the published `$0.10/job/31 days` rate, with a separate free-account-allowance assumption. The owner-approved count and billing-account free usage remain pending; include the actual amount in the regional calculator export. |",
         "| Cloud Scheduler | Estimate pending. |",
     )
 

@@ -1,7 +1,7 @@
 # Staging Cloud Run Cost Scenarios
 
 **Status:** Planning worksheet only; not a quote, a billing cap, or authorization to provision resources.
-**Pricing checked:** 2026-10-23 against the official Google Cloud pricing pages linked below.
+**Pricing checked:** 2026-10-24 against the official Google Cloud pricing pages linked below.
 **Currency and period:** USD, 30-day month.
 **Region:** `asia-south1` is proposed, not owner-approved. Published default rates below are reference rates, not a Mumbai calculator export.
 
@@ -61,6 +61,84 @@ the CPU, memory, request, and minimum Job duration charges.
 The high case exceeds the proposed `$75/month` amount before adding the database
 or supporting services. The low and expected cases also do not establish that an
 all-in deployment fits that amount.
+
+## Worked low-cost staging baseline (reference-rate subtotal)
+
+This worked example makes the excluded-service problem concrete. It is an
+account-independent **reference-rate subtotal**, not a Mumbai quote, invoice
+forecast, or spend guarantee. The 30-day month uses 720 hours; where a published
+rate is hourly it is multiplied by 720. Mumbai remains a proposed region only.
+
+| Component | Explicit low-case quantity | Arithmetic / reference rate | Monthly reference cost |
+| --- | --- | --- | ---: |
+| Cloud Run API and two Jobs | Low scenario above; assume all free-tier allowances are exhausted | Existing low-case calculation | **$7.24** |
+| Cloud SQL shared-core compute | One `db-g1-small`, always on for 720 hours | `720 × $0.035/hour`; default displayed table rate only, not confirmed for Mumbai | **$25.20** |
+| Cloud Scheduler | Two continuously configured schedules; conservatively assume all three free jobs on the billing account are already consumed | `2 × $0.10 per 31 days × 30/31 days`; actual billing is per billable day | **$0.194 ≈ $0.20** |
+| Artifact Registry | 5 GiB average retained image storage; assume account free allowance exhausted | `(5 − 0.5) GiB × $0.000136986/GiB-hour × 720 hours` | **$0.44** |
+| Secret Manager | At most 6 active versions and 10,000 accesses in the billing account | Within published account free allowances; if exhausted, add version-hour and access charges | **$0.00 assumed** |
+| Cloud Logging | At most 50 GiB/project/month, default retention only; no vended network logs | Within published project monthly free allowance | **$0.00 assumed** |
+| Cloud Monitoring | Google Cloud metrics only; no custom metrics, Prometheus, uptime checks, or synthetic monitors | Assumed non-chargeable system metrics; confirm actual metric inventory | **$0.00 assumed** |
+| **Known reference-rate subtotal** | Does not include the unresolved items listed below | Sum of the rows above | **$33.08** |
+
+The subtotal is **not all-in**. It includes the known Cloud SQL compute line at a
+non-regional reference rate, while Cloud SQL storage, backup/PITR, egress,
+taxes, billing-account free-tier consumption, and the selected Mumbai rates are
+not known. The $33.08 amount must therefore not be described as an affordable
+monthly budget or maximum exposure. The previous `$75/month` proposal leaves
+only `$41.92` over this incomplete subtotal; that difference is not a validated
+reserve.
+
+The scenario assumes Cloud Run request-based API billing with zero minimum
+instances and the low API request/runtime values above; two separate one-task
+Jobs every 15 minutes, one vCPU and 0.5 GiB each, with one-minute minimum billed
+duration; one always-on `db-g1-small`; two scheduler definitions; and 5 GiB of
+retained images. These are modeling assumptions only. Owner-selected traffic,
+latency, job cadence, database tier/storage/backup retention, log volume,
+metric mix, network egress, retention, region, taxes, and unrelated billing
+account usage remain **PENDING**. Cloud SQL shared-core is a staging experiment
+only and is not covered by the Cloud SQL SLA.
+
+Official rates and limits used above: [Cloud Run pricing](https://cloud.google.com/run/pricing)
+(request/Jobs rates, free-tier scope, regional pricing, and minimum Job duration);
+[Cloud SQL pricing](https://cloud.google.com/sql/pricing)
+(`db-g1-small` reference rate and regional selection for storage/network);
+[Cloud Scheduler pricing](https://cloud.google.com/scheduler/pricing)
+(`$0.10/job/31 days`, three free jobs per billing account);
+[Artifact Registry pricing](https://cloud.google.com/artifact-registry/pricing)
+(0.5 GiB free per billing account and storage rate);
+[Secret Manager pricing](https://cloud.google.com/secret-manager/pricing)
+(active-version/access allowances and rates); and
+[Cloud Observability pricing](https://cloud.google.com/products/observability/pricing)
+(Logging and Monitoring pricing). References checked 2026-10-24. The official
+[Pricing Calculator](https://cloud.google.com/products/calculator) estimate
+still requires owner-selected region/project/workload inputs and a saved dated
+export; this arithmetic does not replace it.
+
+### Proposed cost alert and stop plan (owner approval pending)
+
+- Proposed whole-project monthly budget target: **$75 USD**, with alerts at
+  **50% ($37.50), 80% ($60), and 100% ($75)** to the named billing and staging
+  operators. These are alert/response thresholds only; an alerts-only budget
+  does not stop usage.
+- Proposed Cloud Run service-scoped spend cap: **$10 USD/month** on the staging
+  project’s `run.googleapis.com` service, with Google's standard 50%, 80%, and
+  100% notifications. This may pause Cloud Run API and Job usage when estimated
+  gross cost reaches the target; it does not cap Cloud SQL or other products.
+- At 50%, review billing export/usage and verify the cost-owner inventory. At
+  80%, pause optional scheduled jobs and block new staging deployments. At 100%,
+  suspend the staging API and execute the reviewed stop/teardown procedure for
+  uncapped resources, after preserving any data required by the approved
+  retention/recovery decision. Check residual charges afterward.
+- **No project-wide hard monthly ceiling is currently evidenced.** Google
+  documents spend caps for a single eligible service in one project; persistent
+  resource charges, in-flight use, reporting/enforcement lag, and unlisted
+  service charges can continue. The `$75` amount is therefore a proposed
+  operator stop threshold, not a guaranteed maximum. The Cloud Run cap and
+  project alerts must be configured and separately tested only after the owner
+  authorizes those live actions.
+
+Google references: [budgets and alerts](https://docs.cloud.google.com/billing/docs/how-to/budgets)
+and [spend-cap eligibility and limitations](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps).
 
 ## Recalculation formulas
 

@@ -1806,6 +1806,11 @@ def execute_next_step(
             and postgres_run_validation_enabled()
             and postgres_validation_coordinator is not None
             and postgres_validation_request_factory is not None
+    ) and not (
+        step.step_type == AgentRunStepType.CREATE_PULL_REQUEST
+        and postgres_pull_request_enabled()
+        and postgres_pull_request_coordinator is not None
+        and postgres_pull_request_request_factory is not None
     ):
         release_run_lease(
             run,
@@ -1816,7 +1821,8 @@ def execute_next_step(
         raise AgentRunConflict(
             "PostgreSQL AgentRun execution currently supports only the "
             "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), and "
-            "explicitly enabled APPLY_CHANGES and RUN_VALIDATION (with dedicated coordinators), "
+            "explicitly enabled APPLY_CHANGES, RUN_VALIDATION, and CREATE_PULL_REQUEST "
+            "(with dedicated coordinators), "
             "VERIFY_RESULT, and SEAL_EVIDENCE steps."
         )
 

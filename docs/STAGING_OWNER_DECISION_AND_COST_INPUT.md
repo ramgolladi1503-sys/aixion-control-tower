@@ -66,7 +66,17 @@ Provide low, expected, and peak assumptions where applicable. State the measurem
 - Excluded costs and reason for exclusion: **PENDING**
 - Independent reviewer and review date: **PENDING**
 
-The existing `$75/month` amount is only a proposal; it is not approved, a quote, or a project-wide hard ceiling. Do not report it as a guaranteed maximum or customer-facing price.
+The offline low-cost worksheet currently computes a **$33.08/month partial reference-rate subtotal** under its stated assumptions. It excludes regional-price confirmation and Cloud SQL storage, backups/PITR, egress, taxes, and unresolved free-tier usage; it is not a quote or an all-in forecast. See [STAGING_COST_SCENARIOS.md](STAGING_COST_SCENARIOS.md).
+
+The following controls are proposals for owner review only. All approvals, project/service scope, named recipients/operators, and live configuration evidence remain **PENDING**. Do not represent either amount as approved spending authority or a guaranteed project-wide maximum.
+
+| Proposed control | Offline proposal | Owner decision/evidence |
+| --- | --- | --- |
+| Whole-project budget notification target | **$75 USD/month**; alert at **50% ($37.50), 80% ($60), and 100% ($75)** to named billing and staging operators; at 80% pause optional scheduled work/deployments; at 100% suspend staging and use the approved teardown procedure | **PENDING**; alerts-only budget is not enforcement |
+| Cloud Run spend cap | **$10 USD/month** scoped to `run.googleapis.com` in the exact staging project; Google-configured 50%, 80%, and 100% notifications | **PENDING** exact project/service scope and authorization; cap does not cover Cloud SQL or other products |
+| Project-wide maximum exposure | **Not established.** Persistent resources, non-eligible services, in-flight usage, and reporting/enforcement delay can leave residual charges | **PENDING** quantified uncapped exposure, owner-approved stop action, named operator, and rehearsal |
+
+The published proposal is not a project-wide hard ceiling or customer-facing price. The applicable official spend-cap documentation lists eligible services and says a cap is scoped to one service in one project; ongoing persistent-resource charges and in-flight work can continue. See [Google Cloud spend-cap scope and limitations](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps) and [budget alert behavior](https://docs.cloud.google.com/billing/docs/how-to/budgets). The dated project/region calculator export and independent review remain **PENDING**.
 
 ### Spend controls and uncapped maximum exposure
 

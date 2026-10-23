@@ -4650,6 +4650,7 @@ def _seed_postgres_validation_completion_records(
     *, connect, workspace, task_id, state, repositories, client,
     include_claim: bool = True, include_consumption: bool = True,
     result_exit_code: int = 0, claim_status: str = "RESULT_RECORDED",
+    extra_lease_actions: list[CapabilityActionType] | None = None,
 ):
     """Seed an exact RUNNING validation checkpoint, intent, claim, action, and consumption."""
     from app.agent_run_supervisor import _build_postgres_agent_run_step_completion_records
@@ -4676,6 +4677,7 @@ def _seed_postgres_validation_completion_records(
         ).fetchone()
         approval = ApprovalRequest.model_validate(approval_row[0])
         approval.test_plan = [command]
+        approval.target_branch = task.branch_preference
         approval.approved_payload_hash = compute_approval_payload_hash(approval)
         conn.execute(
             "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
@@ -4688,7 +4690,7 @@ def _seed_postgres_validation_completion_records(
         task_id=task_id,
         state=state,
         client=client,
-        lease_actions=[CapabilityActionType.RUN_COMMAND],
+        lease_actions=[CapabilityActionType.RUN_COMMAND, *(extra_lease_actions or [])],
         allowed_commands=[command],
     )
     attached = client.post(
@@ -5028,6 +5030,217 @@ def test_postgres_run_validation_completion_commits_success_atomically(
         ).fetchone()[0]
         assert task_audit_details["bundle_revision"] == task_event.metadata["bundle_revision"]
         assert task_audit_details["bundle_git_tree_sha"] == task_event.metadata["bundle_git_tree_sha"]
+
+
+def test_postgres_execute_next_runs_pull_request_through_durable_coordinator_once(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route's gated PR step reaches its durable coordinator and commits once."""
+    from app.postgres_agent_run_apply_changes import (
+        AgentRunApplyChangeIntent,
+        ApplyChangeIntentStatus,
+    )
+    from app.postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus
+    from app.postgres_agent_run_pull_request_route import PullRequestRemote
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+
+    # Reuse the repository's valid completed validation evidence, then add the
+    # completed predecessor intents required by PR authorization and completion.
+    run, steps, worker, validation_intent_id, task_event, build_records = (
+        _seed_postgres_validation_completion_records(
+            connect=connect,
+            workspace=workspace,
+            task_id=task_id,
+            state=state,
+            repositories=repositories,
+            client=client,
+            extra_lease_actions=[CapabilityActionType.CREATE_PULL_REQUEST],
+        )
+    )
+    repositories.agent_runs.commit_authoritative_task_step(
+        expected_run=run,
+        expected_steps=steps,
+        worker_id=worker,
+        lease_token=run.lease_token or "",
+        step_type=AgentRunStepType.RUN_VALIDATION,
+        validation_intent_id=validation_intent_id,
+        validation_task_event=task_event,
+        build_records=build_records,
+    )
+    durable_run = repositories.agent_runs.get(run.id)
+    assert durable_run is not None
+    durable_steps = repositories.agent_runs.list_steps_for_run(run.id)
+    branch_step = next(item for item in durable_steps if item.step_type == AgentRunStepType.CREATE_BRANCH)
+    apply_step = next(item for item in durable_steps if item.step_type == AgentRunStepType.APPLY_CHANGES)
+    validation_step = next(item for item in durable_steps if item.step_type == AgentRunStepType.RUN_VALIDATION)
+    pr_step = next(item for item in durable_steps if item.step_type == AgentRunStepType.CREATE_PULL_REQUEST)
+    assert durable_run.capability_lease_id
+    approval = repositories.approval_decisions.get(durable_run.approval_request_id or "")
+    assert approval is not None
+    created_at = now_utc()
+    branch_intent = AgentRunBranchIntent(
+        id=f"branch_intent_{uuid.uuid4().hex}", workspace_id=workspace.id,
+        run_id=durable_run.id, task_id=task_id, approval_id=approval.id,
+        step_id=branch_step.id, action_id=f"branch_action_{uuid.uuid4().hex}",
+        lease_id=durable_run.capability_lease_id,
+        idempotency_key=branch_step.idempotency_key,
+        repository="owner/approved-repository", source_branch="main",
+        target_ref="feature/approved-branch", source_sha="0" * 40,
+        lease_token_hash="a" * 64, initial_lease_token_hash="a" * 64,
+        run_revision=created_at, step_revision=branch_step.updated_at,
+        status=BranchIntentStatus.COMPLETED,
+        branch_url="https://github.com/owner/approved-repository/tree/feature/approved-branch",
+        created_at=created_at, updated_at=created_at,
+    )
+    validation_intent = repositories.agent_run_validation_intents.get_for_step(
+        workspace_id=workspace.id, run_id=durable_run.id, step_id=validation_step.id,
+        idempotency_key=validation_step.idempotency_key,
+    )
+    assert validation_intent is not None
+    apply_intent = AgentRunApplyChangeIntent(
+        id=f"apply_intent_{uuid.uuid4().hex}", workspace_id=workspace.id,
+        run_id=durable_run.id, task_id=task_id, approval_id=approval.id,
+        step_id=apply_step.id, action_id=f"apply_action_{uuid.uuid4().hex}",
+        lease_id=durable_run.capability_lease_id,
+        idempotency_key=apply_step.idempotency_key,
+        repository="owner/approved-repository", branch="feature/approved-branch",
+        path="src/approved.py", change_type="create", desired_content_sha256="c" * 64,
+        lease_token_hash="a" * 64, run_revision=created_at,
+        step_revision=apply_step.updated_at, status=ApplyChangeIntentStatus.COMPLETED,
+        commit_sha=validation_intent.bundle_revision, created_at=created_at, updated_at=created_at,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO agent_run_branch_intents("
+            "intent_id,workspace_id,run_id,task_id,approval_id,step_id,action_id,lease_id,"
+            "idempotency_key,repository,source_branch,target_ref,source_sha,lease_token_hash,"
+            "initial_lease_token_hash,run_revision,step_revision,status,branch_url,reason,created_at,updated_at,payload"
+            ") VALUES(" + ",".join(["%s"] * 22) + ",%s)",
+            (
+                branch_intent.id, branch_intent.workspace_id, branch_intent.run_id,
+                branch_intent.task_id, branch_intent.approval_id, branch_intent.step_id,
+                branch_intent.action_id, branch_intent.lease_id, branch_intent.idempotency_key,
+                branch_intent.repository, branch_intent.source_branch, branch_intent.target_ref,
+                branch_intent.source_sha, branch_intent.lease_token_hash,
+                branch_intent.initial_lease_token_hash, branch_intent.run_revision,
+                branch_intent.step_revision, branch_intent.status.value, branch_intent.branch_url,
+                branch_intent.reason, branch_intent.created_at, branch_intent.updated_at,
+                Jsonb(branch_intent.model_dump(mode="json")),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO agent_run_apply_change_intents("
+            "intent_id,workspace_id,run_id,task_id,approval_id,step_id,action_id,lease_id,"
+            "idempotency_key,repository,branch,path,change_type,before_sha,desired_content_sha256,"
+            "lease_token_hash,run_revision,step_revision,status,commit_sha,reason,created_at,updated_at,payload"
+            ") VALUES(" + ",".join(["%s"] * 23) + ",%s)",
+            (
+                apply_intent.id, apply_intent.workspace_id, apply_intent.run_id,
+                apply_intent.task_id, apply_intent.approval_id, apply_intent.step_id,
+                apply_intent.action_id, apply_intent.lease_id, apply_intent.idempotency_key,
+                apply_intent.repository, apply_intent.branch, apply_intent.path,
+                apply_intent.change_type, apply_intent.before_sha,
+                apply_intent.desired_content_sha256, apply_intent.lease_token_hash,
+                apply_intent.run_revision, apply_intent.step_revision,
+                apply_intent.status.value, apply_intent.commit_sha, apply_intent.reason,
+                apply_intent.created_at, apply_intent.updated_at,
+                Jsonb(apply_intent.model_dump(mode="json")),
+            ),
+        )
+
+    class FakePullRequestProvider:
+        post_calls = 0
+        remote: PullRequestRemote | None = None
+
+        def observe_branch(self, _repository, branch, *, timeout_seconds):
+            assert timeout_seconds == 30
+            return validation_intent.bundle_revision if branch.startswith("feature/") else "b" * 40
+
+        def find_by_intent(self, *_args, **_kwargs):
+            return [self.remote] if self.remote is not None else []
+
+        def create_pull_request(self, repository, title, body, head_branch, base_branch, *, timeout_seconds):
+            assert timeout_seconds == 30
+            self.post_calls += 1
+            marker = next(line[5:-4] for line in body.splitlines() if line.startswith("<!-- "))
+            assert marker in body
+            self.remote = PullRequestRemote(
+                repository=repository, number=91, title=title, body=body,
+                head_branch=head_branch, base_branch=base_branch,
+                html_url=f"https://github.com/{repository}/pull/91",
+                head_sha=validation_intent.bundle_revision, base_sha="b" * 40,
+            )
+            return self.remote
+
+    provider = FakePullRequestProvider()
+    from app.postgres_runtime import PostgresRuntime
+
+    runtime = PostgresRuntime(
+        _dsn="postgresql://fixture", profile="test", _connector=connect
+    )
+    runtime_repositories = runtime.repositories
+    for name, value in {
+        "postgres_runtime": runtime,
+        "postgres_repositories": runtime_repositories,
+        "agent_run_repository": runtime_repositories.agent_runs,
+        "agent_task_repository": runtime_repositories.agent_tasks,
+        "approval_decision_repository": runtime_repositories.approval_decisions,
+        "trust_repository": runtime_repositories.trust,
+        "trust_event_repository": runtime_repositories.trust_events,
+        "agent_run_branch_intent_repository": runtime_repositories.agent_run_branch_intents,
+        "agent_run_apply_change_intent_repository": runtime_repositories.agent_run_apply_change_intents,
+        "agent_run_validation_intent_repository": runtime_repositories.agent_run_validation_intents,
+        "agent_run_pull_request_intent_repository": runtime_repositories.agent_run_pull_request_intents,
+    }.items():
+        monkeypatch.setattr(main.app.state, name, value, raising=False)
+    monkeypatch.setattr(main.app.state, "agent_run_pull_request_provider", provider, raising=False)
+    monkeypatch.setenv("AIXION_POSTGRES_CREATE_PULL_REQUEST_ENABLED", "true")
+    response = client.post(
+        f"/agent/runs/{durable_run.id}/execute-next",
+        json={"worker_id": "postgres-pr-route-worker", "timeout_seconds": 30},
+    )
+    assert response.status_code == 200, response.text
+    pr_result = next(item for item in response.json()["steps"] if item["id"] == pr_step.id)
+    assert pr_result["status"] == AgentRunStepStatus.SUCCEEDED.value
+    assert provider.post_calls == 1
+    completed_intent = repositories.agent_run_pull_request_intents.get_for_step(
+        workspace_id=workspace.id, run_id=durable_run.id, step_id=pr_step.id,
+        idempotency_key=pr_step.idempotency_key,
+    )
+    assert completed_intent is not None
+    assert completed_intent.status.value == "COMPLETED"
+    assert completed_intent.pull_number == 91
+    assert any(
+        event.event_type == AgentRunEventType.STEP_SUCCEEDED
+        and event.step_id == pr_step.id
+        for event in repositories.agent_runs.list_events_for_run(durable_run.id)
+    )
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_type='agent_run' AND entity_id=%s "
+            "AND event_type='agent_run.step_completed' AND details->>'pull_request_intent_id'=%s",
+            (durable_run.id, completed_intent.id),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s AND event_type='PR_CREATED'",
+            (task_id,),
+        ).fetchone()[0] == 1
+
+    # The next delivery resumes at VERIFY_RESULT; the durable PR intent is
+    # completed and the provider's one-shot mutation is never repeated.
+    replay = client.post(
+        f"/agent/runs/{durable_run.id}/execute-next",
+        json={"worker_id": "postgres-pr-route-worker", "timeout_seconds": 30},
+    )
+    assert replay.status_code == 200, replay.text
+    assert provider.post_calls == 1
 
 
 def test_postgres_run_validation_completion_commits_first_deterministic_failure(

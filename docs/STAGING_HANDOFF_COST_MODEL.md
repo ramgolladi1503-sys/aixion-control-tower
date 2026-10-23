@@ -47,12 +47,14 @@ Do not add a load balancer, Cloud NAT, Redis, multi-region database, or high-ava
 
 ## Indicative monthly cost envelope
 
-Three workload-only Cloud Run scenarios, including the one-minute minimum billed
-duration for each Job invocation and separate free-tier/exhausted-free-tier cases,
-are recorded in [`STAGING_COST_SCENARIOS.md`](STAGING_COST_SCENARIOS.md). They
-exclude the always-on Cloud SQL instance and supporting services, so they are not
-all-in estimates and do not establish that the proposed `$75/month` exposure is
-adequate.
+Three workload-only Cloud Run scenarios and a worked low-cost staging reference
+subtotal are recorded in [`STAGING_COST_SCENARIOS.md`](STAGING_COST_SCENARIOS.md).
+The worked case totals **$33.08/month before unresolved Cloud SQL storage,
+backups/PITR, egress, taxes, and regional rate differences**. It assumes
+account-level free allowances only where stated and is not an all-in estimate,
+quote, or evidence that `$75/month` is adequate. The confirmed project, region,
+workload, data-retention policy, and billing-account free-tier consumption remain
+owner inputs.
 
 The following is a planning estimate, **not a quote or a billing cap**. The Cloud SQL page's displayed default price table has listed `db-g1-small` at **$0.035/hour**; 720 hours would be **$25.20/month for database compute alone** at that displayed rate. The page does not establish that as the `asia-south1` rate. This is a shared-core staging candidate only and is excluded from the Cloud SQL SLA. Storage, backups, network, logs, taxes, and regional price differences are extra. Treat the database cost as **unpriced for Mumbai** until a dated calculator export records the exact edition, tier, region, storage, backup retention, and network assumptions. [Cloud SQL pricing](https://cloud.google.com/sql/pricing)
 
@@ -64,10 +66,10 @@ Google's current Cloud Run page lists Mumbai (`asia-south1`) as an available reg
 | Cloud SQL storage, backup, and network | Variable; set low initial storage, retain only required backups, and price them separately. Do not omit from final approval. |
 | Cloud Run API | Default published request-based reference rates: **$0.000024/vCPU-second active CPU**, **$0.0000025/GiB-second active memory**, **$0.40/million requests**. Regional rate, billed CPU/memory time, networking, and billing-account-wide free-tier availability require the Mumbai calculator estimate. |
 | Cloud Run Jobs | Cloud Run Jobs have a separate free tier and rate table. Price by invocation/runtime only after the bounded one-shot worker is deployable; the current lifespan loops are not costed as reliable scheduled jobs. |
-| Cloud Scheduler | **UNPRICED** until the owner-approved schedule count, region, and applicable pricing are entered in the dated calculator export. Two proposed schedules exist; do not treat them as zero-cost. |
+| Cloud Scheduler | Two proposed schedules are modeled at the published `$0.10/job/31 days` rate, with a separate free-account-allowance assumption. The owner-approved count and billing-account free usage remain pending; include the actual amount in the regional calculator export. |
 | Artifact Registry | First **0.5 GiB** storage is free per billing account; then **$0.000136986/GiB-hour** (about **$0.099/GiB-month** at 720 hours). Network transfer and optional scanning are separate. Co-locate with the runtime and expire old images. |
 | Cloud Logging | Standard log ingestion: first **50 GiB/project/month** free, then **$0.50/GiB**; retention beyond 30 days is **$0.01/GiB-month**. Vended network logs and other observability products have separate treatment. Redaction and volume limits remain required. |
-| Cloud Monitoring | **UNPRICED** until the owner-approved metric volume, alert policies, and retention are included in the calculator export. Monitoring usage must not be assumed to be covered by Cloud Logging allowances. |
+| Cloud Monitoring | The low example assumes only non-chargeable Google Cloud metrics and no custom/Prometheus metrics or uptime checks. Billable metric volume and alert/query policy inventory remain pending and separate from Cloud Logging allowances; include them in the calculator export. |
 | Secret Manager | First **6 active secret versions** and **10,000 accesses/month** are free per billing account; beyond that, **$0.000082192/version-hour** and **$0.03/10,000 accesses**. Replication location and version lifecycle affect cost. |
 | Firebase Cloud Messaging | **UNPRICED / confirm in calculator and target-project pricing terms.** Include expected sends and any related Firebase/Google Cloud usage; do not assume zero cost based on the push API being a wake-up signal. |
 | Metrics, data transfer, DNS, taxes | Usage/configuration-dependent or not yet priced. Enter explicit quantities in the calculator; do not assume these are zero. |
@@ -113,13 +115,15 @@ Do not convert an unknown input to zero. Complete this worksheet with the projec
 
 Calculate request-based Cloud Run API and Cloud Run Jobs on their respective pricing modes; do not blend their free tiers. For Cloud SQL, storage, backups/PITR, egress, logging, secrets, and registry, enter separate line items using the selected region and configuration. Record both the expected-month and conservative peak-month totals. If a charge cannot be priced from the selected calculator inputs, label it **UNPRICED** and keep the handoff open. A proposed $75/month amount is not an approved exposure limit and does not fill any pending input above.
 
-### Proposed spend limit and enforcement boundary
+### Proposed spend limit and enforcement boundary — owner approval pending
 
-For the first, time-bounded staging exercise, propose a **$75 USD per calendar month project spend cap**, with notifications at 50%, 80%, and 100%. This number is a review proposal, not approved spending authority. It is intended to cover the shared-core staging database plus low-volume API and observability usage; the final estimate must be recalculated for Mumbai and actual retention/network assumptions before any resource is created.
+For the first, time-bounded staging exercise, propose a **$75 USD per calendar month project budget target**, with alert thresholds at 50%, 80%, and 100%, plus named operator response. The worked low-cost model currently has a **$33.08/month partial reference subtotal**; its excluded database storage/backup/PITR, egress, taxes, actual Mumbai rate, and owner-approved free-tier assumptions mean `$75` is not validated as enough exposure. This is a proposal, not approved spending authority.
+
+Separately propose a **$10/month Cloud Run service-scoped spend cap** for `run.googleapis.com` in the staging project. Google's spend cap is an enforcement control only for the eligible service and project scope; it is not a total-project cap. Both values, recipients, and response steps remain **PENDING owner approval** and require separate authorization before configuration.
 
 An alerts-only budget is **not** a spending ceiling: Google states that it does not automatically cap service usage. Google's currently documented spend-cap eligibility list names Cloud Run, Cloud Run functions, Gemini API, and Gemini Enterprise Agent Platform. It scopes a spend cap to one eligible service in one project. Cloud Run billing documentation says a Cloud Run cap automatically applies to all Cloud Run resource types, including Jobs. Cloud SQL, Artifact Registry, Secret Manager, Cloud Logging/Monitoring, network egress, and taxes are not in that eligibility list; do not count Cloud Run's cap as protection for those charges. [Eligible services and limitations](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps#eligible-services), [Cloud Run billing settings](https://docs.cloud.google.com/run/docs/configuring/billing-settings), [Google Cloud budgets](https://docs.cloud.google.com/billing/docs/how-to/budgets)
 
-Therefore, **$75 is not a hard project-wide ceiling** for the proposed topology. Even if a Cloud Run service cap is configured, the Cloud SQL instance and other supporting services can continue to incur charges. Before any billing/resource action, either (a) revise the topology to avoid uncapped recurring resources during the initial connector test, or (b) approve an explicit maximum exposure for uncapped services and rehearse an operator shutdown/teardown path that includes Cloud SQL, storage, backups, artifacts, logs, and network resources. Google notes that spend caps do not delete data/resources, in-flight use may finish, cost reporting can lag, and ongoing fixed costs can remain after a cap triggers; a spend cap is a control on eligible service usage, not a universal billing stop. [Spend-cap limitations](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps#limitations)
+Therefore, **$75 is not a hard project-wide ceiling** for this topology; no hard project-wide ceiling is established. The `$75` amount is only a proposed project alert/operator stop threshold; the `$10` amount is only a proposed Cloud Run cap. Even if a Cloud Run service cap is configured, Cloud SQL and other supporting services can keep incurring charges. Before any billing/resource action, either (a) revise the topology to avoid uncapped recurring resources during the initial connector test, or (b) approve a quantified maximum exposure for uncapped services and rehearse an operator shutdown/teardown path that includes Cloud SQL, storage, backups, artifacts, logs, and network resources. Google notes that spend caps do not delete data/resources, in-flight use may finish, cost reporting can lag, and ongoing fixed costs can remain after a cap triggers; a spend cap is not a universal billing stop. [Spend-cap limitations](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps#limitations)
 
 The proposed operator response is: at 50%, review usage; at 80%, stop nonessential jobs and deployments; at 100%, suspend the staging service and execute the reviewed teardown of uncapped resources, including the database where safe, then investigate before re-enabling. Keep enough separate recovery access to tear down resources even if the application is unavailable. Residual storage, backup, artifact, and already-incurred usage can remain billable after compute is stopped, so the operator procedure must include those resources. This procedure is not verified until rehearsed in a separately authorized disposable project.
 

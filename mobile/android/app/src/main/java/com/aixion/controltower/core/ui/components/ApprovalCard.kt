@@ -35,7 +35,11 @@ fun ApprovalCard(
 ) {
     val palette = LocalTowerPalette.current
     val clickableModifier = if (onClick != null) {
-        modifier.clickable(role = Role.Button, onClick = onClick)
+        modifier.clickable(
+            role = Role.Button,
+            onClickLabel = "Review this approval request",
+            onClick = onClick
+        )
     } else {
         modifier
     }

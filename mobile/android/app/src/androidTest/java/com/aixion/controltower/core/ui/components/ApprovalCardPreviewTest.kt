@@ -6,6 +6,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -144,5 +146,36 @@ class ApprovalCardPreviewTest {
         assertTrue("Provider identity should appear before the request title", provider.boundsInRoot.top < title.boundsInRoot.top)
         assertTrue("Risk should appear before the request title", risk.boundsInRoot.top < title.boundsInRoot.top)
         assertTrue("Expiry should remain below the request title", expiry.boundsInRoot.top > title.boundsInRoot.top)
+    }
+
+    @Test
+    fun tappableApprovalCardAnnouncesReviewActionToAssistiveTechnology() {
+        val approval = ApprovalSummary(
+            id = "approval_accessible_action",
+            projectName = "Project",
+            title = "Review permission request",
+            summary = "Run the requested command in this project.",
+            agentName = "Antigravity",
+            targetBranch = "main",
+            status = ApprovalStatus.REQUESTED,
+            risk = RiskLevel.MEDIUM,
+            files = emptyList(),
+            requiredActions = emptyList(),
+            testPlan = emptyList(),
+            rollbackPlan = "Revert"
+        )
+
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalCard(approval = approval, onClick = {})
+            }
+        }
+
+        val semantics = composeRule.onNodeWithTag("approval-card").fetchSemanticsNode().config
+        assertTrue("Approval cards should retain their button role", semantics[SemanticsProperties.Role] == Role.Button)
+        assertTrue(
+            "Approval cards should explain their action to TalkBack",
+            semantics[SemanticsActions.OnClick].label == "Review this approval request"
+        )
     }
 }
