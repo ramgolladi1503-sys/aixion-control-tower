@@ -19,7 +19,7 @@ import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 
 @Composable
-fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier, readable: Boolean = false) {
+fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier, readable: Boolean = true) {
     val palette = LocalTowerPalette.current
     val color = when (risk) {
         RiskLevel.LOW -> palette.positive
@@ -31,7 +31,7 @@ fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier, readable: Boolean 
         label = if (readable) risk.name.toSentenceCase() else risk.name,
         color = color,
         modifier = modifier,
-        fontSize = if (readable) 14.sp else 10.sp,
+        fontSize = 14.sp,
         uppercase = !readable
     )
 }
@@ -41,7 +41,7 @@ fun StatusBadge(
     label: String,
     color: Color,
     modifier: Modifier = Modifier,
-    fontSize: TextUnit = 10.sp,
+    fontSize: TextUnit = 14.sp,
     uppercase: Boolean = true
 ) {
     Box(

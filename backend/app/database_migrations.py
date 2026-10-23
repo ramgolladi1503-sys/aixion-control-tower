@@ -103,6 +103,16 @@ def index_approval_invocation_identity(conn: sqlite3.Connection) -> None:
     )
 
 
+def index_approval_expiry_due(conn: sqlite3.Connection) -> None:
+    """Bound maintenance scans to pending approval rows and their deadlines."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kv_approval_expiry_due "
+        "ON kv_store(json_extract(payload,'$.status'), "
+        "json_extract(payload,'$.expires_at'), json_extract(payload,'$.created_at'), entity_id) "
+        "WHERE entity_type='approval_request'"
+    )
+
+
 def create_approval_delivery_claims(conn: sqlite3.Connection) -> None:
     """Record one-time connector delivery of an approved invocation."""
     conn.execute(
@@ -304,6 +314,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         migration_id="0009_approval_invocation_leases",
         name="Track scoped connector invocation liveness leases",
         apply=create_approval_invocation_leases,
+    ),
+    Migration(
+        migration_id="0010_approval_expiry_due_index",
+        name="Index bounded approval expiration selection",
+        apply=index_approval_expiry_due,
     ),
 )
 

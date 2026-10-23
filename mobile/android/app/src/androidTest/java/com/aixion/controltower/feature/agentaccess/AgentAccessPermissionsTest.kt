@@ -65,7 +65,7 @@ class AgentAccessPermissionsTest {
             }
         }
 
-        composeRule.onNodeWithText("CONNECTOR SETUP").assertExists()
+        composeRule.onNodeWithText("Connector setup").assertExists()
         composeRule.onNodeWithText("MAC AGENT ACCESS").assertDoesNotExist()
     }
 
@@ -77,8 +77,8 @@ class AgentAccessPermissionsTest {
             }
         }
 
-        composeRule.onNodeWithText("SYNCING").assertExists()
-        composeRule.onNodeWithText("CONNECTOR SETUP").assertDoesNotExist()
+        composeRule.onNodeWithText("Syncing").assertExists()
+        composeRule.onNodeWithText("Connector setup").assertDoesNotExist()
     }
 
     @Test

@@ -44,7 +44,7 @@ Use a real, consistent icon per destination with visible text labels; never use 
 
 ### Large windows
 
-Target behavior: on expanded window widths, replace the bottom bar with a navigation rail and use list-detail layouts where they reduce navigation overhead (approval list beside approval detail). On compact and medium widths retain one content pane and bottom navigation. Choose based on current app window size class, including resized/foldable states, not device model. The compact four-destination bottom bar is implemented; adaptive rail/list-detail behavior is not implemented and has not been visually/device-verified. These recommendations follow Android's adaptive navigation model.
+Target behavior: on expanded window widths, replace the bottom bar with a navigation rail and use list-detail layouts where they reduce navigation overhead (approval list beside approval detail). On compact and medium widths retain one content pane and bottom navigation. Choose based on current app window size class, including resized/foldable states, not device model. The compact four-destination bottom bar and expanded-width navigation rail are implemented; approval list-detail behavior is not implemented. Neither adaptive behavior has been visually/device-verified. These recommendations follow Android's adaptive navigation model.
 
 ## 3. Visual system
 

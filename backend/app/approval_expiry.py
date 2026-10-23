@@ -184,19 +184,29 @@ def expire_due_approvals(
     actor: str = "system",
     repository: ApprovalDecisionRepository | None = None,
     workspace_id: str | None = None,
+    limit: int = 250,
 ) -> int:
     active_repository = (
         repository if repository is not None else approval_decision_repository
     )
     with approval_repository_scope(active_repository):
         changed = 0
-        # The repository is authoritative; a missed or stale compatibility
-        # cache entry must not leave a durable pending approval unexpired.
-        for approval in active_repository.list_for_workspace(workspace_id):
+        # Selection is bounded and repository-backed. Expiration itself stays
+        # compare-and-set transactional, so concurrent application instances
+        # may safely select the same row and only one commits its audit/event.
+        now = now_utc()
+        ttl_seconds = get_settings().agent_approval_ttl_seconds
+        for approval in active_repository.list_due_pending(
+            now=now,
+            legacy_ttl_seconds=ttl_seconds,
+            limit=limit,
+            workspace_id=workspace_id,
+        ):
             expired = expire_approval(
                 approval,
                 actor=actor,
                 reason="deadline_elapsed",
+                now=now,
                 repository=active_repository,
             )
             if expired:

@@ -13,7 +13,7 @@ from app.models import User, UserRole
 from app.store import SQLiteBackedStore
 
 
-def test_fresh_database_gets_baseline_email_and_rate_limit_migrations(tmp_path, monkeypatch) -> None:
+def test_fresh_database_gets_baseline_email_rate_limit_and_expiry_migrations(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "fresh.sqlite3"
     monkeypatch.setenv("AIXION_DB_PATH", str(db_path))
 
@@ -29,15 +29,20 @@ def test_fresh_database_gets_baseline_email_and_rate_limit_migrations(tmp_path, 
         ).fetchone()
         rate_table = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'auth_rate_limit_buckets'").fetchone()
         expiry_index = conn.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_auth_rate_limit_window_start'").fetchone()
+        approval_expiry_index = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'idx_kv_approval_expiry_due'"
+        ).fetchone()
         migration_rows = conn.execute(f"SELECT migration_id, name, applied_at FROM {MIGRATION_TABLE}").fetchall()
 
     assert kv_table is not None
     assert email_table is not None
     assert rate_table is not None
     assert expiry_index is not None
+    assert approval_expiry_index is not None
     assert failure_table is not None
     assert failure_identity_trigger is not None
-    assert len(migration_rows) == 9
+    assert len(migration_rows) == 10
     assert migration_rows[0][0] == "0001_baseline_kv_store"
     assert migration_rows[0][1] == "Create baseline key-value persistence table"
     assert migration_rows[0][2]
@@ -57,6 +62,8 @@ def test_fresh_database_gets_baseline_email_and_rate_limit_migrations(tmp_path, 
     assert migration_rows[7][2]
     assert migration_rows[8][0] == "0009_approval_invocation_leases"
     assert migration_rows[8][2]
+    assert migration_rows[9][0] == "0010_approval_expiry_due_index"
+    assert migration_rows[9][2]
     with sqlite3.connect(db_path) as conn:
         lease_table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' "
@@ -76,7 +83,7 @@ def test_migration_runner_is_idempotent(tmp_path) -> None:
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'kv_store'"
         ).fetchone()[0]
 
-        assert migration_count == 9
+        assert migration_count == 10
     assert kv_table_count == 1
 
 
@@ -237,6 +244,7 @@ def test_existing_database_state_survives_baseline_migration(tmp_path, monkeypat
         "0007_approval_delivery_failures",
         "0008_delivery_failure_claim_identity",
         "0009_approval_invocation_leases",
+        "0010_approval_expiry_due_index",
     ]
 
 
@@ -265,7 +273,7 @@ def test_migration_metadata_persists(tmp_path) -> None:
     with sqlite3.connect(db_path) as conn:
         applied = get_applied_migrations(conn)
 
-    assert len(applied) == 9
+    assert len(applied) == 10
     assert applied[0]["migration_id"] == "0001_baseline_kv_store"
     assert applied[0]["name"] == "Create baseline key-value persistence table"
     assert applied[0]["applied_at"]
@@ -277,3 +285,4 @@ def test_migration_metadata_persists(tmp_path) -> None:
     assert applied[6]["migration_id"] == "0007_approval_delivery_failures"
     assert applied[7]["migration_id"] == "0008_delivery_failure_claim_identity"
     assert applied[8]["migration_id"] == "0009_approval_invocation_leases"
+    assert applied[9]["migration_id"] == "0010_approval_expiry_due_index"

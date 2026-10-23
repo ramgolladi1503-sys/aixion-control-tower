@@ -129,7 +129,7 @@ private fun AccountInfoPanel(
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        StatusBadge(label = "SIGNED IN", color = palette.positive)
+        StatusBadge(label = "Signed in", color = palette.positive, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text("Account information", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))

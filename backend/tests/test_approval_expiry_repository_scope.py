@@ -41,10 +41,10 @@ class NonSQLiteApprovalRepository:
 
 class RecordingExpiryRepository:
     def __init__(self) -> None:
-        self.list_scopes: list[str | None] = []
+        self.list_calls: list[dict[str, object]] = []
 
-    def list_for_workspace(self, workspace_id: str | None = None) -> list[ApprovalRequest]:
-        self.list_scopes.append(workspace_id)
+    def list_due_pending(self, **kwargs: object) -> list[ApprovalRequest]:
+        self.list_calls.append(kwargs)
         return []
 
 
@@ -54,7 +54,8 @@ def test_due_approval_sweep_preserves_explicit_workspace_scope_and_global_mainte
     assert expire_due_approvals(repository=repository, workspace_id="workspace-a") == 0  # type: ignore[arg-type]
     assert expire_due_approvals(repository=repository) == 0  # type: ignore[arg-type]
 
-    assert repository.list_scopes == ["workspace-a", None]
+    assert [call["workspace_id"] for call in repository.list_calls] == ["workspace-a", None]
+    assert all(call["limit"] == 250 for call in repository.list_calls)
 
 
 def test_non_sqlite_expiry_does_not_lock_or_publish_to_sqlite_store(

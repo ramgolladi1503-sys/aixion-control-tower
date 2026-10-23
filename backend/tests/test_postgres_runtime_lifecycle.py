@@ -292,6 +292,7 @@ def test_lifespan_retries_approval_reconciliation_and_cancels_worker(
         return 0
 
     monkeypatch.setattr(main, "reconcile_linked_approval_tasks", reconcile)
+    monkeypatch.setattr(main, "expire_due_approvals", lambda **_kwargs: 0)
     application = SimpleNamespace(
         state=SimpleNamespace(
             approval_decision_repository=object(),

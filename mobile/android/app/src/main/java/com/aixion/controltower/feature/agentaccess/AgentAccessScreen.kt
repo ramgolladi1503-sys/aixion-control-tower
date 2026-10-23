@@ -297,8 +297,9 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
 internal fun AgentAccessStatusBadge(isLoading: Boolean) {
     val palette = LocalTowerPalette.current
     StatusBadge(
-        label = if (isLoading) "SYNCING" else "CONNECTOR SETUP",
-        color = palette.caution
+        label = if (isLoading) "Syncing" else "Connector setup",
+        color = palette.caution,
+        uppercase = false
     )
 }
 

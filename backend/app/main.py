@@ -251,6 +251,42 @@ async def _approval_recovery_loop(
             )
 
 
+async def _approval_expiry_loop(
+    application: FastAPI,
+    *,
+    approval_repository: ApprovalDecisionRepository,
+    poll_seconds: int,
+    batch_size: int = 250,
+) -> None:
+    """Durably expire due approvals using the lifespan-selected repository."""
+    while True:
+        await asyncio.sleep(poll_seconds)
+        try:
+            changed = expire_due_approvals(
+                actor="system",
+                repository=approval_repository,
+                limit=batch_size,
+            )
+            application.state.approval_expiry_status = "healthy"
+            application.state.approval_expiry_failure_count = 0
+            application.state.approval_expiry_last_completed_at = now_utc()
+            application.state.approval_expiry_last_changed_count = changed
+            if changed:
+                logger.info("Approval expiry pass committed count=%s", changed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            application.state.approval_expiry_status = "failed"
+            application.state.approval_expiry_failure_count = (
+                getattr(application.state, "approval_expiry_failure_count", 0) + 1
+            )
+            application.state.approval_expiry_last_completed_at = now_utc()
+            application.state.approval_expiry_last_changed_count = 0
+            logger.exception(
+                "Approval expiry pass failed error_type=%s", type(error).__name__
+            )
+
+
 def _validate_postgres_notification_runtime(
     application: FastAPI,
     *,
@@ -330,6 +366,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     dispatch_task: asyncio.Task[None] | None = None
     email_task: asyncio.Task[None] | None = None
     recovery_task: asyncio.Task[None] | None = None
+    expiry_task: asyncio.Task[None] | None = None
     try:
         if getattr(settings, "postgres_auth_enabled", False):
             if postgres_runtime is None:
@@ -435,6 +472,35 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             failure_count=len(startup_recovery_failures),
             completed_at=now_utc(),
         )
+        application.state.approval_expiry_status = "starting"
+        application.state.approval_expiry_failure_count = 0
+        application.state.approval_expiry_last_changed_count = 0
+        try:
+            startup_expired = expire_due_approvals(
+                actor="system",
+                repository=recovery_approval_repository,
+                limit=250,
+            )
+            application.state.approval_expiry_status = "healthy"
+            application.state.approval_expiry_last_completed_at = now_utc()
+            application.state.approval_expiry_last_changed_count = startup_expired
+            if startup_expired:
+                logger.info("Startup approval expiry pass committed count=%s", startup_expired)
+        except Exception as error:
+            application.state.approval_expiry_status = "failed"
+            application.state.approval_expiry_failure_count = 1
+            application.state.approval_expiry_last_completed_at = now_utc()
+            logger.exception(
+                "Startup approval expiry pass failed error_type=%s",
+                type(error).__name__,
+            )
+        expiry_task = asyncio.create_task(
+            _approval_expiry_loop(
+                application,
+                approval_repository=recovery_approval_repository,
+                poll_seconds=getattr(settings, "approval_recovery_poll_seconds", 60),
+            )
+        )
         recovery_task = asyncio.create_task(
             _approval_recovery_loop(
                 application,
@@ -470,10 +536,10 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     email_task = asyncio.create_task(email_dispatch_loop())
         yield
     finally:
-        for task in (dispatch_task, email_task, recovery_task):
+        for task in (dispatch_task, email_task, recovery_task, expiry_task):
             if task is not None:
                 task.cancel()
-        for task in (dispatch_task, email_task, recovery_task):
+        for task in (dispatch_task, email_task, recovery_task, expiry_task):
             if task is not None:
                 with suppress(asyncio.CancelledError):
                     await task

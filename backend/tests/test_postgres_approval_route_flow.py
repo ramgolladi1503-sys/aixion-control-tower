@@ -1128,12 +1128,13 @@ def test_postgres_codex_hook_denies_lost_consume_response_and_same_invocation_re
         postgres_approval_route_runtime
     )
     codex_token = f"postgres-codex-route-token-{uuid.uuid4().hex}"
-    codex_agent = replace(
-        fixture_agent,
-        id=new_id("agent"),
-        provider=AgentProvider.CODEX,
-        display_name="Codex PostgreSQL route test",
-        secret_hash=hashlib.sha256(codex_token.encode("utf-8")).hexdigest(),
+    codex_agent = fixture_agent.model_copy(
+        update={
+            "id": new_id("agent"),
+            "provider": AgentProvider.CODEX,
+            "display_name": "Codex PostgreSQL route test",
+            "secret_hash": hashlib.sha256(codex_token.encode("utf-8")).hexdigest(),
+        }
     )
     repositories.external_agent_auth.create(
         agent=codex_agent,
@@ -1703,9 +1704,16 @@ def test_postgres_antigravity_hook_process_stays_pending_across_api_restart(
             with connect() as connection:
                 row = connection.execute(
                     "SELECT payload FROM approval_requests WHERE workspace_id=%s "
-                    "AND source_agent_id=%s AND source_provider='ANTIGRAVITY' "
+                    "AND source_agent_id=%s "
+                    "AND payload->>'source_provider'=%s "
+                    "AND payload->>'source_session_id'=%s "
                     "ORDER BY created_at DESC LIMIT 1",
-                    (workspace.id, agent.id),
+                    (
+                        workspace.id,
+                        agent.id,
+                        AgentProvider.ANTIGRAVITY.value,
+                        payload["conversationId"],
+                    ),
                 ).fetchone()
             if row is not None:
                 candidate = row[0]

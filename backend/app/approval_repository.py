@@ -764,6 +764,15 @@ class ApprovalDecisionRepository(Protocol):
 
     def list_for_workspace(self, workspace_id: str | None = None) -> list[ApprovalRequest]: ...
 
+    def list_due_pending(
+        self,
+        *,
+        now: datetime,
+        legacy_ttl_seconds: int,
+        limit: int,
+        workspace_id: str | None = None,
+    ) -> list[ApprovalRequest]: ...
+
     def latest_decision_audit(
         self,
         *,
@@ -1253,6 +1262,69 @@ class SQLiteApprovalDecisionRepository:
                 continue
             requests.append(request)
         return sorted(requests, key=lambda request: (request.created_at, request.id), reverse=True)
+
+    def list_due_pending(
+        self,
+        *,
+        now: datetime,
+        legacy_ttl_seconds: int,
+        limit: int,
+        workspace_id: str | None = None,
+    ) -> list[ApprovalRequest]:
+        if (
+            now.utcoffset() is None
+            or legacy_ttl_seconds <= 0
+            or not 1 <= limit <= 10_000
+        ):
+            raise ValueError("Due-approval query bounds are invalid")
+        scope_sql = ""
+        query_params: list[object] = [
+            ApprovalStatus.REQUESTED.value,
+            ApprovalStatus.PENDING_REVIEW.value,
+            now.isoformat(),
+            legacy_ttl_seconds,
+            now.isoformat(),
+        ]
+        if workspace_id is not None:
+            scope_sql = (
+                " AND COALESCE(json_extract(approval.payload,'$.workspace_id'),"
+                "json_extract(project.payload,'$.workspace_id')) = ?"
+            )
+            query_params.append(workspace_id)
+        query_params.extend((legacy_ttl_seconds, limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT approval.entity_id,approval.payload,project.payload "
+                "FROM kv_store AS approval JOIN kv_store AS project "
+                "ON project.entity_type='project' "
+                "AND project.entity_id=json_extract(approval.payload,'$.project_id') "
+                "WHERE approval.entity_type='approval_request' "
+                "AND json_extract(approval.payload,'$.status') IN (?,?) "
+                "AND ((json_extract(approval.payload,'$.expires_at') IS NOT NULL "
+                "AND datetime(json_extract(approval.payload,'$.expires_at')) <= datetime(?)) "
+                "OR (json_extract(approval.payload,'$.expires_at') IS NULL "
+                "AND datetime(json_extract(approval.payload,'$.created_at'), '+' || ? || ' seconds') <= datetime(?))) "
+                + scope_sql
+                + " ORDER BY COALESCE(datetime(json_extract(approval.payload,'$.expires_at')), "
+                "datetime(json_extract(approval.payload,'$.created_at'), '+' || ? || ' seconds')), approval.entity_id LIMIT ?",
+                query_params,
+            ).fetchall()
+        due: list[ApprovalRequest] = []
+        for entity_id, approval_payload, project_payload in rows:
+            approval = ApprovalRequest.model_validate_json(approval_payload)
+            project = Project.model_validate_json(project_payload)
+            if (
+                approval.id != entity_id
+                or approval.project_id != project.id
+                or approval.workspace_id not in {None, project.workspace_id}
+                or (
+                    workspace_id is not None
+                    and (approval.workspace_id or project.workspace_id) != workspace_id
+                )
+            ):
+                continue
+            due.append(approval)
+        return due
 
     def latest_decision_audit(
         self,
@@ -2334,6 +2406,50 @@ class PostgresApprovalDecisionRepository:
         if any(request.workspace_id != workspace_id for request in requests) and workspace_id is not None:
             raise ApprovalDecisionConflict("Approval query returned a record outside its workspace scope.")
         return requests
+
+    def list_due_pending(
+        self,
+        *,
+        now: datetime,
+        legacy_ttl_seconds: int,
+        limit: int,
+        workspace_id: str | None = None,
+    ) -> list[ApprovalRequest]:
+        if (
+            now.utcoffset() is None
+            or legacy_ttl_seconds <= 0
+            or not 1 <= limit <= 10_000
+        ):
+            raise ValueError("Due-approval query bounds are invalid")
+        statuses = (ApprovalStatus.REQUESTED.value, ApprovalStatus.PENDING_REVIEW.value)
+        scope_sql = " AND workspace_id=%s" if workspace_id is not None else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload,approval_id,workspace_id,project_id FROM approval_requests "
+                "WHERE status IN (%s,%s) AND (expires_at <= %s OR "
+                "(expires_at IS NULL AND created_at + (%s * interval '1 second') <= %s))"
+                + scope_sql
+                + " ORDER BY COALESCE(expires_at, created_at + (%s * interval '1 second')), approval_id LIMIT %s",
+                (
+                    statuses[0], statuses[1], now, legacy_ttl_seconds, now,
+                    *((workspace_id,) if workspace_id is not None else ()),
+                    legacy_ttl_seconds, limit,
+                ),
+            ).fetchall()
+        approvals: list[ApprovalRequest] = []
+        for payload, approval_id, row_workspace_id, project_id in rows:
+            approval = ApprovalRequest.model_validate(payload)
+            if (
+                approval.id != approval_id
+                or approval.workspace_id != row_workspace_id
+                or approval.project_id != project_id
+                or (workspace_id is not None and approval.workspace_id != workspace_id)
+            ):
+                raise ApprovalDecisionConflict(
+                    "Due-approval query found mismatched identity or workspace scope."
+                )
+            approvals.append(approval)
+        return approvals
 
     def latest_decision_audit(
         self,

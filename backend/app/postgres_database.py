@@ -1311,6 +1311,14 @@ POSTGRES_MIGRATIONS = (
             "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12'))",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0029_approval_expiry_sweep",
+        name="Index bounded approval expiration selection",
+        statements=(
+            "CREATE INDEX IF NOT EXISTS idx_approval_requests_expiry_due "
+                "ON approval_requests(status,expires_at,created_at,approval_id)",
+        ),
+    ),
 )
 
 

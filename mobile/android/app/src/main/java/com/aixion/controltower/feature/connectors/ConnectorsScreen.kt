@@ -56,7 +56,7 @@ private fun ConnectorsHero() {
     TowerHeroPanel {
         Row(verticalAlignment = Alignment.Top) {
             Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = "SET UP A PROJECT", color = palette.brand)
+                StatusBadge(label = "Set up a project", color = palette.brand, uppercase = false)
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
                     text = "Connect your coding agent",

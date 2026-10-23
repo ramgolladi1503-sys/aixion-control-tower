@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 
@@ -142,6 +142,96 @@ def test_get_and_list_reject_orphaned_or_mismatched_project_scope(tmp_path: Path
     assert repository.get(mismatched.id) is None
     assert {item.id for item in repository.list_for_workspace()} == {valid.id}
     assert repository.list_for_workspace("workspace_other") == []
+
+
+def test_list_due_pending_is_bounded_scoped_and_includes_legacy_deadlines(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "approval_due_selection.sqlite3"
+    now = datetime.now(timezone.utc)
+    due_explicit = _approval().model_copy(
+        update={
+            "id": "approval_due_explicit",
+            "project_id": "project_due_explicit",
+            "workspace_id": "workspace_due_a",
+            "status": ApprovalStatus.PENDING_REVIEW,
+            "created_at": now - timedelta(minutes=10),
+            "expires_at": now - timedelta(seconds=2),
+        }
+    )
+    due_legacy = _approval().model_copy(
+        update={
+            "id": "approval_due_legacy",
+            "project_id": "project_due_legacy",
+            "workspace_id": "workspace_due_a",
+            "status": ApprovalStatus.REQUESTED,
+            "created_at": now - timedelta(minutes=10),
+            "expires_at": None,
+        }
+    )
+    other_workspace = _approval().model_copy(
+        update={
+            "id": "approval_due_other_workspace",
+            "project_id": "project_due_other",
+            "workspace_id": "workspace_due_b",
+            "status": ApprovalStatus.REQUESTED,
+            "created_at": now - timedelta(minutes=10),
+            "expires_at": now - timedelta(seconds=1),
+        }
+    )
+    not_due = _approval().model_copy(
+        update={
+            "id": "approval_not_due",
+            "project_id": "project_not_due",
+            "workspace_id": "workspace_due_a",
+            "status": ApprovalStatus.REQUESTED,
+            "created_at": now - timedelta(minutes=1),
+            "expires_at": now + timedelta(minutes=1),
+        }
+    )
+    with sqlite3.connect(database) as connection:
+        run_migrations(connection)
+        for approval in (due_explicit, due_legacy, other_workspace, not_due):
+            project = Project(
+                id=approval.project_id,
+                name="Due query project",
+                workspace_id=approval.workspace_id,
+            )
+            connection.execute(
+                "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+                ("project", project.id, project.model_dump_json()),
+            )
+            connection.execute(
+                "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+                ("approval_request", approval.id, approval.model_dump_json()),
+            )
+
+    repository = _repository(database)
+    selected = repository.list_due_pending(
+        now=now,
+        legacy_ttl_seconds=600,
+        limit=10,
+        workspace_id="workspace_due_a",
+    )
+    assert {approval.id for approval in selected} == {
+        due_explicit.id,
+        due_legacy.id,
+    }
+    assert repository.list_due_pending(
+        now=now,
+        legacy_ttl_seconds=600,
+        limit=1,
+    ) == [due_explicit]
+
+
+def test_list_due_pending_rejects_invalid_bounds(tmp_path: Path) -> None:
+    repository = _repository(tmp_path / "approval_due_bounds.sqlite3")
+    with pytest.raises(ValueError, match="bounds"):
+        repository.list_due_pending(
+            now=datetime.now(timezone.utc),
+            legacy_ttl_seconds=600,
+            limit=0,
+        )
 
 
 def _audit(

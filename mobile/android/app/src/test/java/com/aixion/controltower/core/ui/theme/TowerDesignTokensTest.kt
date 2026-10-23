@@ -21,14 +21,14 @@ class TowerDesignTokensTest {
         val labelMedium = TowerTypography.labelMedium
         val labelSmall = TowerTypography.labelSmall
 
-        assertEquals(13.sp, bodySmall.fontSize)
-        assertEquals(19.sp, bodySmall.lineHeight)
-        assertEquals(13.sp, labelMedium.fontSize)
-        assertEquals(18.sp, labelMedium.lineHeight)
-        assertEquals(12.sp, labelSmall.fontSize)
-        assertEquals(16.sp, labelSmall.lineHeight)
-        assertTrue("Labels must remain at least 12sp", labelMedium.fontSize >= 12.sp)
-        assertTrue("Labels must remain at least 12sp", labelSmall.fontSize >= 12.sp)
+        assertEquals(14.sp, bodySmall.fontSize)
+        assertEquals(20.sp, bodySmall.lineHeight)
+        assertEquals(14.sp, labelMedium.fontSize)
+        assertEquals(20.sp, labelMedium.lineHeight)
+        assertEquals(14.sp, labelSmall.fontSize)
+        assertEquals(18.sp, labelSmall.lineHeight)
+        assertTrue("Labels must remain at least 14sp", labelMedium.fontSize >= 14.sp)
+        assertTrue("Labels must remain at least 14sp", labelSmall.fontSize >= 14.sp)
         assertTrue("Supporting styles must retain distinct hierarchy", bodySmall != labelMedium)
         assertTrue("Supporting styles must retain distinct hierarchy", labelMedium != labelSmall)
     }
