@@ -1,23 +1,36 @@
 from __future__ import annotations
 
+import time
+from datetime import timedelta
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+import psycopg
 
 from .application_repository_access import (
+    approval_decision_repository_for_request,
     mcp_child_server_repository_for_request,
     project_repository_for_request,
     workspace_id_for_request,
 )
 from .auth import require_maintainer
 from .mcp_gateway import MCPGatewayDecision, MCPGatewayToolCall
-from .mcp_gateway_routes import gateway_for_project
+from .mcp_gateway_routes import (
+    GatewaySubmitRequest,
+    _postgres_mcp_submission,
+    _resolve_postgres_gateway_request,
+    gateway_for_project,
+)
 from .mcp_child_server_repository import (
     PostgresMCPChildServerRepository,
     SQLiteMCPChildServerRepository,
 )
-from .models import AuthUser, MCPChildServer
+from .models import ApprovalStatus, AuthUser, MCPChildServer, now_utc
+from .approval_expiry import expire_approval
+from .mcp_pending_repository import MCPPendingRepositoryError
+from .settings import get_settings
 from .store import store
 from .workspace_access import project_workspace_id, workspace_id_for_user
 
@@ -128,13 +141,18 @@ def _registered_tool_policy(
     project_id: str,
     tool_name: str,
     requested_server_name: str | None,
+    registered_servers: list[MCPChildServer] | None = None,
 ) -> tuple[str, bool, dict[str, Any]] | None:
-    registered_servers = _project_child_servers(project_id)
-    if not registered_servers:
+    servers = (
+        _project_child_servers(project_id)
+        if registered_servers is None
+        else registered_servers
+    )
+    if not servers:
         return None
 
     matches = []
-    for server in registered_servers:
+    for server in servers:
         if requested_server_name is not None and requested_server_name != server.name:
             continue
         if not server.enabled:
@@ -213,7 +231,13 @@ def _value_matches_json_type(value: Any, expected_type: str | list[str]) -> bool
     return False
 
 
-def _tool_call_from_params(project_id: str, params: dict[str, Any]) -> MCPGatewayToolCall:
+def _tool_call_from_params(
+    project_id: str,
+    params: dict[str, Any],
+    *,
+    registered_servers: list[MCPChildServer] | None = None,
+    allow_demo: bool = True,
+) -> MCPGatewayToolCall:
     tool_name = params.get("name")
     if not isinstance(tool_name, str) or not tool_name.strip():
         raise ValueError("tools/call params must include non-empty name")
@@ -238,12 +262,19 @@ def _tool_call_from_params(project_id: str, params: dict[str, Any]) -> MCPGatewa
     if mutating is not None and not isinstance(mutating, bool):
         raise ValueError("mutating must be a boolean when provided")
 
-    registered_policy = _registered_tool_policy(project_id, tool_name, requested_server_name)
+    registered_policy = _registered_tool_policy(
+        project_id,
+        tool_name,
+        requested_server_name,
+        registered_servers=registered_servers,
+    )
     if registered_policy is not None:
         server_name, registered_mutating, input_schema = registered_policy
         _validate_arguments_against_schema(arguments, input_schema)
         mutating = registered_mutating
     else:
+        if not allow_demo:
+            raise ValueError("tools/call references an unknown or disabled registered tool")
         server_name = requested_server_name or "child-test-server"
 
     return MCPGatewayToolCall(
@@ -276,6 +307,194 @@ def _gateway_decision_to_mcp_result(decision: MCPGatewayDecision) -> dict[str, A
     }
 
 
+def _postgres_mcp_tool_call(
+    *,
+    project_id: str,
+    payload: MCPJsonRpcRequest,
+    user: AuthUser,
+    request: Request,
+    registered_servers: list[MCPChildServer],
+) -> MCPJsonRpcResponse:
+    """Persist, wait for, and forward one PostgreSQL-backed mutating call.
+
+    The JSON-RPC request ID is the transport idempotency key. Approval is read
+    from the application repository on every poll, and forwarding is delegated
+    to the durable claim/finalize implementation shared with MCP Gateway.
+    """
+    try:
+        call = _tool_call_from_params(
+            project_id,
+            payload.params,
+            registered_servers=registered_servers,
+            allow_demo=False,
+        )
+    except ValueError as error:
+        return _error_response(payload.id, code=-32602, message=str(error))
+
+    if call.mutating is not True:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL MCP non-mutating forwarding is unavailable",
+        )
+    if payload.id is None:
+        return _error_response(
+            payload.id,
+            code=-32600,
+            message="Mutating MCP tools/call requires a JSON-RPC request ID for idempotency.",
+        )
+    idempotency_key = f"{project_id}:{call.session_id or ''}:{payload.id}"
+    if len(idempotency_key) > 256:
+        return _error_response(
+            payload.id,
+            code=-32600,
+            message="Mutating MCP tools/call request ID is too long.",
+        )
+
+    submission = _postgres_mcp_submission(
+        payload=GatewaySubmitRequest(project_id=project_id, request=call),
+        user=user,
+        request=request,
+        idempotency_key=idempotency_key,
+    )
+    approval_id = submission.approval_request_id
+    if not approval_id:
+        raise HTTPException(status_code=503, detail="MCP approval identity was not persisted")
+
+    try:
+        approval_repository = approval_decision_repository_for_request(request)
+        approval = approval_repository.get(approval_id)
+    except (RuntimeError, psycopg.Error, MCPPendingRepositoryError) as error:
+        raise HTTPException(status_code=503, detail="MCP approval state is unavailable") from error
+    try:
+        workspace_id = workspace_id_for_request(user, request)
+    except (RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP approval workspace is unavailable") from error
+    if approval is None or workspace_id is None or approval.workspace_id != workspace_id:
+        raise HTTPException(status_code=503, detail="MCP approval state is unavailable")
+
+    # The submission helper resolves the target again before it writes the
+    # durable request. Reject a concurrent registry change so the request can
+    # never be approved against a different tool schema than the one validated
+    # at the transport boundary.
+    matching_servers = [server for server in registered_servers if server.name == call.server_name]
+    try:
+        approved_target = json.loads(approval.files[0].new_content or "")
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=409, detail="Approved MCP target binding is invalid") from error
+    if (
+        len(matching_servers) != 1
+        or approved_target.get("target_server_id") != matching_servers[0].id
+        or approved_target.get("target_server_revision") != matching_servers[0].updated_at.isoformat()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="MCP server configuration changed during submission; create a new request",
+        )
+
+    # Reuse the application's bounded approval TTL. This also bounds the
+    # synchronous HTTP wait even when a caller reuses an older idempotency key.
+    ttl_seconds = get_settings().agent_approval_ttl_seconds
+    effective_expiry = approval.expires_at or (approval.created_at + timedelta(seconds=ttl_seconds))
+    if effective_expiry.tzinfo is None or effective_expiry.utcoffset() is None:
+        raise HTTPException(status_code=503, detail="MCP approval expiry is invalid")
+    deadline = min(
+        effective_expiry,
+        now_utc() + timedelta(seconds=ttl_seconds),
+    )
+    monotonic_deadline = time.monotonic() + max(0.0, (deadline - now_utc()).total_seconds())
+
+    while True:
+        try:
+            approval = approval_repository.get(approval_id)
+        except (RuntimeError, psycopg.Error, MCPPendingRepositoryError) as error:
+            raise HTTPException(status_code=503, detail="MCP approval state is unavailable") from error
+        if approval is None or workspace_id is None or approval.workspace_id != workspace_id:
+            raise HTTPException(status_code=503, detail="MCP approval state is unavailable")
+
+        if approval.status == ApprovalStatus.APPROVED:
+            decision = _resolve_postgres_gateway_request(
+                approval_request_id=approval_id,
+                user=user,
+                request=request,
+                pending_repository=request.app.state.postgres_repositories.mcp_pending_requests,
+            )
+            return _result_response(payload.id, _gateway_decision_to_mcp_result(decision))
+
+        if approval.status not in {ApprovalStatus.REQUESTED, ApprovalStatus.PENDING_REVIEW}:
+            decision = MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval_id,
+                status=approval.status,
+                reason=f"Approval status is {approval.status}; MCP tool was not forwarded.",
+            )
+            result = _gateway_decision_to_mcp_result(decision)
+            result["isError"] = True
+            return _result_response(payload.id, result)
+
+        now = now_utc()
+        if effective_expiry <= now:
+            try:
+                # The shared expiry path handles both explicit deadlines and
+                # legacy rows whose deadline is derived from the configured TTL.
+                expire_approval(
+                    approval,
+                    actor="system:mcp-transport-timeout",
+                    reason="deadline_elapsed",
+                    now=now,
+                    repository=approval_repository,
+                )
+                approval = approval_repository.get(approval_id)
+            except Exception as error:
+                raise HTTPException(status_code=503, detail="MCP approval expiry could not be persisted") from error
+            if approval is None or approval.status not in {
+                ApprovalStatus.EXPIRED,
+                ApprovalStatus.DENIED,
+                ApprovalStatus.REVISION_REQUESTED,
+            }:
+                raise HTTPException(status_code=503, detail="MCP approval expiry is unresolved")
+            decision = MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval_id,
+                status=approval.status,
+                reason="Approval expired before the MCP tool call was approved; the tool was not forwarded.",
+            )
+            result = _gateway_decision_to_mcp_result(decision)
+            result["isError"] = True
+            return _result_response(payload.id, result)
+        if time.monotonic() >= monotonic_deadline:
+            try:
+                expire_approval(
+                    approval,
+                    actor="system:mcp-transport-timeout",
+                    reason="transport_wait_timeout",
+                    now=now,
+                    force=True,
+                    repository=approval_repository,
+                )
+                approval = approval_repository.get(approval_id)
+            except Exception as error:
+                raise HTTPException(status_code=503, detail="MCP approval timeout could not be persisted") from error
+            if approval is None or approval.status not in {
+                ApprovalStatus.EXPIRED,
+                ApprovalStatus.DENIED,
+                ApprovalStatus.REVISION_REQUESTED,
+            }:
+                raise HTTPException(status_code=503, detail="MCP approval timeout is unresolved")
+            decision = MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval_id,
+                status=ApprovalStatus.EXPIRED,
+                reason="MCP approval wait timed out; the tool was not forwarded.",
+            )
+            result = _gateway_decision_to_mcp_result(decision)
+            result["isError"] = True
+            return _result_response(payload.id, result)
+        time.sleep(min(0.5, max(0.0, monotonic_deadline - time.monotonic())))
+
+
 @router.post("/{project_id}/jsonrpc", response_model=MCPJsonRpcResponse)
 def handle_mcp_jsonrpc(
     project_id: str,
@@ -285,33 +504,32 @@ def handle_mcp_jsonrpc(
 ) -> MCPJsonRpcResponse:
     postgres_child_servers: list[MCPChildServer] | None = None
     if http_request is not None:
-        repository = mcp_child_server_repository_for_request(http_request)
+        try:
+            repository = mcp_child_server_repository_for_request(http_request)
+        except (RuntimeError, psycopg.Error) as error:
+            raise HTTPException(status_code=503, detail="MCP server registry is unavailable") from error
         if isinstance(repository, PostgresMCPChildServerRepository):
-            # Only discovery methods are safe until tool-call approval, audit,
-            # pending-request, and forwarding effects share one durable path.
-            if payload.method == "tools/call":
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "MCP tools/call is unavailable until approval, pending-request, "
-                        "audit, and forwarding state share a durable runtime."
-                    ),
-                )
-            project_repository = project_repository_for_request(http_request)
-            workspace_id = workspace_id_for_request(user, http_request)
-            project = project_repository.get(project_id)
+            try:
+                project_repository = project_repository_for_request(http_request)
+                workspace_id = workspace_id_for_request(user, http_request)
+                project = project_repository.get(project_id)
+            except (RuntimeError, psycopg.Error) as error:
+                raise HTTPException(status_code=503, detail="MCP project data is unavailable") from error
             if (
                 project is None
                 or workspace_id is None
                 or project.workspace_id != workspace_id
             ):
                 raise HTTPException(status_code=404, detail="Project not found")
-            if payload.method == "tools/list":
-                postgres_child_servers = repository.list_for_workspace(
-                    workspace_id,
-                    project_id=project_id,
-                    enabled=True,
-                )
+            if payload.method in {"tools/list", "tools/call"}:
+                try:
+                    postgres_child_servers = repository.list_for_workspace(
+                        workspace_id,
+                        project_id=project_id,
+                        enabled=True,
+                    )
+                except (RuntimeError, psycopg.Error) as error:
+                    raise HTTPException(status_code=503, detail="MCP server registry is unavailable") from error
         elif isinstance(repository, SQLiteMCPChildServerRepository):
             if project_id not in store.projects:
                 raise HTTPException(status_code=404, detail="Project not found")
@@ -355,6 +573,14 @@ def handle_mcp_jsonrpc(
         )
         return _result_response(payload.id, {"tools": tools})
 
+    if postgres_child_servers is not None:
+        return _postgres_mcp_tool_call(
+            project_id=project_id,
+            payload=payload,
+            user=user,
+            request=http_request,
+            registered_servers=postgres_child_servers,
+        )
     try:
         tool_call = _tool_call_from_params(project_id, payload.params)
     except ValueError as exc:

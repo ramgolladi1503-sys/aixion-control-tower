@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import psycopg
@@ -12,6 +14,7 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 from app import main, mcp_transport_routes
+from app import mcp_gateway_routes
 from app.application_repositories import ApplicationRepositories
 from app.models import (
     AuditEvent,
@@ -70,6 +73,14 @@ def postgres_mcp_transport_runtime(
             "app.application_repository_access.get_settings",
             lambda: SimpleNamespace(postgres_auth_enabled=True, auth_enabled=True),
         )
+        monkeypatch.setattr(
+            mcp_gateway_routes,
+            "get_settings",
+            lambda: SimpleNamespace(
+                postgres_auth_enabled=True,
+                agent_approval_ttl_seconds=600,
+            ),
+        )
         for name, value in {
             "postgres_repositories": repositories,
             "postgres_runtime": SimpleNamespace(repositories=repositories),
@@ -95,6 +106,12 @@ def postgres_mcp_transport_runtime(
             mcp_transport_routes.MaintainerDependency.dependency,
             lambda: user,
         )
+        for dependency in (main.ReviewerDependency, mcp_gateway_routes.ReviewerDependency):
+            monkeypatch.setitem(
+                main.app.dependency_overrides,
+                dependency.dependency,
+                lambda: user,
+            )
         yield connect, workspace, project, user, repositories
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
@@ -112,7 +129,7 @@ def _register_server(repositories, project: Project, workspace: Workspace) -> MC
                 name="pg_registry_tool",
                 description="Only available from the PostgreSQL registry.",
                 input_schema={"type": "object", "properties": {}},
-                mutating=False,
+                mutating=True,
             )
         ],
     )
@@ -201,23 +218,110 @@ def test_postgres_mcp_transport_hides_foreign_workspace_projects(
     assert workspace.id != foreign_workspace.id
 
 
-def test_postgres_mcp_tools_call_remains_fail_closed(
+def test_postgres_mcp_tools_call_waits_for_durable_approval_and_forwards_once(
     postgres_mcp_transport_runtime,
 ) -> None:
     _connect, workspace, project, _user, repositories = postgres_mcp_transport_runtime
-    _register_server(repositories, project, workspace)
+    server = _register_server(repositories, project, workspace)
 
-    client = TestClient(main.app)
-    response = client.post(
-        f"/mcp/{project.id}/jsonrpc",
-        json={
-            "jsonrpc": "2.0",
-            "id": "call",
-            "method": "tools/call",
-            "params": {"name": "pg_registry_tool", "arguments": {}},
+    call_payload = {
+        "jsonrpc": "2.0",
+        "id": "durable-call-1",
+        "method": "tools/call",
+        "params": {
+            "name": "pg_registry_tool",
+            "server_name": server.name,
+            "arguments": {},
+            "session_id": "pg-transport-session",
         },
-    )
-    client.close()
+    }
+    with TestClient(main.app) as submit_client, TestClient(main.app) as reviewer_client:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                submit_client.post,
+                f"/mcp/{project.id}/jsonrpc",
+                json=call_payload,
+            )
+            pending = None
+            for _ in range(100):
+                candidates = repositories.mcp_pending_requests.list_for_workspace(
+                    workspace.id,
+                    project_id=project.id,
+                )
+                pending = next(
+                    (item for item in candidates if item.session_id == "pg-transport-session"),
+                    None,
+                )
+                if pending is not None:
+                    break
+                time.sleep(0.05)
+            assert pending is not None, "transport did not persist its durable MCP approval"
+            assert not future.done(), "mutating tools/call returned before reviewer decision"
 
-    assert response.status_code == 503
-    assert "share a durable runtime" in response.json()["detail"]
+            decision = reviewer_client.post(
+                f"/approvals/{pending.approval_request_id}/decision",
+                json={"decision": "approve", "reason": "approve PostgreSQL MCP transport"},
+            )
+            assert decision.status_code == 200, decision.text
+            response = future.result(timeout=15)
+
+    assert response.status_code == 200, response.text
+    structured = response.json()["result"]["structuredContent"]
+    assert structured["forwarded"] is True
+    assert structured["approval_required"] is True
+    assert structured["approval_request_id"] == pending.approval_request_id
+    assert structured["result"]["server_name"] == server.name
+    assert repositories.mcp_pending_requests.get(pending.id).status.value == "FORWARDED"
+    assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == 1
+
+
+def test_postgres_mcp_tools_call_denial_never_dispatches(
+    postgres_mcp_transport_runtime,
+) -> None:
+    _connect, workspace, project, _user, repositories = postgres_mcp_transport_runtime
+    server = _register_server(repositories, project, workspace)
+
+    call_payload = {
+        "jsonrpc": "2.0",
+        "id": "durable-call-denied",
+        "method": "tools/call",
+        "params": {
+            "name": "pg_registry_tool",
+            "server_name": server.name,
+            "arguments": {},
+            "session_id": "pg-transport-denied-session",
+        },
+    }
+    with TestClient(main.app) as submit_client, TestClient(main.app) as reviewer_client:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                submit_client.post,
+                f"/mcp/{project.id}/jsonrpc",
+                json=call_payload,
+            )
+            pending = None
+            for _ in range(100):
+                candidates = repositories.mcp_pending_requests.list_for_workspace(
+                    workspace.id,
+                    project_id=project.id,
+                )
+                pending = next(
+                    (item for item in candidates if item.session_id == "pg-transport-denied-session"),
+                    None,
+                )
+                if pending is not None:
+                    break
+                time.sleep(0.05)
+            assert pending is not None, "transport did not persist its durable MCP approval"
+            decision = reviewer_client.post(
+                f"/approvals/{pending.approval_request_id}/decision",
+                json={"decision": "deny", "reason": "deny PostgreSQL MCP transport"},
+            )
+            assert decision.status_code == 200, decision.text
+            response = future.result(timeout=15)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["isError"] is True
+    assert response.json()["result"]["structuredContent"]["forwarded"] is False
+    assert repositories.mcp_pending_requests.get(pending.id).status.value == "BLOCKED_BY_DECISION"
+    assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == 0
