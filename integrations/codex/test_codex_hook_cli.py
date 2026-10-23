@@ -20,7 +20,18 @@ SPEC.loader.exec_module(hook)
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [("7", 7), ("not a date", hook.POLL_INTERVAL_SECONDS), (None, hook.POLL_INTERVAL_SECONDS)],
+    [
+        ("7", 7),
+        ("0", 0),
+        ("9" * 100, hook.MAX_WAIT_SECONDS),
+        ("-1", hook.POLL_INTERVAL_SECONDS),
+        ("+7", hook.POLL_INTERVAL_SECONDS),
+        (" 7", hook.POLL_INTERVAL_SECONDS),
+        ("7 ", hook.POLL_INTERVAL_SECONDS),
+        ("1_0", hook.POLL_INTERVAL_SECONDS),
+        ("not a date", hook.POLL_INTERVAL_SECONDS),
+        (None, hook.POLL_INTERVAL_SECONDS),
+    ],
 )
 def test_retry_after_delta_and_invalid_values(value: str | None, expected: int) -> None:
     assert hook._parse_retry_after(value) == expected
@@ -29,9 +40,22 @@ def test_retry_after_delta_and_invalid_values(value: str | None, expected: int) 
 def test_retry_after_http_date_uses_injected_utc_clock() -> None:
     now = datetime(2026, 10, 23, 12, 0, 0, tzinfo=timezone.utc)
     value = format_datetime(now + timedelta(seconds=37), usegmt=True)
+    offset = format_datetime(now + timedelta(seconds=37), usegmt=False)
     past = format_datetime(now - timedelta(seconds=5), usegmt=True)
     assert hook._parse_retry_after(value, now=now) == 37
+    assert hook._parse_retry_after(offset, now=now) == 37
     assert hook._parse_retry_after(past, now=now) == 0
+    subsecond_now = now + timedelta(microseconds=500_000)
+    next_second = format_datetime(now + timedelta(seconds=1), usegmt=True)
+    assert hook._parse_retry_after(next_second, now=subsecond_now) == 1
+    assert (
+        hook._parse_retry_after("Fri, 31 Feb 2026 12:00:00 GMT", now=now)
+        == hook.POLL_INTERVAL_SECONDS
+    )
+    assert (
+        hook._parse_retry_after("Fri, 23 Oct 2026 12:01:00", now=now)
+        == hook.POLL_INTERVAL_SECONDS
+    )
 
 
 @pytest.mark.parametrize(

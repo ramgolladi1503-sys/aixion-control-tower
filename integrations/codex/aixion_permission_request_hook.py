@@ -354,10 +354,11 @@ def _parse_retry_after(
     """
     if value is None:
         return POLL_INTERVAL_SECONDS
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        pass
+    if re.fullmatch(r"[0-9]+", value):
+        try:
+            return min(MAX_WAIT_SECONDS, int(value))
+        except ValueError:
+            return POLL_INTERVAL_SECONDS
     try:
         retry_at = parsedate_to_datetime(value)
         if retry_at.tzinfo is None:
@@ -365,7 +366,8 @@ def _parse_retry_after(
         current = now or datetime.now(timezone.utc)
         if current.tzinfo is None:
             return POLL_INTERVAL_SECONDS
-        return max(0, int((retry_at - current).total_seconds()))
+        delay = max(0, math.ceil((retry_at - current).total_seconds()))
+        return min(MAX_WAIT_SECONDS, delay)
     except (OverflowError, TypeError, ValueError):
         return POLL_INTERVAL_SECONDS
 
