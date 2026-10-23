@@ -3206,6 +3206,7 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     ]
     assert len(branch_events) == 1
     assert branch_events[0].event_type == AgentTaskEventType.NOTE
+    assert branch_events[0].actor == "postgres-branch-route-test"
     assert branch_events[0].metadata["source_sha"] == source_sha
 
     success_events = [

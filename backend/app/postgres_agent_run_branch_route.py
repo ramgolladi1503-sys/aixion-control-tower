@@ -10,7 +10,7 @@ from .agent_worker_github_branch import DEFAULT_SOURCE_BRANCH, _default_client
 from .application_repository_access import application_repositories_for_request
 from .application_repositories import ApplicationRepositories
 from .approval_repository import PostgresApprovalDecisionRepository
-from .models import AuthUser, now_utc
+from .models import now_utc
 from .postgres_agent_run_branch import AgentRunBranchIntent, PostgresAgentRunBranchIntentRepository
 from .postgres_agent_run_branch_executor import BranchExecutionRequest, PostgresCreateBranchCoordinator
 from .postgres_runtime import PostgresRuntime
@@ -23,7 +23,7 @@ SOURCE_BRANCH = DEFAULT_SOURCE_BRANCH
 
 
 def postgres_branch_execution_dependencies(
-    *, request: Request, run: AgentRun, step: AgentRunStep, actor: AuthUser
+    *, request: Request, run: AgentRun, step: AgentRunStep, actor: str
 ) -> tuple[PostgresCreateBranchCoordinator, object]:
     """Bind CREATE_BRANCH to the exact PostgreSQL authority owned by app lifespan."""
     state = request.app.state
@@ -134,7 +134,7 @@ def postgres_branch_execution_dependencies(
             )
 
         return BranchExecutionRequest(
-            workspace_id=run.workspace_id, actor=actor.email,
+            workspace_id=run.workspace_id, actor=actor,
             worker_lease_token=worker_lease_token, expected_run=current_run,
             expected_step=current_step, task=task, approval=approval, lease=lease,
             repository=repository, source_branch=SOURCE_BRANCH, target_ref=target_ref,
@@ -142,7 +142,7 @@ def postgres_branch_execution_dependencies(
             intent_factory=intent_factory,
             completion_factory=lambda intent, url: build_postgres_branch_completion(
                 run=current_run, steps=repositories.agent_runs.list_steps_for_run(run.id),
-                intent=intent, branch_url=url, actor=actor.email,
+                intent=intent, branch_url=url, actor=actor,
                 worker_lease_token=worker_lease_token,
             ),
         )

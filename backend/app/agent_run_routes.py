@@ -841,7 +841,10 @@ def execute_run_next_step(
                     raise AgentRunConflict("PostgreSQL CREATE_BRANCH requires an app-bound request.")
                 branch_coordinator, branch_request_factory = (
                     postgres_branch_execution_dependencies(
-                        request=request, run=run, step=current_step, actor=user
+                        request=request,
+                        run=run,
+                        step=current_step,
+                        actor=payload.worker_id,
                     )
                 )
             trust_actions = []
