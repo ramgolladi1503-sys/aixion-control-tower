@@ -76,4 +76,12 @@ class AuthUxCopyTest {
         assertFalse(AuthUxCopy.canAttemptVerify(AuthUiState(verificationCode = "123456")))
         assertTrue(AuthUxCopy.canAttemptVerify(AuthUiState(email = "owner@example.com", verificationCode = "123456")))
     }
+
+    @Test
+    fun developmentVerificationCodeIsOnlyVisibleInDebugBuilds() {
+        assertEquals("123456", developmentVerificationCodeForDisplay("123456", isDebugBuild = true))
+        assertEquals(null, developmentVerificationCodeForDisplay("123456", isDebugBuild = false))
+        assertEquals(null, developmentVerificationCodeForDisplay("  ", isDebugBuild = true))
+        assertEquals(null, developmentVerificationCodeForDisplay(null, isDebugBuild = true))
+    }
 }

@@ -42,6 +42,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aixion.controltower.BuildConfig
 import com.aixion.controltower.core.api.dto.AuthUserDto
 import com.aixion.controltower.core.api.dto.InviteDto
 import com.aixion.controltower.core.api.dto.SessionDto
@@ -318,7 +319,17 @@ internal fun AuthFormContent(
                     if (state.emailVerified) {
                         Text("Email verified. Log in to continue.", color = palette.positive, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     }
-                    state.devVerificationCode?.let { Text("Dev verification code: $it", color = palette.positive, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    developmentVerificationCodeForDisplay(
+                        code = state.devVerificationCode,
+                        isDebugBuild = BuildConfig.DEBUG
+                    )?.let { code ->
+                        Text(
+                            "Dev verification code: $code",
+                            color = palette.positive,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                     if (!state.emailVerified) {
                         OutlinedTextField(
                             value = state.verificationCode,
@@ -347,6 +358,12 @@ internal fun AuthFormContent(
         }
     }
 }
+
+/** Only debug variants may render a verification code returned for local development. */
+internal fun developmentVerificationCodeForDisplay(
+    code: String?,
+    isDebugBuild: Boolean
+): String? = code?.takeIf { isDebugBuild && it.isNotBlank() }
 
 @Composable
 private fun PrivacyControlsPanel(state: AuthUiState, viewModel: AuthViewModel) {

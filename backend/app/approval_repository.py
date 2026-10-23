@@ -742,6 +742,10 @@ class ApprovalDecisionRepository(Protocol):
         self, *, workspace_id: str | None, source_agent_id: str, source_invocation_id: str
     ) -> ApprovalRequest | None: ...
 
+    def get_live_invocation_lease(
+        self, *, workspace_id: str, source_agent_id: str, source_invocation_id: str
+    ) -> ApprovalInvocationLease | None: ...
+
     def claim_approved_delivery(
         self,
         *,
@@ -1001,6 +1005,51 @@ class SQLiteApprovalDecisionRepository:
         ):
             raise ApprovalDecisionConflict("Invocation approval identity is inconsistent.")
         return approval
+
+    def get_live_invocation_lease(
+        self, *, workspace_id: str, source_agent_id: str, source_invocation_id: str
+    ) -> ApprovalInvocationLease | None:
+        """Return an exact-scope, unexpired, unconsumed invocation lease."""
+        if not workspace_id or not source_agent_id or not source_invocation_id:
+            raise ValueError("Invocation liveness lookup requires complete scope")
+        now = now_utc()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT lease.approval_id,lease.workspace_id,lease.source_agent_id,"
+                "lease.source_invocation_id,lease.heartbeat_at,lease.expires_at,"
+                "approval.payload,claim.approval_id "
+                "FROM approval_invocation_leases AS lease "
+                "JOIN kv_store AS approval ON approval.entity_type='approval_request' "
+                "AND approval.entity_id=lease.approval_id "
+                "LEFT JOIN approval_delivery_claims AS claim ON claim.approval_id=lease.approval_id "
+                "WHERE lease.workspace_id=? AND lease.source_agent_id=? "
+                "AND lease.source_invocation_id=?",
+                (workspace_id, source_agent_id, source_invocation_id),
+            ).fetchall()
+        if not row:
+            return None
+        if len(row) != 1:
+            raise ApprovalInvocationLeaseRejected("Invocation liveness scope is ambiguous")
+        item = row[0]
+        lease = _sqlite_lease_from_row(item[:6])
+        try:
+            approval = ApprovalRequest.model_validate_json(item[6])
+        except Exception as exc:
+            raise ApprovalInvocationLeaseRejected("Invocation approval record is invalid") from exc
+        if item[7] is not None:
+            return None
+        if (
+            approval.id != lease.approval_id
+            or approval.workspace_id != workspace_id
+            or approval.source_agent_id != source_agent_id
+            or approval.source_invocation_id != source_invocation_id
+            or approval.status not in {ApprovalStatus.PENDING_REVIEW, ApprovalStatus.APPROVED}
+            or approval.expires_at is None
+            or approval.expires_at <= now
+            or lease.expires_at <= now
+        ):
+            return None
+        return lease
 
     def claim_approved_delivery(
         self,
@@ -2188,6 +2237,53 @@ class PostgresApprovalDecisionRepository:
         ):
             raise ApprovalDecisionConflict("Invocation approval identity is inconsistent.")
         return approval
+
+    def get_live_invocation_lease(
+        self, *, workspace_id: str, source_agent_id: str, source_invocation_id: str
+    ) -> ApprovalInvocationLease | None:
+        """Return an exact-scope, unexpired, unconsumed invocation lease."""
+        if not workspace_id or not source_agent_id or not source_invocation_id:
+            raise ValueError("Invocation liveness lookup requires complete scope")
+        now = now_utc()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT lease.approval_id,lease.workspace_id,lease.source_agent_id,"
+                "lease.source_invocation_id,lease.heartbeat_at,lease.expires_at,"
+                "approval.payload,approval.status,approval.expires_at,claim.approval_id "
+                "FROM approval_invocation_leases AS lease "
+                "JOIN approval_requests AS approval ON approval.approval_id=lease.approval_id "
+                "AND approval.workspace_id=lease.workspace_id "
+                "LEFT JOIN approval_delivery_claims AS claim ON claim.approval_id=lease.approval_id "
+                "WHERE lease.workspace_id=%s AND lease.source_agent_id=%s "
+                "AND lease.source_invocation_id=%s",
+                (workspace_id, source_agent_id, source_invocation_id),
+            ).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise ApprovalInvocationLeaseRejected("Invocation liveness scope is ambiguous")
+        row = rows[0]
+        lease = _postgres_lease_from_row(row[:6])
+        try:
+            approval = ApprovalRequest.model_validate(row[6])
+        except Exception as exc:
+            raise ApprovalInvocationLeaseRejected("Invocation approval record is invalid") from exc
+        if row[9] is not None:
+            return None
+        if (
+            approval.id != lease.approval_id
+            or approval.workspace_id != workspace_id
+            or approval.source_agent_id != source_agent_id
+            or approval.source_invocation_id != source_invocation_id
+            or approval.status not in {ApprovalStatus.PENDING_REVIEW, ApprovalStatus.APPROVED}
+            or row[7] != approval.status.value
+            or approval.expires_at is None
+            or approval.expires_at <= now
+            or row[8] != approval.expires_at
+            or lease.expires_at <= now
+        ):
+            return None
+        return lease
 
     def claim_approved_delivery(
         self,

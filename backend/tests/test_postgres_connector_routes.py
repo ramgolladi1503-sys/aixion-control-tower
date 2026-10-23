@@ -29,7 +29,22 @@ from app.connector_webhook import (
     _assert_hmac_v1_not_replayed,
     expected_hmac_v1_signature,
 )
-from app.models import AuditEvent, AuthUser, Project, User, UserRole, Workspace
+from app.models import (
+    ApprovalRequest,
+    ApprovalStatus,
+    AgentAuthType,
+    AgentProvider,
+    AuditEvent,
+    AuthUser,
+    ExternalAgent,
+    Project,
+    RiskAssessment,
+    RiskLevel,
+    User,
+    UserRole,
+    Workspace,
+    now_utc,
+)
 from app.postgres_database import run_postgres_migrations
 from app.store import store
 
@@ -242,6 +257,115 @@ def test_connector_management_routes_use_workspace_bound_postgres_and_atomic_aud
     assert [item[0] for item in audit_rows] == ["connector.created", "connector.updated"]
     assert set(store.agent_connectors) == before_connectors
     assert {event.id for event in store.audit_events} == before_audits
+
+
+def test_connector_credentials_projects_exact_postgres_invocation_lease_liveness(
+    postgres_connector_route_runtime,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    client = TestClient(main.app)
+    created_connector = client.post(
+        "/connectors",
+        json={"name": "Invocation status", "provider_label": "ANTIGRAVITY"},
+    )
+    assert created_connector.status_code == 200, created_connector.text
+    connector_id = created_connector.json()["id"]
+
+    now = now_utc()
+    project = Project(
+        name="Invocation status project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    external_agent = ExternalAgent(
+        id=connector_id,
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Invocation status connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    invocation_id = f"antigravity:v1:{uuid.uuid4().hex}"
+    approval = ApprovalRequest(
+        id=f"approval_{uuid.uuid4().hex}",
+        project_id=project.id,
+        title="Invocation liveness",
+        summary="Exact-scope status projection fixture",
+        agent_name=external_agent.display_name,
+        target_branch="test",
+        files=[],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.PENDING_REVIEW,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=connector_id,
+        source_agent_name=external_agent.display_name,
+        source_invocation_id=invocation_id,
+        workspace_id=workspace.id,
+        verified_source=True,
+        expires_at=now + timedelta(minutes=5),
+    )
+    lease_expires_at = now + timedelta(seconds=60)
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+        conn.execute(
+            "INSERT INTO external_agents(agent_id,workspace_id,created_by_user_id,provider,"
+            "auth_type,enabled,secret_hash,payload) VALUES(%s,%s,%s,%s,%s,TRUE,NULL,%s)",
+            (external_agent.id, workspace.id, user.id, external_agent.provider.value,
+             external_agent.auth_type.value, Jsonb(external_agent.model_dump(mode="json"))),
+        )
+        conn.execute(
+            "INSERT INTO approval_requests(approval_id,project_id,workspace_id,work_order_id,"
+            "source_agent_id,status,expires_at,created_at,updated_at,version,payload) "
+            "VALUES(%s,%s,%s,NULL,%s,%s,%s,%s,%s,0,%s)",
+            (approval.id, project.id, workspace.id, connector_id, approval.status.value,
+             approval.expires_at, approval.created_at, approval.updated_at,
+             Jsonb(approval.model_dump(mode="json"))),
+        )
+        conn.execute(
+            "INSERT INTO approval_invocation_leases(approval_id,workspace_id,source_agent_id,"
+            "source_invocation_id,heartbeat_at,expires_at) VALUES(%s,%s,%s,%s,%s,%s)",
+            (approval.id, workspace.id, connector_id, invocation_id, now, lease_expires_at),
+        )
+
+    live = client.get(
+        f"/connectors/{connector_id}/credentials",
+        params={"source_invocation_id": invocation_id},
+    )
+    assert live.status_code == 200, live.text
+    assert live.json()["invocation_live"] is True
+    assert live.json()["source_invocation_id"] == invocation_id
+    assert live.json()["invocation_expires_at"]
+
+    assert main.app.state.postgres_repositories.approval_decisions.get_live_invocation_lease(
+        workspace_id="another-workspace",
+        source_agent_id=connector_id,
+        source_invocation_id=invocation_id,
+    ) is None
+    assert main.app.state.postgres_repositories.approval_decisions.get_live_invocation_lease(
+        workspace_id=workspace.id,
+        source_agent_id="another-connector",
+        source_invocation_id=invocation_id,
+    ) is None
+    assert main.app.state.postgres_repositories.approval_decisions.get_live_invocation_lease(
+        workspace_id=workspace.id,
+        source_agent_id=connector_id,
+        source_invocation_id="another-invocation",
+    ) is None
+
+    with connect() as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET expires_at=%s WHERE approval_id=%s",
+            (now - timedelta(seconds=1), approval.id),
+        )
+    expired = client.get(
+        f"/connectors/{connector_id}/credentials",
+        params={"source_invocation_id": invocation_id},
+    )
+    assert expired.status_code == 200
+    assert expired.json()["invocation_live"] is False
 
 
 def test_connector_management_routes_hide_other_workspaces(postgres_connector_route_runtime) -> None:

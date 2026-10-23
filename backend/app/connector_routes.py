@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from .agent_task_repository import PostgresAgentTaskRepository
 from .auth import require_owner
@@ -33,6 +33,7 @@ from .connector_simulator import ConnectorSimulationRequest, ConnectorSimulation
 from .connector_templates import ConnectorTemplate, ConnectorTemplateList, connector_templates, get_connector_template
 from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
 from .application_repository_access import (
+    approval_decision_repository_for_request,
     connector_repository_for_request,
     project_repository_for_request,
     workspace_id_for_request,
@@ -40,6 +41,8 @@ from .application_repository_access import (
 )
 from .settings import get_settings
 from .models import AuditEvent, AuthUser, now_utc
+from .approval_decisions import approval_decision_repository
+from .approval_repository import ApprovalInvocationLeaseRejected
 from .connector_repository import (
     ConnectorRepository,
     ConnectorRepositoryConflict,
@@ -549,9 +552,47 @@ def enable_connector(
 def get_connector_credentials(
     connector_id: str, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
+    source_invocation_id: str | None = Query(default=None, min_length=1, max_length=256),
 ) -> ConnectorCredentialStatus:
     bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
-    return connector_credential_status(bound if bound is not None else _get_connector_or_404(connector_id, user))
+    connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
+    if source_invocation_id is None:
+        return connector_credential_status(connector)
+    workspace_id = (
+        workspace_id_for_request(user, http_request) or user.workspace_id
+        if http_request is not None else workspace_id_for_user(user)
+    )
+    if not workspace_id:
+        return connector_credential_status(
+            connector, source_invocation_id=source_invocation_id
+        )
+    try:
+        repository = (
+            approval_decision_repository_for_request(http_request)
+            if http_request is not None
+            else approval_decision_repository
+        )
+        lease = repository.get_live_invocation_lease(
+            workspace_id=workspace_id,
+            source_agent_id=connector.id,
+            source_invocation_id=source_invocation_id,
+        )
+    except (RuntimeError, ApprovalInvocationLeaseRejected) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Connector invocation liveness is unavailable",
+        ) from error
+    except Exception as error:
+        # A failed status read must not fall back to last_used_at or cached health.
+        raise HTTPException(
+            status_code=503,
+            detail="Connector invocation liveness is unavailable",
+        ) from error
+    return connector_credential_status(
+        connector,
+        invocation_lease=lease,
+        source_invocation_id=source_invocation_id,
+    )
 
 
 @router.post("/{connector_id}/secret/issue", response_model=ConnectorSecretIssueResponse)
