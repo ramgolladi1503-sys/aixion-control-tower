@@ -61,6 +61,8 @@ A workload-specific calculator export is still required. It must identify the se
 
 ## Remaining pre-billing work
 
+Use the blank [Staging Owner Decision and Cost Input Record](STAGING_OWNER_DECISION_AND_COST_INPUT.md) to collect the unresolved owner inputs below. Its fields are intentionally **PENDING** and must not be filled from inferred or unverified account/project data. Completing it does not authorize live cloud inspection, billing/API/IAM changes, resource creation, deployment, data migration, or rehearsal; each live action requires separate explicit authorization.
+
 Before the billing cut line, the owner/reviewer must provide or approve:
 
 1. The dedicated staging project ID and named project owner; verify that the selected billing account is linked to that project.
