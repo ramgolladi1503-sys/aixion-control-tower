@@ -29,6 +29,7 @@ from .approval_repository import (
     ApprovalDecisionRepository,
     ApprovalDeliveryEvidenceIntegrityError,
     ApprovalRecordMissing,
+    PostgresApprovalDecisionRepository,
 )
 from .application_repository_access import (
     agent_run_repository_for_request,
@@ -688,6 +689,22 @@ def _approval_workspace_id(request: ApprovalRequest) -> str | None:
     return approval_workspace_id(request)
 
 
+def _approval_reviewer_workspace_id(
+    user: AuthUser,
+    http_request: Request | None,
+    repository: ApprovalDecisionRepository,
+) -> str | None:
+    workspace_id = _workspace_id_for_route(user, http_request)
+    if workspace_id is None and (
+        get_settings().is_production
+        or isinstance(repository, PostgresApprovalDecisionRepository)
+    ):
+        # PostgreSQL list_for_workspace(None) is intentionally an unscoped
+        # administrative query. Reviewer HTTP routes must never reach it.
+        raise HTTPException(status_code=403, detail="Workspace membership is required")
+    return workspace_id
+
+
 def _approval_for_user(
     approval_id: str,
     user: AuthUser,
@@ -696,6 +713,11 @@ def _approval_for_user(
 ) -> ApprovalRequest:
     active_repository = (
         repository if repository is not None else approval_decision_repository
+    )
+    workspace_id = _approval_reviewer_workspace_id(
+        user,
+        http_request,
+        active_repository,
     )
     approval = active_repository.get(approval_id)
     if not approval:
@@ -708,9 +730,6 @@ def _approval_for_user(
         or (approval.workspace_id is not None and approval.workspace_id != project.workspace_id)
     ):
         raise HTTPException(status_code=404, detail="Approval request not found")
-    workspace_id = _workspace_id_for_route(user, http_request)
-    if workspace_id is None and get_settings().is_production:
-        raise HTTPException(status_code=403, detail="Workspace membership is required")
     if workspace_id is not None and project.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="Approval request not found")
     if approval_repository_publishes_compatibility_state(active_repository):
@@ -1136,9 +1155,7 @@ def list_approval_requests(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[ApprovalRequest]:
     repository = _approval_repository_for_route(http_request)
-    workspace_id = _workspace_id_for_route(user, http_request)
-    if workspace_id is None and get_settings().is_production:
-        raise HTTPException(status_code=403, detail="Workspace membership is required")
+    workspace_id = _approval_reviewer_workspace_id(user, http_request, repository)
     requests = repository.list_for_workspace(workspace_id)
     publish_compatibility_state = approval_repository_publishes_compatibility_state(repository)
     if publish_compatibility_state:
@@ -1379,6 +1396,7 @@ def decide_approval(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ApprovalRequest:
     repository = _approval_repository_for_route(http_request)
+    _approval_reviewer_workspace_id(user, http_request, repository)
     publish_compatibility_state = approval_repository_publishes_compatibility_state(repository)
     with approval_repository_scope(repository):
         durable_request = repository.get(approval_id)

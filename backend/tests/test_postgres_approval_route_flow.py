@@ -683,6 +683,90 @@ def test_postgres_reviewer_inbox_expiry_is_scoped_once_for_list_and_grouped_rout
     assert requested_scopes == [workspace.id, workspace.id]
 
 
+@pytest.mark.parametrize(
+    ("method", "path_template", "payload"),
+    [
+        ("get", "/approvals", None),
+        ("get", "/approvals/grouped", None),
+        ("get", "/approvals/{approval_id}", None),
+        (
+            "post",
+            "/approvals/{approval_id}/decision",
+            {"decision": "approve", "reason": "must remain untouched"},
+        ),
+    ],
+)
+def test_postgres_reviewer_routes_require_workspace_before_unscoped_repository_reads(
+    postgres_approval_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path_template: str,
+    payload: dict[str, str] | None,
+) -> None:
+    connect, workspace, project, _user, repositories, _agent, _token, _schema = (
+        postgres_approval_route_runtime
+    )
+    approval = ApprovalRequest(
+        project_id=project.id,
+        workspace_id=workspace.id,
+        title="Workspace-less reviewer must not see this",
+        summary="PostgreSQL reviewer endpoints must fail closed before lookup.",
+        target_branch="feature/missing-reviewer-workspace",
+        files=[FileChange(path="README.md", diff="+reviewed")],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.PENDING_REVIEW,
+    )
+    repositories.approval_decisions.create(
+        approval=approval,
+        audit_event=AuditEvent(
+            event_type="approval.created",
+            entity_id=approval.id,
+            workspace_id=workspace.id,
+            details={"project_id": project.id},
+        ),
+        notification=Notification(
+            title="Approval needed",
+            body="Open Control Tower to review.",
+            entity_type="approval_request",
+            entity_id=approval.id,
+            workspace_id=workspace.id,
+        ),
+    )
+
+    def unexpected_read(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Reviewer request reached PostgreSQL before workspace validation")
+
+    monkeypatch.setattr(repositories.approval_decisions, "list_for_workspace", unexpected_read)
+    monkeypatch.setattr(repositories.approval_decisions, "get", unexpected_read)
+    monkeypatch.setattr(main, "_workspace_id_for_route", lambda _user, _request: None)
+
+    path = path_template.format(approval_id=approval.id)
+    before_approvals = set(store.approval_requests)
+    before_audits = {event.id for event in store.audit_events}
+    before_notifications = set(store.notifications)
+    client = TestClient(main.app)
+    response = getattr(client, method)(path, json=payload) if payload else getattr(client, method)(path)
+    client.close()
+
+    assert response.status_code == 403, response.text
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT status FROM approval_requests WHERE approval_id=%s",
+            (approval.id,),
+        ).fetchone() == (ApprovalStatus.PENDING_REVIEW.value,)
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s",
+            (approval.id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s",
+            (approval.id,),
+        ).fetchone()[0] == 1
+    assert set(store.approval_requests) == before_approvals
+    assert {event.id for event in store.audit_events} == before_audits
+    assert set(store.notifications) == before_notifications
+
+
 def test_postgres_approval_history_reads_verified_decision_from_runtime_bundle(
     postgres_approval_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
