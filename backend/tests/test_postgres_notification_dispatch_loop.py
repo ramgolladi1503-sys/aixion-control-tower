@@ -21,6 +21,8 @@ class FakeRuntime:
             agent_tasks=object(),
             agent_runs=object(),
             agent_run_branch_intents=object(),
+            agent_run_apply_change_intents=object(),
+            agent_run_pull_request_intents=object(),
             agent_run_validation_intents=object(),
             projects=object(),
             workspace_membership=object(),
