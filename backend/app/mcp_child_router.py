@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -9,6 +10,8 @@ from .models import MCPChildServer
 from .store import store
 from .settings import get_settings
 from .application_repository_access import mcp_child_server_repository_for_request
+
+logger = logging.getLogger(__name__)
 
 
 class MCPChildServerRouter:
@@ -112,9 +115,13 @@ class MCPChildServerRouter:
                 project_id=project_id,
                 enabled=True,
             )
-        except Exception:
+        except Exception as error:
             # Repository/runtime failures are fail-closed; callers receive no
             # server and therefore cannot dispatch a tool call.
+            logger.warning(
+                "MCP child-server repository lookup failed error_type=%s",
+                type(error).__name__,
+            )
             return None
         exact = [
             server
