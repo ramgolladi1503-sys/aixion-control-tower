@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import base64
+import os
+import uuid
 from datetime import datetime, timezone
 from hashlib import sha256
 from types import SimpleNamespace
+from collections.abc import Iterator
 
+import psycopg
 import pytest
 from fastapi import HTTPException
+from psycopg import Connection, sql
+from psycopg.types.json import Jsonb
 
 from app.postgres_agent_run_apply_changes import (
     AgentRunApplyChangeIntent,
@@ -26,6 +32,8 @@ from app.postgres_agent_run_apply_changes_route import (
     GitHubApplyChangeProvider,
     postgres_apply_changes_execution_dependencies,
 )
+from app import postgres_database
+from app.postgres_database import _migration_checksum, run_postgres_migrations
 from app.trust_models import ActionConsumption
 
 
@@ -33,6 +41,93 @@ _BASE_SHA = "a" * 40
 _COMMIT_SHA = "b" * 40
 _CONTENT = "approved file contents\n"
 _NOW = datetime(2026, 10, 23, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def pg_apply_change_migration_context() -> Iterator[tuple[str, object]]:
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL migration tests")
+    schema = f"ct_apply_change_migration_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    def connect() -> Connection:
+        conn = psycopg.connect(dsn)
+        conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        return conn
+
+    try:
+        yield schema, connect
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def _assert_apply_change_migration_shape(schema: str, connect, migration) -> None:
+    with connect() as conn:
+        ledger = conn.execute(
+            "SELECT migration_id,name,migration_checksum FROM schema_migrations "
+            "WHERE migration_id=%s",
+            (migration.migration_id,),
+        ).fetchall()
+        assert ledger == [(migration.migration_id, migration.name, _migration_checksum(migration))]
+        assert conn.execute(
+            "SELECT count(*) FROM schema_migrations WHERE migration_id=%s",
+            (migration.migration_id,),
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT to_regclass(%s)", ("agent_run_apply_change_intents",),
+        ).fetchone() == ("agent_run_apply_change_intents",)
+
+        constraints = {
+            row[0]: (row[1], row[2])
+            for row in conn.execute(
+                "SELECT conname,contype,pg_get_constraintdef(oid) "
+                "FROM pg_constraint WHERE conrelid=%s::regclass",
+                (f"{schema}.agent_run_apply_change_intents",),
+            ).fetchall()
+        }
+        assert constraints["agent_run_apply_change_intents_pkey"][0] == "p"
+        unique_definitions = [
+            definition for kind, definition in constraints.values() if kind == "u"
+        ]
+        assert any(
+            "UNIQUE (workspace_id, run_id, step_id, idempotency_key)" in definition
+            for definition in unique_definitions
+        )
+        assert any(
+            "UNIQUE (action_id, workspace_id)" in definition
+            for definition in unique_definitions
+        )
+        foreign_keys = [kind for kind, _definition in constraints.values() if kind == "f"]
+        assert len(foreign_keys) == 5
+        definitions = " ".join(definition for _kind, definition in constraints.values())
+        assert "change_type" in definitions and "create" in definitions and "update" in definitions
+        assert "POST_CLAIMED" in definitions and "RECONCILIATION_REQUIRED" in definitions
+        assert "desired_content_sha256" in definitions and "lease_token_hash" in definitions
+
+        indexes = {
+            row[0]: row[1]
+            for row in conn.execute(
+                "SELECT indexname,indexdef FROM pg_indexes "
+                "WHERE schemaname=%s AND tablename='agent_run_apply_change_intents'",
+                (schema,),
+            ).fetchall()
+        }
+        assert "agent_run_apply_change_intents_pkey" in indexes
+        assert any(
+            "CREATE UNIQUE INDEX" in definition
+            and "(workspace_id, run_id, step_id, idempotency_key)" in definition
+            for definition in indexes.values()
+        )
+        assert any(
+            "CREATE UNIQUE INDEX" in definition and "(action_id, workspace_id)" in definition
+            for definition in indexes.values()
+        )
+        reconcile = indexes["idx_agent_run_apply_change_reconcile"]
+        assert "workspace_id, status, updated_at, intent_id" in reconcile
+        assert "POST_CLAIMED" in reconcile and "REMOTE_VERIFIED" in reconcile
 
 
 class _FakeIntentRepository:
@@ -431,3 +526,82 @@ def test_postgres_apply_rebind_rejects_lease_provider_or_agent_mismatch(
     lease = SimpleNamespace(provider=provider, agent_id=agent_id)
     assert not _lease_matches_task(lease, task)
     assert _lease_matches_task(SimpleNamespace(provider="codex", agent_id="agent-1"), task)
+
+
+def test_pg_0032_migrates_empty_isolated_schema_and_replay_is_idempotent(
+    pg_apply_change_migration_context: tuple[str, object],
+) -> None:
+    schema, connect = pg_apply_change_migration_context
+    migrations = postgres_database.POSTGRES_MIGRATIONS
+    migration = next(
+        item for item in migrations
+        if item.migration_id == "pg_0032_agent_run_apply_change_intents"
+    )
+
+    first_ledger = run_postgres_migrations(connect)
+    second_ledger = run_postgres_migrations(connect)
+
+    assert [row["migration_id"] for row in first_ledger] == [
+        item.migration_id for item in migrations
+    ]
+    assert second_ledger == first_ledger
+    _assert_apply_change_migration_shape(schema, connect, migration)
+
+
+def test_pg_0032_upgrades_exact_pg_0031_schema_preserving_existing_rows(
+    pg_apply_change_migration_context: tuple[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema, connect = pg_apply_change_migration_context
+    migrations = postgres_database.POSTGRES_MIGRATIONS
+    target_index = next(
+        index for index, item in enumerate(migrations)
+        if item.migration_id == "pg_0032_agent_run_apply_change_intents"
+    )
+    prior_migrations = migrations[:target_index]
+    assert prior_migrations[-1].migration_id == "pg_0031_agent_run_branch_post_claim"
+    migration = migrations[target_index]
+
+    monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", prior_migrations)
+    prior_ledger = run_postgres_migrations(connect)
+    assert [row["migration_id"] for row in prior_ledger] == [
+        item.migration_id for item in prior_migrations
+    ]
+    assert prior_ledger[-1]["migration_id"] == "pg_0031_agent_run_branch_post_claim"
+
+    workspace_id = "workspace_pg0032_upgrade_fixture"
+    prior_payload = {
+        "id": workspace_id,
+        "name": "Existing workspace",
+        "owner_user_id": "user_pg0032_upgrade_fixture",
+        "metadata": {"must_survive": True, "revision": 31},
+    }
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT to_regclass(%s)", ("agent_run_apply_change_intents",),
+        ).fetchone() == (None,)
+        conn.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+            (workspace_id, Jsonb(prior_payload)),
+        )
+
+    monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", migrations)
+    upgraded_ledger = run_postgres_migrations(connect)
+    replayed_ledger = run_postgres_migrations(connect)
+
+    with connect() as conn:
+        retained = conn.execute(
+            "SELECT payload FROM workspaces WHERE workspace_id=%s", (workspace_id,),
+        ).fetchone()
+        migration_count = conn.execute(
+            "SELECT count(*) FROM schema_migrations WHERE migration_id=%s",
+            (migration.migration_id,),
+        ).fetchone()
+
+    assert [row["migration_id"] for row in upgraded_ledger] == [
+        item.migration_id for item in migrations
+    ]
+    assert replayed_ledger == upgraded_ledger
+    assert retained == (prior_payload,)
+    assert migration_count == (1,)
+    _assert_apply_change_migration_shape(schema, connect, migration)
