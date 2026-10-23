@@ -68,6 +68,10 @@ def pg_pull_request_schema() -> Iterator[tuple[str, object]]:
 def pg_pull_request_context(pg_pull_request_schema) -> dict:
     schema, connect = pg_pull_request_schema
     run_postgres_migrations(connect)
+    return _seed_pull_request_rows(schema, connect)
+
+
+def _seed_pull_request_rows(schema: str, connect) -> dict:
     now = now_utc()
     workspace_id = f"workspace_{uuid.uuid4().hex}"
     project_id = f"project_{uuid.uuid4().hex}"
@@ -255,6 +259,144 @@ def _evaluate_pr_action(context: dict, action: ProposedAction | None = None):
 
 
 class TestPullRequestMigration:
+    def test_upgrade_from_pg_0033_preserves_rows_and_replays(
+        self, pg_pull_request_schema, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        schema, connect = pg_pull_request_schema
+        migrations = postgres_database.POSTGRES_MIGRATIONS
+        target = next(
+            index for index, item in enumerate(migrations)
+            if item.migration_id == "pg_0034_agent_run_pull_request_intents"
+        )
+        pg_0033 = migrations[target - 1]
+        assert pg_0033.migration_id == "pg_0033_agent_run_validation_intents"
+        monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", migrations[:target])
+        run_postgres_migrations(connect)
+        context = _seed_pull_request_rows(schema, connect)
+
+        tables = (
+            ("workspaces", "workspace_id"),
+            ("agent_runs", "run_id"),
+            ("agent_tasks", "task_id"),
+            ("approval_requests", "approval_id"),
+            ("agent_run_steps", "step_id"),
+            ("proposed_actions", "action_id"),
+            ("capability_leases", "lease_id"),
+        )
+        preserved = {}
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM schema_migrations WHERE migration_id=%s",
+                ("pg_0033_agent_run_validation_intents",),
+            ).fetchone() == (1,)
+            assert conn.execute(
+                "SELECT count(*) FROM schema_migrations WHERE migration_id=%s",
+                ("pg_0034_agent_run_pull_request_intents",),
+            ).fetchone() == (0,)
+            for table, key_column in tables:
+                row_id = {
+                    "workspaces": context["workspace_id"],
+                    "agent_runs": context["run"].id,
+                    "agent_tasks": context["task"].id,
+                    "approval_requests": context["approval"].id,
+                    "agent_run_steps": context["step"].id,
+                    "proposed_actions": context["action"].id,
+                    "capability_leases": context["lease"].id,
+                }[table]
+                row = conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE {}=%s").format(
+                        sql.Identifier(table), sql.Identifier(key_column),
+                    ),
+                    (row_id,),
+                ).fetchone()
+                assert row is not None, f"missing seeded {table} row before upgrade"
+                preserved[table] = row
+
+        monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", migrations)
+        run_postgres_migrations(connect)
+        migration = migrations[target]
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT name,migration_checksum FROM schema_migrations WHERE migration_id=%s",
+                (migration.migration_id,),
+            ).fetchone() == (migration.name, _migration_checksum(migration))
+            assert conn.execute(
+                "SELECT to_regclass(%s),to_regclass(%s),to_regclass(%s)",
+                (
+                    "agent_run_pull_request_intents",
+                    "idx_agent_run_pull_request_reconcile",
+                    "idx_agent_runs_id_workspace",
+                ),
+            ).fetchone() == (
+                "agent_run_pull_request_intents",
+                "idx_agent_run_pull_request_reconcile",
+                "idx_agent_runs_id_workspace",
+            )
+            columns = {
+                row[0] for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema=%s AND table_name='agent_run_pull_request_intents'",
+                    (schema,),
+                ).fetchall()
+            }
+            assert {
+                "intent_id", "workspace_id", "run_id", "task_id", "approval_id",
+                "step_id", "action_id", "lease_id", "status", "title_sha256",
+                "body_sha256", "last_get_status", "get_match_count",
+                "get_response_sha256", "payload",
+            } <= columns
+            constraints = conn.execute(
+                "SELECT contype,pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid=%s::regclass",
+                (f"{schema}.agent_run_pull_request_intents",),
+            ).fetchall()
+            definitions = " ".join(definition for _kind, definition in constraints)
+            assert "UNIQUE (workspace_id, run_id, step_id, idempotency_key)" in definitions
+            assert "UNIQUE (repository, intent_marker)" in definitions
+            assert "FOREIGN KEY (action_id, workspace_id)" in definitions
+            assert "FOREIGN KEY (lease_id, workspace_id)" in definitions
+            assert "ON DELETE RESTRICT" in definitions
+            assert "RECONCILIATION_REQUIRED" in definitions
+            assert "title_sha256" in definitions and "body_sha256" in definitions
+            assert conn.execute(
+                "SELECT to_regprocedure(%s)",
+                ("aixion_agent_run_pull_request_status_transition()",),
+            ).fetchone() == ("aixion_agent_run_pull_request_status_transition()",)
+            assert conn.execute(
+                "SELECT tgname FROM pg_trigger WHERE tgrelid=%s::regclass AND NOT tgisinternal",
+                (f"{schema}.agent_run_pull_request_intents",),
+            ).fetchall() == [("trg_agent_run_pull_request_status_transition",)]
+            assert conn.execute(
+                "SELECT count(*) FROM schema_migrations WHERE migration_id=%s",
+                (migration.migration_id,),
+            ).fetchone() == (1,)
+            for table, key_column in tables:
+                row_id = {
+                    "workspaces": context["workspace_id"],
+                    "agent_runs": context["run"].id,
+                    "agent_tasks": context["task"].id,
+                    "approval_requests": context["approval"].id,
+                    "agent_run_steps": context["step"].id,
+                    "proposed_actions": context["action"].id,
+                    "capability_leases": context["lease"].id,
+                }[table]
+                assert conn.execute(
+                    sql.SQL("SELECT * FROM {} WHERE {}=%s").format(
+                        sql.Identifier(table), sql.Identifier(key_column),
+                    ),
+                    (row_id,),
+                ).fetchone() == preserved[table]
+
+        run_postgres_migrations(connect)
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM schema_migrations WHERE migration_id=%s",
+                (migration.migration_id,),
+            ).fetchone() == (1,)
+            assert conn.execute(
+                "SELECT count(*) FROM agent_run_pull_request_intents"
+            ).fetchone() == (0,)
+
     def test_migration_is_additive_scoped_and_replayable(self, pg_pull_request_schema) -> None:
         schema, connect = pg_pull_request_schema
         run_postgres_migrations(connect)
