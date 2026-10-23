@@ -1003,8 +1003,8 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
         f"/agent/runs/{run_id}/execute-next",
         json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
     )
-    assert rejected.status_code == 409
-    assert "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps" in rejected.json()["detail"]
+    assert rejected.status_code == 503
+    assert "lifespan-owned repository bundle" in rejected.json()["detail"]
     assert repositories.agent_runs.get(run_id) == durable_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
 
@@ -2925,10 +2925,9 @@ def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_b
             (run.updated_at, Jsonb(run.model_dump(mode="json")), run_id, workspace.id),
         )
         conn.execute(
-            "UPDATE agent_run_steps SET step_type=%s,status=%s,updated_at=%s,payload=%s "
+            "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
             "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
             (
-                step.step_type.value,
                 step.status.value,
                 step.updated_at,
                 Jsonb(step.model_dump(mode="json")),
@@ -3058,10 +3057,9 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
         )
         for step in steps:
             conn.execute(
-                "UPDATE agent_run_steps SET step_type=%s,status=%s,updated_at=%s,payload=%s "
+                "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
                 "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
                 (
-                    step.step_type.value,
                     step.status.value,
                     step.updated_at,
                     Jsonb(step.model_dump(mode="json")),
