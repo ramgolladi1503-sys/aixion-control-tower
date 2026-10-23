@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from .agent_task_models import AgentTask
@@ -435,7 +435,11 @@ def validate_recovery_snapshot(snapshot: RecoverySnapshot) -> RecoveryValidation
 
 
 @router.get("/export", response_model=RecoverySnapshot)
-def export_recovery_snapshot(user: AuthUser = Depends(require_owner)) -> RecoverySnapshot:
+def export_recovery_snapshot(
+    user: AuthUser = Depends(require_owner),
+    request: Request = None,  # type: ignore[assignment]
+) -> RecoverySnapshot:
+    _require_sqlite_recovery_runtime(request)
     # Read all rows and migration metadata from one SQLite read transaction.
     # In-memory maps can lag repository transactions and are not snapshot authority.
     records, migration_rows, task_records, membership_records = recovery_snapshot_repository.read_snapshot(
@@ -484,6 +488,21 @@ def export_recovery_snapshot(user: AuthUser = Depends(require_owner)) -> Recover
         excluded_sensitive_collections=EXCLUDED_SENSITIVE_COLLECTIONS.copy(),
         entities=entities,
     )
+
+
+def _require_sqlite_recovery_runtime(request: Request | None = None) -> None:
+    """Prevent recovery exports from silently reading SQLite in PostgreSQL mode."""
+    postgres_runtime = (
+        getattr(request.app.state, "postgres_runtime", None) if request is not None else None
+    )
+    if postgres_runtime is not None or get_settings().postgres_auth_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Recovery exports are unavailable while PostgreSQL is configured "
+                "without an authoritative recovery repository."
+            ),
+        )
 
 
 @router.post("/validate", response_model=RecoveryValidationResponse)

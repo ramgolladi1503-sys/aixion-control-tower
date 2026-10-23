@@ -223,6 +223,12 @@ def test_audit_and_recovery_reads_fail_closed_when_postgres_runtime_is_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(app.state, "postgres_runtime", SimpleNamespace(), raising=False)
+    from app.recovery_routes import recovery_snapshot_repository
+
+    def unexpected_snapshot_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite recovery snapshot must not be read in PostgreSQL mode")
+
+    monkeypatch.setattr(recovery_snapshot_repository, "read_snapshot", unexpected_snapshot_read)
 
     responses = [
         client.get("/audit/events"),

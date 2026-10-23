@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from app.main import app
 from app.models import (
@@ -31,6 +35,7 @@ from app.recovery_routes import (
     _safe_entities,
     export_recovery_snapshot,
 )
+from app import recovery_routes
 from app.store import store
 
 client = TestClient(app)
@@ -94,6 +99,66 @@ def test_recovery_export_returns_safe_operational_snapshot() -> None:
     assert body["excluded_sensitive_collections"] == EXCLUDED_SENSITIVE_COLLECTIONS
     assert "users" not in body["entities"]
     assert "sessions" not in body["entities"]
+
+
+def test_direct_recovery_export_fails_closed_when_postgres_auth_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = AuthUser(
+        id="owner-postgres-mode",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id="workspace-postgres-mode",
+    )
+
+    def unexpected_snapshot_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite recovery snapshot must not be read in PostgreSQL mode")
+
+    monkeypatch.setattr(
+        recovery_routes,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        recovery_routes.recovery_snapshot_repository,
+        "read_snapshot",
+        unexpected_snapshot_read,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        recovery_routes.export_recovery_snapshot(user)
+    assert raised.value.status_code == 503
+    assert "authoritative recovery repository" in raised.value.detail
+
+
+def test_direct_recovery_export_fails_closed_when_request_has_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = AuthUser(
+        id="owner-probe-mode",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id="workspace-probe-mode",
+    )
+
+    def unexpected_snapshot_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite recovery snapshot must not be read during PostgreSQL runtime")
+
+    monkeypatch.setattr(
+        recovery_routes.recovery_snapshot_repository,
+        "read_snapshot",
+        unexpected_snapshot_read,
+    )
+    scope = {"type": "http", "app": app}
+    request = Request(scope)
+    monkeypatch.setattr(app.state, "postgres_runtime", SimpleNamespace(), raising=False)
+
+    with pytest.raises(HTTPException) as raised:
+        recovery_routes.export_recovery_snapshot(user, request=request)
+    assert raised.value.status_code == 503
+    assert "authoritative recovery repository" in raised.value.detail
 
 
 def test_recovery_export_includes_durable_approval_missing_from_compatibility_cache() -> None:
