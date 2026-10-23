@@ -39,6 +39,12 @@ class RuntimeReadinessResponse(BaseModel):
     approval_recovery_failure_count: int = 0
     approval_recovery_last_completed_at: datetime | None = None
     approval_recovery_poll_seconds: int = 60
+    approval_expiry_status: Literal[
+        "not_started", "starting", "healthy", "failed"
+    ] = "not_started"
+    approval_expiry_failure_count: int = 0
+    approval_expiry_last_completed_at: datetime | None = None
+    approval_expiry_last_changed_count: int = 0
     app_state_repository_bindings: dict[
         str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]
     ] = Field(default_factory=dict)
@@ -147,10 +153,24 @@ def build_runtime_readiness(
     recovery_last_completed_at = getattr(
         application_state, "approval_recovery_last_completed_at", None
     )
+    expiry_status = getattr(application_state, "approval_expiry_status", "not_started")
+    if expiry_status not in {"not_started", "starting", "healthy", "failed"}:
+        expiry_status = "failed"
+    expiry_failure_count = max(
+        0, int(getattr(application_state, "approval_expiry_failure_count", 0) or 0)
+    )
+    expiry_last_completed_at = getattr(
+        application_state, "approval_expiry_last_completed_at", None
+    )
+    expiry_last_changed_count = max(
+        0, int(getattr(application_state, "approval_expiry_last_changed_count", 0) or 0)
+    )
     if settings.is_production and recovery_status != "healthy":
         errors.append(
             "Approval recovery is not healthy: status=" + recovery_status
         )
+    if settings.is_production and expiry_status != "healthy":
+        errors.append("Approval expiry worker is not healthy: status=" + expiry_status)
     postgres_probe_status: Literal["disabled", "ready", "not_ready"] = "disabled"
     postgres_probe_schema_ready: bool | None = None
     postgres_pool_size = 0
@@ -285,6 +305,10 @@ def build_runtime_readiness(
         approval_recovery_poll_seconds=getattr(
             settings, "approval_recovery_poll_seconds", 60
         ),
+        approval_expiry_status=expiry_status,
+        approval_expiry_failure_count=expiry_failure_count,
+        approval_expiry_last_completed_at=expiry_last_completed_at,
+        approval_expiry_last_changed_count=expiry_last_changed_count,
         app_state_repository_bindings=application_repository_bindings,
         postgres_probe_enabled=settings.postgres_runtime_probe_enabled,
         postgres_auth_rate_limits_enabled=settings.postgres_auth_rate_limits_enabled,

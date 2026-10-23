@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
+from datetime import datetime, timezone
+
+import pytest
 
 os.environ.setdefault("AIXION_PROFILE", "test")
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
@@ -49,6 +52,11 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     assert body["application_store_ready"] is True
     assert body["approval_recovery_status"] in {"not_started", "healthy", "degraded"}
     assert body["approval_recovery_poll_seconds"] == 60
+    assert body["approval_expiry_status"] in {
+        "not_started", "starting", "healthy", "failed"
+    }
+    assert body["approval_expiry_failure_count"] >= 0
+    assert body["approval_expiry_last_changed_count"] >= 0
     assert body["app_state_repository_bindings"]["approval_decisions"] == "sqlite"
     assert body["app_state_repository_bindings"]["projects"] == "sqlite"
     assert body["app_state_repository_bindings"]["notification_outbox"] == "unbound"
@@ -362,3 +370,87 @@ def test_readiness_reports_not_ready_when_database_check_fails(monkeypatch) -> N
     assert body["migrations_applied"] is False
     assert body["recovery_snapshot_available"] is False
     assert any(error.startswith("Database readiness check failed") for error in body["errors"])
+
+
+def test_readiness_defaults_approval_expiry_worker_to_not_started() -> None:
+    readiness = build_runtime_readiness(application_state=None)
+
+    assert readiness.approval_expiry_status == "not_started"
+    assert readiness.approval_expiry_failure_count == 0
+    assert readiness.approval_expiry_last_completed_at is None
+    assert readiness.approval_expiry_last_changed_count == 0
+
+
+def test_readiness_reports_healthy_approval_expiry_worker() -> None:
+    completed_at = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+    state = type(
+        "State",
+        (),
+        {
+            "approval_expiry_status": "healthy",
+            "approval_expiry_failure_count": 0,
+            "approval_expiry_last_completed_at": completed_at,
+            "approval_expiry_last_changed_count": 2,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.approval_expiry_status == "healthy"
+    assert readiness.approval_expiry_failure_count == 0
+    assert readiness.approval_expiry_last_completed_at == completed_at
+    assert readiness.approval_expiry_last_changed_count == 2
+
+
+def test_readiness_reports_failed_approval_expiry_worker_without_changing_readiness() -> None:
+    state = type(
+        "State",
+        (),
+        {
+            "approval_expiry_status": "failed",
+            "approval_expiry_failure_count": 3,
+            "approval_expiry_last_completed_at": None,
+            "approval_expiry_last_changed_count": 0,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.approval_expiry_status == "failed"
+    assert readiness.approval_expiry_failure_count == 3
+    assert readiness.approval_expiry_last_changed_count == 0
+    # This is additive diagnostics; existing local readiness semantics are unchanged.
+    assert readiness.status == "ready"
+
+
+@pytest.mark.parametrize("expiry_status", ["not_started", "failed"])
+def test_production_readiness_fails_closed_when_approval_expiry_is_unhealthy(
+    monkeypatch, expiry_status: str
+) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+    settings = replace(
+        get_settings(),
+        profile="production",
+        trust_enforcement=True,
+        lease_signing_key_configured=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    state = type(
+        "State",
+        (),
+        {
+            "approval_recovery_status": "healthy",
+            "approval_expiry_status": expiry_status,
+            "approval_expiry_failure_count": 1 if expiry_status == "failed" else 0,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.approval_expiry_status == expiry_status
+    assert readiness.status == "not_ready"
+    assert any(
+        f"Approval expiry worker is not healthy: status={expiry_status}" == error
+        for error in readiness.errors
+    )

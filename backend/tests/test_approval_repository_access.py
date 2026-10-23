@@ -9,9 +9,22 @@ from app.models import AuthUser, UserRole
 class RecordingApprovalRepository:
     def __init__(self) -> None:
         self.workspace_reads: list[str | None] = []
+        self.expiry_workspace_reads: list[str | None] = []
 
     def list_for_workspace(self, workspace_id: str | None = None) -> list[object]:
         self.workspace_reads.append(workspace_id)
+        return []
+
+    def list_due_pending(
+        self,
+        *,
+        now: object,
+        legacy_ttl_seconds: int,
+        limit: int,
+        workspace_id: str | None = None,
+    ) -> list[object]:
+        del now, legacy_ttl_seconds, limit
+        self.expiry_workspace_reads.append(workspace_id)
         return []
 
 
@@ -43,5 +56,5 @@ def test_approval_list_route_uses_repository_bound_to_fastapi_app(monkeypatch) -
     assert repository.workspace_reads == [
         "workspace-test",
         "workspace-test",
-        "workspace-test",
     ]
+    assert repository.expiry_workspace_reads == [None, "workspace-test"]

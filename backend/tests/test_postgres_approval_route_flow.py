@@ -1250,7 +1250,7 @@ def test_postgres_codex_hook_denies_lost_consume_response_and_same_invocation_re
         assert connection.execute(
             "SELECT COUNT(*) FROM approval_requests WHERE approval_id=%s "
             "AND workspace_id=%s AND source_agent_id=%s AND source_invocation_id=%s "
-            "AND source_provider=%s",
+            "AND payload->>'source_provider'=%s",
             (
                 approval_id,
                 workspace.id,

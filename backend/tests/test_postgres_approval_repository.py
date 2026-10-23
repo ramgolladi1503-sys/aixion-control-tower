@@ -1500,6 +1500,25 @@ def test_postgres_list_for_workspace_queries_durable_tenant_scoped_rows(
     assert {item.id for item in repository.list_for_workspace()} == {approval_a.id, approval_b.id}
 
 
+def test_postgres_due_selector_includes_recent_legacy_null_expiry_records(
+    postgres_repository: tuple[
+        PostgresApprovalDecisionRepository, Callable[[], Connection]
+    ],
+) -> None:
+    repository, connect = postgres_repository
+    workspace, _project, approval, _ = _seed(connect)
+
+    selected = repository.list_due_pending(
+        now=now_utc(),
+        legacy_ttl_seconds=600,
+        limit=1,
+        workspace_id=workspace.id,
+    )
+
+    assert [item.id for item in selected] == [approval.id]
+    assert selected[0].expires_at is None
+
+
 def test_postgres_agent_task_approval_creation_commits_task_timeline_and_audit_atomically(
     postgres_repository: tuple[
         PostgresApprovalDecisionRepository, Callable[[], Connection]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 import hmac
 from collections.abc import Callable
@@ -38,6 +39,8 @@ from .models import (
     Workspace,
     now_utc,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ApprovalRecordMissing(LookupError):
@@ -1282,33 +1285,73 @@ class SQLiteApprovalDecisionRepository:
             ApprovalStatus.REQUESTED.value,
             ApprovalStatus.PENDING_REVIEW.value,
             now.isoformat(),
-            legacy_ttl_seconds,
-            now.isoformat(),
         ]
         if workspace_id is not None:
-            scope_sql = (
-                " AND COALESCE(json_extract(approval.payload,'$.workspace_id'),"
-                "json_extract(project.payload,'$.workspace_id')) = ?"
-            )
+            scope_sql = " AND COALESCE(approval.workspace_id,project.workspace_id)=?"
             query_params.append(workspace_id)
         query_params.extend((legacy_ttl_seconds, limit))
         with self._connect() as conn:
             rows = conn.execute(
+                "WITH approval_rows AS ("
+                "SELECT entity_id,payload,"
+                "CASE WHEN json_valid(payload) THEN json_extract(payload,'$.id') END AS payload_id,"
+                "CASE WHEN json_valid(payload) THEN json_extract(payload,'$.project_id') END AS project_id,"
+                "CASE WHEN json_valid(payload) THEN json_extract(payload,'$.status') END AS status,"
+                "CASE WHEN json_valid(payload) THEN json_type(payload,'$.workspace_id') END AS workspace_type,"
+                "CASE WHEN json_valid(payload) THEN json_extract(payload,'$.workspace_id') END AS workspace_id,"
+                "CASE WHEN json_valid(payload) THEN json_type(payload,'$.expires_at') END AS expiry_type,"
+                "CASE WHEN json_valid(payload) THEN json_extract(payload,'$.expires_at') END AS expires_at,"
+                "CASE WHEN json_valid(payload) THEN json_type(payload,'$.created_at') END AS created_type,"
+                "CASE WHEN json_valid(payload) THEN json_extract(payload,'$.created_at') END AS created_at "
+                "FROM kv_store WHERE entity_type='approval_request'), "
+                "project_rows AS ("
+                "SELECT entity_id,payload,"
+                "CASE WHEN json_valid(payload) THEN json_extract(payload,'$.id') END AS payload_id,"
+                "CASE WHEN json_valid(payload) THEN json_extract(payload,'$.workspace_id') END AS workspace_id,"
+                "CASE WHEN json_valid(payload) THEN json_type(payload,'$.workspace_id') END AS workspace_type "
+                "FROM kv_store WHERE entity_type='project') "
                 "SELECT approval.entity_id,approval.payload,project.payload "
-                "FROM kv_store AS approval JOIN kv_store AS project "
-                "ON project.entity_type='project' "
-                "AND project.entity_id=json_extract(approval.payload,'$.project_id') "
-                "WHERE approval.entity_type='approval_request' "
-                "AND json_extract(approval.payload,'$.status') IN (?,?) "
-                "AND ((json_extract(approval.payload,'$.expires_at') IS NOT NULL "
-                "AND datetime(json_extract(approval.payload,'$.expires_at')) <= datetime(?)) "
-                "OR (json_extract(approval.payload,'$.expires_at') IS NULL "
-                "AND datetime(json_extract(approval.payload,'$.created_at'), '+' || ? || ' seconds') <= datetime(?))) "
+                "FROM approval_rows AS approval JOIN project_rows AS project "
+                "ON project.entity_id=approval.project_id "
+                "WHERE approval.status IN (?,?) "
+                "AND approval.payload_id=approval.entity_id "
+                "AND project.payload_id=project.entity_id "
+                "AND (((approval.workspace_type IS NULL OR approval.workspace_type='null') "
+                "AND (project.workspace_type IS NULL OR project.workspace_type='null' "
+                "OR project.workspace_type='text')) "
+                "OR (approval.workspace_type='text' AND project.workspace_type='text' "
+                "AND approval.workspace_id=project.workspace_id)) "
+                "AND approval.created_type='text' AND datetime(approval.created_at) IS NOT NULL "
+                "AND (approval.expiry_type IS NULL OR approval.expiry_type='null' "
+                "OR (approval.expiry_type='text' AND datetime(approval.expires_at) IS NOT NULL)) "
+                "AND ((approval.expiry_type='text' AND datetime(approval.expires_at) <= datetime(?)) "
+                "OR approval.expiry_type IS NULL OR approval.expiry_type='null') "
                 + scope_sql
-                + " ORDER BY COALESCE(datetime(json_extract(approval.payload,'$.expires_at')), "
-                "datetime(json_extract(approval.payload,'$.created_at'), '+' || ? || ' seconds')), approval.entity_id LIMIT ?",
+                + " ORDER BY COALESCE(datetime(approval.expires_at), "
+                "datetime(approval.created_at,'+' || ? || ' seconds')), approval.entity_id LIMIT ?",
                 query_params,
             ).fetchall()
+            invalid_row = conn.execute(
+                "SELECT approval.entity_id FROM kv_store AS approval "
+                "LEFT JOIN kv_store AS project ON project.entity_type='project' "
+                "AND project.entity_id=CASE WHEN json_valid(approval.payload) "
+                "THEN json_extract(approval.payload,'$.project_id') END "
+                "WHERE approval.entity_type='approval_request' AND ("
+                "CASE WHEN json_valid(approval.payload) THEN json_extract(approval.payload,'$.id') END "
+                "IS NOT approval.entity_id OR project.entity_id IS NULL OR "
+                "CASE WHEN json_valid(project.payload) THEN json_extract(project.payload,'$.id') END "
+                "IS NOT project.entity_id OR "
+                "(CASE WHEN json_valid(approval.payload) THEN json_extract(approval.payload,'$.workspace_id') END "
+                "IS NOT NULL AND CASE WHEN json_valid(approval.payload) THEN json_extract(approval.payload,'$.workspace_id') END "
+                "IS NOT CASE WHEN json_valid(project.payload) THEN json_extract(project.payload,'$.workspace_id') END)) "
+                "LIMIT 1"
+            ).fetchone()
+        if invalid_row is not None:
+            logger.warning(
+                "Approval expiry selector detected invalid persisted approval identity; "
+                "excluding that record while continuing valid due selection entity_id=%s",
+                invalid_row[0],
+            )
         due: list[ApprovalRequest] = []
         for entity_id, approval_payload, project_payload in rows:
             approval = ApprovalRequest.model_validate_json(approval_payload)
@@ -1322,7 +1365,9 @@ class SQLiteApprovalDecisionRepository:
                     and (approval.workspace_id or project.workspace_id) != workspace_id
                 )
             ):
-                continue
+                raise ApprovalDecisionConflict(
+                    "Due-approval query returned a mismatched persisted identity or workspace."
+                )
             due.append(approval)
         return due
 
@@ -2426,12 +2471,11 @@ class PostgresApprovalDecisionRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT payload,approval_id,workspace_id,project_id FROM approval_requests "
-                "WHERE status IN (%s,%s) AND (expires_at <= %s OR "
-                "(expires_at IS NULL AND created_at + (%s * interval '1 second') <= %s))"
+                "WHERE status IN (%s,%s) AND (expires_at <= %s OR expires_at IS NULL)"
                 + scope_sql
                 + " ORDER BY COALESCE(expires_at, created_at + (%s * interval '1 second')), approval_id LIMIT %s",
                 (
-                    statuses[0], statuses[1], now, legacy_ttl_seconds, now,
+                    statuses[0], statuses[1], now,
                     *((workspace_id,) if workspace_id is not None else ()),
                     legacy_ttl_seconds, limit,
                 ),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from app.agent_task_models import (
     AgentTaskStatus,
 )
 from app.approval_integrity import compute_approval_payload_hash
+from app.approval_expiry import expire_due_approvals
 from app.approval_repository import (
     ApprovalDecisionConflict,
     ApprovalDeliveryEvidenceIntegrityError,
@@ -232,6 +234,149 @@ def test_list_due_pending_rejects_invalid_bounds(tmp_path: Path) -> None:
             legacy_ttl_seconds=600,
             limit=0,
         )
+
+
+def test_list_due_pending_preserves_unscoped_local_approvals_without_cross_scope_leakage(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "approval_due_unscoped.sqlite3"
+    now = datetime.now(timezone.utc)
+    approval = _approval().model_copy(
+        update={
+            "id": "approval_due_local_unscoped",
+            "project_id": "project_due_local_unscoped",
+            "workspace_id": None,
+            "status": ApprovalStatus.PENDING_REVIEW,
+            "created_at": now - timedelta(minutes=5),
+            "expires_at": now - timedelta(minutes=1),
+        }
+    )
+    _seed_database(database, approval)
+    repository = _repository(database)
+
+    assert [item.id for item in repository.list_due_pending(
+        now=now,
+        legacy_ttl_seconds=600,
+        limit=250,
+    )] == [approval.id]
+    assert repository.list_due_pending(
+        now=now,
+        legacy_ttl_seconds=600,
+        limit=250,
+        workspace_id="workspace-not-local",
+    ) == []
+
+
+def test_list_due_pending_validates_before_limit_to_prevent_corrupt_row_starvation(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database = tmp_path / "approval_due_invalid_rows.sqlite3"
+    now = datetime.now(timezone.utc)
+    valid = _approval().model_copy(
+        update={
+            "id": "approval_valid_after_invalid_rows",
+            "project_id": "project_due_invalid_rows",
+            "workspace_id": "workspace_due_invalid_rows",
+            "status": ApprovalStatus.PENDING_REVIEW,
+            "created_at": now - timedelta(minutes=5),
+            "expires_at": now - timedelta(minutes=1),
+        }
+    )
+    _seed_database(database, valid)
+    with sqlite3.connect(database) as connection:
+        invalid_rows = []
+        for index in range(260):
+            entity_id = f"approval_invalid_{index:03d}"
+            payload = valid.model_dump(mode="json") | {
+                "id": f"payload_identity_mismatch_{index:03d}",
+                "expires_at": (now - timedelta(minutes=2)).isoformat(),
+            }
+            invalid_rows.append(
+                ("approval_request", entity_id, json.dumps(payload, separators=(",", ":")))
+            )
+        connection.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            invalid_rows,
+        )
+
+    repository = _repository(database)
+    with caplog.at_level("WARNING", logger="app.approval_repository"):
+        selected = repository.list_due_pending(
+            now=now,
+            legacy_ttl_seconds=600,
+            limit=250,
+            workspace_id="workspace_due_invalid_rows",
+        )
+
+    assert [approval.id for approval in selected] == [valid.id]
+    assert "invalid persisted approval identity" in caplog.text
+    assert "approval_invalid_000" in caplog.text
+
+
+def test_recent_null_expiry_approvals_are_backfilled_in_bounded_batches(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "approval_due_null_expiry.sqlite3"
+    now = datetime.now(timezone.utc)
+    first = _approval().model_copy(
+        update={
+            "id": "approval_null_expiry_000",
+            "project_id": "project_null_expiry_batch",
+            "workspace_id": "workspace_null_expiry_batch",
+            "created_at": now,
+            "expires_at": None,
+        }
+    )
+    project = Project(
+        id=first.project_id,
+        name="Legacy approvals project",
+        workspace_id=first.workspace_id,
+    )
+    with sqlite3.connect(database) as connection:
+        run_migrations(connection)
+        connection.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("project", project.id, project.model_dump_json()),
+        )
+        for index in range(260):
+            approval = first.model_copy(update={"id": f"approval_null_expiry_{index:03d}"})
+            connection.execute(
+                "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+                ("approval_request", approval.id, approval.model_dump_json()),
+            )
+
+    repository = _repository(database)
+    first_batch = repository.list_due_pending(
+        now=now,
+        legacy_ttl_seconds=600,
+        limit=250,
+        workspace_id=first.workspace_id,
+    )
+    assert len(first_batch) == 250
+    assert all(approval.expires_at is None for approval in first_batch)
+
+    assert expire_due_approvals(repository=repository, workspace_id=first.workspace_id) == 0
+    remaining = repository.list_due_pending(
+        now=now_utc(),
+        legacy_ttl_seconds=600,
+        limit=250,
+        workspace_id=first.workspace_id,
+    )
+    assert len(remaining) == 10
+    assert all(approval.expires_at is None for approval in remaining)
+
+    assert expire_due_approvals(repository=repository, workspace_id=first.workspace_id) == 0
+    assert repository.list_due_pending(
+        now=now_utc(),
+        legacy_ttl_seconds=600,
+        limit=250,
+        workspace_id=first.workspace_id,
+    ) == []
+    assert all(
+        repository.get(f"approval_null_expiry_{index:03d}").expires_at is not None
+        for index in range(260)
+    )
 
 
 def _audit(
