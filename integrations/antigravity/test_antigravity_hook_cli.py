@@ -96,6 +96,32 @@ def test_main_denies_nonstandard_json_numbers_before_approval_requests(
     assert json.loads(captured.out)["decision"] == "deny"
 
 
+@pytest.mark.parametrize("number", ["1e999", "-1e999"])
+def test_main_denies_overflowing_json_numbers_before_approval_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    number: str,
+) -> None:
+    raw_input = (
+        '{"toolCall":{"name":"run_command","args":{"value":'
+        f"{number}" + "}}}"
+    ).encode()
+    requests: list[str] = []
+    monkeypatch.setattr(hook.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw_input)))
+
+    def unexpected_request(method: str, *_args: object, **_kwargs: object) -> dict:
+        requests.append(method)
+        raise AssertionError("Invalid hook input must not reach the approval API")
+
+    monkeypatch.setattr(hook, "_request", unexpected_request)
+
+    assert hook.main([]) == 0
+
+    captured = capsys.readouterr()
+    assert requests == []
+    assert json.loads(captured.out)["decision"] == "deny"
+
+
 def _hook_payload() -> dict:
     return {
         "toolCall": {"name": "run_command", "args": {"command": "printf hello"}},

@@ -84,7 +84,7 @@ from .models import (
 )
 from .mcp_child_server_repository import SQLiteMCPChildServerRepository
 from .idea_repository import IdeaRepository, SQLiteIdeaRepository
-from .work_order_repository import SQLiteWorkOrderRepository
+from .work_order_repository import PostgresWorkOrderRepository, SQLiteWorkOrderRepository
 from .notifications import (
     create_notification,
     notification_dispatch_loop,
@@ -1043,11 +1043,31 @@ def create_approval_request(
     project = _project_for_user(payload.project_id, user, http_request)
     if payload.work_order_id:
         work_order = work_order_repository.get(payload.work_order_id)
+        if isinstance(work_order_repository, SQLiteWorkOrderRepository):
+            work_order_scope_valid = (
+                work_order is not None
+                and work_order_scope_is_consistent(work_order)
+                and work_order_workspace_id(work_order) == project.workspace_id
+            )
+        elif isinstance(work_order_repository, PostgresWorkOrderRepository):
+            # The PostgreSQL repository validates the normalized project/workspace
+            # columns against the stored payload. Resolve this link against the
+            # project already read from the same request-selected PostgreSQL
+            # authority; the module-level project_repository is SQLite in this
+            # runtime and must not be consulted for PostgreSQL-only records.
+            work_order_scope_valid = (
+                work_order is not None
+                and work_order.workspace_id == project.workspace_id
+            )
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail="Work order persistence runtime is unavailable",
+            )
         if (
             work_order is None
-            or not work_order_scope_is_consistent(work_order)
+            or not work_order_scope_valid
             or work_order.project_id != project.id
-            or work_order_workspace_id(work_order) != project.workspace_id
         ):
             raise HTTPException(status_code=404, detail="Work order not found")
 

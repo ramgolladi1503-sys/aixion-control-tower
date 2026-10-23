@@ -433,6 +433,40 @@ def test_run_denies_create_conflict_or_mismatched_retry_response(
     assert calls == 1
 
 
+@pytest.mark.parametrize("approval_id", [
+    "approval_0123456789ab/../../identity",
+    "approval_not-hex",
+    "",
+])
+def test_run_denies_noncanonical_approval_id_before_using_it_in_api_path(
+    monkeypatch: pytest.MonkeyPatch,
+    approval_id: str,
+) -> None:
+    calls: list[str] = []
+
+    def request(
+        method: str,
+        url: str,
+        _config: dict,
+        _token: str,
+        body: dict | None = None,
+        **_kwargs: object,
+    ) -> dict:
+        calls.append(url)
+        assert method == "POST" and url.endswith("/agents/approvals")
+        assert body is not None
+        created = _codex_approval(body)
+        created["id"] = approval_id
+        return created
+
+    monkeypatch.setattr(hook, "_request", request)
+
+    result = hook.run(_codex_event(), _codex_environment())
+
+    assert result[0] == "deny"
+    assert calls == [f"{_codex_environment()['AIXION_API_BASE_URL']}/agents/approvals"]
+
+
 class _FakeClock:
     def __init__(self) -> None:
         self.now = 100.0

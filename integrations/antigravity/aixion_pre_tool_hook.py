@@ -163,6 +163,14 @@ def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"Non-standard JSON constant: {value}")
 
 
+def _parse_finite_json_float(value: str) -> float:
+    """Reject valid JSON exponents that overflow Python's finite float range."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("JSON number is outside the finite range")
+    return parsed
+
+
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """Reject ambiguous JSON objects instead of silently keeping the last key."""
     result: dict[str, Any] = {}
@@ -180,6 +188,7 @@ def _read_input() -> dict[str, Any]:
     try:
         value = json.loads(
             raw,
+            parse_float=_parse_finite_json_float,
             parse_constant=_reject_nonstandard_json_constant,
             object_pairs_hook=_reject_duplicate_json_keys,
         )
@@ -285,6 +294,7 @@ def _request(
         try:
             result = json.loads(
                 content,
+                parse_float=_parse_finite_json_float,
                 parse_constant=_reject_nonstandard_json_constant,
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
@@ -504,6 +514,7 @@ def _configuration(env: dict[str, str], payload: dict[str, Any]) -> dict[str, st
                 raise GateError("Agent config exceeds its size limit")
             config = json.loads(
                 raw_config,
+                parse_float=_parse_finite_json_float,
                 parse_constant=_reject_nonstandard_json_constant,
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
@@ -572,6 +583,7 @@ def check_connection(environ: dict[str, str] | None = None) -> dict[str, str]:
             raise GateError(f"Control Tower health check returned HTTP {response.status}")
         health = json.loads(
             response.body,
+            parse_float=_parse_finite_json_float,
             parse_constant=_reject_nonstandard_json_constant,
             object_pairs_hook=_reject_duplicate_json_keys,
         )

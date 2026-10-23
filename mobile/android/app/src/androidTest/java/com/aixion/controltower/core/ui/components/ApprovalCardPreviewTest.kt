@@ -3,10 +3,10 @@ package com.aixion.controltower.core.ui.components
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -49,9 +49,7 @@ class ApprovalCardPreviewTest {
         }
 
         composeRule.onNodeWithText("Request preview").assertExists()
-        composeRule
-            .onNodeWithTag("approval-card-summary-preview")
-            .assertTextEquals(longSummary)
+        assertAccessibleSummary(longSummary)
     }
 
     @Test
@@ -69,7 +67,7 @@ class ApprovalCardPreviewTest {
             "Long approval previews should remain compact and use the same visual line limit",
             kotlin.math.abs(firstHeight - secondHeight) < 1f
         )
-        composeRule.onNodeWithTag("approval-card-summary-preview").assertTextEquals(otherLongSummary)
+        assertAccessibleSummary(otherLongSummary)
     }
 
     private fun renderCardHeight(summary: String): Float {
@@ -95,6 +93,18 @@ class ApprovalCardPreviewTest {
             }
         }
         return composeRule.onNodeWithTag("approval-card").fetchSemanticsNode().boundsInRoot.height
+    }
+
+    private fun assertAccessibleSummary(summary: String) {
+        val previewSemantics = composeRule
+            .onNodeWithTag("approval-card-summary-preview", useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .config
+        assertTrue(
+            "Assistive technology must receive the complete summary with its purpose",
+            previewSemantics[SemanticsProperties.ContentDescription]
+                .single() == "Request summary: $summary"
+        )
     }
 
     @Test

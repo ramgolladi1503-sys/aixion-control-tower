@@ -616,7 +616,11 @@ def _run(
     if created is None:
         return "deny", "Control Tower approval creation remained ambiguous"
     approval_id = created.get("id")
-    if (not isinstance(approval_id, str) or not approval_id
+    # Approval IDs are used as URL path segments in every subsequent request.
+    # Require the backend's canonical opaque-ID format before interpolating it;
+    # the diagnostic validator alone is not an authorization boundary.
+    if (not isinstance(approval_id, str)
+            or DIAGNOSTIC_APPROVAL_ID.fullmatch(approval_id) is None
             or created.get("status") not in {"PENDING_REVIEW", "REQUESTED", "APPROVED"}
             or not _identity_matches(created, approval_id=approval_id, config=config)
             or not _matches(created, body=body, config=config)):

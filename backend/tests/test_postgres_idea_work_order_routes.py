@@ -151,6 +151,65 @@ def test_work_order_cannot_link_an_idea_from_another_workspace(postgres_idea_wor
     assert response.json()["detail"] == "Idea not found"
 
 
+def test_approval_route_links_postgres_only_work_order_without_sqlite_fallback(
+    postgres_idea_work_order_runtime,
+) -> None:
+    connect, workspace, project = postgres_idea_work_order_runtime
+    client = TestClient(main.app)
+    assert project.id not in store.projects
+    created_work_order = client.post(
+        "/work-orders",
+        json={
+            "project_id": project.id,
+            "goal": "Prepare a change for approval",
+            "tasks": ["Review exact diff", "Approve from mobile"],
+        },
+    )
+    assert created_work_order.status_code == 200, created_work_order.text
+    work_order = created_work_order.json()
+    assert work_order["id"] not in store.work_orders
+
+    before_approvals = set(store.approval_requests)
+    before_notifications = set(store.notifications)
+    before_audits = {event.id for event in store.audit_events}
+    response = client.post(
+        "/approvals",
+        json={
+            "project_id": project.id,
+            "work_order_id": work_order["id"],
+            "title": "Review the prepared change",
+            "summary": "Approve the exact work order from the mobile console.",
+            "target_branch": "main",
+            "files": [{"path": "README.md", "diff": "+approved change"}],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    approval = response.json()
+    assert approval["workspace_id"] == workspace.id
+    assert approval["work_order_id"] == work_order["id"]
+    with connect() as connection:
+        persisted = connection.execute(
+            "SELECT project_id,workspace_id,work_order_id FROM approval_requests "
+            "WHERE approval_id=%s",
+            (approval["id"],),
+        ).fetchone()
+        assert persisted == (project.id, workspace.id, work_order["id"])
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s AND workspace_id=%s "
+            "AND event_type='approval.created'",
+            (approval["id"], workspace.id),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s AND workspace_id=%s",
+            (approval["id"], workspace.id),
+        ).fetchone()[0] == 1
+    assert approval["id"] not in store.approval_requests
+    assert set(store.approval_requests) == before_approvals
+    assert set(store.notifications) == before_notifications
+    assert {event.id for event in store.audit_events} == before_audits
+
+
 def test_external_agent_work_order_uses_postgres_project_and_idea_scope(
     postgres_idea_work_order_runtime, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
