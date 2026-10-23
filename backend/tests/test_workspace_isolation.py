@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
@@ -657,10 +658,12 @@ def test_mcp_transport_denies_cross_workspace_project_before_protocol_response()
     _persist_projects(project_a)
 
     with pytest.raises(HTTPException) as error:
-        mcp_transport_routes.handle_mcp_jsonrpc(
-            project_a.id,
-            mcp_transport_routes.MCPJsonRpcRequest(method="tools/list"),
-            _user(workspace_b),
+        asyncio.run(
+            mcp_transport_routes.handle_mcp_jsonrpc(
+                project_a.id,
+                mcp_transport_routes.MCPJsonRpcRequest(method="tools/list"),
+                _user(workspace_b),
+            )
         )
     assert error.value.status_code == 404
 
