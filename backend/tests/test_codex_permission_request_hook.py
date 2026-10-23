@@ -458,6 +458,58 @@ def test_documented_permission_request_without_tool_use_id_completes_phone_flow(
     assert calls[-1][0] == "POST" and calls[-1][1].endswith("/consume")
 
 
+def test_second_callback_cannot_reuse_stale_approved_record_without_tool_use_id(monkeypatch) -> None:
+    """A create retry/replay must not carry approval across callback identities."""
+    event = _event()
+    event.pop("tool_use_id")
+    calls: list[tuple[str, str]] = []
+    first_callback_record: dict = {}
+    create_bodies: list[dict] = []
+    create_count = 0
+
+    def request(method, url, _config, _token, body=None, **_kwargs):
+        nonlocal create_count, first_callback_record
+        calls.append((method, url))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            create_count += 1
+            create_bodies.append(body or {})
+            if create_count == 1:
+                first_callback_record = _record(body or {})
+                return first_callback_record
+            # Simulate the server returning a previously approved record for
+            # the first callback when the second callback creates its request.
+            stale_approved = {**first_callback_record, "status": "APPROVED"}
+            stale_approved["approved_payload_hash"] = hook._hash(stale_approved)
+            return stale_approved
+        if method == "GET":
+            return {**first_callback_record, "status": "DENIED"}
+        if method == "POST" and url.endswith("/consume"):
+            return {"consumed": True}
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+
+    # Complete the first callback as denied so its record remains available for
+    # the simulated stale replay without ever consuming an approval.
+    first_result = hook.run(event, ENV)
+    first_callback_call_count = len(calls)
+    second_result = hook.run(event, ENV)
+
+    assert first_result == ("deny", "Control Tower decision: DENIED")
+    assert second_result == (
+        "deny",
+        "Control Tower did not create a matching actionable approval",
+    )
+    assert create_count == 2
+    assert create_bodies[0]["source_invocation_id"] != create_bodies[1]["source_invocation_id"]
+    assert first_callback_record["source_invocation_id"] == create_bodies[0]["source_invocation_id"]
+    assert sum(method == "GET" for method, _ in calls) == 1
+    assert calls[first_callback_call_count:] == [
+        ("POST", "http://127.0.0.1:8012/agents/approvals")
+    ]
+    assert not any(url.endswith("/consume") for _, url in calls)
+
+
 def test_session_identity_is_stable_across_turns_and_tool_calls() -> None:
     first = hook._invocation_identity(
         _event(), tool_name="Bash", tool_input=_event()["tool_input"]

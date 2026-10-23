@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from typing import Any
@@ -333,13 +334,53 @@ def test_migration_command_upgrades_from_a_prior_known_revision(
         migration.migration_id for migration in prior_revision
     ]
 
+    # Keep representative application records in the prior schema so this
+    # exercises an upgrade in place, rather than only checking the ledger.
+    workspace_id = "workspace_migration_upgrade_fixture"
+    project_id = "project_migration_upgrade_fixture"
+    workspace_payload = {
+        "id": workspace_id,
+        "name": "Migration upgrade fixture",
+        "owner_user_id": "user_migration_upgrade_fixture",
+        "created_at": "2026-01-02T03:04:05Z",
+        "metadata": {"retained": True, "source": "prior_revision"},
+    }
+    project_payload = {
+        "id": project_id,
+        "workspace_id": workspace_id,
+        "name": "Existing project",
+        "description": "Must survive the schema upgrade unchanged",
+        "mode": "STRICT",
+        "rules": ["preserve audit history", "require approval"],
+        "metadata": {"migration_fixture": 1},
+    }
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s::jsonb)",
+            (workspace_id, json.dumps(workspace_payload)),
+        )
+        connection.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s::jsonb)",
+            (project_id, workspace_id, json.dumps(project_payload)),
+        )
+
     monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", known_migrations)
     upgraded_ledger = run_postgres_migrations(connect)
     repeated_ledger = run_postgres_migrations(connect)
 
+    with connect() as connection:
+        retained_workspace = connection.execute(
+            "SELECT payload FROM workspaces WHERE workspace_id=%s", (workspace_id,)
+        ).fetchone()
+        retained_project = connection.execute(
+            "SELECT workspace_id,payload FROM projects WHERE project_id=%s", (project_id,)
+        ).fetchone()
+
     expected_ids = [migration.migration_id for migration in known_migrations]
     assert [row["migration_id"] for row in upgraded_ledger] == expected_ids
     assert repeated_ledger == upgraded_ledger
+    assert retained_workspace == (workspace_payload,)
+    assert retained_project == (workspace_id, project_payload)
 
 
 def test_invocation_lease_manifest_scope_migration_preserves_v11_and_allows_v12(
