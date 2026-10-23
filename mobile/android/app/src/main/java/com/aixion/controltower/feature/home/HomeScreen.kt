@@ -188,21 +188,21 @@ internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = false) {
         Text(
-            text = "Connect an agent",
+            text = "Agent connections",
             color = palette.ink,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            text = "Set up Antigravity or Codex on the computer running your work. Keep that computer online while approvals are pending.",
+            text = "View setup guidance for Antigravity and Codex, and manage the computers that run your work.",
             color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
-            Text("Connect platform")
+            Text("Manage connections")
         }
     }
 }

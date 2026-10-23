@@ -1294,6 +1294,23 @@ POSTGRES_MIGRATIONS = (
             "ON approval_invocation_leases(expires_at)",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0028_invocation_lease_import_manifest_scope",
+        name="Allow immutable manifest for invocation lease imports",
+        statements=(
+            "ALTER TABLE sqlite_import_runs DROP CONSTRAINT IF EXISTS sqlite_import_runs_scope_check",
+            "ALTER TABLE sqlite_import_runs ADD CONSTRAINT sqlite_import_runs_scope_check "
+            "CHECK (scope IN ('approval_transaction_slice_v1','approval_and_trust_slice_v2',"
+            "'approval_trust_agent_history_v3','approval_trust_agent_history_connectors_v4',"
+            "'approval_auth_agent_history_connectors_v5','approval_auth_agent_history_connectors_email_v6',"
+            "'approval_auth_agent_mcp_connectors_email_v7',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_v8',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_v9',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_v10',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12'))",
+        ),
+    ),
 )
 
 

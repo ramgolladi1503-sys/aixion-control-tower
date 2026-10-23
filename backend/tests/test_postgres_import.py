@@ -634,7 +634,7 @@ def test_delivery_state_is_included_and_requires_matching_invocation_audit(tmp_p
 
     plan, selected, digest = build_plan(path)
 
-    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11"
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12"
     assert plan["planned_counts"]["approval_delivery_claim"] == 1
     assert plan["planned_counts"]["approval_delivery_failure"] == 1
     assert plan["planned_counts"]["approval_invocation_lease"] == 1
@@ -942,7 +942,7 @@ def test_import_preserves_trust_state_signatures_and_hash_chain(tmp_path, postgr
     _snapshot(path, include_omitted=False, include_trust=True)
     plan, selected, digest = build_plan(path)
 
-    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11"
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12"
     assert plan["planned_counts"]["agent_run"] == 1
     assert plan["planned_counts"]["agent_run_step"] == 1
     assert plan["planned_counts"]["agent_run_event"] == 1

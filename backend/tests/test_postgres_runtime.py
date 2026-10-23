@@ -342,6 +342,29 @@ def test_migration_command_upgrades_from_a_prior_known_revision(
     assert repeated_ledger == upgraded_ledger
 
 
+def test_invocation_lease_manifest_scope_migration_preserves_v11_and_allows_v12(
+    postgres_schema: tuple[str, Any],
+) -> None:
+    _schema, connect = postgres_schema
+    run_postgres_migrations(connect)
+    scopes = (
+        "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11",
+        "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12",
+    )
+    with connect() as connection:
+        for index, scope in enumerate(scopes, start=1):
+            connection.execute(
+                "INSERT INTO sqlite_import_runs(source_sha256,scope,source_counts,imported_counts) "
+                "VALUES(%s,%s,'{}'::jsonb,'{}'::jsonb)",
+                (f"{index:064x}", scope),
+            )
+        stored_scopes = connection.execute(
+            "SELECT scope FROM sqlite_import_runs ORDER BY source_sha256"
+        ).fetchall()
+
+    assert stored_scopes == [(scope,) for scope in scopes]
+
+
 def test_migration_command_refuses_wrong_schema_before_ddl(
     postgres_schema: tuple[str, Any],
 ) -> None:

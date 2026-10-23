@@ -66,7 +66,7 @@ from app.trust_models import (
     TrustEvent,
 )
 
-SCOPE = "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11"
+SCOPE = "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12"
 ENTITY_TYPES = {
     "workspace": Workspace,
     "user": User,
