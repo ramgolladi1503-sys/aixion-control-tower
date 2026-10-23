@@ -166,7 +166,9 @@ def test_main_denies_nonstandard_json_numbers(
     }
 
 
-@pytest.mark.parametrize("outcome", ["approved", "revoked", "stale_payload"])
+@pytest.mark.parametrize(
+    "outcome", ["approved", "revoked", "stale_payload", "invalid_approved_hash"]
+)
 def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -219,6 +221,8 @@ def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
                 return changed
             approved = {**created, "status": "APPROVED"}
             approved["approved_payload_hash"] = hook._hash(approved)
+            if outcome == "invalid_approved_hash":
+                approved["approved_payload_hash"] = "sha256:" + "0" * 64
             return approved
         if method == "POST" and url.endswith("/consume"):
             return {"consumed": True}
