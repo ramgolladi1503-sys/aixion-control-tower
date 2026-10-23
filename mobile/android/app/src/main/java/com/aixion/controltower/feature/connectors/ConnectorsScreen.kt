@@ -56,7 +56,7 @@ private fun ConnectorsHero() {
     TowerHeroPanel {
         Row(verticalAlignment = Alignment.Top) {
             Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = "CONNECT ONCE", color = palette.brand)
+                StatusBadge(label = "SET UP A PROJECT", color = palette.brand)
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
                     text = "Connect your coding agent",
@@ -65,7 +65,7 @@ private fun ConnectorsHero() {
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = "Choose the agent you use on your computer. Setup takes place in that project workspace.",
+                    text = "Choose the agent used by this project. Set up each project workspace on the computer where the agent runs.",
                     color = palette.inkMuted,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -88,14 +88,14 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupCard(
             name = "Antigravity",
-            description = "Install the Control Tower hook in your Antigravity project.",
+            description = "Install the Control Tower tool hook in this Antigravity project workspace.",
             buttonLabel = "Set up Antigravity",
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         ProviderSetupCard(
             name = "Codex",
-            description = "Install the Control Tower permission hook in your Codex project.",
+            description = "Capture local Codex permission prompts. Codex Desktop approval interception is not verified.",
             buttonLabel = "Set up Codex",
             onClick = { onOpenAgentAccess("CODEX") }
         )
