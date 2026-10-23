@@ -49,4 +49,12 @@ class TowerDesignTokensTest {
             assertTrue("$spacing must stay on the 4dp grid", spacing.value % 4f == 0f)
         }
     }
+
+    @Test
+    fun contentFrameUsesCompactAndExpandedMaximumWidths() {
+        assertEquals(TowerLayout.compactContentMaxWidth, towerContentMaxWidth(600.dp))
+        assertEquals(TowerLayout.compactContentMaxWidth, towerContentMaxWidth(839.dp))
+        assertEquals(TowerLayout.expandedContentMaxWidth, towerContentMaxWidth(840.dp))
+        assertEquals(TowerLayout.expandedContentMaxWidth, towerContentMaxWidth(1_200.dp))
+    }
 }

@@ -109,4 +109,34 @@ class HomeScreenTest {
         composeRule.onNodeWithText("Agent connection status is not available here.", substring = true)
             .assertExists()
     }
+
+    @Test
+    fun backendFailureShowsOneActionableErrorAndHidesDiagnosticsUntilRequested() {
+        var retryRequested = false
+        composeRule.setContent {
+            HomeContent(
+                state = HomeUiState(
+                    loading = false,
+                    errorMessage = "SocketTimeoutException: gateway did not respond"
+                ),
+                onRetry = { retryRequested = true }
+            )
+        }
+
+        composeRule.onAllNodesWithText("Approval service unavailable").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Service unavailable").assertCountEquals(0)
+        composeRule.onAllNodesWithText("We couldn't load your approvals", substring = true)
+            .assertCountEquals(0)
+        composeRule.onAllNodesWithText("Current approvals unavailable").assertCountEquals(1)
+        composeRule.onAllNodesWithText(
+            "Check your connection, then retry to load the latest requests."
+        ).assertCountEquals(1)
+        composeRule.onAllNodesWithText("Retry sync").assertCountEquals(1)
+        composeRule.onAllNodesWithText("SocketTimeoutException: gateway did not respond")
+            .assertCountEquals(0)
+        composeRule.onNodeWithText("Technical details").performClick()
+        composeRule.onNodeWithText("SocketTimeoutException: gateway did not respond").assertExists()
+        composeRule.onNodeWithText("Retry sync").performClick()
+        composeRule.runOnIdle { assertTrue(retryRequested) }
+    }
 }

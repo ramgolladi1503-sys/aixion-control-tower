@@ -47,7 +47,7 @@ data class HomeUiState(
 internal fun homeHeroTitle(state: HomeUiState): String = when {
     state.loading -> "Loading approvals"
     state.refreshing -> "Refreshing approvals"
-    state.hasError -> "Backend sync failed"
+    state.hasError -> "Approval service unavailable"
     state.unsupportedApprovals.isNotEmpty() -> "${state.unsupportedApprovals.size} approvals need an app update"
     state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"
     state.blockedCount > 0 -> "${state.blockedCount} blocked actions need attention"
@@ -56,7 +56,7 @@ internal fun homeHeroTitle(state: HomeUiState): String = when {
 }
 
 internal fun homeHeroStatusLabel(state: HomeUiState): String = when {
-    state.hasError -> "Backend error"
+    state.hasError -> "Service unavailable"
     state.loading || state.refreshing -> "Syncing"
     !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "Not verified"
     state.unsupportedApprovals.isNotEmpty() -> "Unsupported approval"
@@ -64,10 +64,12 @@ internal fun homeHeroStatusLabel(state: HomeUiState): String = when {
     else -> "Backend synced"
 }
 
+internal fun shouldShowHomeStatusHero(state: HomeUiState): Boolean = !state.hasError
+
 internal fun homeHeroSubtitle(state: HomeUiState): String = when {
     state.loading -> "Syncing approval requests."
     state.refreshing -> "Checking for current approval requests."
-    state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then retry."
+    state.hasError -> "We couldn't load your approvals. Check your connection, then retry."
     state.unsupportedApprovals.isNotEmpty() -> "The app cannot safely interpret some approval status or risk values. No decisions are enabled for them."
     state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, reject, or request revision."
     state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."

@@ -17,6 +17,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
@@ -75,6 +76,24 @@ class ApprovalInboxScreenTest {
         assertEquals(
             LiveRegionMode.Polite,
             status.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+    }
+
+    @Test
+    fun decisionHistoryLoadingIsAnnouncedPolitely() {
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(loading = false, historyLoading = true)
+            )
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+        val loadingStatus = composeRule.onNodeWithTag("approval-history-loading-status")
+        loadingStatus.assertExists()
+        loadingStatus.assertTextContains("Loading decision history")
+        assertEquals(
+            LiveRegionMode.Polite,
+            loadingStatus.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
         )
     }
 

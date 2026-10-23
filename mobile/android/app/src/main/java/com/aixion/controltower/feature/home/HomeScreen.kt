@@ -8,15 +8,21 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -84,43 +90,44 @@ internal fun HomeContent(
             )
         }
 
-        item {
-            TowerHeroPanel {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        StatusBadge(
-                            label = homeHeroStatusLabel(state),
-                            color = when {
-                                state.hasError -> palette.danger
-                                state.unsupportedApprovals.isNotEmpty() -> palette.danger
-                                state.actionRequiredCount > 0 -> palette.caution
-                                state.loading || state.refreshing || !state.hasSuccessfulSync -> palette.caution
-                                else -> palette.positive
-                            },
-                            fontSize = 14.sp,
-                            uppercase = false
-                        )
-                        Spacer(modifier = Modifier.height(TowerSpacing.md))
-                        Text(
-                            text = homeHeroTitle(state),
-                            color = palette.ink,
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            lineHeight = 33.sp
-                        )
-                        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                        Text(
-                            text = homeHeroSubtitle(state),
-                            color = palette.inkMuted,
-                            fontSize = 14.sp,
-                            lineHeight = 20.sp
-                        )
+        if (shouldShowHomeStatusHero(state)) {
+            item {
+                TowerHeroPanel {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            StatusBadge(
+                                label = homeHeroStatusLabel(state),
+                                color = when {
+                                    state.unsupportedApprovals.isNotEmpty() -> palette.danger
+                                    state.actionRequiredCount > 0 -> palette.caution
+                                    state.loading || state.refreshing || !state.hasSuccessfulSync -> palette.caution
+                                    else -> palette.positive
+                                },
+                                fontSize = 14.sp,
+                                uppercase = false
+                            )
+                            Spacer(modifier = Modifier.height(TowerSpacing.md))
+                            Text(
+                                text = homeHeroTitle(state),
+                                color = palette.ink,
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                lineHeight = 33.sp
+                            )
+                            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                            Text(
+                                text = homeHeroSubtitle(state),
+                                color = palette.inkMuted,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp
+                            )
+                        }
+                        ForgedLogoMark(size = 56.dp, color = palette.ink.copy(alpha = 0.82f))
                     }
-                    ForgedLogoMark(size = 56.dp, color = palette.ink.copy(alpha = 0.82f))
                 }
             }
         }
@@ -128,22 +135,17 @@ internal fun HomeContent(
         state.errorMessage?.let { message ->
             item {
                 ErrorPanel(
-                    title = "Live backend data unavailable",
-                    body = message,
+                    statusLabel = "Connection issue",
+                    title = "Current approvals unavailable",
+                    body = "Check your connection, then retry to load the latest requests.",
+                    technicalDetails = message,
                     onRetry = onRetry,
                     retryEnabled = !state.loading
                 )
             }
         }
 
-        if (state.hasError) {
-            item {
-                EmptyHomePanel(
-                    title = "No fallback approvals loaded",
-                    body = "This is intentional. Authenticated product screens now wait for real backend data instead of silently showing demo data. Use Retry after the backend is reachable."
-                )
-            }
-        } else if (!state.refreshing && state.hasSuccessfulSync && state.actionRequiredApprovals.isNotEmpty()) {
+        if (!state.hasError && !state.refreshing && state.hasSuccessfulSync && state.actionRequiredApprovals.isNotEmpty()) {
             item {
                 HomeApprovalPreview(
                     approvals = state.actionRequiredApprovals,
@@ -156,6 +158,7 @@ internal fun HomeContent(
         if (!state.hasError && !state.refreshing && state.hasSuccessfulSync && state.unsupportedApprovals.isNotEmpty()) {
             item {
                 ErrorPanel(
+                    statusLabel = "Update needed",
                     title = "Approval data is not recognized",
                     body = "Update the app or backend before deciding. These requests remain visible but cannot be approved.",
                     onRetry = onRetry,
@@ -275,10 +278,18 @@ internal fun HomeSyncTimestamp(syncedAt: Instant) {
 }
 
 @Composable
-private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEnabled: Boolean) {
+private fun ErrorPanel(
+    title: String,
+    body: String,
+    onRetry: () -> Unit,
+    retryEnabled: Boolean,
+    technicalDetails: String? = null,
+    statusLabel: String = "Review needed"
+) {
     val palette = LocalTowerPalette.current
+    var detailsExpanded by remember(technicalDetails) { mutableStateOf(false) }
     TowerPanel(elevated = true) {
-        StatusBadge(label = "Real data required", color = palette.danger, fontSize = 14.sp, uppercase = false)
+        StatusBadge(label = statusLabel, color = palette.danger, fontSize = 14.sp, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = title,
@@ -297,25 +308,24 @@ private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEn
         Button(onClick = onRetry, enabled = retryEnabled) {
             Text("Retry sync")
         }
-    }
-}
-
-@Composable
-private fun EmptyHomePanel(title: String, body: String) {
-    val palette = LocalTowerPalette.current
-    TowerPanel(elevated = true) {
-        Text(
-            text = title,
-            color = palette.ink,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(
-            text = body,
-            color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
-        )
+        if (!technicalDetails.isNullOrBlank()) {
+            TextButton(
+                onClick = { detailsExpanded = !detailsExpanded },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (detailsExpanded) "Hide technical details" else "Technical details")
+            }
+            if (detailsExpanded) {
+                Text(
+                    text = technicalDetails,
+                    color = palette.inkMuted,
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    modifier = Modifier
+                        .heightIn(max = 192.dp)
+                        .verticalScroll(rememberScrollState())
+                )
+            }
+        }
     }
 }

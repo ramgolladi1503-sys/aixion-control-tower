@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
+import com.aixion.controltower.core.ui.theme.TowerContentFrame
 import com.aixion.controltower.feature.agentruns.AgentRunsScreen
 import com.aixion.controltower.feature.agenttasks.AgentTasksScreen
 import com.aixion.controltower.feature.agentaccess.AgentAccessScreen
@@ -238,26 +239,30 @@ fun ControlTowerApp(
                     .background(palette.canvas)
             ) {
                 NavHost(navController = navController, startDestination = Route.Auth.value) {
-                    composable(Route.Auth.value) { AuthScreen(viewModel = authViewModel) }
+                    composable(Route.Auth.value) {
+                        TowerContentFrame { AuthScreen(viewModel = authViewModel) }
+                    }
                     composable(Route.Home.value) {
-                        HomeScreen(
-                            onApprovalSelected = { approval ->
-                                approvalsViewModel.selectApproval(approval)
-                                navController.navigate(Route.ApprovalDetail.value)
-                            },
-                            onOpenConnect = {
-                                navController.navigate(Route.Connectors.value) {
-                                    launchSingleTop = true
+                        TowerContentFrame {
+                            HomeScreen(
+                                onApprovalSelected = { approval ->
+                                    approvalsViewModel.selectApproval(approval)
+                                    navController.navigate(Route.ApprovalDetail.value)
+                                },
+                                onOpenConnect = {
+                                    navController.navigate(Route.Connectors.value) {
+                                        launchSingleTop = true
+                                    }
+                                },
+                                onOpenApprovals = {
+                                    navController.navigate(Route.Inbox.value) {
+                                        launchSingleTop = true
+                                        popUpTo(Route.Home.value) { saveState = true }
+                                        restoreState = true
+                                    }
                                 }
-                            },
-                            onOpenApprovals = {
-                                navController.navigate(Route.Inbox.value) {
-                                    launchSingleTop = true
-                                    popUpTo(Route.Home.value) { saveState = true }
-                                    restoreState = true
-                                }
-                            }
-                        )
+                            )
+                        }
                     }
                     composable(Route.Projects.value) { ProjectsScreen() }
                     composable(Route.WorkOrders.value) { WorkOrdersScreen() }
@@ -269,13 +274,15 @@ fun ControlTowerApp(
                         )
                     }
                     composable(Route.Inbox.value) {
-                        ApprovalInboxScreen(
-                            viewModel = approvalsViewModel,
-                            onApprovalSelected = { approval ->
-                                approvalsViewModel.selectApproval(approval)
-                                navController.navigate(Route.ApprovalDetail.value)
-                            }
-                        )
+                        TowerContentFrame {
+                            ApprovalInboxScreen(
+                                viewModel = approvalsViewModel,
+                                onApprovalSelected = { approval ->
+                                    approvalsViewModel.selectApproval(approval)
+                                    navController.navigate(Route.ApprovalDetail.value)
+                                }
+                            )
+                        }
                     }
                     composable(Route.AgentTasks.value) {
                         AgentTasksScreen(
@@ -290,15 +297,17 @@ fun ControlTowerApp(
                     composable(
                         route = Route.AgentAccess.value,
                         arguments = listOf(navArgument("provider") { type = NavType.StringType })
-                    ) { AgentAccessScreen() }
+                    ) { TowerContentFrame { AgentAccessScreen() } }
                     composable(Route.Connectors.value) {
-                        ConnectorsScreen(
-                            onOpenAgentAccess = { provider ->
-                                navController.navigate(Route.AgentAccess.forProvider(provider)) {
-                                    launchSingleTop = true
+                        TowerContentFrame {
+                            ConnectorsScreen(
+                                onOpenAgentAccess = { provider ->
+                                    navController.navigate(Route.AgentAccess.forProvider(provider)) {
+                                        launchSingleTop = true
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
                     composable(Route.MCPQueue.value) {
                         MCPQueueScreen(
@@ -310,21 +319,27 @@ fun ControlTowerApp(
                         )
                     }
                     composable(Route.Account.value) {
-                        AuthScreen(
-                            viewModel = authViewModel,
-                            onLogoutRequested = ::requestLogoutConfirmation
-                        )
+                        TowerContentFrame {
+                            AuthScreen(
+                                viewModel = authViewModel,
+                                onLogoutRequested = ::requestLogoutConfirmation
+                            )
+                        }
                     }
                     composable(Route.Ops.value) { RuntimeReadinessScreen() }
                     composable(Route.Tests.value) { TestRunsScreen() }
                     composable(Route.Audit.value) { AuditTrailScreen() }
-                    composable(Route.Diff.value) { DiffViewerScreen(viewModel = approvalsViewModel) }
+                    composable(Route.Diff.value) {
+                        TowerContentFrame { DiffViewerScreen(viewModel = approvalsViewModel) }
+                    }
                     composable(Route.ApprovalDetail.value) {
-                        ApprovalDetailScreen(
-                            viewModel = approvalsViewModel,
-                            onOpenDiff = { navController.navigate(Route.Diff.value) },
-                            onDecisionSubmitted = { mcpQueueViewModel.refresh() }
-                        )
+                        TowerContentFrame {
+                            ApprovalDetailScreen(
+                                viewModel = approvalsViewModel,
+                                onOpenDiff = { navController.navigate(Route.Diff.value) },
+                                onDecisionSubmitted = { mcpQueueViewModel.refresh() }
+                            )
+                        }
                     }
                 }
             }

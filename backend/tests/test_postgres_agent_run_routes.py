@@ -542,6 +542,198 @@ def test_postgres_agent_run_http_control_transitions_are_durable_and_audited(
     assert run_id not in store.agent_runs
 
 
+def test_postgres_stale_lease_watchdog_http_route_recovers_only_request_workspace(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    client = TestClient(main.app)
+    current_user = state["current_user"]
+    current_user["value"] = state["users"][0]
+
+    run_ids: dict[str, str] = {}
+    for index, target_workspace in enumerate((workspace, other_workspace)):
+        current_user["value"] = state["users"][index]
+        task_id = state["task_ids_by_workspace"][target_workspace.id]
+        created = client.post("/agent/runs", json={"task_id": task_id})
+        assert created.status_code == 200, created.text
+        run_id = created.json()["run"]["id"]
+        run_ids[target_workspace.id] = run_id
+        stale_at = now_utc() - timedelta(minutes=5)
+        run = repositories.agent_runs.get(run_id)
+        assert run is not None and run.current_step_id is not None
+        step = next(
+            item for item in repositories.agent_runs.list_steps_for_run(run_id)
+            if item.id == run.current_step_id
+        )
+        stale_run = run.model_copy(
+            update={
+                "status": AgentRunStatus.RUNNING,
+                "lease_owner": "stale-worker",
+                "lease_token": f"stale-token-{target_workspace.id}",
+                "lease_expires_at": stale_at,
+                "heartbeat_at": stale_at,
+                "updated_at": stale_at,
+            }
+        )
+        stale_step = step.model_copy(
+            update={
+                "status": AgentRunStepStatus.RUNNING,
+                "lease_owner": "stale-worker",
+                "lease_token": stale_run.lease_token,
+                "lease_expires_at": stale_at,
+                "updated_at": stale_at,
+            }
+        )
+        with connect() as conn:
+            conn.execute(
+                "UPDATE agent_runs SET status=%s,lease_owner=%s,lease_token=%s,"
+                "lease_expires_at=%s,updated_at=%s,payload=%s WHERE run_id=%s AND workspace_id=%s",
+                (
+                    stale_run.status.value,
+                    stale_run.lease_owner,
+                    stale_run.lease_token,
+                    stale_run.lease_expires_at,
+                    stale_run.updated_at,
+                    Jsonb(stale_run.model_dump(mode="json")),
+                    run_id,
+                    target_workspace.id,
+                ),
+            )
+            conn.execute(
+                "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                "WHERE step_id=%s AND workspace_id=%s",
+                (
+                    stale_step.status.value,
+                    stale_step.updated_at,
+                    Jsonb(stale_step.model_dump(mode="json")),
+                    stale_step.id,
+                    target_workspace.id,
+                ),
+            )
+
+    current_user["value"] = state["users"][0]
+    before_sqlite_runs = set(store.agent_runs)
+    response = client.post("/agent/runs/watchdog/recover-stale")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"recovered": 1}
+    recovered = repositories.agent_runs.get(run_ids[workspace.id])
+    untouched = repositories.agent_runs.get(run_ids[other_workspace.id])
+    assert recovered is not None and recovered.lease_token is None
+    assert recovered.status == AgentRunStatus.RETRY_WAIT
+    assert untouched is not None and untouched.lease_token is not None
+    assert untouched.status == AgentRunStatus.RUNNING
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE workspace_id=%s AND run_id=%s "
+            "AND event_type='STALE_LEASE_RECOVERED'",
+            (workspace.id, recovered.id),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type='agent_run.stale_lease_recovered'",
+            (workspace.id, recovered.id),
+        ).fetchone()[0] == 1
+    assert set(store.agent_runs) == before_sqlite_runs
+
+
+def test_postgres_stale_lease_watchdog_http_route_rolls_back_audit_failure(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    client = TestClient(main.app, raise_server_exceptions=False)
+    current_user = state["current_user"]
+    current_user["value"] = state["users"][0]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    stale_at = now_utc() - timedelta(minutes=5)
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None and run.current_step_id is not None
+    step = next(
+        item for item in repositories.agent_runs.list_steps_for_run(run_id)
+        if item.id == run.current_step_id
+    )
+    stale_run = run.model_copy(
+        update={
+            "status": AgentRunStatus.RUNNING,
+            "lease_owner": "stale-worker",
+            "lease_token": "stale-token",
+            "lease_expires_at": stale_at,
+            "heartbeat_at": stale_at,
+            "updated_at": stale_at,
+        }
+    )
+    stale_step = step.model_copy(
+        update={
+            "status": AgentRunStepStatus.RUNNING,
+            "lease_owner": "stale-worker",
+            "lease_token": stale_run.lease_token,
+            "lease_expires_at": stale_at,
+            "updated_at": stale_at,
+        }
+    )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status=%s,lease_owner=%s,lease_token=%s,"
+            "lease_expires_at=%s,updated_at=%s,payload=%s WHERE run_id=%s AND workspace_id=%s",
+            (
+                stale_run.status.value,
+                stale_run.lease_owner,
+                stale_run.lease_token,
+                stale_run.lease_expires_at,
+                stale_run.updated_at,
+                Jsonb(stale_run.model_dump(mode="json")),
+                run_id,
+                workspace.id,
+            ),
+        )
+        conn.execute(
+            "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+            "WHERE step_id=%s AND workspace_id=%s",
+            (
+                stale_step.status.value,
+                stale_step.updated_at,
+                Jsonb(stale_step.model_dump(mode="json")),
+                stale_step.id,
+                workspace.id,
+            ),
+        )
+        conn.execute(
+            "CREATE FUNCTION reject_stale_lease_audit() RETURNS trigger AS $$ "
+            "BEGIN IF NEW.event_type='agent_run.stale_lease_recovered' THEN "
+            "RAISE EXCEPTION 'injected stale lease audit failure'; END IF; "
+            "RETURN NEW; END; $$ LANGUAGE plpgsql"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_stale_lease_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_stale_lease_audit()"
+        )
+
+    response = client.post("/agent/runs/watchdog/recover-stale")
+
+    assert response.status_code == 500
+    durable_run = repositories.agent_runs.get(run_id)
+    durable_step = next(
+        item for item in repositories.agent_runs.list_steps_for_run(run_id)
+        if item.id == step.id
+    )
+    assert durable_run == stale_run
+    assert durable_step == stale_step
+    assert not any(
+        event.run_id == run_id
+        and event.event_type.value == "STALE_LEASE_RECOVERED"
+        for event in repositories.agent_runs.list_events_for_run(run_id)
+    )
+
+
 def _seed_postgres_verify_result_ready(
     *,
     connect: Callable[[], Connection],

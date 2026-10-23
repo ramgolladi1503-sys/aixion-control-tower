@@ -316,7 +316,16 @@ fun ApprovalInboxContent(
                 }
             }
             if (state.historyLoading) {
-                item { Text("Loading decision history…", color = palette.inkMuted, fontSize = 14.sp) }
+                item {
+                    Text(
+                        text = "Loading decision history…",
+                        modifier = Modifier
+                            .testTag("approval-history-loading-status")
+                            .semantics { liveRegion = LiveRegionMode.Polite },
+                        color = palette.inkMuted,
+                        fontSize = 14.sp
+                    )
+                }
             }
             state.historyErrorMessage?.let { message ->
                 item {

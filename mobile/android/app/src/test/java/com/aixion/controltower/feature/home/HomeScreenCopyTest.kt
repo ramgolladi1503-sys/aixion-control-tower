@@ -1,6 +1,8 @@
 package com.aixion.controltower.feature.home
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
 
@@ -94,5 +96,13 @@ class HomeScreenCopyTest {
                 )
             )
         )
+    }
+
+    @Test
+    fun statusHeroIsHiddenForBackendFailureButRemainsForNormalState() {
+        val errorState = HomeUiState(loading = false, errorMessage = "SocketTimeoutException")
+
+        assertFalse(shouldShowHomeStatusHero(errorState))
+        assertTrue(shouldShowHomeStatusHero(HomeUiState(loading = false)))
     }
 }
