@@ -24,6 +24,7 @@ from .workspace_membership_repository import PostgresWorkspaceMembershipReposito
 from .test_run_repository import PostgresTestRunRepository
 from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .postgres_trust_repository import PostgresTrustRepository
+from .postgres_agent_run_branch import PostgresAgentRunBranchIntentRepository
 
 
 @dataclass(frozen=True)
@@ -54,12 +55,15 @@ class ApplicationRepositories:
     test_runs: PostgresTestRunRepository
     trust_events: PostgresTrustEventRepository
     trust: PostgresTrustRepository
+    agent_run_branch_intents: PostgresAgentRunBranchIntentRepository
 
     @classmethod
     def from_connector(
         cls, connect: Callable[[], Connection]
     ) -> ApplicationRepositories:
         """Build all PostgreSQL adapters over the runtime's shared pool."""
+        trust_events = PostgresTrustEventRepository(connect)
+        trust = PostgresTrustRepository()
         return cls(
             auth=PostgresAuthRepository(connect),
             auth_rate_limits=PostgresAuthRateLimitRepository(connect),
@@ -78,6 +82,9 @@ class ApplicationRepositories:
             mcp_child_servers=PostgresMCPChildServerRepository(connect),
             mcp_pending_requests=PostgresMCPPendingRepository(connect),
             test_runs=PostgresTestRunRepository(connect),
-            trust_events=PostgresTrustEventRepository(connect),
-            trust=PostgresTrustRepository(),
+            trust_events=trust_events,
+            trust=trust,
+            agent_run_branch_intents=PostgresAgentRunBranchIntentRepository(
+                connect, trust_repository=trust, trust_event_repository=trust_events
+            ),
         )

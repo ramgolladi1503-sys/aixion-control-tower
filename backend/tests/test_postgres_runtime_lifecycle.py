@@ -10,6 +10,7 @@ os.environ.setdefault("AIXION_PROFILE", "test")
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app import main
+from app.application_repositories import ApplicationRepositories
 from app.notification_outbox_repository import PostgresNotificationOutboxRepository
 
 
@@ -38,6 +39,7 @@ class FakeRuntime:
             mcp_pending_requests=object(),
             trust=object(),
             trust_events=object(),
+            agent_run_branch_intents=object(),
         )
 
     def open(self, *, wait: bool = False) -> None:
@@ -193,6 +195,16 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
             assert not hasattr(application.state, state_name)
 
     asyncio.run(exercise())
+
+
+def test_application_repository_bundle_shares_trust_adapters_with_branch_intents() -> None:
+    def unexpected_connect():
+        raise AssertionError("Constructing the repository bundle must not connect")
+
+    repositories = ApplicationRepositories.from_connector(unexpected_connect)
+
+    assert repositories.agent_run_branch_intents._trust is repositories.trust
+    assert repositories.agent_run_branch_intents._trust_events is repositories.trust_events
 
 
 def test_postgres_auth_lifecycle_fails_closed_for_missing_repository_binding(
