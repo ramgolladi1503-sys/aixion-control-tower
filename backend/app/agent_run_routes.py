@@ -70,6 +70,10 @@ from .postgres_agent_run_apply_changes_route import postgres_apply_changes_execu
 from .postgres_agent_run_apply_changes_executor import postgres_apply_changes_enabled
 from .postgres_agent_run_validation import PostgresAgentRunValidationIntentRepository
 from .postgres_agent_run_validation_route import postgres_validation_execution_dependencies
+from .postgres_agent_run_pull_request_route import (
+    postgres_pull_request_enabled,
+    postgres_pull_request_execution_dependencies,
+)
 from .approval_decisions import (
     agent_task_repository,
     approval_decision_repository,
@@ -832,6 +836,10 @@ def execute_run_next_step(
             isinstance(run_repository, PostgresAgentRunRepository)
             and current_step.step_type == AgentRunStepType.RUN_VALIDATION
             and postgres_run_validation_enabled()
+        ) or (
+            isinstance(run_repository, PostgresAgentRunRepository)
+            and current_step.step_type == AgentRunStepType.CREATE_PULL_REQUEST
+            and postgres_pull_request_enabled()
         )
         if isinstance(run_repository, PostgresAgentRunRepository) and not postgres_supported_step:
             raise HTTPException(
@@ -839,7 +847,7 @@ def execute_run_next_step(
                 detail=(
                     "PostgreSQL AgentRun execution supports VALIDATE_SCOPE, VERIFY_RESULT, "
                     "SEAL_EVIDENCE, CREATE_BRANCH, and explicitly enabled APPLY_CHANGES/RUN_VALIDATION "
-                    "with complete durable authority."
+                    "with complete durable authority. CREATE_PULL_REQUEST also requires its explicit rollout gate."
                 ),
             )
         if (
@@ -873,6 +881,8 @@ def execute_run_next_step(
             validation_coordinator = None
             validation_request_factory = None
             validation_coordinator_intent_repository = None
+            pull_request_coordinator = None
+            pull_request_request_factory = None
             if (
                 isinstance(run_repository, PostgresAgentRunRepository)
                 and current_step.step_type == AgentRunStepType.CREATE_BRANCH
@@ -914,6 +924,17 @@ def execute_run_next_step(
                     step=current_step,
                     actor=user.email,
                 )
+            if (
+                isinstance(run_repository, PostgresAgentRunRepository)
+                and current_step.step_type == AgentRunStepType.CREATE_PULL_REQUEST
+            ):
+                if request is None:
+                    raise AgentRunConflict("PostgreSQL CREATE_PULL_REQUEST requires an app-bound request.")
+                pull_request_coordinator, pull_request_request_factory = (
+                    postgres_pull_request_execution_dependencies(
+                        request=request, run=run, step=current_step, actor=payload.worker_id,
+                    )
+                )
             trust_actions = []
             if not postgres_governed_step:
                 ensure_run_capability(run, user=user)
@@ -941,6 +962,8 @@ def execute_run_next_step(
                     validation_coordinator_intent_repository
                     or validation_intent_repository
                 ),
+                postgres_pull_request_coordinator=pull_request_coordinator,
+                postgres_pull_request_request_factory=pull_request_request_factory,
             )
             consume_run_step_actions(
                 trust_actions,

@@ -182,7 +182,9 @@ _POSTGRES_APP_STATE_BINDINGS = {
     "agent_task_repository": "agent_tasks",
     "agent_run_repository": "agent_runs",
     "agent_run_branch_intent_repository": "agent_run_branch_intents",
+    "agent_run_apply_change_intent_repository": "agent_run_apply_change_intents",
     "agent_run_validation_intent_repository": "agent_run_validation_intents",
+    "agent_run_pull_request_intent_repository": "agent_run_pull_request_intents",
     "project_repository": "projects",
     "workspace_membership_repository": "workspace_membership",
     "external_agent_auth_repository": "external_agent_auth",
@@ -589,7 +591,9 @@ app.state.approval_decision_repository = approval_decision_repository
 app.state.agent_task_repository = agent_task_repository
 app.state.agent_run_repository = agent_run_repository
 app.state.agent_run_branch_intent_repository = None
+app.state.agent_run_apply_change_intent_repository = None
 app.state.agent_run_validation_intent_repository = None
+app.state.agent_run_pull_request_intent_repository = None
 app.state.audit_event_repository = SQLiteAuditEventRepository(store._connect)
 app.state.test_run_repository = SQLiteTestRunRepository(store._connect)
 idea_repository: IdeaRepository = SQLiteIdeaRepository(store._connect)

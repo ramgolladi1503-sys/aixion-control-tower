@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -65,6 +66,10 @@ from .postgres_agent_run_validation import (
     PostgresAgentRunValidationIntentRepository,
     RunValidationCommandStatus,
     RunValidationIntentStatus,
+)
+from .postgres_agent_run_pull_request import (
+    AgentRunPullRequestIntent,
+    PostgresAgentRunPullRequestIntentRepository,
 )
 from .agent_task_repository import (
     AgentTaskRepository,
@@ -149,6 +154,121 @@ PostgresRunValidationRequestFactory = Callable[
 
 
 @dataclass(frozen=True)
+class PostgresPullRequestRequest:
+    expected_run: AgentRun
+    expected_step: AgentRunStep
+    task: AgentTask
+    approval: ApprovalRequest
+    lease: object
+    worker_id: str
+    worker_lease_token: str
+    actor: str
+    timeout_seconds: int
+    repository: str
+    head_branch: str
+    base_branch: str
+    expected_head_sha: str
+    provider: object
+    intent_repository: PostgresAgentRunPullRequestIntentRepository
+    completion_factory: Callable[[AgentRunPullRequestIntent, str, str], object]
+
+
+PostgresPullRequestRequestFactory = Callable[
+    [AgentRun, AgentRunStep, str, int], PostgresPullRequestRequest
+]
+
+
+@dataclass(frozen=True)
+class PostgresPullRequestCompletion:
+    expected_run: AgentRun
+    updated_run: AgentRun
+    expected_steps: list[AgentRunStep]
+    updated_steps: list[AgentRunStep]
+    events: list[AgentRunEvent]
+    audit: AuditEvent
+    intent_id: str
+    task_event: AgentTaskEvent
+    task_audit: AuditEvent
+    now: datetime
+
+
+def build_postgres_pull_request_completion(
+    *, run: AgentRun, steps: list[AgentRunStep], intent: AgentRunPullRequestIntent,
+    title: str, body: str, actor: str, worker_lease_token: str,
+    now: datetime | None = None,
+) -> PostgresPullRequestCompletion:
+    """Build hash-only completion records for one verified pull request."""
+    step = next((item for item in steps if item.id == intent.step_id), None)
+    if (
+        step is None or step.step_type != AgentRunStepType.CREATE_PULL_REQUEST
+        or step.status != AgentRunStepStatus.RUNNING or step.lease_token != worker_lease_token
+        or run.lease_token != worker_lease_token or run.current_step_id != step.id
+        or run.id != intent.run_id or run.task_id != intent.task_id
+        or run.workspace_id != intent.workspace_id or run.approval_request_id != intent.approval_id
+        or intent.status.value != "REMOTE_VERIFIED" or not intent.pull_number or not intent.pull_url
+        or not intent.observed_head_sha or not intent.observed_base_sha
+        or intent.observed_head_sha != intent.expected_head_sha
+        or intent.observed_base_sha != intent.expected_base_sha
+        or hashlib.sha256(title.encode("utf-8")).hexdigest() != intent.title_sha256
+        or hashlib.sha256(body.encode("utf-8")).hexdigest() != intent.body_sha256
+        or intent.intent_marker not in body
+    ):
+        raise AgentRunConflict("Verified PostgreSQL pull request does not match the current leased run step.")
+    facts = {
+        "pull_request_intent_id": intent.id, "action_id": intent.action_id,
+        "repository": intent.repository, "head_branch": intent.head_branch,
+        "base_branch": intent.base_branch, "pull_number": intent.pull_number,
+        "pull_url": intent.pull_url, "head_sha": intent.observed_head_sha,
+        "base_sha": intent.observed_base_sha, "title_sha256": intent.title_sha256,
+        "body_sha256": intent.body_sha256, "intent_marker": intent.intent_marker,
+        "response_sha256": intent.response_sha256,
+    }
+    result = AgentRunStepExecutionResult(
+        success=True, decision=VerificationDecision.PASS,
+        reason="One approved pull request was created or recovered by exact GET identity.",
+        evidence={"operation_type": "github_pull_request_creation", **facts},
+        output_reference=intent.pull_url,
+    )
+    updated_run, updated_steps, events, audit = _build_postgres_agent_run_step_completion_records(
+        run=run, steps=steps, step_type=AgentRunStepType.CREATE_PULL_REQUEST,
+        result=result, worker_id=actor, lease_token=worker_lease_token,
+        already_running=True,
+    )
+    for event in events:
+        if event.step_id == intent.step_id and event.event_type == AgentRunEventType.STEP_SUCCEEDED:
+            event.metadata.update(facts)
+    audit.details.update(facts)
+    task_event = AgentTaskEvent(
+        task_id=intent.task_id, event_type=AgentTaskEventType.PR_CREATED,
+        message="Worker opened a GitHub pull request for human review.",
+        status=AgentTaskStatus.READY_FOR_PR, actor=actor,
+        metadata={
+            "run_id": intent.run_id, "step_id": intent.step_id,
+            "pull_request_intent_id": intent.id, "repository": intent.repository,
+            "head_branch": intent.head_branch, "base_branch": intent.base_branch,
+            "pull_number": intent.pull_number, "pull_url": intent.pull_url,
+            "head_sha": intent.observed_head_sha, "base_sha": intent.observed_base_sha,
+            "title_sha256": intent.title_sha256, "body_sha256": intent.body_sha256,
+            "intent_marker": intent.intent_marker, "response_sha256": intent.response_sha256,
+        },
+    )
+    task_audit = AuditEvent(
+        event_type="agent_task.pull_request_created", entity_id=intent.task_id,
+        workspace_id=intent.workspace_id, actor=actor, details={
+            "run_id": intent.run_id, "step_id": intent.step_id,
+            "event_id": task_event.id, **facts,
+        },
+    )
+    return PostgresPullRequestCompletion(
+        expected_run=run.model_copy(deep=True), updated_run=updated_run,
+        expected_steps=[item.model_copy(deep=True) for item in steps],
+        updated_steps=updated_steps, events=events, audit=audit,
+        intent_id=intent.id, task_event=task_event, task_audit=task_audit,
+        now=now or _now(),
+    )
+
+
+@dataclass(frozen=True)
 class PostgresRunValidationOutcome:
     result: AgentRunStepExecutionResult
     intent_id: str
@@ -209,6 +329,13 @@ def inspect_validation_bundle(bundle: AgentRunValidationBundle) -> str:
 def postgres_run_validation_enabled() -> bool:
     """Explicit default-off gate for PostgreSQL RUN_VALIDATION execution."""
     return os.getenv("AIXION_POSTGRES_RUN_VALIDATION_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+def postgres_pull_request_enabled() -> bool:
+    """Explicit default-off gate for PostgreSQL CREATE_PULL_REQUEST execution."""
+    return os.getenv("AIXION_POSTGRES_CREATE_PULL_REQUEST_ENABLED", "false").strip().lower() in {
         "1", "true", "yes",
     }
 
@@ -1471,6 +1598,8 @@ def execute_next_step(
     postgres_validation_coordinator: PostgresAgentRunValidationCoordinator | None = None,
     postgres_validation_request_factory: PostgresRunValidationRequestFactory | None = None,
     postgres_validation_intent_repository: PostgresAgentRunValidationIntentRepository | None = None,
+    postgres_pull_request_coordinator=None,
+    postgres_pull_request_request_factory: PostgresPullRequestRequestFactory | None = None,
 ) -> AgentRunStepExecutionResult:
     if (postgres_branch_coordinator is None) != (postgres_branch_request_factory is None):
         raise AgentRunConflict(
@@ -1495,6 +1624,13 @@ def execute_next_step(
         or not callable(postgres_validation_request_factory)
     ):
         raise AgentRunConflict("PostgreSQL validation execution injections have invalid types.")
+    if (postgres_pull_request_coordinator is None) != (postgres_pull_request_request_factory is None):
+        raise AgentRunConflict("PostgreSQL pull request coordinator and request factory must be injected together.")
+    if postgres_pull_request_coordinator is not None and (
+        not callable(getattr(postgres_pull_request_coordinator, "execute", None))
+        or not callable(postgres_pull_request_request_factory)
+    ):
+        raise AgentRunConflict("PostgreSQL pull request execution injections have invalid types.")
     active_run_repository = run_repository
     if active_run_repository is not None and not isinstance(
         active_run_repository,
@@ -1520,6 +1656,8 @@ def execute_next_step(
         raise AgentRunConflict("PostgreSQL APPLY_CHANGES injection is unavailable for SQLite runs.")
     if postgres_validation_coordinator is not None and not postgres_repository_execution:
         raise AgentRunConflict("PostgreSQL RUN_VALIDATION injection is unavailable for SQLite runs.")
+    if postgres_pull_request_coordinator is not None and not postgres_repository_execution:
+        raise AgentRunConflict("PostgreSQL CREATE_PULL_REQUEST injection is unavailable for SQLite runs.")
     if postgres_repository_execution and not postgres_run_validation_enabled() and (
         postgres_validation_coordinator is not None
         or (
@@ -1551,11 +1689,17 @@ def execute_next_step(
             and postgres_run_validation_enabled()
             and postgres_validation_coordinator is not None
             and postgres_validation_request_factory is not None
+        ) and not (
+            current_step.step_type == AgentRunStepType.CREATE_PULL_REQUEST
+            and postgres_pull_request_enabled()
+            and postgres_pull_request_coordinator is not None
+            and postgres_pull_request_request_factory is not None
         ):
             raise AgentRunConflict(
                 "PostgreSQL AgentRun execution currently supports only the "
                 "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), and "
-                "explicitly enabled APPLY_CHANGES and RUN_VALIDATION (with dedicated coordinators), "
+                "explicitly enabled APPLY_CHANGES, RUN_VALIDATION, and CREATE_PULL_REQUEST "
+                "(with dedicated coordinators), "
                 "VERIFY_RESULT, and SEAL_EVIDENCE steps."
             )
         if current_step.step_type in {
@@ -2154,6 +2298,96 @@ def execute_next_step(
             decision=completed_step.decision or VerificationDecision.FAIL_PERMANENT,
             reason=completed_step.reason,
             evidence=completed_step.evidence,
+            output_reference=completed_step.output_reference,
+        )
+
+    if postgres_repository_execution and step.step_type == AgentRunStepType.CREATE_PULL_REQUEST:
+        if postgres_pull_request_coordinator is None or postgres_pull_request_request_factory is None:
+            raise AgentRunConflict(
+                "PostgreSQL CREATE_PULL_REQUEST requires its dedicated coordinator and request factory."
+            )
+        try:
+            pull_request_request = postgres_pull_request_request_factory(
+                expected_run, step.model_copy(deep=True), lease_token, timeout_seconds
+            )
+            expected_step = next((item for item in expected_steps if item.id == step.id), None)
+            if (
+                not isinstance(pull_request_request, PostgresPullRequestRequest)
+                or pull_request_request.expected_run != expected_run
+                or pull_request_request.expected_step != expected_step
+                or pull_request_request.worker_id != worker_id
+                or pull_request_request.worker_lease_token != lease_token
+                or pull_request_request.timeout_seconds != timeout_seconds
+                or not isinstance(
+                    pull_request_request.intent_repository,
+                    PostgresAgentRunPullRequestIntentRepository,
+                )
+            ):
+                raise AgentRunConflict(
+                    "PostgreSQL CREATE_PULL_REQUEST request differs from its committed worker lease."
+                )
+            completion = postgres_pull_request_coordinator.execute(pull_request_request)
+            if (
+                not isinstance(completion, PostgresPullRequestCompletion)
+                or completion.expected_run != expected_run
+                or completion.intent_id == ""
+                or completion.task_event.task_id != expected_run.task_id
+            ):
+                raise AgentRunConflict("PostgreSQL CREATE_PULL_REQUEST completion is malformed.")
+
+            def build_pull_request_records(
+                task: AgentTask,
+                approval: ApprovalRequest,
+                _task_events: list[AgentTaskEvent],
+                locked_run: AgentRun,
+                locked_steps: list[AgentRunStep],
+            ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+                if locked_run != expected_run or locked_steps != expected_steps:
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun changed while preparing pull request completion."
+                    )
+                if (
+                    task.id != expected_run.task_id
+                    or task.workspace_id != expected_run.workspace_id
+                    or task.approval_request_id != approval.id
+                    or approval.id != expected_run.approval_request_id
+                    or completion.task_event.task_id != task.id
+                ):
+                    raise AgentRunRepositoryConflict(
+                        "Pull request completion task or approval scope changed."
+                    )
+                return (
+                    completion.updated_run,
+                    completion.updated_steps,
+                    completion.events,
+                    completion.audit,
+                )
+
+            updated_run, updated_steps, events, audit = (
+                active_run_repository.commit_authoritative_task_step(
+                    expected_run=expected_run,
+                    expected_steps=expected_steps,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    step_type=AgentRunStepType.CREATE_PULL_REQUEST,
+                    pull_request_intent_id=completion.intent_id,
+                    pull_request_task_event=completion.task_event,
+                    pull_request_task_audit=completion.task_audit,
+                    build_records=build_pull_request_records,
+                )
+            )
+        except Exception as error:
+            # An intent or POST claim may already be durable. Never route this
+            # action to the generic executor or another provider path.
+            raise AgentRunConflict(
+                "PostgreSQL CREATE_PULL_REQUEST could not be completed safely."
+            ) from error
+        store.project_agent_run_control_transition(updated_run, updated_steps, events, [audit])
+        completed_step = next(item for item in updated_steps if item.id == step.id)
+        return AgentRunStepExecutionResult(
+            success=completed_step.status == AgentRunStepStatus.SUCCEEDED,
+            decision=completed_step.decision or VerificationDecision.FAIL_PERMANENT,
+            reason=completed_step.reason, evidence=completed_step.evidence,
             output_reference=completed_step.output_reference,
         )
 

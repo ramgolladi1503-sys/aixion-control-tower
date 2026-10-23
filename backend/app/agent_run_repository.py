@@ -25,6 +25,7 @@ from .agent_run_state_machine import can_transition_run, can_transition_step
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from .postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus, _payload as branch_intent_payload
 from .postgres_agent_run_apply_changes import AgentRunApplyChangeIntent, ApplyChangeIntentStatus
+from .postgres_agent_run_pull_request import AgentRunPullRequestIntent, PullRequestIntentStatus
 from .approval_integrity import compute_approval_payload_hash
 from .models import ApprovalRequest, ApprovalStatus, AuditEvent, Project
 from .postgres_trust_repository import PostgresTrustRepository
@@ -2800,6 +2801,9 @@ class PostgresAgentRunRepository:
         step_type: AgentRunStepType,
         validation_intent_id: str | None = None,
         validation_task_event: AgentTaskEvent | None = None,
+        pull_request_intent_id: str | None = None,
+        pull_request_task_event: AgentTaskEvent | None = None,
+        pull_request_task_audit: AuditEvent | None = None,
         build_records: Callable[
             [AgentTask, ApprovalRequest, list[AgentTaskEvent], AgentRun, list[AgentRunStep]],
             tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent],
@@ -2826,6 +2830,7 @@ class PostgresAgentRunRepository:
                 AgentRunStepType.VALIDATE_SCOPE,
                 AgentRunStepType.VERIFY_RESULT,
                 AgentRunStepType.RUN_VALIDATION,
+                AgentRunStepType.CREATE_PULL_REQUEST,
             }
             or not expected_run.workspace_id
             or not expected_run.approval_request_id
@@ -2840,6 +2845,17 @@ class PostgresAgentRunRepository:
             or (validation_intent_id is None) != (validation_task_event is None)
         ):
             raise ValueError("RUN_VALIDATION completion requires its intent and task event")
+        if (
+            (step_type == AgentRunStepType.CREATE_PULL_REQUEST)
+            != (pull_request_intent_id is not None and pull_request_task_event is not None and pull_request_task_audit is not None)
+            or (pull_request_intent_id is None)
+            != (pull_request_task_event is None and pull_request_task_audit is None)
+        ):
+            raise ValueError("CREATE_PULL_REQUEST completion requires intent, task event, and task audit")
+        if step_type == AgentRunStepType.CREATE_PULL_REQUEST and (
+            validation_intent_id is not None or validation_task_event is not None
+        ):
+            raise ValueError("CREATE_PULL_REQUEST completion cannot carry validation evidence")
 
         with self._connect() as conn:
             with conn.transaction():
@@ -2927,6 +2943,8 @@ class PostgresAgentRunRepository:
                 validation_intent: dict[str, object] | None = None
                 validation_claims: list[dict[str, object]] = []
                 validation_step: AgentRunStep | None = None
+                pull_request_intent: AgentRunPullRequestIntent | None = None
+                pull_request_step: AgentRunStep | None = None
                 if step_type == AgentRunStepType.RUN_VALIDATION:
                     from .agent_worker_validation_plan import validate_validation_plan
 
@@ -3209,6 +3227,286 @@ class PostgresAgentRunRepository:
                         raise AgentRunRepositoryConflict(
                             "Validation evidence is incomplete, noncontiguous, or contradictory"
                         )
+                if step_type == AgentRunStepType.CREATE_PULL_REQUEST:
+                    if (
+                        task.status != AgentTaskStatus.APPROVED
+                        or approval.status != ApprovalStatus.APPROVED
+                        or durable_run.status != AgentRunStatus.RUNNING
+                        or durable_run.pause_requested or durable_run.cancel_requested
+                        or not pull_request_intent_id
+                        or pull_request_task_event is None
+                        or pull_request_task_audit is None
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "CREATE_PULL_REQUEST authority is no longer active"
+                        )
+                    pull_request_step = next(
+                        (item for item in durable_steps if item.id == durable_run.current_step_id),
+                        None,
+                    )
+                    if (
+                        pull_request_step is None
+                        or pull_request_step.step_type != AgentRunStepType.CREATE_PULL_REQUEST
+                        or pull_request_step.status != AgentRunStepStatus.RUNNING
+                        or pull_request_step.lease_owner != worker_id
+                        or pull_request_step.lease_token != lease_token
+                        or pull_request_step.lease_expires_at != durable_run.lease_expires_at
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "CREATE_PULL_REQUEST is not the current worker-leased step"
+                        )
+                    intent_row = conn.execute(
+                        "SELECT intent_id,workspace_id,run_id,task_id,approval_id,step_id,action_id,lease_id,"
+                        "idempotency_key,repository,head_branch,base_branch,expected_head_sha,expected_base_sha,"
+                        "title_sha256,body_sha256,intent_marker,"
+                        "lease_token_hash,run_revision,step_revision,status,pull_number,pull_url,observed_repository,"
+                        "observed_head_branch,observed_base_branch,marker_matches,observed_head_sha,observed_base_sha,"
+                        "response_sha256,last_get_status,get_match_count,get_response_sha256,reason,created_at,updated_at,payload "
+                        "FROM agent_run_pull_request_intents WHERE intent_id=%s AND workspace_id=%s FOR UPDATE",
+                        (pull_request_intent_id, durable_run.workspace_id),
+                    ).fetchone()
+                    if intent_row is None:
+                        raise AgentRunRepositoryConflict("Verified pull request intent is missing")
+                    try:
+                        pull_request_intent = AgentRunPullRequestIntent.model_validate(intent_row[36])
+                    except Exception as error:
+                        raise AgentRunRepositoryIntegrityError(
+                            "Stored pull request intent payload is invalid"
+                        ) from error
+                    indexed_intent = (
+                        pull_request_intent.id, pull_request_intent.workspace_id,
+                        pull_request_intent.run_id, pull_request_intent.task_id,
+                        pull_request_intent.approval_id, pull_request_intent.step_id,
+                        pull_request_intent.action_id, pull_request_intent.lease_id,
+                        pull_request_intent.idempotency_key, pull_request_intent.repository,
+                        pull_request_intent.head_branch, pull_request_intent.base_branch,
+                        pull_request_intent.expected_head_sha, pull_request_intent.expected_base_sha,
+                        pull_request_intent.title_sha256, pull_request_intent.body_sha256,
+                        pull_request_intent.intent_marker, pull_request_intent.lease_token_hash,
+                        pull_request_intent.run_revision, pull_request_intent.step_revision,
+                        pull_request_intent.status.value, pull_request_intent.pull_number,
+                        pull_request_intent.pull_url, pull_request_intent.observed_repository,
+                        pull_request_intent.observed_head_branch,
+                        pull_request_intent.observed_base_branch, pull_request_intent.marker_matches,
+                        pull_request_intent.observed_head_sha, pull_request_intent.observed_base_sha,
+                        pull_request_intent.response_sha256, pull_request_intent.last_get_status,
+                        pull_request_intent.get_match_count, pull_request_intent.get_response_sha256,
+                        pull_request_intent.reason,
+                        pull_request_intent.created_at, pull_request_intent.updated_at,
+                    )
+                    if indexed_intent != tuple(intent_row[:36]):
+                        raise AgentRunRepositoryIntegrityError(
+                            "Pull request intent payload differs from indexed identity"
+                        )
+                    if (
+                        pull_request_intent.id != pull_request_intent_id
+                        or pull_request_intent.status != PullRequestIntentStatus.REMOTE_VERIFIED
+                        or pull_request_intent.workspace_id != durable_run.workspace_id
+                        or pull_request_intent.run_id != durable_run.id
+                        or pull_request_intent.task_id != task.id
+                        or pull_request_intent.approval_id != approval.id
+                        or pull_request_intent.step_id != pull_request_step.id
+                        or pull_request_intent.lease_id != durable_run.capability_lease_id
+                        or pull_request_intent.idempotency_key != pull_request_step.idempotency_key
+                        or pull_request_intent.run_revision != durable_run.updated_at
+                        or pull_request_intent.step_revision != pull_request_step.updated_at
+                        or pull_request_intent.lease_token_hash != sha256_hex({"lease_token": lease_token})
+                        or pull_request_intent.repository != task.repository
+                        or pull_request_intent.head_branch != task.branch_preference
+                        or pull_request_intent.observed_repository != pull_request_intent.repository
+                        or pull_request_intent.observed_head_branch != pull_request_intent.head_branch
+                        or pull_request_intent.observed_base_branch != pull_request_intent.base_branch
+                        or pull_request_intent.marker_matches is not True
+                        or not pull_request_intent.pull_number or not pull_request_intent.pull_url
+                        or not pull_request_intent.observed_head_sha
+                        or not pull_request_intent.observed_base_sha
+                        or not pull_request_intent.response_sha256
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "Pull request intent no longer matches the durable run, approval, or lease"
+                        )
+                    if pull_request_task_event.event_type != AgentTaskEventType.PR_CREATED:
+                        raise AgentRunRepositoryConflict("Pull request completion event has the wrong type")
+                    expected_pr_metadata = {
+                        "run_id": durable_run.id, "step_id": pull_request_step.id,
+                        "pull_request_intent_id": pull_request_intent.id,
+                        "repository": pull_request_intent.repository,
+                        "head_branch": pull_request_intent.head_branch,
+                        "base_branch": pull_request_intent.base_branch,
+                        "pull_number": pull_request_intent.pull_number,
+                        "pull_url": pull_request_intent.pull_url,
+                        "head_sha": pull_request_intent.observed_head_sha,
+                        "base_sha": pull_request_intent.observed_base_sha,
+                        "title_sha256": pull_request_intent.title_sha256,
+                        "body_sha256": pull_request_intent.body_sha256,
+                        "intent_marker": pull_request_intent.intent_marker,
+                        "response_sha256": pull_request_intent.response_sha256,
+                    }
+                    if (
+                        pull_request_task_event.task_id != task.id
+                        or pull_request_task_event.status != AgentTaskStatus.READY_FOR_PR
+                        or pull_request_task_event.actor != worker_id
+                        or pull_request_task_event.metadata != expected_pr_metadata
+                        or pull_request_task_audit.event_type != "agent_task.pull_request_created"
+                        or pull_request_task_audit.entity_id != task.id
+                        or pull_request_task_audit.workspace_id != task.workspace_id
+                        or pull_request_task_audit.actor != worker_id
+                        or pull_request_task_audit.details.get("pull_request_intent_id") != pull_request_intent.id
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "Pull request completion event or audit does not exactly bind verified metadata"
+                        )
+                    branch_rows = conn.execute(
+                        "SELECT payload FROM agent_run_branch_intents WHERE workspace_id=%s AND run_id=%s AND task_id=%s AND status='COMPLETED'",
+                        (durable_run.workspace_id, durable_run.id, task.id),
+                    ).fetchall()
+                    apply_rows = conn.execute(
+                        "SELECT payload FROM agent_run_apply_change_intents WHERE workspace_id=%s AND run_id=%s AND task_id=%s AND status='COMPLETED'",
+                        (durable_run.workspace_id, durable_run.id, task.id),
+                    ).fetchall()
+                    validation_rows = conn.execute(
+                        "SELECT payload FROM agent_run_validation_intents WHERE workspace_id=%s AND run_id=%s AND task_id=%s AND status='COMPLETED'",
+                        (durable_run.workspace_id, durable_run.id, task.id),
+                    ).fetchall()
+                    if len(branch_rows) != 1 or len(apply_rows) != 1 or len(validation_rows) != 1:
+                        raise AgentRunRepositoryConflict(
+                            "Pull request requires exactly one completed durable branch, apply, and validation intent"
+                        )
+                    try:
+                        from .postgres_agent_run_validation import AgentRunValidationIntent
+
+                        branch_intent = AgentRunBranchIntent.model_validate(branch_rows[0][0])
+                        apply_intent = AgentRunApplyChangeIntent.model_validate(apply_rows[0][0])
+                        validation_intent = AgentRunValidationIntent.model_validate(validation_rows[0][0])
+                    except Exception as error:
+                        raise AgentRunRepositoryIntegrityError(
+                            "Pull request predecessor intent payload is invalid"
+                        ) from error
+                    if (
+                        branch_intent.repository != pull_request_intent.repository
+                        or branch_intent.target_ref != pull_request_intent.head_branch
+                        or apply_intent.repository != pull_request_intent.repository
+                        or apply_intent.branch != pull_request_intent.head_branch
+                        or not apply_intent.commit_sha
+                        or validation_intent.bundle_revision != apply_intent.commit_sha
+                        or validation_intent.workspace_id != pull_request_intent.workspace_id
+                        or validation_intent.run_id != pull_request_intent.run_id
+                        or validation_intent.task_id != pull_request_intent.task_id
+                        or validation_intent.approval_id != pull_request_intent.approval_id
+                        or pull_request_intent.expected_head_sha != validation_intent.bundle_revision
+                        or pull_request_intent.observed_head_sha != validation_intent.bundle_revision
+                        or pull_request_intent.observed_head_sha != pull_request_intent.expected_head_sha
+                        or pull_request_intent.observed_base_sha != pull_request_intent.expected_base_sha
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "Pull request does not match durable validated branch/apply authority"
+                        )
+                    if (
+                        [item.step_type for item in durable_steps] != list(DEFAULT_AGENT_RUN_STEPS)
+                        or [item.sequence for item in durable_steps] != list(range(len(DEFAULT_AGENT_RUN_STEPS)))
+                        or any(
+                            item.sequence < pull_request_step.sequence
+                            and item.status != AgentRunStepStatus.SUCCEEDED
+                            for item in durable_steps
+                        )
+                        or branch_intent.step_id != next(item.id for item in durable_steps if item.step_type == AgentRunStepType.CREATE_BRANCH)
+                        or apply_intent.step_id != next(item.id for item in durable_steps if item.step_type == AgentRunStepType.APPLY_CHANGES)
+                        or validation_intent.step_id != next(item.id for item in durable_steps if item.step_type == AgentRunStepType.RUN_VALIDATION)
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "Pull request requires the canonical run plan with every predecessor succeeded"
+                        )
+                    trust = PostgresTrustRepository()
+                    action = trust.get_proposed_action(
+                        conn, pull_request_intent.action_id, pull_request_intent.workspace_id, for_update=True
+                    )
+                    policy = trust.get_latest_policy_decision_for_action(
+                        conn, pull_request_intent.action_id, pull_request_intent.workspace_id, for_update=True
+                    )
+                    lease = trust.get_capability_lease(
+                        conn, pull_request_intent.lease_id, pull_request_intent.workspace_id, for_update=True
+                    )
+                    if (
+                        action is None or policy is None or lease is None
+                        or policy.decision.value != "ALLOW"
+                        or action.action_type != CapabilityActionType.CREATE_PULL_REQUEST
+                        or action.workspace_id != pull_request_intent.workspace_id
+                        or action.run_id != pull_request_intent.run_id
+                        or action.task_id != pull_request_intent.task_id
+                        or action.lease_id != pull_request_intent.lease_id
+                        or action.repository != pull_request_intent.repository
+                        or action.branch != pull_request_intent.head_branch
+                        or action.retry_number != max(0, pull_request_step.attempt_count - 1)
+                        or any(action.metadata.get(key) != value for key, value in {
+                            "repository": pull_request_intent.repository,
+                            "head_branch": pull_request_intent.head_branch,
+                            "base_branch": pull_request_intent.base_branch,
+                            "title_sha256": pull_request_intent.title_sha256,
+                            "body_sha256": pull_request_intent.body_sha256,
+                            "intent_marker": pull_request_intent.intent_marker,
+                            "step_type": AgentRunStepType.CREATE_PULL_REQUEST.value,
+                            "idempotency_key": pull_request_intent.idempotency_key,
+                            "step_id": pull_request_intent.step_id,
+                            "task_id": pull_request_intent.task_id,
+                            "approval_id": pull_request_intent.approval_id,
+                            "lease_id": pull_request_intent.lease_id,
+                            "validated_head_sha": validation_intent.bundle_revision,
+                            "validated_base_sha": pull_request_intent.expected_base_sha,
+                        }.items())
+                        or lease.status != CapabilityLeaseStatus.ACTIVE
+                        or lease.approval_request_id != approval.id
+                        or lease.workspace_id != task.workspace_id
+                        or lease.scope.repository != pull_request_intent.repository
+                        or lease.scope.branch != pull_request_intent.head_branch
+                        or CapabilityActionType.CREATE_PULL_REQUEST not in lease.scope.allowed_actions
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "Pull request trust policy, action, or capability lease is not valid"
+                        )
+                    consumption_row = conn.execute(
+                        "SELECT action_id,workspace_id,lease_id,consumed_at,payload FROM action_consumptions "
+                        "WHERE action_id=%s AND workspace_id=%s FOR SHARE",
+                        (action.id, pull_request_intent.workspace_id),
+                    ).fetchone()
+                    if consumption_row is None:
+                        raise AgentRunRepositoryConflict("Pull request action has no durable capability consumption")
+                    try:
+                        consumption_envelope = dict(consumption_row[4])
+                        consumption = ActionConsumption.model_validate(consumption_envelope["consumption"])
+                    except Exception as error:
+                        raise AgentRunRepositoryIntegrityError("Pull request capability consumption is invalid") from error
+                    expected_consumption = {
+                        "workspace_id": pull_request_intent.workspace_id,
+                        "run_id": pull_request_intent.run_id,
+                        "task_id": pull_request_intent.task_id,
+                        "approval_id": pull_request_intent.approval_id,
+                        "step_id": pull_request_intent.step_id,
+                        "action_id": pull_request_intent.action_id,
+                        "lease_id": pull_request_intent.lease_id,
+                        "intent_id": pull_request_intent.id,
+                        "repository": pull_request_intent.repository,
+                        "head_branch": pull_request_intent.head_branch,
+                        "base_branch": pull_request_intent.base_branch,
+                        "intent_marker": pull_request_intent.intent_marker,
+                        "runtime_seconds_reserved": action.estimated_runtime_seconds,
+                        "authorized_attempt_count": pull_request_step.attempt_count,
+                        "authorized_retry_consumed": pull_request_step.attempt_count > 1,
+                    }
+                    if (
+                        consumption_row[0] != action.id
+                        or consumption_row[1] != pull_request_intent.workspace_id
+                        or consumption_row[2] != pull_request_intent.lease_id
+                        or consumption_envelope.get("action_id") != action.id
+                        or consumption_envelope.get("workspace_id") != pull_request_intent.workspace_id
+                        or consumption_envelope.get("lease_id") != pull_request_intent.lease_id
+                        or consumption.evidence != expected_consumption
+                        or consumption.pull_requests_created != 1
+                        or consumption.actual_runtime_seconds != action.estimated_runtime_seconds
+                        or consumption.retry_consumed != (pull_request_step.attempt_count > 1)
+                        or consumption.actual_cost_usd != 0
+                        or consumption.output_reference is not None
+                    ):
+                        raise AgentRunRepositoryConflict("Pull request capability consumption is inconsistent")
                 checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
                 if (
                     durable_run.lease_owner != worker_id
@@ -3225,7 +3523,7 @@ class PostgresAgentRunRepository:
                 )
                 expected_current_status = (
                     AgentRunStepStatus.RUNNING
-                    if step_type == AgentRunStepType.RUN_VALIDATION
+                    if step_type in {AgentRunStepType.RUN_VALIDATION, AgentRunStepType.CREATE_PULL_REQUEST}
                     else AgentRunStepStatus.READY
                 )
                 if (
@@ -3364,10 +3662,38 @@ class PostgresAgentRunRepository:
                         raise AgentRunRepositoryConflict(
                             "RUN_VALIDATION AgentRun event does not bind the inspected bundle"
                         )
+                if step_type == AgentRunStepType.CREATE_PULL_REQUEST:
+                    result_step = next(
+                        (item for item in updated_steps if item.id == pull_request_step.id), None
+                    )
+                    if (
+                        result_step is None
+                        or result_step.status != AgentRunStepStatus.SUCCEEDED
+                        or result_step.evidence.get("pull_request_intent_id") != pull_request_intent.id
+                        or result_step.evidence.get("repository") != pull_request_intent.repository
+                        or result_step.evidence.get("head_branch") != pull_request_intent.head_branch
+                        or result_step.evidence.get("base_branch") != pull_request_intent.base_branch
+                        or result_step.evidence.get("pull_number") != pull_request_intent.pull_number
+                        or result_step.evidence.get("pull_url") != pull_request_intent.pull_url
+                        or result_step.evidence.get("head_sha") != pull_request_intent.observed_head_sha
+                        or result_step.evidence.get("base_sha") != pull_request_intent.observed_base_sha
+                        or result_step.evidence.get("title_sha256") != pull_request_intent.title_sha256
+                        or result_step.evidence.get("body_sha256") != pull_request_intent.body_sha256
+                        or result_step.evidence.get("intent_marker") != pull_request_intent.intent_marker
+                        or result_step.evidence.get("response_sha256") != pull_request_intent.response_sha256
+                        or pull_request_task_event.created_at > checked_at
+                        or pull_request_task_audit.created_at > checked_at
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "CREATE_PULL_REQUEST step result does not exactly bind verified intent"
+                        )
                 # Validate the generated completion using the existing shared
                 # state/identity contract, represented as its in-transaction
                 # RUNNING checkpoint. No intermediate checkpoint is persisted.
-                already_running_validation = step_type == AgentRunStepType.RUN_VALIDATION
+                already_running_validation = step_type in {
+                    AgentRunStepType.RUN_VALIDATION,
+                    AgentRunStepType.CREATE_PULL_REQUEST,
+                }
                 running_run = durable_run.model_copy(deep=True)
                 running_steps = [item.model_copy(deep=True) for item in durable_steps]
                 if not already_running_validation:
@@ -3454,6 +3780,69 @@ class PostgresAgentRunRepository:
                             event.created_at,
                             event.event_type.value,
                             Jsonb(event.model_dump(mode="json")),
+                        ),
+                    )
+                if step_type == AgentRunStepType.CREATE_PULL_REQUEST:
+                    completed_intent = pull_request_intent.model_copy(update={
+                        "status": PullRequestIntentStatus.COMPLETED,
+                        "reason": "Verified remote pull request, AgentRun completion, task event, and audits committed atomically.",
+                        "updated_at": checked_at,
+                    })
+                    changed = conn.execute(
+                        "UPDATE agent_run_pull_request_intents SET status='COMPLETED',reason=%s,updated_at=%s,payload=%s "
+                        "WHERE intent_id=%s AND workspace_id=%s AND status='REMOTE_VERIFIED' "
+                        "AND run_revision=%s AND step_revision=%s AND lease_token_hash=%s",
+                        (
+                            completed_intent.reason, checked_at,
+                            Jsonb(completed_intent.model_dump(mode="json")),
+                            pull_request_intent.id, durable_run.workspace_id,
+                            pull_request_intent.run_revision, pull_request_intent.step_revision,
+                            pull_request_intent.lease_token_hash,
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise AgentRunRepositoryConflict("Pull request intent completion lost its CAS")
+                    conn.execute(
+                        "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+                        "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            pull_request_task_event.id, pull_request_task_event.task_id,
+                            task.workspace_id, pull_request_task_event.event_type.value,
+                            pull_request_task_event.actor, pull_request_task_event.created_at,
+                            Jsonb(pull_request_task_event.model_dump(mode="json")),
+                        ),
+                    )
+                    updated_task = task.model_copy(deep=True)
+                    updated_task.status = AgentTaskStatus.READY_FOR_PR
+                    updated_task.worker_lease_owner = None
+                    updated_task.worker_lease_token = None
+                    updated_task.worker_lease_expires_at = None
+                    updated_task.updated_at = checked_at
+                    changed = conn.execute(
+                        "UPDATE agent_tasks SET status=%s,updated_at=%s,payload=%s "
+                        "WHERE task_id=%s AND workspace_id=%s AND status=%s AND updated_at=%s",
+                        (
+                            updated_task.status.value, updated_task.updated_at,
+                            Jsonb(updated_task.model_dump(mode="json")), task.id,
+                            task.workspace_id, task.status.value, task_row[5],
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise AgentRunRepositoryConflict(
+                            "AgentTask changed during pull request completion"
+                        )
+                    updated_task_audit = pull_request_task_audit.model_copy(
+                        update={"created_at": checked_at}
+                    )
+                    conn.execute(
+                        "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
+                        "event_type,actor,details,created_at,payload) "
+                        "VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                        (
+                            updated_task_audit.id, task.workspace_id, task.id,
+                            updated_task_audit.event_type, updated_task_audit.actor,
+                            Jsonb(updated_task_audit.details), checked_at,
+                            Jsonb(updated_task_audit.model_dump(mode="json")),
                         ),
                     )
                 if step_type == AgentRunStepType.RUN_VALIDATION:

@@ -1608,6 +1608,97 @@ POSTGRES_MIGRATIONS = (
             "FOR EACH ROW EXECUTE FUNCTION aixion_agent_run_validation_status_transition()",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0034_agent_run_pull_request_intents",
+        name="Persist one-shot AgentRun pull request creation and recovery",
+        statements=(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_steps_id_workspace ON agent_run_steps(step_id,workspace_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_proposed_actions_id_workspace ON proposed_actions(action_id,workspace_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_capability_leases_id_workspace ON capability_leases(lease_id,workspace_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_id_workspace ON agent_runs(run_id,workspace_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_id_workspace ON agent_tasks(task_id,workspace_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_requests_id_workspace ON approval_requests(approval_id,workspace_id)",
+            """
+            CREATE TABLE IF NOT EXISTS agent_run_pull_request_intents (
+                intent_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                task_id TEXT NOT NULL, approval_id TEXT NOT NULL, step_id TEXT NOT NULL,
+                action_id TEXT NOT NULL, lease_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+                repository TEXT NOT NULL, head_branch TEXT NOT NULL, base_branch TEXT NOT NULL,
+                expected_head_sha TEXT NOT NULL, expected_base_sha TEXT NOT NULL,
+                title_sha256 TEXT NOT NULL, body_sha256 TEXT NOT NULL, intent_marker TEXT NOT NULL,
+                lease_token_hash TEXT NOT NULL, run_revision TIMESTAMPTZ NOT NULL,
+                step_revision TIMESTAMPTZ NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('INTENT','POST_CLAIMED','RECONCILIATION_REQUIRED','REMOTE_VERIFIED','COMPLETED')),
+                pull_number BIGINT, pull_url TEXT, observed_repository TEXT,
+                observed_head_branch TEXT, observed_base_branch TEXT, marker_matches BOOLEAN,
+                observed_head_sha TEXT, observed_base_sha TEXT,
+                response_sha256 TEXT, last_get_status TEXT CHECK (last_get_status IS NULL OR last_get_status IN ('CERTAIN','UNCERTAIN')),
+                get_match_count INTEGER CHECK (get_match_count IS NULL OR get_match_count >= 0),
+                get_response_sha256 TEXT CHECK (get_response_sha256 IS NULL OR get_response_sha256 ~ '^[a-f0-9]{64}$'),
+                reason TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL, payload JSONB NOT NULL,
+                UNIQUE (workspace_id,run_id,step_id,idempotency_key), UNIQUE (action_id,workspace_id),
+                UNIQUE (repository,intent_marker),
+                FOREIGN KEY (run_id,workspace_id) REFERENCES agent_runs(run_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (task_id,workspace_id) REFERENCES agent_tasks(task_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (approval_id,workspace_id) REFERENCES approval_requests(approval_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (step_id,workspace_id) REFERENCES agent_run_steps(step_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (action_id,workspace_id) REFERENCES proposed_actions(action_id,workspace_id) ON DELETE RESTRICT,
+                FOREIGN KEY (lease_id,workspace_id) REFERENCES capability_leases(lease_id,workspace_id) ON DELETE RESTRICT,
+                CHECK (title_sha256 ~ '^[a-f0-9]{64}$' AND body_sha256 ~ '^[a-f0-9]{64}$'),
+                CHECK (expected_head_sha ~ '^[a-f0-9]{40}$' AND expected_base_sha ~ '^[a-f0-9]{40}$'),
+                CHECK (lease_token_hash ~ '^[a-f0-9]{64}$'),
+                CHECK (response_sha256 IS NULL OR response_sha256 ~ '^[a-f0-9]{64}$'),
+                CHECK (observed_head_sha IS NULL OR observed_head_sha ~ '^[a-f0-9]{40}$'),
+                CHECK (observed_base_sha IS NULL OR observed_base_sha ~ '^[a-f0-9]{40}$'),
+                CHECK (pull_number IS NULL OR pull_number > 0),
+                CHECK (payload ? 'id' AND payload->>'id'=intent_id),
+                CHECK (payload ? 'workspace_id' AND payload->>'workspace_id'=workspace_id),
+                CHECK (payload ? 'run_id' AND payload->>'run_id'=run_id),
+                CHECK (payload ? 'task_id' AND payload->>'task_id'=task_id),
+                CHECK (payload ? 'approval_id' AND payload->>'approval_id'=approval_id),
+                CHECK (payload ? 'step_id' AND payload->>'step_id'=step_id),
+                CHECK (payload ? 'action_id' AND payload->>'action_id'=action_id),
+                CHECK (payload ? 'lease_id' AND payload->>'lease_id'=lease_id),
+                CHECK (payload ? 'idempotency_key' AND payload->>'idempotency_key'=idempotency_key),
+                CHECK (payload ? 'repository' AND payload->>'repository'=repository),
+                CHECK (payload ? 'head_branch' AND payload->>'head_branch'=head_branch),
+                CHECK (payload ? 'base_branch' AND payload->>'base_branch'=base_branch),
+                CHECK (payload ? 'expected_head_sha' AND payload->>'expected_head_sha'=expected_head_sha),
+                CHECK (payload ? 'expected_base_sha' AND payload->>'expected_base_sha'=expected_base_sha),
+                CHECK (payload ? 'title_sha256' AND payload->>'title_sha256'=title_sha256),
+                CHECK (payload ? 'body_sha256' AND payload->>'body_sha256'=body_sha256),
+                CHECK (payload ? 'intent_marker' AND payload->>'intent_marker'=intent_marker),
+                CHECK (payload ? 'lease_token_hash' AND payload->>'lease_token_hash'=lease_token_hash),
+                CHECK (payload ? 'status' AND payload->>'status'=status),
+                CHECK (payload->>'last_get_status' IS NOT DISTINCT FROM last_get_status),
+                CHECK (payload->>'get_match_count' IS NOT DISTINCT FROM get_match_count::text),
+                CHECK (payload->>'get_response_sha256' IS NOT DISTINCT FROM get_response_sha256),
+                CHECK (NOT (payload ? 'title' OR payload ? 'body' OR payload ? 'token')),
+                CHECK ((status IN ('REMOTE_VERIFIED','COMPLETED')) =
+                    (pull_number IS NOT NULL AND pull_url IS NOT NULL AND observed_repository IS NOT NULL
+                    AND observed_head_branch IS NOT NULL AND observed_base_branch IS NOT NULL
+                    AND marker_matches IS TRUE AND observed_head_sha IS NOT NULL
+                    AND observed_base_sha IS NOT NULL AND response_sha256 IS NOT NULL))
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_agent_run_pull_request_reconcile ON agent_run_pull_request_intents(workspace_id,status,updated_at,intent_id) WHERE status IN ('POST_CLAIMED','RECONCILIATION_REQUIRED')",
+            """
+            CREATE FUNCTION aixion_agent_run_pull_request_status_transition() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN
+                IF NEW.status=OLD.status THEN RETURN NEW; END IF;
+                IF NOT ((OLD.status='INTENT' AND NEW.status='POST_CLAIMED')
+                    OR (OLD.status='POST_CLAIMED' AND NEW.status IN ('REMOTE_VERIFIED','RECONCILIATION_REQUIRED'))
+                    OR (OLD.status='RECONCILIATION_REQUIRED' AND NEW.status='REMOTE_VERIFIED')
+                    OR (OLD.status='REMOTE_VERIFIED' AND NEW.status='COMPLETED')) THEN
+                    RAISE EXCEPTION 'invalid pull request intent status transition: % -> %', OLD.status, NEW.status;
+                END IF;
+                RETURN NEW;
+            END; $$
+            """,
+            "CREATE TRIGGER trg_agent_run_pull_request_status_transition BEFORE UPDATE OF status ON agent_run_pull_request_intents FOR EACH ROW EXECUTE FUNCTION aixion_agent_run_pull_request_status_transition()",
+        ),
+    ),
 )
 
 

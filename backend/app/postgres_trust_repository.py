@@ -640,12 +640,13 @@ class PostgresTrustRepository:
         actor: str,
         now: datetime,
         trust_event_repository: PostgresTrustEventRepository,
+        expected_base_branch: str | None = None,
     ) -> tuple[PolicyDecision, CapabilityLease]:
         """Create/evaluate one exact run action while locking its authority.
 
         This is deliberately narrower than the standalone action evaluator:
-        it accepts only a CREATE_BRANCH action or one exact MODIFY_FILES action
-        for the current leased run step.
+        it accepts only CREATE_BRANCH, one exact MODIFY_FILES action, or one
+        exact CREATE_PULL_REQUEST action for the current leased run step.
         Callers must use the returned persisted decision and must not perform a
         remote side effect in this transaction.
         """
@@ -654,12 +655,16 @@ class PostgresTrustRepository:
             raise ValueError("Run action evaluation requires a transaction and full identity")
         action_type = action.action_type.value
         apply_change = action_type == "MODIFY_FILES"
-        expected_step_type = "APPLY_CHANGES" if apply_change else "CREATE_BRANCH"
+        create_pull_request = action_type == "CREATE_PULL_REQUEST"
+        expected_step_type = (
+            "APPLY_CHANGES" if apply_change else
+            "CREATE_PULL_REQUEST" if create_pull_request else "CREATE_BRANCH"
+        )
         if (
             action.workspace_id != workspace_id
             or action.run_id != run_id
             or not action.task_id
-            or action_type not in {"CREATE_BRANCH", "MODIFY_FILES"}
+            or action_type not in {"CREATE_BRANCH", "MODIFY_FILES", "CREATE_PULL_REQUEST"}
             or action.lease_id is None
             or action.repository is None
             or not action.branch
@@ -683,8 +688,24 @@ class PostgresTrustRepository:
                 )
             )
             or (
-                not apply_change
+                not apply_change and not create_pull_request
                 and not re.fullmatch(r"[0-9a-f]{40}", str(action.metadata.get("source_sha", "")))
+            )
+            or (
+                create_pull_request
+                and (
+                    action.metadata.get("step_type") != "CREATE_PULL_REQUEST"
+                    or action.metadata.get("head_branch") != action.branch
+                    or not action.metadata.get("base_branch")
+                    or expected_base_branch is None
+                    or action.metadata.get("base_branch") != expected_base_branch
+                    or action.metadata.get("repository") != action.repository
+                    or not re.fullmatch(r"[0-9a-f]{40}", str(action.metadata.get("validated_head_sha", "")))
+                    or not re.fullmatch(r"[0-9a-f]{40}", str(action.metadata.get("validated_base_sha", "")))
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(action.metadata.get("title_sha256", "")))
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(action.metadata.get("body_sha256", "")))
+                    or not re.fullmatch(r"aixion-intent:[a-f0-9-]{36}", str(action.metadata.get("intent_marker", "")))
+                )
             )
         ):
             raise PostgresTrustRepositoryConflict("Run branch action scope is incomplete")
@@ -725,6 +746,7 @@ class PostgresTrustRepository:
             or task.status.value != task_row[4]
             or task.status.value != "APPROVED"
             or task.approval_request_id != approval.id
+            or (create_pull_request and approval.target_branch != action.branch)
         ):
             raise PostgresTrustRepositoryConflict("Run branch authority payload or status is invalid")
 
@@ -783,7 +805,14 @@ class PostgresTrustRepository:
             or action.metadata.get("approval_id") != run.approval_request_id
             or action.metadata.get("lease_id") != run.capability_lease_id
             or action.metadata.get("repository") != action.repository
-            or action.metadata.get("target_ref") != action.branch
+            or (
+                not create_pull_request
+                and action.metadata.get("target_ref") != action.branch
+            )
+            or (
+                create_pull_request
+                and action.metadata.get("head_branch") != action.branch
+            )
             or step.status not in {AgentRunStepStatus.READY, AgentRunStepStatus.RUNNING}
         ):
             raise PostgresTrustRepositoryConflict("Run branch step identity or state is invalid")
@@ -829,7 +858,9 @@ class PostgresTrustRepository:
         if lease is None or lease.status != CapabilityLeaseStatus.ACTIVE or lease.expires_at <= checked_at:
             raise PostgresTrustRepositoryConflict("Run branch capability lease is inactive")
         if (
-            lease.approval_request_id != approval.id
+            not verify_payload_signature(lease_receipt_payload(lease), lease.receipt_signature)
+            or lease.workspace_id != workspace_id
+            or lease.approval_request_id != approval.id
             or lease.approved_payload_hash != approval.approved_payload_hash
             or lease.scope.repository != action.repository
             or lease.scope.branch != action.branch
@@ -887,6 +918,15 @@ class PostgresTrustRepository:
                 "change_type": action.metadata["change_type"],
                 "content_sha256": action.metadata["content_sha256"],
                 "before_sha": action.metadata.get("before_sha"),
+            })
+        elif create_pull_request:
+            event_payload.update({
+                "repository": action.repository,
+                "head_branch": action.metadata["head_branch"],
+                "base_branch": action.metadata["base_branch"],
+                "validated_head_sha": action.metadata["validated_head_sha"],
+                "validated_base_sha": action.metadata["validated_base_sha"],
+                "intent_marker": action.metadata["intent_marker"],
             })
         else:
             event_payload.update({
