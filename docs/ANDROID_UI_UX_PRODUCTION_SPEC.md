@@ -103,11 +103,13 @@ Use Android system sans (Roboto) for regular UI and a system monospace face only
 
 | Style | Size / line height | Weight | Use |
 |---|---|---|---|
-| Display | 28 / 34 sp | 600 | One primary page heading or short decision outcome |
-| Title | 20 / 26 sp | 600 | Card and detail section titles |
-| Body | 16 / 24 sp | 400 | All main explanatory copy and fields |
-| Label | 14 / 20 sp | 500 | Metadata, buttons, navigation labels |
-| Code | 14 / 21 sp | 400 | Commands, file paths, immutable action payloads |
+| Page heading (`headlineLarge`) | 28 / 36 sp | 600 | Primary screen heading; the Home and sign-in screens use this token |
+| Section/card title (`titleLarge` / `titleMedium`) | 20 / 28 or 17 / 24 sp | 600 | App-bar/detail section and approval-card headings |
+| Body (`bodyLarge` / `bodyMedium`) | 16 / 24 or 15 / 22 sp | 400 | Explanatory copy, fields, and request context |
+| Label (`labelLarge` / `labelMedium` / `labelSmall`) | 14 / 20 or 14 / 18 sp | 500 | Metadata, controls, and navigation labels |
+| Payload (`TowerCodeTextStyle`) | 14 / 21 sp | 400 | Commands, file paths, and immutable action payloads |
+
+These values match the current `core/ui/theme/Theme.kt` Compose tokens rather than proposing a second typography system. The theme also defines 32/40 `displayLarge` and 24/32 `headlineMedium`; use those only where the screen hierarchy calls for them, and do not introduce them as another default page-title size. Android system sans is the UI face and system monospace is reserved for exact payloads. Do not hard-code a smaller substitute in a release-one screen. Verify the resulting hierarchy at 1.0×, 1.3×, and 2.0× system font scales on device; source token values do not prove rendered wrapping or readability.
 
 Do not render core content below 14sp. Use sentence case and normal word spacing; reserve uppercase micro-labels for short, non-essential metadata only.
 
