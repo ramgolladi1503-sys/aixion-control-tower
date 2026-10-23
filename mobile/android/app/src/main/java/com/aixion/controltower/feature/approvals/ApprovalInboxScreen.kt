@@ -164,6 +164,7 @@ fun ApprovalInboxContent(
     val unsupported = state.approvals.filter(::isUnsupportedInboxApproval)
     var selectedSection by remember { mutableStateOf(ApprovalInboxSection.NEEDS_REVIEW) }
     var selectedHistoryFilter by remember { mutableStateOf(ApprovalHistoryFilter.ALL) }
+    var technicalDetailsExpanded by remember(state.errorMessage) { mutableStateOf(false) }
     val visibleApprovals = filterApprovalsForInbox(
         approvals = state.approvals,
         section = selectedSection
@@ -183,8 +184,10 @@ fun ApprovalInboxContent(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
             ) {
-                TextButton(onClick = onRetry, enabled = !state.loading && !state.refreshing) {
-                    Text(if (state.refreshing) "Refreshing…" else "Refresh")
+                if (!state.hasError) {
+                    TextButton(onClick = onRetry, enabled = !state.loading && !state.refreshing) {
+                        Text(if (state.refreshing) "Refreshing…" else "Refresh")
+                    }
                 }
             }
             Text(
@@ -205,7 +208,7 @@ fun ApprovalInboxContent(
         state.errorMessage?.let { message ->
             item {
                 TowerPanel(elevated = true) {
-                    StatusBadge("Real data required", palette.danger, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
+                    StatusBadge("Connection issue", palette.danger, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
                         text = "Approval data unavailable",
@@ -213,7 +216,7 @@ fun ApprovalInboxContent(
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        text = message,
+                        text = "Reconnect and retry to load the latest approvals. Requests stay unavailable until the server responds.",
                         color = palette.inkMuted,
                         style = MaterialTheme.typography.bodyMedium
                     )
@@ -228,19 +231,22 @@ fun ApprovalInboxContent(
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                    if (listOf("demo approvals", "mock approvals", "fallback approvals").none {
-                            message.contains(it, ignoreCase = true)
-                        }
-                    ) {
-                        Text(
-                            text = "Demo approvals are never shown.",
-                            color = palette.inkMuted,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
                     Button(onClick = onRetry, enabled = !state.loading && !state.refreshing) {
                         Text("Retry approvals")
+                    }
+                    TextButton(
+                        onClick = { technicalDetailsExpanded = !technicalDetailsExpanded },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (technicalDetailsExpanded) "Hide technical details" else "Technical details")
+                    }
+                    if (technicalDetailsExpanded) {
+                        Text(
+                            text = message,
+                            color = palette.inkMuted,
+                            style = MaterialTheme.typography.bodySmall
+                        )
                     }
                 }
             }

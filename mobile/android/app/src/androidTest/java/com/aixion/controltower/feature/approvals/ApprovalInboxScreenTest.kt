@@ -343,8 +343,15 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onAllNodesWithText("Approval data unavailable").assertCountEquals(1)
-        composeRule.onAllNodesWithText("Backend unavailable: connection refused").assertCountEquals(1)
-        composeRule.onAllNodesWithText("Demo approvals are never shown.").assertCountEquals(1)
+        composeRule.onAllNodesWithText("Backend unavailable: connection refused").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Demo approvals are never shown.").assertCountEquals(0)
+        composeRule.onNodeWithText(
+            "Reconnect and retry to load the latest approvals. Requests stay unavailable until the server responds."
+        ).assertExists()
+        composeRule.onAllNodesWithText("Refresh").assertCountEquals(0)
+        composeRule.onNodeWithText("Technical details").performClick()
+        composeRule.onNodeWithText("Backend unavailable: connection refused").assertExists()
+        composeRule.onNodeWithText("Hide technical details").assertExists()
         composeRule.onAllNodesWithText("Retry approvals").assertCountEquals(1)
         composeRule.onNodeWithText("Approval sync unavailable.").assertExists()
         composeRule.onAllNodesWithText("1 pending").assertCountEquals(0)
