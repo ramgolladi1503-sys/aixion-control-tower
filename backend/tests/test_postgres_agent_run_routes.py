@@ -2980,6 +2980,258 @@ def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_b
         ).fetchone()[0] == intents_before
 
 
+def test_postgres_create_branch_route_commits_verified_branch_and_task_records_atomically(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP route uses one lifespan-owned PostgreSQL bundle end to end."""
+    from app.agent_run_models import AgentRunStatus
+    from app.agent_worker_github_branch import GitHubBranchObservation
+    from app.postgres_agent_run_branch import BranchIntentStatus
+    from app.postgres_runtime import PostgresRuntime
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+
+    # The capability lease, task branch, and approved payload must all bind the
+    # same target ref before the durable run is created.
+    with connect() as conn:
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=("
+            "SELECT approval_request_id FROM agent_tasks WHERE task_id=%s) AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+        approval.target_branch = "feature/approved-branch"
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
+        )
+
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        state=state,
+        client=client,
+    )
+    attached = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    assert attached.status_code == 200, attached.text
+
+    # Position a valid durable run at its final branch step. Earlier validation
+    # steps are already complete, so this single route invocation can reach a
+    # terminal run without pretending the remaining phases were executed.
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None
+    steps = repositories.agent_runs.list_steps_for_run(run_id)
+    branch_step = steps[-1]
+    run.status = AgentRunStatus.RUNNING
+    run.current_step_index = branch_step.sequence
+    run.current_step_id = branch_step.id
+    run.updated_at = now_utc()
+    for step in steps[:-1]:
+        step.status = AgentRunStepStatus.SUCCEEDED
+        step.updated_at = run.updated_at
+    branch_step.step_type = AgentRunStepType.CREATE_BRANCH
+    branch_step.status = AgentRunStepStatus.READY
+    branch_step.updated_at = run.updated_at
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status=%s,current_step_id=%s,updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (
+                run.status.value,
+                run.current_step_id,
+                run.updated_at,
+                Jsonb(run.model_dump(mode="json")),
+                run_id,
+                workspace.id,
+            ),
+        )
+        for step in steps:
+            conn.execute(
+                "UPDATE agent_run_steps SET step_type=%s,status=%s,updated_at=%s,payload=%s "
+                "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+                (
+                    step.step_type.value,
+                    step.status.value,
+                    step.updated_at,
+                    Jsonb(step.model_dump(mode="json")),
+                    step.id,
+                    run_id,
+                    workspace.id,
+                ),
+            )
+
+    # Use a real runtime object around the fixture's schema-scoped connector,
+    # then bind every route-visible repository to that exact bundle identity.
+    runtime = PostgresRuntime(
+        _dsn="postgresql://test-runtime/agent-run-routes",
+        profile="test",
+        _connector=connect,
+    )
+    runtime_repositories = runtime.repositories
+    assert runtime_repositories.agent_run_branch_intents is not repositories.agent_run_branch_intents
+    monkeypatch.setattr(main.app.state, "postgres_runtime", runtime, raising=False)
+    monkeypatch.setattr(
+        main.app.state, "postgres_repositories", runtime_repositories, raising=False
+    )
+    for state_name, repository_name in {
+        "agent_run_repository": "agent_runs",
+        "agent_task_repository": "agent_tasks",
+        "approval_decision_repository": "approval_decisions",
+        "trust_repository": "trust",
+        "trust_event_repository": "trust_events",
+        "agent_run_branch_intent_repository": "agent_run_branch_intents",
+    }.items():
+        monkeypatch.setattr(
+            main.app.state,
+            state_name,
+            getattr(runtime_repositories, repository_name),
+            raising=False,
+        )
+
+    source_sha = "a" * 40
+
+    class FakeGitHubProvider:
+        def __init__(self) -> None:
+            self.post_calls: list[tuple[str, str, str]] = []
+            self.observations: list[tuple[str, str]] = []
+
+        def observe_branch(self, repository: str, branch: str) -> GitHubBranchObservation:
+            self.observations.append((repository, branch))
+            if branch == "main":
+                return GitHubBranchObservation(
+                    repository=repository,
+                    branch=branch,
+                    found=True,
+                    sha=source_sha,
+                    html_url=f"https://github.com/{repository}/tree/main",
+                )
+            if self.post_calls:
+                return GitHubBranchObservation(
+                    repository=repository,
+                    branch=branch,
+                    found=True,
+                    sha=source_sha,
+                    html_url=f"https://github.com/{repository}/tree/{branch}",
+                )
+            return GitHubBranchObservation(
+                repository=repository,
+                branch=branch,
+                found=False,
+            )
+
+        def create_branch(self, repository: str, branch: str, pinned_sha: str) -> None:
+            self.post_calls.append((repository, branch, pinned_sha))
+
+    provider = FakeGitHubProvider()
+    monkeypatch.setattr(
+        "app.postgres_agent_run_branch_route._default_client", lambda: provider
+    )
+    run_ids_before = set(store.agent_runs)
+    step_ids_before = set(store.agent_run_steps)
+    task_snapshot_before = store.agent_tasks.get(task_id)
+    task_event_ids_before = set(store.agent_task_events)
+    audit_ids_before = {event.id for event in store.audit_events}
+    approval_snapshot_before = store.approval_requests.get(approval.id)
+
+    executed = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-branch-route-test", "timeout_seconds": 10},
+    )
+
+    assert executed.status_code == 200, executed.text
+    final_run = runtime_repositories.agent_runs.get(run_id)
+    final_steps = runtime_repositories.agent_runs.list_steps_for_run(run_id)
+    assert final_run is not None
+    assert final_run.status == AgentRunStatus.SUCCEEDED
+    completed_step = next(step for step in final_steps if step.id == branch_step.id)
+    assert completed_step.status == AgentRunStepStatus.SUCCEEDED
+    assert completed_step.output_reference == (
+        "https://github.com/owner/approved-repository/tree/feature/approved-branch"
+    )
+
+    intent = runtime_repositories.agent_run_branch_intents.get_for_step(
+        workspace_id=workspace.id,
+        run_id=run_id,
+        step_id=branch_step.id,
+        idempotency_key=branch_step.idempotency_key,
+    )
+    assert intent is not None and intent.status == BranchIntentStatus.COMPLETED
+    assert intent.source_sha == source_sha
+    assert provider.post_calls == [
+        ("owner/approved-repository", "feature/approved-branch", source_sha)
+    ]
+    assert provider.observations.count(("owner/approved-repository", "main")) == 2
+    assert provider.observations.count(
+        ("owner/approved-repository", "feature/approved-branch")
+    ) == 2
+
+    task = runtime_repositories.agent_tasks.get(task_id)
+    assert task is not None and task.status == AgentTaskStatus.APPROVED
+    task_events = runtime_repositories.agent_tasks.list_events(
+        task_id, workspace_id=workspace.id
+    )
+    branch_events = [
+        event
+        for event in task_events
+        if event.metadata.get("branch_intent_id") == intent.id
+    ]
+    assert len(branch_events) == 1
+    assert branch_events[0].event_type == AgentTaskEventType.NOTE
+    assert branch_events[0].metadata["source_sha"] == source_sha
+
+    run_events = runtime_repositories.agent_runs.list_events_for_run(run_id)
+    success_events = [
+        event
+        for event in run_events
+        if event.step_id == branch_step.id
+        and event.event_type == AgentRunEventType.STEP_SUCCEEDED
+    ]
+    assert len(success_events) == 1
+    assert success_events[0].metadata["branch_intent_id"] == intent.id
+    with connect() as conn:
+        task_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_type='agent_task' "
+            "AND entity_id=%s AND event_type='agent_task.branch_created'",
+            (workspace.id, task_id),
+        ).fetchone()[0]
+        run_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_type='agent_run' "
+            "AND entity_id=%s AND event_type='agent_run.step_completed'",
+            (workspace.id, run_id),
+        ).fetchone()[0]
+        persisted_task_status = conn.execute(
+            "SELECT status FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()[0]
+    assert task_audits == 1
+    assert run_audits == 1
+    assert persisted_task_status == AgentTaskStatus.APPROVED.value
+
+    # The shared supervisor still publishes AgentRun compatibility snapshots
+    # into process-local maps. Task, approval, task-event, and audit state must
+    # remain PostgreSQL-authoritative and unchanged in those SQLite maps.
+    assert run_id in store.agent_runs
+    assert store.agent_runs[run_id].status == final_run.status
+    assert store.agent_runs[run_id].updated_at == final_run.updated_at
+    assert set(store.agent_runs) == run_ids_before | {run_id}
+    assert set(store.agent_run_steps) == step_ids_before | {step.id for step in steps}
+    assert store.agent_tasks.get(task_id) == task_snapshot_before
+    assert set(store.agent_task_events) == task_event_ids_before
+    assert {event.id for event in store.audit_events} == audit_ids_before
+    assert store.approval_requests.get(approval.id) == approval_snapshot_before
+
+
 def test_postgres_credential_revocation_route_uses_durable_workspace_state(
     postgres_agent_run_route_runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
