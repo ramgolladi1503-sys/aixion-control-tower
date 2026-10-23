@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 from pathlib import Path
 import sys
@@ -82,6 +83,36 @@ def test_http_status_mapping_remains_fail_closed(
         )
     if isinstance(raised.value, hook.RateLimitError):
         assert raised.value.retry_after_seconds == 7
+
+
+def test_hook_input_rejects_duplicate_identity_keys(monkeypatch) -> None:
+    raw = (
+        b'{"hook_event_name":"PermissionRequest","session_id":"first",'
+        b'"session_id":"second","turn_id":"turn","tool_name":"Bash",'
+        b'"tool_input":{"command":"echo safe"}}'
+    )
+    monkeypatch.setattr(hook.sys, "stdin", type("Stdin", (), {"buffer": io.BytesIO(raw)})())
+
+    with pytest.raises(hook.GateError, match="invalid JSON"):
+        hook._read_input()
+
+
+def test_api_response_rejects_duplicate_approval_identity(monkeypatch) -> None:
+    response = type("Response", (), {
+        "status": 200,
+        "headers": {},
+        "body": b'{"id":"approval_one","source_agent_id":"expected",'
+        b'"source_agent_id":"attacker"}',
+    })()
+    monkeypatch.setattr(hook, "deadline_request", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(hook.AmbiguousRequestError, match="invalid response data"):
+        hook._request(
+            "GET",
+            "http://127.0.0.1:8012/agents/approvals/approval_one/decision",
+            {"agent_id": ENV["AIXION_AGENT_ID"]},
+            ENV["AIXION_AGENT_TOKEN"],
+        )
 
 
 @pytest.mark.parametrize("stall", ["headers", "body"])

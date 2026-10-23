@@ -217,6 +217,18 @@ fun ApprovalInboxContent(
                         fontSize = 14.sp,
                         lineHeight = 21.sp
                     )
+                    if (state.approvals.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                        Text(
+                            text = "The latest approval check failed. Previously loaded requests are hidden because their status may have changed. Reconnect and retry before reviewing.",
+                            modifier = Modifier
+                                .testTag("approval-inbox-stale-data-warning")
+                                .semantics { liveRegion = LiveRegionMode.Polite },
+                            color = palette.danger,
+                            fontSize = 14.sp,
+                            lineHeight = 21.sp
+                        )
+                    }
                     if (listOf("demo approvals", "mock approvals", "fallback approvals").none {
                             message.contains(it, ignoreCase = true)
                         }

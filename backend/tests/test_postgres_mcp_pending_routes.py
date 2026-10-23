@@ -17,6 +17,8 @@ from psycopg.types.json import Jsonb
 from app import main, mcp_gateway_routes
 from app.application_repositories import ApplicationRepositories
 from app.models import AuthUser, MCPPendingRequest, MCPPendingStatus, Project, User, UserRole, Workspace, now_utc
+from app.approval_integrity import compute_approval_payload_hash
+from app.models import ApprovalStatus, AuditEvent, MCPChildServer, MCPToolDefinition
 from app.postgres_database import run_postgres_migrations
 from app.store import store
 
@@ -166,6 +168,68 @@ def postgres_mcp_pending_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Itera
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def _create_approved_mcp_forwarding_case(connect, project: Project, user: AuthUser) -> tuple[str, MCPChildServer]:
+    client = TestClient(main.app)
+    submitted = client.post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": f"resolve-{uuid.uuid4().hex}"},
+        json={
+            "project_id": project.id,
+            "request": {
+                "server_name": "route-test-child",
+                "tool_name": "write_file",
+                "arguments": {"path": "approved.txt", "content": "approved"},
+                "session_id": "mcp-session-01",
+                "requested_by": "codex-connector",
+                "mutating": True,
+            },
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+    approval_id = submitted.json()["approval_request_id"]
+    repositories = main.app.state.postgres_repositories
+    approval = repositories.approval_decisions.get(approval_id)
+    assert approval is not None
+    approved = approval.model_copy(
+        update={
+            "status": ApprovalStatus.APPROVED,
+            "approved_payload_hash_version": 2,
+            "approved_at": now_utc(),
+            "approved_by_user_id": user.id,
+            "updated_at": now_utc(),
+        }
+    )
+    approved = approved.model_copy(
+        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+    )
+    with connect() as connection:
+        connection.execute(
+            "UPDATE approval_requests SET status=%s,updated_at=%s,version=version+1,payload=%s "
+            "WHERE approval_id=%s",
+            (approved.status.value, approved.updated_at, Jsonb(approved.model_dump(mode="json")), approval_id),
+        )
+
+    server = MCPChildServer(
+        project_id=project.id,
+        workspace_id=project.workspace_id,
+        name="route-test-child",
+        transport="test",
+        enabled=True,
+        tools=[MCPToolDefinition(name="write_file", mutating=True)],
+    )
+    repositories.mcp_child_servers.create(
+        server=server,
+        audit_event=AuditEvent(
+            event_type="mcp.child_server.created",
+            actor=user.email,
+            entity_id=server.id,
+            workspace_id=server.workspace_id,
+            details={"project_id": project.id, "name": server.name},
+        ),
+    )
+    return approval_id, server
 
 
 def test_postgres_mcp_pending_reads_are_workspace_scoped_and_do_not_project_to_sqlite(
@@ -458,6 +522,105 @@ def test_postgres_mcp_submission_rolls_back_all_rows_when_audit_or_notification_
         assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 1
         assert connection.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM notifications").fetchone()[0] == 0
+
+
+def test_postgres_mcp_resolve_forwards_one_claim_and_persists_final_audit(
+    postgres_mcp_pending_route_runtime,
+) -> None:
+    connect, _workspace, project, user, _pending = postgres_mcp_pending_route_runtime
+    approval_id, server = _create_approved_mcp_forwarding_case(connect, project, user)
+    client = TestClient(main.app)
+    before_calls = mcp_gateway_routes.child_received_count_for_server_for_test(server.name)
+
+    resolved = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["forwarded"] is True
+    assert resolved.json()["status"] == ApprovalStatus.APPROVED
+    repository = main.app.state.postgres_repositories.mcp_pending_requests
+    finished = repository.get_for_approval(approval_id)
+    assert finished is not None
+    assert finished.status == MCPPendingStatus.FORWARDED
+    assert finished.attempts == 1
+    assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == before_calls + 1
+    with connect() as connection:
+        audit_types = connection.execute(
+            "SELECT event_type FROM audit_events WHERE approval_id=%s ORDER BY created_at",
+            (approval_id,),
+        ).fetchall()
+    assert any(row[0] == "mcp.forwarded_after_approval" for row in audit_types)
+
+    replay = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+    assert replay.status_code == 409
+    assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == before_calls + 1
+    assert repository.get_for_approval(approval_id).attempts == 1
+
+
+def test_postgres_mcp_resolve_rejects_unbound_action_before_child_call(
+    postgres_mcp_pending_route_runtime,
+) -> None:
+    connect, _workspace, project, user, _pending = postgres_mcp_pending_route_runtime
+    approval_id, server = _create_approved_mcp_forwarding_case(connect, project, user)
+    repository = main.app.state.postgres_repositories.mcp_pending_requests
+    pending = repository.get_for_approval(approval_id)
+    assert pending is not None
+    tampered = pending.model_copy(update={"arguments": {"path": "different.txt"}})
+    with connect() as connection:
+        connection.execute(
+            "UPDATE mcp_pending_requests SET payload=%s WHERE pending_id=%s",
+            (Jsonb(tampered.model_dump(mode="json")), pending.id),
+        )
+    before_calls = mcp_gateway_routes.child_received_count_for_server_for_test(server.name)
+
+    response = TestClient(main.app).post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert response.status_code in {409, 503}
+    assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == before_calls
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT status,attempts FROM mcp_pending_requests WHERE pending_id=%s",
+            (pending.id,),
+        ).fetchone()
+    assert row == (MCPPendingStatus.WAITING_FOR_APPROVAL.value, 0)
+
+
+def test_postgres_mcp_resolve_marks_failed_child_response_unknown_and_never_replays(
+    postgres_mcp_pending_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, _workspace, project, user, _pending = postgres_mcp_pending_route_runtime
+    approval_id, server = _create_approved_mcp_forwarding_case(connect, project, user)
+    calls = 0
+    before_child_calls = mcp_gateway_routes.child_received_count_for_server_for_test(server.name)
+
+    def child_effect_then_lost_response(_server, _call):
+        nonlocal calls
+        calls += 1
+        return {"ok": False, "error": "response lost after dispatch"}
+
+    monkeypatch.setattr(mcp_gateway_routes._child_router, "_call_test_server", child_effect_then_lost_response)
+    client = TestClient(main.app)
+
+    first = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert first.status_code == 503
+    repository = main.app.state.postgres_repositories.mcp_pending_requests
+    pending = repository.get_for_approval(approval_id)
+    assert pending is not None
+    assert pending.status == MCPPendingStatus.DEAD_LETTER
+    assert pending.last_error == mcp_gateway_routes.MCP_PENDING_FORWARD_OUTCOME_UNKNOWN
+    assert pending.attempts == 1
+    with connect() as connection:
+        audit_types = connection.execute(
+            "SELECT event_type FROM audit_events WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchall()
+    assert any(row[0] == "mcp.forward_outcome_unknown" for row in audit_types)
+
+    replay = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+    assert replay.status_code == 409
+    assert calls == 1
+    assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == before_child_calls
 
 
 def test_postgres_mcp_concurrent_idempotent_submissions_create_one_complete_record_set(

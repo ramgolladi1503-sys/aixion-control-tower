@@ -261,15 +261,12 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
-    fun approvalLoadErrorShowsOneActionablePanelWithoutDemoApprovals() {
+    fun initialApprovalLoadErrorShowsUnavailableStateWithoutStaleWarning() {
         var refreshRequested = false
         composeRule.setContent {
             ApprovalInboxContent(
                 state = ApprovalsUiState(
                     loading = false,
-                    approvals = listOf(
-                        approval(id = "approval_unavailable", title = "Must not be shown", status = ApprovalStatus.REQUESTED)
-                    ),
                     errorMessage = "Backend unavailable: connection refused"
                 ),
                 onRetry = { refreshRequested = true }
@@ -283,10 +280,45 @@ class ApprovalInboxScreenTest {
         composeRule.onNodeWithText("Approval sync unavailable.").assertExists()
         composeRule.onAllNodesWithText("1 pending").assertCountEquals(0)
         composeRule.onAllNodesWithText("No fallback approvals loaded").assertCountEquals(0)
-        composeRule.onAllNodesWithText("Must not be shown").assertCountEquals(0)
+        composeRule.onAllNodesWithText("approval-inbox-stale-data-warning").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Previously loaded requests are hidden").assertCountEquals(0)
 
         composeRule.onNodeWithText("Retry approvals").performClick()
         assertEquals(true, refreshRequested)
+    }
+
+    @Test
+    fun failedRefreshExplainsCachedApprovalsAreHiddenAndKeepsThemNonActionable() {
+        val staleApproval = approval(
+            id = "approval_stale_after_refresh_failure",
+            title = "Previously loaded request",
+            status = ApprovalStatus.REQUESTED
+        )
+
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    refreshing = false,
+                    approvals = listOf(staleApproval),
+                    errorMessage = "Backend unavailable: connection refused"
+                )
+            )
+        }
+
+        val warning = composeRule.onNodeWithTag("approval-inbox-stale-data-warning")
+        warning.assertExists()
+        warning.assertTextContains("The latest approval check failed")
+        warning.assertTextContains("Previously loaded requests are hidden")
+        warning.assertTextContains("Reconnect and retry before reviewing")
+        assertEquals(
+            LiveRegionMode.Polite,
+            warning.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+        composeRule.onAllNodesWithText("Previously loaded request").assertCountEquals(0)
+        composeRule.onAllNodesWithText("1 pending").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Review request").assertCountEquals(0)
+        composeRule.onNodeWithText("Retry approvals").assertExists()
     }
 
     @Test

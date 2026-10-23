@@ -962,6 +962,115 @@ def test_approved_connector_delivery_claim_is_single_use_across_adapters(approva
     assert _count(approval_case, "audit_event") == 3
 
 
+def test_invocation_heartbeat_racing_delivery_claim_cannot_revive_consumed_call(
+    approval_case,
+) -> None:
+    agent = ExternalAgent(
+        id=f"agent_heartbeat_claim_race_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Heartbeat and claim race connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=approval_case.workspace.id,
+    )
+    presented_token_hash = _store_external_agent(approval_case, agent)
+    invocation_id = f"heartbeat-claim-race:{uuid.uuid4().hex}"
+    approval = _approval(
+        approval_case,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+        status=ApprovalStatus.PENDING_REVIEW,
+        expires_at=now_utc() + timedelta(minutes=5),
+    )
+    _create(approval_case, approval)
+    approved = approval.model_copy(
+        update={"status": ApprovalStatus.APPROVED, "approved_payload_hash_version": 2}
+    )
+    approved = approved.model_copy(
+        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+    )
+    approval_case.repository.commit_decision(
+        approval_id=approval.id,
+        expected_status=ApprovalStatus.PENDING_REVIEW,
+        expected_approval=approval,
+        updated_approval=approved,
+        audit_event=_decision_audit(approval, approved, uuid.uuid4().hex),
+        decision_notification=Notification(
+            title="Decision recorded",
+            body="The connector may claim this invocation once.",
+            entity_type="approval_request",
+            entity_id=approval.id,
+            workspace_id=approval.workspace_id,
+        ),
+    )
+    barrier = Barrier(2)
+
+    def heartbeat():
+        barrier.wait(timeout=5)
+        try:
+            return approval_case.repository.heartbeat_invocation(
+                approval_id=approval.id,
+                workspace_id=approval.workspace_id,
+                source_agent_id=agent.id,
+                source_invocation_id=invocation_id,
+                presented_token_hash=presented_token_hash,
+                occurred_at=now_utc(),
+                ttl_seconds=60,
+            )
+        except (ApprovalInvocationLeaseRejected, ApprovalDeliveryCredentialRejected):
+            return None
+
+    def claim() -> bool:
+        barrier.wait(timeout=5)
+        return approval_case.repository.claim_approved_delivery(
+            approval_id=approval.id,
+            workspace_id=approval.workspace_id,
+            source_agent_id=agent.id,
+            source_invocation_id=invocation_id,
+            expected_payload_hash=approved.approved_payload_hash,
+            presented_token_hash=presented_token_hash,
+            audit_event=AuditEvent(
+                id=f"audit_claim_race_{uuid.uuid4().hex}",
+                event_type="approval.delivery_claimed",
+                entity_id=approval.id,
+                workspace_id=approval.workspace_id,
+                actor=f"agent:{agent.id}",
+                details={"source_invocation_id": invocation_id},
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        heartbeat_future = executor.submit(heartbeat)
+        claim_future = executor.submit(claim)
+        heartbeat_result = heartbeat_future.result(timeout=10)
+        claim_result = claim_future.result(timeout=10)
+
+    assert claim_result is True
+    assert heartbeat_result is None or heartbeat_result.approval_id == approval.id
+    with approval_case.connect() as connection:
+        if approval_case.backend == "sqlite":
+            claim_count = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (approval.id,),
+            ).fetchone()[0]
+        else:
+            claim_count = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval.id,),
+            ).fetchone()[0]
+    assert claim_count == 1
+    with pytest.raises(ApprovalInvocationLeaseRejected):
+        approval_case.repository.heartbeat_invocation(
+            approval_id=approval.id,
+            workspace_id=approval.workspace_id,
+            source_agent_id=agent.id,
+            source_invocation_id=invocation_id,
+            presented_token_hash=presented_token_hash,
+            occurred_at=now_utc(),
+            ttl_seconds=60,
+        )
+
+
 def test_connector_revoked_after_authentication_cannot_claim_delivery(approval_case) -> None:
     agent = ExternalAgent(
         id=f"agent_revocation_contract_{uuid.uuid4().hex}",

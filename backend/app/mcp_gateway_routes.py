@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TypeVar
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_maintainer, require_reviewer
 from .approval_decisions import approval_decision_repository
+from .child_mcp_test_server import ChildMCPToolCall
 from .mcp_child_router import MCPChildServerRouter
 from .mcp_gateway import (
     MCP_MUTATING_TOOL_NAMES,
@@ -244,6 +245,7 @@ def _postgres_mcp_submission(
         # Non-mutating calls are currently forwarded by the process-local test
         # child router. Never execute them via that projection in PostgreSQL mode.
         raise HTTPException(status_code=503, detail="PostgreSQL MCP non-mutating forwarding is unavailable")
+    approved_call = call.model_copy(update={"mutating": True})
 
     try:
         workspace_id = workspace_id_for_request(user, request)
@@ -319,8 +321,12 @@ def _postgres_mcp_submission(
         files=[FileChange(
             path=f"mcp://{call.server_name}/{call.tool_name}",
             change_type="mcp_tool_call",
-            diff=f"MCP mutating tool call requires approval: {call.model_dump()}",
-            new_content=str(call.model_dump(mode="json")),
+            diff=f"MCP mutating tool call requires approval: {approved_call.model_dump(mode='json')}",
+            new_content=json.dumps(
+                approved_call.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         )],
         test_plan=["MCP gateway must forward only after approval."],
         rollback_plan="Deny or expire the approval; the child MCP server receives nothing.",
@@ -661,7 +667,14 @@ def resolve_gateway_request(
     request: Request = None,  # type: ignore[assignment]
 ) -> MCPGatewayDecision:
     if request is not None:
-        _require_local_mcp_write_runtime(request)
+        postgres_pending_repository = _postgres_pending_repository_for_request(request)
+        if postgres_pending_repository is not None:
+            return _resolve_postgres_gateway_request(
+                approval_request_id=approval_request_id,
+                user=user,
+                request=request,
+                pending_repository=postgres_pending_repository,
+            )
     approval = approval_decision_repository.get(approval_request_id)
     if not approval or not approval_scope_is_consistent(approval):
         raise HTTPException(status_code=404, detail="Approval request not found")
@@ -674,3 +687,204 @@ def resolve_gateway_request(
     gateway = gateway_for_project(approval.project_id)
     gateway.wait_handle(approval_request_id).notify_decision_changed()
     return gateway.resolve_after_side_channel_decision(approval_request_id)
+
+
+def _resolve_postgres_gateway_request(
+    *,
+    approval_request_id: str,
+    user: AuthUser,
+    request: Request,
+    pending_repository,
+) -> MCPGatewayDecision:
+    """Claim and forward one approved MCP action through durable PostgreSQL state.
+
+    The repository commits the forwarding claim before this function invokes a
+    child server. A lost response or an exception after that boundary is treated
+    as an unknown outcome and can never be replayed under this request ID.
+    """
+    repositories = request.app.state.postgres_repositories
+    try:
+        workspace_id = workspace_id_for_request(user, request)
+        if workspace_id is None:
+            raise HTTPException(status_code=404, detail="Approval request not found")
+        approval = repositories.approval_decisions.get(approval_request_id)
+        project = repositories.projects.get(approval.project_id) if approval is not None else None
+        if (
+            approval is None
+            or approval.workspace_id != workspace_id
+            or project is None
+            or project.id != approval.project_id
+            or project.workspace_id != workspace_id
+        ):
+            raise HTTPException(status_code=404, detail="Approval request not found")
+        if approval.status != ApprovalStatus.APPROVED:
+            raise HTTPException(status_code=503, detail="MCP forwarding requires a durable approved decision")
+        pending = pending_repository.get_for_approval(approval_request_id)
+        if (
+            pending is None
+            or pending.workspace_id != workspace_id
+            or pending.project_id != approval.project_id
+            or pending.approval_request_id != approval.id
+        ):
+            raise HTTPException(status_code=404, detail="MCP pending request not found")
+        now = now_utc()
+        claimed = pending_repository.claim_forwarding(
+            pending_id=pending.id,
+            approval_id=approval.id,
+            workspace_id=workspace_id,
+            project_id=approval.project_id,
+            server_name=pending.server_name,
+            owner="mcp-gateway-resolver",
+            now=now,
+            lease_expires_at=now + timedelta(seconds=30),
+        )
+    except HTTPException:
+        raise
+    except (MCPPendingRepositoryError, RuntimeError, psycopg.Error, ValueError) as error:
+        raise HTTPException(status_code=503, detail="MCP forwarding claim is unavailable") from error
+
+    if claimed is None:
+        # Re-read the durable row to distinguish a committed unknown outcome
+        # from an ordinary competing claim. Neither case invokes the child.
+        try:
+            latest = pending_repository.get_for_approval(approval_request_id)
+        except (MCPPendingRepositoryError, RuntimeError, psycopg.Error) as error:
+            raise HTTPException(status_code=503, detail="MCP forwarding state is unavailable") from error
+        if latest and latest.last_error == MCP_PENDING_FORWARD_OUTCOME_UNKNOWN:
+            raise HTTPException(
+                status_code=409,
+                detail="MCP forwarding outcome is unknown; create a new request instead of replaying",
+            )
+        raise HTTPException(status_code=409, detail="MCP request is not eligible for another forwarding attempt")
+
+    # The claim transaction verifies the enabled child row together with the
+    # approval and pending action. Re-read its configuration for dispatch and
+    # fail closed if it was disabled or changed immediately after that claim.
+    try:
+        servers = repositories.mcp_child_servers.list_for_workspace(
+            workspace_id,
+            project_id=claimed.project_id,
+            enabled=True,
+        )
+    except (RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP child server registry is unavailable") from error
+    matching_servers = [server for server in servers if server.name == claimed.server_name]
+    if len(matching_servers) != 1:
+        _finish_postgres_mcp_forwarding(
+            pending_repository,
+            expected=claimed,
+            status=MCPPendingStatus.DEAD_LETTER,
+            actor="mcp-gateway",
+            event_type="mcp.forward_not_started",
+            reason_code="CHILD_SERVER_UNAVAILABLE",
+            details={"server_name": claimed.server_name, "tool_name": claimed.tool_name},
+        )
+        raise HTTPException(status_code=409, detail="Approved MCP child server is no longer enabled")
+
+    child_server = matching_servers[0]
+    child_call = ChildMCPToolCall(
+        server_name=claimed.server_name,
+        tool_name=claimed.tool_name,
+        arguments=claimed.arguments,
+        session_id=claimed.session_id,
+        requested_by=claimed.requested_by,
+    )
+    try:
+        if child_server.transport == "test":
+            result = _child_router._call_test_server(child_server, child_call)
+        elif child_server.transport == "http":
+            result = MCPChildServerRouter._call_http_server(child_server, child_call)
+        elif child_server.transport == "http-jsonrpc":
+            result = MCPChildServerRouter._call_http_jsonrpc_server(child_server, child_call)
+        else:
+            # No fallback transport is allowed after the single durable claim.
+            result = {"ok": False, "reason_code": "UNSUPPORTED_CHILD_TRANSPORT"}
+    except Exception:
+        result = {"ok": False, "reason_code": MCP_PENDING_FORWARD_OUTCOME_UNKNOWN}
+
+    if not isinstance(result, dict) or result.get("ok") is False:
+        _finish_postgres_mcp_forwarding(
+            pending_repository,
+            expected=claimed,
+            status=MCPPendingStatus.DEAD_LETTER,
+            actor="mcp-gateway",
+            event_type="mcp.forward_outcome_unknown",
+            reason_code=MCP_PENDING_FORWARD_OUTCOME_UNKNOWN,
+            details={"server_name": claimed.server_name, "tool_name": claimed.tool_name},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="MCP child-server outcome is unknown; this request will not be replayed",
+        )
+
+    _finish_postgres_mcp_forwarding(
+        pending_repository,
+        expected=claimed,
+        status=MCPPendingStatus.FORWARDED,
+        actor="mcp-gateway",
+        event_type="mcp.forwarded_after_approval",
+        reason_code=None,
+        details={
+            "server_name": claimed.server_name,
+            "tool_name": claimed.tool_name,
+            "attempts": claimed.attempts,
+            "approved_payload_hash": approval.approved_payload_hash,
+        },
+    )
+    return MCPGatewayDecision(
+        forwarded=True,
+        approval_required=True,
+        approval_request_id=approval.id,
+        status=approval.status,
+        result=result,
+        reason="Mutating MCP tool call forwarded after durable approval.",
+    )
+
+
+def _finish_postgres_mcp_forwarding(
+    pending_repository,
+    *,
+    expected: MCPPendingRequest,
+    status: MCPPendingStatus,
+    actor: str,
+    event_type: str,
+    reason_code: str | None,
+    details: dict,
+) -> None:
+    now = now_utc()
+    updated = expected.model_copy(
+        update={
+            "status": status,
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "last_error": reason_code,
+            "updated_at": now,
+        }
+    )
+    audit_event = AuditEvent(
+        event_type=event_type,
+        actor=actor,
+        entity_id=expected.approval_request_id,
+        workspace_id=expected.workspace_id,
+        details={
+            "mcp_pending_request_id": expected.id,
+            "project_id": expected.project_id,
+            "server_name": expected.server_name,
+            "tool_name": expected.tool_name,
+            "previous_status": expected.status,
+            "new_status": updated.status,
+            **details,
+            **({"reason_code": reason_code} if reason_code else {}),
+        },
+        created_at=now,
+    )
+    try:
+        pending_repository.finish_forwarding(
+            expected=expected,
+            updated=updated,
+            audit_event=audit_event,
+        )
+    except (MCPPendingRepositoryError, RuntimeError, psycopg.Error) as error:
+        # A child call may already have happened. Keep the lease for recovery;
+        # its expiry must be marked unknown by the repository, never replayed.
+        raise HTTPException(status_code=503, detail="MCP forwarding outcome could not be persisted") from error

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import uuid
@@ -27,6 +28,8 @@ from app.models import (
     AuditEvent,
     FileChange,
     MCPPendingRequest,
+    MCPChildServer,
+    MCPToolDefinition,
     MCPPendingStatus,
     Notification,
     Project,
@@ -39,6 +42,14 @@ from app.postgres_database import POSTGRES_MIGRATIONS, run_postgres_migrations
 
 
 def _records() -> tuple[ApprovalRequest, MCPPendingRequest, AuditEvent, Notification]:
+    call_snapshot = {
+        "server_name": "server",
+        "tool_name": "write_file",
+        "arguments": {"path": "a.txt", "text": "reviewed"},
+        "session_id": None,
+        "requested_by": "test-client",
+        "mutating": True,
+    }
     approval = ApprovalRequest(
         id="approval-mcp-pending-test",
         project_id="project-mcp-pending-test",
@@ -47,10 +58,16 @@ def _records() -> tuple[ApprovalRequest, MCPPendingRequest, AuditEvent, Notifica
         summary="Review exact mutating MCP call",
         agent_name="mcp-gateway",
         target_branch="mcp-gateway/write_file",
-        files=[FileChange(path="mcp://server/write_file", diff="write file")],
+        source_provider="OTHER",
+        source_agent_name="mcp-gateway",
+        files=[FileChange(
+            path="mcp://server/write_file",
+            change_type="mcp_tool_call",
+            diff="MCP mutating tool call requires approval: " + str(call_snapshot),
+            new_content=json.dumps(call_snapshot, sort_keys=True, separators=(",", ":")),
+        )],
         risk=RiskAssessment(level=RiskLevel.HIGH, reasons=["Mutating MCP call"]),
         status=ApprovalStatus.REQUESTED,
-        source_agent_name="mcp-gateway",
         verified_source=True,
     )
     pending = MCPPendingRequest(
@@ -338,6 +355,14 @@ def _seed_postgres_project(connect: Callable[[], Connection]) -> None:
         name="MCP pending project",
         workspace_id=workspace.id,
     )
+    server = MCPChildServer(
+        id="mcp-server-pending-test",
+        project_id=project.id,
+        workspace_id=workspace.id,
+        name="server",
+        enabled=True,
+        tools=[MCPToolDefinition(name="write_file", mutating=True)],
+    )
     with connect() as connection:
         connection.execute(
             "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
@@ -346,6 +371,12 @@ def _seed_postgres_project(connect: Callable[[], Connection]) -> None:
         connection.execute(
             "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
             (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+        connection.execute(
+            "INSERT INTO mcp_child_servers(server_id,project_id,workspace_id,name,enabled,"
+            "created_at,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (server.id, server.project_id, server.workspace_id, server.name, server.enabled,
+             server.created_at, server.updated_at, Jsonb(server.model_dump(mode="json"))),
         )
 
 
@@ -422,6 +453,10 @@ def test_postgres_approved_request_claim_and_expired_lease_fail_closed(
     now = now_utc()
     claimed = repository.claim_forwarding(
         pending_id=pending.id,
+        approval_id=approval.id,
+        workspace_id=approval.workspace_id,
+        project_id=approval.project_id,
+        server_name=pending.server_name,
         owner="worker-one",
         now=now,
         lease_expires_at=now + timedelta(seconds=10),
@@ -431,6 +466,10 @@ def test_postgres_approved_request_claim_and_expired_lease_fail_closed(
 
     assert repository.claim_forwarding(
         pending_id=pending.id,
+        approval_id=approval.id,
+        workspace_id=approval.workspace_id,
+        project_id=approval.project_id,
+        server_name=pending.server_name,
         owner="worker-two",
         now=now + timedelta(seconds=11),
         lease_expires_at=now + timedelta(seconds=41),
@@ -466,3 +505,90 @@ def test_postgres_mismatched_project_scope_is_rejected_without_rows(
     with connect() as connection:
         assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 0
         assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 0
+
+
+def test_postgres_forward_claim_is_workspace_and_child_server_scoped(
+    postgres_mcp_pending_repository,
+) -> None:
+    repository, connect = postgres_mcp_pending_repository
+    approval, pending, _, _ = _postgres_create(repository, connect)
+    approved = _approved(approval)
+    with connect() as connection:
+        connection.execute(
+            "UPDATE approval_requests SET status=%s,payload=%s WHERE approval_id=%s",
+            (approved.status.value, Jsonb(approved.model_dump(mode="json")), approval.id),
+        )
+    now = now_utc()
+    common = {
+        "pending_id": pending.id,
+        "approval_id": approval.id,
+        "workspace_id": approval.workspace_id,
+        "project_id": approval.project_id,
+        "server_name": pending.server_name,
+        "owner": "worker-one",
+        "now": now,
+        "lease_expires_at": now + timedelta(seconds=30),
+    }
+    assert repository.claim_forwarding(**{**common, "workspace_id": "workspace-other"}) is None
+    assert repository.claim_forwarding(**{**common, "project_id": "project-other"}) is None
+    assert repository.claim_forwarding(**{**common, "server_name": "other-server"}) is None
+    with connect() as connection:
+        connection.execute(
+            "UPDATE mcp_child_servers SET enabled=FALSE,"
+            "payload=jsonb_set(payload,'{enabled}','false'::jsonb) WHERE name=%s",
+            (pending.server_name,),
+        )
+    assert repository.claim_forwarding(**common) is None
+    assert repository.get(pending.id).status == MCPPendingStatus.WAITING_FOR_APPROVAL
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("server_name", "different-server"),
+        ("tool_name", "different-tool"),
+        ("arguments", {"path": "different.txt", "text": "reviewed"}),
+        ("session_id", "different-session"),
+        ("requested_by", "different-client"),
+    ],
+)
+def test_postgres_forward_claim_rejects_validly_rehashed_but_mismatched_mcp_action(
+    postgres_mcp_pending_repository,
+    field: str,
+    replacement: object,
+) -> None:
+    repository, connect = postgres_mcp_pending_repository
+    approval, pending, _, _ = _postgres_create(repository, connect)
+    action = json.loads(approval.files[0].new_content)
+    action[field] = replacement
+    tampered_file = approval.files[0].model_copy(update={
+        "new_content": json.dumps(action, sort_keys=True, separators=(",", ":")),
+        "diff": "MCP mutating tool call requires approval: " + str(action),
+    })
+    candidate = approval.model_copy(update={
+        "files": [tampered_file],
+        "status": ApprovalStatus.APPROVED,
+        "approved_payload_hash_version": 2,
+        "approved_at": now_utc(),
+        "approved_by_user_id": "reviewer-mcp-test",
+    })
+    approved = candidate.model_copy(update={
+        "approved_payload_hash": compute_approval_payload_hash(candidate),
+    })
+    with connect() as connection:
+        connection.execute(
+            "UPDATE approval_requests SET status=%s,payload=%s WHERE approval_id=%s",
+            (approved.status.value, Jsonb(approved.model_dump(mode="json")), approval.id),
+        )
+    now = now_utc()
+    assert repository.claim_forwarding(
+        pending_id=pending.id,
+        approval_id=approval.id,
+        workspace_id=approval.workspace_id,
+        project_id=approval.project_id,
+        server_name=pending.server_name,
+        owner="worker-one",
+        now=now,
+        lease_expires_at=now + timedelta(seconds=30),
+    ) is None
+    assert repository.get(pending.id).status == MCPPendingStatus.WAITING_FOR_APPROVAL

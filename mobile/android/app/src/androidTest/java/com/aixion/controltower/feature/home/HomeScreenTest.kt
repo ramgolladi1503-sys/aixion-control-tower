@@ -76,18 +76,20 @@ class HomeScreenTest {
     }
 
     @Test
-    fun connectionPanelOffersNeutralManagementNavigationWithoutClaimingStatus() {
+    fun connectionPanelOffersSetupGuidanceWithoutClaimingDeviceManagementOrConnectionStatus() {
         var opened = false
         composeRule.setContent {
             HomeAgentConnectionPanel(onOpenConnect = { opened = true })
         }
 
         composeRule.onNodeWithText("Agent connections").assertExists()
-        composeRule.onNodeWithText("View setup guidance for Antigravity and Codex", substring = true)
-            .assertExists()
+        composeRule.onNodeWithText(
+            "Set up Antigravity or Codex for the project on the computer where the agent runs. Keep that computer online while approvals are pending."
+        ).assertExists()
+        composeRule.onAllNodesWithText("manage the computers", substring = true).assertCountEquals(0)
         composeRule.onAllNodesWithText("Connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Online").assertCountEquals(0)
-        composeRule.onNodeWithText("Manage connections").performClick()
+        composeRule.onNodeWithText("Set up an agent").performClick()
         composeRule.runOnIdle { assertTrue(opened) }
     }
 

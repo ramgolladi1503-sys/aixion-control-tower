@@ -141,6 +141,16 @@ def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"Non-standard JSON constant: {value}")
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous JSON objects instead of silently keeping the last key."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def _emit_decision(behavior: str, message: str) -> None:
     result: dict[str, Any] = {
         "hookSpecificOutput": {
@@ -159,7 +169,11 @@ def _read_input() -> dict[str, Any]:
     if len(raw) > MAX_INPUT_BYTES:
         raise GateError("Codex hook input exceeds its size limit")
     try:
-        value = json.loads(raw, parse_constant=_reject_nonstandard_json_constant)
+        value = json.loads(
+            raw,
+            parse_constant=_reject_nonstandard_json_constant,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise GateError("Codex hook input is invalid JSON") from exc
     if not isinstance(value, dict) or value.get("hook_event_name") != "PermissionRequest":
@@ -317,7 +331,11 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         if len(raw) > MAX_RESPONSE_BYTES:
             raise AmbiguousRequestError("Control Tower response exceeds its size limit")
         try:
-            result = json.loads(raw, parse_constant=_reject_nonstandard_json_constant)
+            result = json.loads(
+                raw,
+                parse_constant=_reject_nonstandard_json_constant,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             raise AmbiguousRequestError("Control Tower returned invalid response data") from exc
         if not isinstance(result, dict):

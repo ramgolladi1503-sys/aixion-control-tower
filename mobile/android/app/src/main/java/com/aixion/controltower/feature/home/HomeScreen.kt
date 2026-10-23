@@ -198,14 +198,14 @@ internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            text = "View setup guidance for Antigravity and Codex, and manage the computers that run your work.",
+            text = "Set up Antigravity or Codex for the project on the computer where the agent runs. Keep that computer online while approvals are pending.",
             color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 21.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
-            Text("Manage connections")
+            Text("Set up an agent")
         }
     }
 }

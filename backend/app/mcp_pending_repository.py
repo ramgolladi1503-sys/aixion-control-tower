@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import json
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime
@@ -10,11 +12,13 @@ from psycopg.types.json import Jsonb
 
 from .approval_integrity import compute_approval_payload_hash
 from .models import (
+    AgentProvider,
     ApprovalRequest,
     ApprovalStatus,
     AuditEvent,
     MCPPendingRequest,
     MCPPendingStatus,
+    MCPChildServer,
     Notification,
     Project,
     WorkOrder,
@@ -64,6 +68,10 @@ class MCPPendingRepository(Protocol):
         owner: str,
         now: datetime,
         lease_expires_at: datetime,
+        workspace_id: str | None = None,
+        approval_id: str | None = None,
+        project_id: str | None = None,
+        server_name: str | None = None,
     ) -> MCPPendingRequest | None: ...
 
     def finish_forwarding(
@@ -346,6 +354,10 @@ class SQLiteMCPPendingRepository:
         owner: str,
         now: datetime,
         lease_expires_at: datetime,
+        workspace_id: str | None = None,
+        approval_id: str | None = None,
+        project_id: str | None = None,
+        server_name: str | None = None,
     ) -> MCPPendingRequest | None:
         if not owner or lease_expires_at <= now:
             raise ValueError("MCP forwarding lease owner and future expiry are required")
@@ -357,6 +369,13 @@ class SQLiteMCPPendingRepository:
             ).fetchone()
             current = _decode(row, pending_id)
             if current is None:
+                return None
+            if (
+                (workspace_id is not None and current.workspace_id != workspace_id)
+                or (approval_id is not None and current.approval_request_id != approval_id)
+                or (project_id is not None and current.project_id != project_id)
+                or (server_name is not None and current.server_name != server_name)
+            ):
                 return None
             if current.status == MCPPendingStatus.FORWARDING and current.lease_expires_at and current.lease_expires_at > now:
                 return None
@@ -697,58 +716,152 @@ class PostgresMCPPendingRepository:
         self,
         *,
         pending_id: str,
+        approval_id: str,
+        workspace_id: str,
+        project_id: str,
+        server_name: str,
         owner: str,
         now: datetime,
         lease_expires_at: datetime,
     ) -> MCPPendingRequest | None:
-        if not owner or lease_expires_at <= now:
-            raise ValueError("MCP forwarding lease owner and future expiry are required")
+        """Claim one exact, approved MCP action inside a workspace transaction.
+
+        Approval, pending, and child-server rows are locked in that order. The
+        decision writer takes approval before pending, and the server lock
+        prevents a concurrent disable from racing past this claim check.
+        """
+        if not all((pending_id, approval_id, workspace_id, project_id, server_name, owner)):
+            raise MCPPendingRepositoryScopeError(
+                "PostgreSQL MCP forwarding claims require complete request scope"
+            )
+        if lease_expires_at <= now:
+            raise ValueError("MCP forwarding lease must expire in the future")
+
         with self._connect() as conn:
-            # Discover the owning approval without locking. The approval lock
-            # is always acquired before the pending row, matching the reviewer
-            # decision transaction's lock order.
             identity = conn.execute(
                 "SELECT approval_id FROM mcp_pending_requests WHERE pending_id=%s",
                 (pending_id,),
             ).fetchone()
-            if identity is None:
+            if identity is None or identity[0] != approval_id:
                 return None
+
             approval_row = conn.execute(
-                "SELECT payload,status,workspace_id,project_id FROM approval_requests "
-                "WHERE approval_id=%s FOR UPDATE",
-                (identity[0],),
+                "SELECT approval_id,status,workspace_id,project_id,expires_at,payload "
+                "FROM approval_requests WHERE approval_id=%s FOR UPDATE",
+                (approval_id,),
             ).fetchone()
-            row = conn.execute(
-                "SELECT pending_id,approval_id,workspace_id,project_id,payload "
-                "FROM mcp_pending_requests WHERE pending_id=%s FOR UPDATE",
-                (pending_id,),
-            ).fetchone()
-            if row is None:
+            if approval_row is None:
                 return None
-            current = _decode((row[0], row[4], row[1], row[2], row[3]), pending_id)
+
+            pending_row = conn.execute(
+                "SELECT pending_id,approval_id,workspace_id,project_id,status,attempts,"
+                "lease_owner,lease_expires_at,last_error,payload "
+                "FROM mcp_pending_requests WHERE pending_id=%s AND approval_id=%s "
+                "AND workspace_id=%s AND project_id=%s FOR UPDATE",
+                (pending_id, approval_id, workspace_id, project_id),
+            ).fetchone()
+            if pending_row is None:
+                return None
+            current = _decode(
+                (pending_row[0], pending_row[9], pending_row[1], pending_row[2], pending_row[3]),
+                pending_id,
+            )
             if current is None:
                 return None
-            if row[1] != identity[0] or approval_row is None:
-                return None
-            if current.status == MCPPendingStatus.FORWARDING and current.lease_expires_at and current.lease_expires_at > now:
-                return None
+            if (
+                pending_row[1] != approval_id
+                or pending_row[2] != workspace_id
+                or pending_row[3] != project_id
+                or current.workspace_id != workspace_id
+                or current.project_id != project_id
+            ):
+                raise MCPPendingRepositoryScopeError(
+                    "Stored MCP pending row scope does not match forwarding claim"
+                )
+            if (
+                pending_row[4] != current.status.value
+                or pending_row[5] != current.attempts
+                or pending_row[6] != current.lease_owner
+                or pending_row[7] != current.lease_expires_at
+                or pending_row[8] != current.last_error
+            ):
+                raise MCPPendingRepositoryError(
+                    "Stored MCP pending columns do not match their payload"
+                )
+            if (
+                approval_row[0] != approval_id
+                or approval_row[2] != workspace_id
+                or approval_row[3] != project_id
+            ):
+                raise MCPPendingRepositoryScopeError(
+                    "Stored approval scope does not match MCP forwarding claim"
+                )
+            try:
+                approval = ApprovalRequest.model_validate(approval_row[5])
+            except Exception as error:
+                raise MCPPendingRepositoryError(
+                    "Stored MCP approval payload is invalid"
+                ) from error
+            if (
+                approval.id != approval_id
+                or approval.workspace_id != workspace_id
+                or approval.project_id != project_id
+                or approval.status.value != approval_row[1]
+                or approval.expires_at != approval_row[4]
+            ):
+                raise MCPPendingRepositoryScopeError(
+                    "Stored approval columns do not match their payload"
+                )
+
             if current.status == MCPPendingStatus.FORWARDING:
+                if current.lease_expires_at is not None and current.lease_expires_at > now:
+                    return None
                 self._mark_outcome_unknown_postgres(conn, current, now)
                 return None
-            if current.status not in {MCPPendingStatus.WAITING_FOR_APPROVAL, MCPPendingStatus.FORWARDING}:
+            if current.status != MCPPendingStatus.WAITING_FOR_APPROVAL:
                 return None
-            approval = ApprovalRequest.model_validate(approval_row[0]) if approval_row else None
+            if current.attempts >= current.max_attempts:
+                return None
             if (
-                approval is None
-                or approval_row[1] != ApprovalStatus.APPROVED.value
-                or approval_row[2] != current.workspace_id
-                or approval_row[3] != current.project_id
-                or approval.status != ApprovalStatus.APPROVED
+                approval.status != ApprovalStatus.APPROVED
+                or approval.expires_at is not None and approval.expires_at <= now
                 or approval.approved_payload_hash_version != 2
                 or approval.approved_payload_hash is None
                 or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+                or not self._approved_mcp_action_matches(approval, current)
             ):
                 return None
+
+            child_row = conn.execute(
+                "SELECT server_id,project_id,workspace_id,name,enabled,payload "
+                "FROM mcp_child_servers WHERE project_id=%s AND workspace_id=%s "
+                "AND name=%s FOR UPDATE",
+                (project_id, workspace_id, server_name),
+            ).fetchone()
+            if child_row is None:
+                return None
+            try:
+                child = MCPChildServer.model_validate(child_row[5])
+            except Exception as error:
+                raise MCPPendingRepositoryError(
+                    "Stored MCP child-server payload is invalid"
+                ) from error
+            if (
+                child.id != child_row[0]
+                or child.project_id != child_row[1]
+                or child.workspace_id != child_row[2]
+                or child.name != child_row[3]
+                or child.enabled != child_row[4]
+            ):
+                raise MCPPendingRepositoryScopeError(
+                    "Stored MCP child-server columns do not match their payload"
+                )
+            if not child.enabled:
+                return None
+            tool = next((item for item in child.tools if item.name == current.tool_name), None)
+            if tool is None or not tool.mutating or current.server_name != server_name:
+                return None
+
             claimed = current.model_copy(update={
                 "status": MCPPendingStatus.FORWARDING,
                 "attempts": current.attempts + 1,
@@ -756,14 +869,59 @@ class PostgresMCPPendingRepository:
                 "lease_expires_at": lease_expires_at,
                 "updated_at": now,
             })
-            conn.execute(
+            result = conn.execute(
                 "UPDATE mcp_pending_requests SET status=%s,attempts=%s,lease_owner=%s,"
-                "lease_expires_at=%s,updated_at=%s,payload=%s WHERE pending_id=%s",
+                "lease_expires_at=%s,updated_at=%s,payload=%s "
+                "WHERE pending_id=%s AND approval_id=%s AND workspace_id=%s AND project_id=%s "
+                "AND status=%s AND attempts=%s",
                 (claimed.status.value, claimed.attempts, claimed.lease_owner,
                  claimed.lease_expires_at, claimed.updated_at,
-                 Jsonb(claimed.model_dump(mode="json")), pending_id),
+                 Jsonb(claimed.model_dump(mode="json")), pending_id, approval_id,
+                 workspace_id, project_id, MCPPendingStatus.WAITING_FOR_APPROVAL.value,
+                 current.attempts),
             )
+            if result.rowcount != 1:
+                raise MCPPendingRepositoryConflict(
+                    "MCP pending request changed during forwarding claim"
+                )
             return claimed
+
+    @staticmethod
+    def _approved_mcp_action_matches(
+        approval: ApprovalRequest,
+        pending: MCPPendingRequest,
+    ) -> bool:
+        """Bind the approved, hash-frozen MCP tool call to the pending row."""
+        prefix = "MCP mutating tool call requires approval: "
+        if (
+            approval.source_provider != AgentProvider.OTHER
+            or approval.source_agent_name != "mcp-gateway"
+            or approval.source_session_id != pending.session_id
+            or len(approval.files) != 1
+        ):
+            return False
+        file_change = approval.files[0]
+        if file_change.path != f"mcp://{pending.server_name}/{pending.tool_name}":
+            return False
+        try:
+            new_content = json.loads(file_change.new_content or "")
+            diff = file_change.diff
+            if not diff.startswith(prefix):
+                return False
+            diff_call = ast.literal_eval(diff[len(prefix):])
+        except (json.JSONDecodeError, SyntaxError, ValueError, TypeError):
+            return False
+        if not isinstance(new_content, dict) or not isinstance(diff_call, dict):
+            return False
+        expected = {
+            "server_name": pending.server_name,
+            "tool_name": pending.tool_name,
+            "arguments": pending.arguments,
+            "session_id": pending.session_id,
+            "requested_by": pending.requested_by,
+            "mutating": True,
+        }
+        return set(new_content) == set(expected) and new_content == diff_call == expected
 
     @staticmethod
     def _mark_outcome_unknown_postgres(
