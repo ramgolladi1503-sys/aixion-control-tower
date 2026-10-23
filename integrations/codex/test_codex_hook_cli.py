@@ -4,6 +4,8 @@ import importlib.util
 import hashlib
 import io
 import json
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,22 @@ SPEC = importlib.util.spec_from_file_location("aixion_codex_cli_hook", HOOK_PATH
 assert SPEC and SPEC.loader
 hook = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(hook)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("7", 7), ("not a date", hook.POLL_INTERVAL_SECONDS), (None, hook.POLL_INTERVAL_SECONDS)],
+)
+def test_retry_after_delta_and_invalid_values(value: str | None, expected: int) -> None:
+    assert hook._parse_retry_after(value) == expected
+
+
+def test_retry_after_http_date_uses_injected_utc_clock() -> None:
+    now = datetime(2026, 10, 23, 12, 0, 0, tzinfo=timezone.utc)
+    value = format_datetime(now + timedelta(seconds=37), usegmt=True)
+    past = format_datetime(now - timedelta(seconds=5), usegmt=True)
+    assert hook._parse_retry_after(value, now=now) == 37
+    assert hook._parse_retry_after(past, now=now) == 0
 
 
 @pytest.mark.parametrize(

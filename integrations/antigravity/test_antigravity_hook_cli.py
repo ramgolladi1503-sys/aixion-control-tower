@@ -6,6 +6,8 @@ import io
 import json
 import threading
 import time
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -896,6 +898,22 @@ def test_deadline_transport_status_mapping(
     )
     with pytest.raises(error, match=message):
         hook._request("GET", "https://control.example/decision", "agent", "secret")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("7", 7), ("not a date", hook.POLL_INTERVAL_SECONDS), (None, hook.POLL_INTERVAL_SECONDS)],
+)
+def test_retry_after_delta_and_invalid_values(value: str | None, expected: int) -> None:
+    assert hook._parse_retry_after(value) == expected
+
+
+def test_retry_after_http_date_uses_injected_utc_clock() -> None:
+    now = datetime(2026, 10, 23, 12, 0, 0, tzinfo=timezone.utc)
+    value = format_datetime(now + timedelta(seconds=37), usegmt=True)
+    past = format_datetime(now - timedelta(seconds=5), usegmt=True)
+    assert hook._parse_retry_after(value, now=now) == 37
+    assert hook._parse_retry_after(past, now=now) == 0
 
 
 def _prepare_connection_check(monkeypatch: pytest.MonkeyPatch, api_base: str) -> None:

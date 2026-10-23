@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import argparse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import os
 import re
@@ -270,10 +272,7 @@ def _request(
                 (value for key, value in response.headers.items() if key.lower() == "retry-after"),
                 None,
             )
-            try:
-                retry_after_seconds = int(retry_after_header) if retry_after_header else POLL_INTERVAL_SECONDS
-            except (TypeError, ValueError):
-                retry_after_seconds = POLL_INTERVAL_SECONDS
+            retry_after_seconds = _parse_retry_after(retry_after_header)
             raise RateLimitError(retry_after_seconds)
         if response.status >= 500:
             raise AmbiguousRequestError("Control Tower returned an ambiguous server failure")
@@ -295,6 +294,32 @@ def _request(
         return result
     except (TimeoutError, OSError) as exc:
         raise AmbiguousRequestError("Control Tower request outcome is unknown") from exc
+
+
+def _parse_retry_after(
+    value: str | None, *, now: datetime | None = None
+) -> int:
+    """Parse both RFC delta-seconds and HTTP-date Retry-After values.
+
+    Invalid headers use the normal bounded polling interval. The approval wait
+    loop still clamps every delay to its monotonic invocation deadline.
+    """
+    if value is None:
+        return POLL_INTERVAL_SECONDS
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            return POLL_INTERVAL_SECONDS
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            return POLL_INTERVAL_SECONDS
+        return max(0, int((retry_at - current).total_seconds()))
+    except (OverflowError, TypeError, ValueError):
+        return POLL_INTERVAL_SECONDS
 
 
 def _refresh_invocation_lease_if_due(

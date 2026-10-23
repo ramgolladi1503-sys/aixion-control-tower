@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import math
@@ -314,12 +316,9 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         if response.status == 429:
             retry_after = next(
                 (value for key, value in response.headers.items() if key.lower() == "retry-after"),
-                str(POLL_INTERVAL_SECONDS),
+                None,
             )
-            try:
-                delay = int(retry_after)
-            except (TypeError, ValueError):
-                delay = POLL_INTERVAL_SECONDS
+            delay = _parse_retry_after(retry_after)
             raise RateLimitError(delay)
         if response.status >= 500:
             raise AmbiguousRequestError("Control Tower returned an ambiguous server failure")
@@ -343,6 +342,32 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         return result
     except (TimeoutError, OSError) as exc:
         raise AmbiguousRequestError("Control Tower request outcome is unknown") from exc
+
+
+def _parse_retry_after(
+    value: str | None, *, now: datetime | None = None
+) -> int:
+    """Parse both RFC delta-seconds and HTTP-date Retry-After values.
+
+    Invalid headers use the normal bounded polling interval. The approval wait
+    loop still clamps every delay to its monotonic invocation deadline.
+    """
+    if value is None:
+        return POLL_INTERVAL_SECONDS
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            return POLL_INTERVAL_SECONDS
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            return POLL_INTERVAL_SECONDS
+        return max(0, int((retry_at - current).total_seconds()))
+    except (OverflowError, TypeError, ValueError):
+        return POLL_INTERVAL_SECONDS
 
 
 def _refresh_invocation_lease_if_due(

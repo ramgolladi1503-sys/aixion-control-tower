@@ -357,8 +357,9 @@ def test_connector_credentials_projects_exact_postgres_invocation_lease_liveness
 
     with connect() as conn:
         conn.execute(
-            "UPDATE approval_invocation_leases SET expires_at=%s WHERE approval_id=%s",
-            (now - timedelta(seconds=1), approval.id),
+            "UPDATE approval_invocation_leases SET heartbeat_at=%s,expires_at=%s "
+            "WHERE approval_id=%s",
+            (now - timedelta(seconds=2), now - timedelta(seconds=1), approval.id),
         )
     expired = client.get(
         f"/connectors/{connector_id}/credentials",
