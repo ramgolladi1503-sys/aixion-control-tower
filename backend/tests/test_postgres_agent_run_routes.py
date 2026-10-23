@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import multiprocessing
+import queue as queue_module
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -73,6 +75,65 @@ from app.trust_models import (
 )
 from app.postgres_trust_repository import PostgresTrustRepository, PostgresTrustRepositoryConflict
 from app.trust_policy import lease_receipt_payload
+
+
+def _claim_apply_change_intent_in_process(
+    dsn: str,
+    schema: str,
+    intent_data: dict,
+    run_data: dict,
+    step_data: dict,
+    worker_lease_token: str,
+    barrier,
+    results,
+) -> None:
+    """Race a durable APPLY_CHANGES claim from an independent DB process."""
+    from app.agent_run_models import AgentRun, AgentRunStep
+    from app.postgres_agent_run_apply_changes import (
+        AgentRunApplyChangeIntent,
+        PostgresAgentRunApplyChangeIntentRepository,
+    )
+
+    def process_connect() -> Connection:
+        connection = psycopg.connect(dsn)
+        connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        return connection
+
+    intent = AgentRunApplyChangeIntent.model_validate(intent_data)
+    expected_run = AgentRun.model_validate(run_data)
+    expected_step = AgentRunStep.model_validate(step_data)
+    barrier.wait(timeout=20)
+    try:
+        claimed = PostgresAgentRunApplyChangeIntentRepository(process_connect).claim_write_once(
+            intent=intent,
+            expected_run=expected_run,
+            expected_step=expected_step,
+            worker_lease_token=worker_lease_token,
+            now=now_utc(),
+        )
+        outcome = "claimed"
+        error = None
+        assert claimed.status == ApplyChangeIntentStatus.POST_CLAIMED
+    except PostgresTrustRepositoryConflict as exc:
+        outcome = "conflict"
+        error = f"{type(exc).__name__}: {exc}"
+    except BaseException as exc:
+        outcome = "error"
+        error = f"{type(exc).__name__}: {exc}"
+    durable = PostgresAgentRunApplyChangeIntentRepository(process_connect).get_for_step(
+        workspace_id=intent.workspace_id,
+        run_id=intent.run_id,
+        step_id=intent.step_id,
+        idempotency_key=intent.idempotency_key,
+    )
+    results.put(
+        (
+            outcome,
+            os.getpid(),
+            durable.status.value if durable is not None else None,
+            error,
+        )
+    )
 
 
 @pytest.fixture
@@ -3263,11 +3324,15 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     assert store.approval_requests.get(approval.id) == approval_snapshot_before
 
 
-@pytest.mark.parametrize("rollback_completion", [False, True])
+@pytest.mark.parametrize(
+    ("rollback_completion", "process_claim_race"),
+    [(False, False), (True, False), (False, True)],
+)
 def test_postgres_apply_changes_route_is_atomic_and_recovers_without_second_write(
     postgres_agent_run_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
     rollback_completion: bool,
+    process_claim_race: bool,
 ) -> None:
     """Exercise durable approval, one GitHub mutation, and atomic PG outcome/recovery."""
     import base64
@@ -3447,6 +3512,91 @@ def test_postgres_apply_changes_route_is_atomic_and_recovers_without_second_writ
 
     monkeypatch.setattr("app.postgres_agent_run_apply_changes_route.httpx.get", fake_get)
     monkeypatch.setattr("app.postgres_agent_run_apply_changes_route.httpx.post", fake_post)
+
+    process_claim_results: list[tuple[str, int, str | None, str | None]] = []
+    process_claim_context: dict[str, object] = {}
+    original_claim = runtime_repositories.agent_run_apply_change_intents.claim_write_once
+
+    def race_process_claims(*, intent, expected_run, expected_step, worker_lease_token, now):
+        # This hook runs only after the route has durably recorded its approved
+        # intent, action consumption, and current worker lease. The two spawned
+        # workers use independent connections and repository instances.
+        with connect() as conn:
+            schema = conn.execute("SELECT current_schema()").fetchone()[0]
+        dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+        assert dsn and schema
+        context = multiprocessing.get_context("spawn")
+        barrier = context.Barrier(2)
+        results = context.Queue()
+        workers = [
+            context.Process(
+                target=_claim_apply_change_intent_in_process,
+                args=(
+                    dsn,
+                    schema,
+                    intent.model_dump(mode="json"),
+                    expected_run.model_dump(mode="json"),
+                    expected_step.model_dump(mode="json"),
+                    worker_lease_token,
+                    barrier,
+                    results,
+                ),
+            )
+            for _ in range(2)
+        ]
+        try:
+            for worker in workers:
+                worker.start()
+            received = []
+            for _ in workers:
+                try:
+                    received.append(results.get(timeout=30))
+                except queue_module.Empty:
+                    pytest.fail("Timed out waiting for APPLY_CHANGES claim processes")
+            for worker in workers:
+                worker.join(timeout=10)
+                if worker.is_alive():
+                    pytest.fail("APPLY_CHANGES claim process did not exit before timeout")
+            assert [worker.exitcode for worker in workers] == [0, 0]
+            assert len({result[1] for result in received}) == 2
+            assert sorted(result[0] for result in received) == ["claimed", "conflict"]
+            assert all(result[2] == ApplyChangeIntentStatus.POST_CLAIMED.value for result in received)
+            assert all(result[3] is None for result in received if result[0] == "claimed")
+            assert all(result[3] for result in received if result[0] == "conflict")
+            process_claim_results.extend(received)
+            process_claim_context.update(
+                {
+                    "intent": intent,
+                    "expected_run": expected_run,
+                    "expected_step": expected_step,
+                    "worker_lease_token": worker_lease_token,
+                }
+            )
+            durable = runtime_repositories.agent_run_apply_change_intents.get_for_step(
+                workspace_id=intent.workspace_id,
+                run_id=intent.run_id,
+                step_id=intent.step_id,
+                idempotency_key=intent.idempotency_key,
+            )
+            assert durable is not None
+            assert durable.status == ApplyChangeIntentStatus.POST_CLAIMED
+            # Stop the route before its provider write: the two-process race
+            # itself owns the durable one-shot claim in this test variant.
+            raise RuntimeError("Cross-process claim race completed; provider write suppressed")
+        finally:
+            for worker in workers:
+                if worker.is_alive():
+                    worker.terminate()
+                worker.join(timeout=5)
+            results.close()
+            results.join_thread()
+
+    if process_claim_race:
+        monkeypatch.setattr(
+            runtime_repositories.agent_run_apply_change_intents,
+            "claim_write_once",
+            race_process_claims,
+        )
     original_commit = runtime_repositories.agent_runs.commit_step_completion
     if rollback_completion:
         first_apply_commit = True
@@ -3468,6 +3618,35 @@ def test_postgres_apply_changes_route_is_atomic_and_recovers_without_second_writ
         json={"worker_id": "postgres-apply-route-test", "timeout_seconds": 10},
     )
     assert first.status_code == 200, first.text
+
+    if process_claim_race:
+        assert len(process_claim_results) == 2
+        assert sorted(result[0] for result in process_claim_results) == ["claimed", "conflict"]
+        persisted = runtime_repositories.agent_run_apply_change_intents.get_for_step(
+            workspace_id=workspace.id,
+            run_id=run_id,
+            step_id=apply_step.id,
+            idempotency_key=apply_step.idempotency_key,
+        )
+        assert persisted is not None
+        assert persisted.status == ApplyChangeIntentStatus.POST_CLAIMED
+        assert not any(method == "POST" for method, _call in http_calls)
+        with pytest.raises(PostgresTrustRepositoryConflict):
+            original_claim(
+                intent=process_claim_context["intent"],
+                expected_run=process_claim_context["expected_run"],
+                expected_step=process_claim_context["expected_step"],
+                worker_lease_token=process_claim_context["worker_lease_token"],
+                now=now_utc(),
+            )
+        assert runtime_repositories.agent_run_apply_change_intents.get_for_step(
+            workspace_id=workspace.id,
+            run_id=run_id,
+            step_id=apply_step.id,
+            idempotency_key=apply_step.idempotency_key,
+        ).status == ApplyChangeIntentStatus.POST_CLAIMED
+        assert not any(method == "POST" for method, _call in http_calls)
+        return
 
     intents = runtime_repositories.agent_run_apply_change_intents
     persisted = intents.get_for_step(
