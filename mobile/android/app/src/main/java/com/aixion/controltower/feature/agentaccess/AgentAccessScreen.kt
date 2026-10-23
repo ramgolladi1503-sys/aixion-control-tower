@@ -141,7 +141,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
     ) {
         item {
             TowerHeroPanel {
-                StatusBadge(label = if (state.loading) "SYNCING" else "MAC AGENT ACCESS", color = if (state.loading) palette.caution else palette.positive)
+                AgentAccessStatusBadge(isLoading = state.loading)
                 Spacer(Modifier.height(TowerSpacing.md))
                 Text("Connect ${agentProviderName(state.selectedProvider)}", color = palette.ink, fontSize = 26.sp)
                 Spacer(Modifier.height(TowerSpacing.sm))
@@ -291,6 +291,15 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
             }
         }
     }
+}
+
+@Composable
+internal fun AgentAccessStatusBadge(isLoading: Boolean) {
+    val palette = LocalTowerPalette.current
+    StatusBadge(
+        label = if (isLoading) "SYNCING" else "CONNECTOR SETUP",
+        color = palette.caution
+    )
 }
 
 @Composable

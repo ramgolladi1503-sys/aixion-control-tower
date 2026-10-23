@@ -58,6 +58,30 @@ class AgentAccessPermissionsTest {
     }
 
     @Test
+    fun connectorSetupIsNeverPresentedAsAConfirmedLiveConnection() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                AgentAccessStatusBadge(isLoading = false)
+            }
+        }
+
+        composeRule.onNodeWithText("CONNECTOR SETUP").assertExists()
+        composeRule.onNodeWithText("MAC AGENT ACCESS").assertDoesNotExist()
+    }
+
+    @Test
+    fun connectorStatusShowsSyncingWhileLoading() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                AgentAccessStatusBadge(isLoading = true)
+            }
+        }
+
+        composeRule.onNodeWithText("SYNCING").assertExists()
+        composeRule.onNodeWithText("CONNECTOR SETUP").assertDoesNotExist()
+    }
+
+    @Test
     fun connectorPermissionsUseDarkPaletteTextColors() {
         composeRule.setContent {
             ControlTowerTheme {
