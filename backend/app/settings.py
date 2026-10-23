@@ -184,6 +184,19 @@ def _production_validation_errors(settings: Settings) -> tuple[str, ...]:
         "Production profile is disabled: this build only supports the single-process SQLite store; "
         "implement and configure the PostgreSQL store before production startup."
     )
+    if not settings.postgres_auth_enabled:
+        errors.append(
+            "AIXION_POSTGRES_AUTH_ENABLED must be true in production to select the "
+            "lifespan-bound PostgreSQL application runtime"
+        )
+    if not settings.postgres_runtime_probe_enabled:
+        errors.append(
+            "AIXION_POSTGRES_RUNTIME_PROBE_ENABLED must be true in production"
+        )
+    if not settings.postgres_auth_rate_limits_enabled:
+        errors.append(
+            "AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED must be true in production"
+        )
     missing = sorted(name for name in REQUIRED_PRODUCTION_ENV_VARS if not _env_present(name))
     if missing:
         errors.append("Missing required production environment variables: " + ", ".join(missing))

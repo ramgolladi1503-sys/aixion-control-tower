@@ -299,6 +299,29 @@ def _codex_environment() -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize(
+    "raw_config",
+    [
+        b'{"api_base_url":"https://safe.example",'
+        b'"api_base_url":"https://attacker.example",'
+        b'"agent_id":"agent-123","project_id":"project-456"}',
+        b'{"api_base_url":"https://safe.example",'
+        b'"agent_id":"agent-123","project_id":"project-456",'
+        b'"unused":NaN}',
+    ],
+    ids=["duplicate-api-base", "nonstandard-number"],
+)
+def test_configuration_rejects_ambiguous_or_nonstandard_json(
+    tmp_path: Path,
+    raw_config: bytes,
+) -> None:
+    config_path = tmp_path / "codex.json"
+    config_path.write_bytes(raw_config)
+    config_path.chmod(0o600)
+    with pytest.raises(hook.GateError, match="config is unreadable or invalid"):
+        hook._configuration({"AIXION_CODEX_CONFIG": str(config_path)})
+
+
 def _codex_approval(body: dict) -> dict:
     return {
         "id": "approval_0123456789ab",

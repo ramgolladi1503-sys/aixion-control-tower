@@ -222,8 +222,17 @@ def _configuration(env: dict[str, str]) -> dict[str, str]:
                 raw = stream.read(MAX_CONFIG_BYTES + 1)
             if len(raw) > MAX_CONFIG_BYTES:
                 raise GateError("Codex config exceeds its size limit")
-            config = json.loads(raw)
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # Config selects the API, agent, project, and credential source. Do
+            # not silently accept duplicate keys or JavaScript-only constants:
+            # the hook applies the same strict JSON rules to provider input and
+            # API responses, so configuration must have one unambiguous value
+            # for every field as well.
+            config = json.loads(
+                raw,
+                parse_constant=_reject_nonstandard_json_constant,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
             raise GateError("Codex config is unreadable or invalid") from exc
     elif not all(env.get(name) for name in (
         "AIXION_API_BASE_URL", "AIXION_AGENT_ID", "AIXION_PROJECT_ID"

@@ -606,6 +606,33 @@ def test_production_profile_fails_closed_until_postgresql_store_exists(
         validate_startup_environment()
 
 
+def test_production_requires_postgres_application_runtime_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "false")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED", "false")
+
+    settings = get_settings()
+
+    assert any(
+        "AIXION_POSTGRES_AUTH_ENABLED must be true in production" in error
+        for error in settings.validation_errors
+    )
+    assert any(
+        "AIXION_POSTGRES_RUNTIME_PROBE_ENABLED must be true in production" in error
+        for error in settings.validation_errors
+    )
+    assert any(
+        "AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED must be true in production"
+        in error
+        for error in settings.validation_errors
+    )
+    with pytest.raises(RuntimeError, match="Invalid Aixion production environment"):
+        validate_startup_environment()
+
+
 def test_production_rejects_any_sqlite_database_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
