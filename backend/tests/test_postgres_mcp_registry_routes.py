@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from app import main, mcp_registry_routes
 from app.application_repositories import ApplicationRepositories
 from app.mcp_gateway_routes import child_received_count_for_test
-from app.models import AuthUser, Project, UserRole, Workspace
+from app.models import AuthUser, Project, User, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
 from app.store import store
 
@@ -43,6 +43,15 @@ def postgres_mcp_registry_route_runtime(
             name="MCP registry route workspace",
             owner_user_id=f"user_{uuid.uuid4().hex}",
         )
+        persisted_user = User(
+            id=workspace.owner_user_id,
+            email="mcp-reviewer@example.test",
+            display_name="MCP Reviewer",
+            role=UserRole.OWNER,
+            password_hash="0" * 64,
+            password_salt="0" * 32,
+            workspace_id=workspace.id,
+        )
         project = Project(
             id=f"project_{uuid.uuid4().hex}",
             name="MCP registry route project",
@@ -52,6 +61,20 @@ def postgres_mcp_registry_route_runtime(
             connection.execute(
                 "INSERT INTO workspaces(workspace_id,payload) VALUES (%s,%s)",
                 (workspace.id, Jsonb(workspace.model_dump(mode="json"))),
+            )
+            connection.execute(
+                "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    persisted_user.id,
+                    persisted_user.workspace_id,
+                    persisted_user.email,
+                    persisted_user.email.lower(),
+                    persisted_user.role,
+                    persisted_user.disabled,
+                    persisted_user.email_verified,
+                    Jsonb(persisted_user.model_dump(mode="json")),
+                ),
             )
             connection.execute(
                 "INSERT INTO projects(project_id,workspace_id,payload) VALUES (%s,%s,%s)",
