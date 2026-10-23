@@ -3656,17 +3656,64 @@ def test_postgres_apply_changes_route_is_atomic_and_recovers_without_second_writ
     assert persisted is not None
     if rollback_completion:
         assert persisted.status == ApplyChangeIntentStatus.REMOTE_VERIFIED
+        # A process restart loses the original runtime/repository objects. Build
+        # a fresh lifespan-style bundle over the same durable schema before
+        # retrying; recovery must discover the remote commit with GETs only.
+        runtime_before_restart = runtime
+        runtime_after_restart = PostgresRuntime(
+            _dsn="postgresql://test-runtime/agent-run-routes-restarted",
+            profile="test",
+            _connector=connect,
+        )
+        restarted_repositories = runtime_after_restart.repositories
+        assert restarted_repositories is not runtime_repositories
+        monkeypatch.setattr(
+            main.app.state, "postgres_runtime", runtime_after_restart, raising=False
+        )
+        monkeypatch.setattr(
+            main.app.state, "postgres_repositories", restarted_repositories, raising=False
+        )
+        for state_name, repository_name in {
+            "agent_run_repository": "agent_runs",
+            "agent_task_repository": "agent_tasks",
+            "approval_decision_repository": "approval_decisions",
+            "trust_repository": "trust",
+            "trust_event_repository": "trust_events",
+            "agent_run_branch_intent_repository": "agent_run_branch_intents",
+        }.items():
+            monkeypatch.setattr(
+                main.app.state,
+                state_name,
+                getattr(restarted_repositories, repository_name),
+                raising=False,
+            )
+        assert main.app.state.postgres_runtime is not runtime_before_restart
+        assert restarted_repositories.agent_runs.get(run_id) is not None
+        restarted_intents = restarted_repositories.agent_run_apply_change_intents
+        restarted_intent = restarted_intents.get_for_step(
+            workspace_id=workspace.id,
+            run_id=run_id,
+            step_id=apply_step.id,
+            idempotency_key=apply_step.idempotency_key,
+        )
+        assert restarted_intent is not None
+        assert restarted_intent.status == ApplyChangeIntentStatus.REMOTE_VERIFIED
         retry = client.post(
             f"/agent/runs/{run_id}/retry",
             json={"step_id": apply_step.id, "reason": "Recover verified outcome"},
         )
         assert retry.status_code == 200, retry.text
-        monkeypatch.setattr(runtime_repositories.agent_runs, "commit_step_completion", original_commit)
+        calls_before_recovery = len(http_calls)
         recovered = client.post(
             f"/agent/runs/{run_id}/execute-next",
             json={"worker_id": "postgres-apply-recovery-test", "timeout_seconds": 10},
         )
         assert recovered.status_code == 200, recovered.text
+        recovery_calls = http_calls[calls_before_recovery:]
+        assert recovery_calls
+        assert all(method == "GET" for method, _call in recovery_calls)
+        runtime_repositories = restarted_repositories
+        intents = restarted_intents
     assert sum(method == "POST" for method, _call in http_calls) == 1
     assert intent_marker == persisted.id
 
