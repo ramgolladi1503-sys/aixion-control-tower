@@ -125,8 +125,9 @@ def postgres_branch_execution_dependencies(
                 approval_id=approval.id, step_id=step.id, action_id=action.id,
                 lease_id=lease.id, idempotency_key=step.idempotency_key,
                 repository=repository, source_branch=SOURCE_BRANCH, target_ref=target_ref,
-                source_sha=source_sha, lease_token_hash=sha256_hex(worker_lease_token),
-                initial_lease_token_hash=sha256_hex(worker_lease_token),
+                source_sha=source_sha,
+                lease_token_hash=sha256_hex({"lease_token": worker_lease_token}),
+                initial_lease_token_hash=sha256_hex({"lease_token": worker_lease_token}),
                 run_revision=current_run.updated_at, step_revision=current_step.updated_at,
                 created_at=stamp, updated_at=stamp,
             )
