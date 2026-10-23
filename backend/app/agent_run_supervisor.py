@@ -43,6 +43,13 @@ from .agent_run_repository import (
     PostgresAgentRunRepository,
     SQLiteAgentRunRepository,
 )
+from .postgres_agent_run_branch_executor import (
+    BranchExecutionRequest,
+    BranchExecutionState,
+    BranchCompletion,
+    PostgresCreateBranchCoordinator,
+)
+from .postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus
 from .agent_task_repository import (
     AgentTaskRepository,
     PostgresAgentTaskRepository,
@@ -78,6 +85,9 @@ from .store import store
 from .workspace_access import agent_run_scope_is_consistent
 
 StepExecutor = Callable[[AgentRun, AgentRunStep, int], AgentRunStepExecutionResult]
+PostgresBranchRequestFactory = Callable[
+    [AgentRun, AgentRunStep, str, int], BranchExecutionRequest
+]
 
 
 class AgentRunConflict(RuntimeError):
@@ -852,6 +862,98 @@ def _build_postgres_agent_run_step_completion_records(
     return updated_run, updated_steps, events, audit
 
 
+def build_postgres_branch_completion(
+    *,
+    run: AgentRun,
+    steps: list[AgentRunStep],
+    intent: AgentRunBranchIntent,
+    branch_url: str,
+    actor: str,
+    worker_lease_token: str,
+    now: datetime | None = None,
+) -> BranchCompletion:
+    """Build the atomic AgentRun/task records for a verified branch intent.
+
+    This is public so the runtime request factory can bind the coordinator's
+    completion callback without duplicating state-machine or audit logic.
+    """
+    if not isinstance(intent, AgentRunBranchIntent) or not branch_url:
+        raise AgentRunConflict("Verified PostgreSQL branch completion is incomplete.")
+    if (
+        run.id != intent.run_id
+        or run.task_id != intent.task_id
+        or run.workspace_id != intent.workspace_id
+        or run.current_step_id != intent.step_id
+        or run.lease_token != worker_lease_token
+    ):
+        raise AgentRunConflict("Branch completion does not match the committed run lease.")
+    branch_step = next((item for item in steps if item.id == intent.step_id), None)
+    if (
+        branch_step is None
+        or branch_step.run_id != run.id
+        or branch_step.task_id != run.task_id
+        or branch_step.step_type != AgentRunStepType.CREATE_BRANCH
+        or branch_step.status != AgentRunStepStatus.RUNNING
+        or branch_step.lease_token != worker_lease_token
+    ):
+        raise AgentRunConflict("Branch completion step is not the current leased step.")
+    facts = {
+        "branch_intent_id": intent.id,
+        "repository": intent.repository,
+        "source_branch": intent.source_branch,
+        "target_ref": intent.target_ref,
+        "source_sha": intent.source_sha,
+        "branch_url": branch_url,
+    }
+    result = AgentRunStepExecutionResult(
+        success=True,
+        decision=VerificationDecision.PASS,
+        reason="GitHub branch was created once and verified at the pinned source SHA.",
+        evidence={"operation_type": "github_branch_creation", **facts},
+        output_reference=branch_url,
+    )
+    updated_run, updated_steps, events, audit = (
+        _build_postgres_agent_run_step_completion_records(
+            run=run,
+            steps=steps,
+            step_type=AgentRunStepType.CREATE_BRANCH,
+            result=result,
+            worker_id=actor,
+            lease_token=worker_lease_token,
+            already_running=True,
+        )
+    )
+    for event in events:
+        if event.step_id == intent.step_id and event.event_type == AgentRunEventType.STEP_SUCCEEDED:
+            event.metadata.update(facts)
+    audit.details.update(facts)
+    event = AgentTaskEvent(
+        task_id=intent.task_id,
+        event_type=AgentTaskEventType.NOTE,
+        message="Worker created and verified the approved GitHub feature branch.",
+        actor=actor,
+        metadata={"operation_type": "github_branch_creation", **facts},
+    )
+    task_audit = AuditEvent(
+        event_type="agent_task.branch_created",
+        entity_id=intent.task_id,
+        workspace_id=intent.workspace_id,
+        actor=actor,
+        details=facts,
+    )
+    return BranchCompletion(
+        expected_run=run.model_copy(deep=True),
+        updated_run=updated_run,
+        expected_steps=[item.model_copy(deep=True) for item in steps],
+        updated_steps=updated_steps,
+        events=events,
+        audit=audit,
+        branch_task_event=event,
+        branch_task_audit=task_audit,
+        now=now or _now(),
+    )
+
+
 def execute_next_step(
     run_id: str,
     *,
@@ -862,7 +964,18 @@ def execute_next_step(
     task_repository: AgentTaskRepository | None = None,
     approval_repository: ApprovalDecisionRepository | None = None,
     run_repository: AgentRunRepository | None = None,
+    postgres_branch_coordinator: PostgresCreateBranchCoordinator | None = None,
+    postgres_branch_request_factory: PostgresBranchRequestFactory | None = None,
 ) -> AgentRunStepExecutionResult:
+    if (postgres_branch_coordinator is None) != (postgres_branch_request_factory is None):
+        raise AgentRunConflict(
+            "PostgreSQL branch coordinator and request factory must be injected together."
+        )
+    if postgres_branch_coordinator is not None and (
+        not isinstance(postgres_branch_coordinator, PostgresCreateBranchCoordinator)
+        or not callable(postgres_branch_request_factory)
+    ):
+        raise AgentRunConflict("PostgreSQL branch execution injections have invalid types.")
     active_run_repository = run_repository
     if active_run_repository is not None and not isinstance(
         active_run_repository,
@@ -882,16 +995,23 @@ def execute_next_step(
         run_events = active_run_repository.list_events_for_run(run_id)
         store.project_agent_run_snapshot(run, run_steps, run_events)
     postgres_repository_execution = isinstance(active_run_repository, PostgresAgentRunRepository)
+    if postgres_branch_coordinator is not None and not postgres_repository_execution:
+        raise AgentRunConflict("PostgreSQL CREATE_BRANCH injection is unavailable for SQLite runs.")
     if postgres_repository_execution:
         current_step = store.agent_run_steps.get(run.current_step_id or "")
         if current_step is None or current_step.step_type not in {
             AgentRunStepType.VALIDATE_SCOPE,
             AgentRunStepType.VERIFY_RESULT,
             AgentRunStepType.SEAL_EVIDENCE,
-        }:
+        } and not (
+            current_step.step_type == AgentRunStepType.CREATE_BRANCH
+            and postgres_branch_coordinator is not None
+            and postgres_branch_request_factory is not None
+        ):
             raise AgentRunConflict(
                 "PostgreSQL AgentRun execution currently supports only the "
-                "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps."
+                "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), "
+                "VERIFY_RESULT, and SEAL_EVIDENCE steps."
             )
         if current_step.step_type in {
             AgentRunStepType.VALIDATE_SCOPE,
@@ -975,7 +1095,11 @@ def execute_next_step(
         AgentRunStepType.VALIDATE_SCOPE,
         AgentRunStepType.VERIFY_RESULT,
         AgentRunStepType.SEAL_EVIDENCE,
-    }:
+    } and not (
+        step.step_type == AgentRunStepType.CREATE_BRANCH
+        and postgres_branch_coordinator is not None
+        and postgres_branch_request_factory is not None
+    ):
         release_run_lease(
             run,
             worker_id=worker_id,
@@ -984,7 +1108,8 @@ def execute_next_step(
         )
         raise AgentRunConflict(
             "PostgreSQL AgentRun execution currently supports only the "
-            "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps."
+            "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), "
+            "VERIFY_RESULT, and SEAL_EVIDENCE steps."
         )
 
     if (
@@ -1359,6 +1484,90 @@ def execute_next_step(
     expected_steps = [item.model_copy(deep=True) for item in _run_steps(run.id)]
     persisted_event_ids = {event.id for event in _run_events(run.id)}
 
+    coordinated_branch_result: AgentRunStepExecutionResult | None = None
+    if postgres_repository_execution and step.step_type == AgentRunStepType.CREATE_BRANCH:
+        if postgres_branch_coordinator is None or postgres_branch_request_factory is None:
+            raise AgentRunConflict(
+                "PostgreSQL CREATE_BRANCH requires its dedicated coordinator and request factory."
+            )
+        try:
+            request = postgres_branch_request_factory(
+                expected_run, step.model_copy(deep=True), lease_token, timeout_seconds
+            )
+            branch_step_snapshot = next(
+                (item for item in expected_steps if item.id == step.id), None
+            )
+            if (
+                not isinstance(request, BranchExecutionRequest)
+                or request.expected_run != expected_run
+                or request.expected_step != branch_step_snapshot
+                or request.worker_lease_token != lease_token
+                or request.timeout_seconds != timeout_seconds
+            ):
+                raise AgentRunConflict(
+                    "PostgreSQL CREATE_BRANCH request factory returned a mismatched run or lease."
+                )
+            branch_result = postgres_branch_coordinator.execute(request)
+        except Exception as error:
+            # The durable intent/POST claim, when present, is authoritative.
+            # Never route an ambiguous provider effect into the legacy executor.
+            coordinated_branch_result = AgentRunStepExecutionResult(
+                success=False,
+                decision=VerificationDecision.NEEDS_HUMAN,
+                reason=(
+                    "PostgreSQL branch execution could not be reconciled safely: "
+                    f"{type(error).__name__}."
+                ),
+                evidence={"operation_type": "github_branch_creation", "reconciliation_required": True},
+            )
+        else:
+            if branch_result.state == BranchExecutionState.COMPLETED:
+                committed_run = active_run_repository.get(run.id)
+                committed_steps = active_run_repository.list_steps_for_run(run.id)
+                committed_events = active_run_repository.list_events_for_run(run.id)
+                if committed_run is None:
+                    raise AgentRunConflict(
+                        "Committed PostgreSQL branch completion could not be reloaded."
+                    )
+                store.project_agent_run_snapshot(
+                    committed_run, committed_steps, committed_events
+                )
+                completed = next(
+                    (item for item in committed_steps if item.id == step.id), None
+                )
+                if completed is None or completed.status != AgentRunStepStatus.SUCCEEDED:
+                    raise AgentRunConflict(
+                        "PostgreSQL branch completion transaction returned without a succeeded step."
+                    )
+                return AgentRunStepExecutionResult(
+                    success=True,
+                    decision=completed.decision or VerificationDecision.PASS,
+                    reason=completed.reason,
+                    evidence=completed.evidence,
+                    output_reference=completed.output_reference,
+                )
+            unresolved = (
+                branch_result.state == BranchExecutionState.RECONCILIATION_REQUIRED
+                or (
+                    branch_result.intent is not None
+                    and branch_result.intent.status
+                    == BranchIntentStatus.RECONCILIATION_REQUIRED
+                )
+            )
+            decision = VerificationDecision.NEEDS_HUMAN if unresolved else VerificationDecision.BLOCK_POLICY
+            coordinated_branch_result = AgentRunStepExecutionResult(
+                success=False,
+                decision=decision,
+                reason=branch_result.reason,
+                evidence={
+                    "operation_type": "github_branch_creation",
+                    "branch_intent_id": branch_result.intent.id if branch_result.intent else None,
+                    "intent_status": branch_result.intent.status.value if branch_result.intent else None,
+                    "verified_sha": branch_result.verified_sha,
+                    "branch_url": branch_result.branch_url,
+                },
+            )
+
     if (
         postgres_repository_execution
         and step.step_type == AgentRunStepType.SEAL_EVIDENCE
@@ -1447,12 +1656,15 @@ def execute_next_step(
 
     try:
         raise_if_fault_configured(run.id, step.step_type)
-        effective_executor = executor or DefaultAgentRunStepExecutor(
-            task_repository=task_repository,
-            approval_repository=approval_repository,
-            run_repository=run_repository,
-        )
-        result = effective_executor(run, step, timeout_seconds)
+        if coordinated_branch_result is not None:
+            result = coordinated_branch_result
+        else:
+            effective_executor = executor or DefaultAgentRunStepExecutor(
+                task_repository=task_repository,
+                approval_repository=approval_repository,
+                run_repository=run_repository,
+            )
+            result = effective_executor(run, step, timeout_seconds)
     except InjectedAgentRunFault as error:
         _append_event(
             run,

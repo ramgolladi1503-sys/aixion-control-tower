@@ -23,6 +23,37 @@ GITHUB_API_BASE_URL = "https://api.github.com"
 DEFAULT_SOURCE_BRANCH = "main"
 
 
+class GitHubBranchObservationError(RuntimeError):
+    """Base class for failures while observing a GitHub branch."""
+
+
+class GitHubBranchPermissionError(GitHubBranchObservationError):
+    """GitHub rejected the request because credentials or permissions are insufficient."""
+
+
+class GitHubBranchTransportError(GitHubBranchObservationError):
+    """The GitHub API could not be reached or the request timed out."""
+
+
+class GitHubBranchProviderError(GitHubBranchObservationError):
+    """GitHub returned an unexpected response or a provider-side failure."""
+
+
+@dataclass(frozen=True)
+class GitHubBranchObservation:
+    repository: str
+    branch: str
+    found: bool
+    sha: str | None = None
+    html_url: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.found and (not self.sha or not self.html_url):
+            raise ValueError("A found branch observation requires both sha and html_url")
+        if not self.found and (self.sha is not None or self.html_url is not None):
+            raise ValueError("A not-found branch observation cannot contain sha or html_url")
+
+
 @dataclass
 class GitHubBranchCreateResult:
     repository: str
@@ -41,6 +72,12 @@ class GitHubBranchClient(Protocol):
     def create_branch(self, repository: str, branch: str, source_sha: str) -> GitHubBranchCreateResult: ...
 
 
+class GitHubBranchObservationClient(Protocol):
+    """Optional read-only observation capability, separate for legacy client compatibility."""
+
+    def observe_branch(self, repository: str, branch: str) -> GitHubBranchObservation: ...
+
+
 class GitHubRestBranchClient:
     def __init__(self, token: str, *, base_url: str = GITHUB_API_BASE_URL, timeout_seconds: float = 20.0) -> None:
         self.token = token
@@ -56,6 +93,42 @@ class GitHubRestBranchClient:
 
     def _ref_url(self, repository: str, branch: str) -> str:
         return f"{self.base_url}/repos/{repository}/git/ref/heads/{branch}"
+
+    def observe_branch(self, repository: str, branch: str) -> GitHubBranchObservation:
+        """Observe a target ref without mutation; distinguish absence from API failures."""
+        try:
+            response = httpx.get(
+                self._ref_url(repository, branch), headers=self._headers(), timeout=self.timeout_seconds
+            )
+        except httpx.TimeoutException as error:
+            raise GitHubBranchTransportError("GitHub branch observation timed out") from error
+        except httpx.TransportError as error:
+            raise GitHubBranchTransportError(f"GitHub branch observation transport failed: {error}") from error
+
+        if response.status_code == 404:
+            return GitHubBranchObservation(repository=repository, branch=branch, found=False)
+        if response.status_code in {401, 403}:
+            raise GitHubBranchPermissionError(
+                f"GitHub branch observation permission denied: {response.status_code} {response.text[:300]}"
+            )
+        if response.status_code != 200:
+            raise GitHubBranchProviderError(
+                f"GitHub branch observation failed: {response.status_code} {response.text[:300]}"
+            )
+
+        try:
+            payload = response.json()
+        except (ValueError, json.JSONDecodeError) as error:
+            raise GitHubBranchProviderError("GitHub branch response was not valid JSON") from error
+        sha = payload.get("object", {}).get("sha") if isinstance(payload, dict) else None
+        if not isinstance(sha, str) or not sha.strip():
+            raise GitHubBranchProviderError("GitHub branch response did not include object.sha")
+        html_url = payload.get("_links", {}).get("html") if isinstance(payload, dict) else None
+        if not isinstance(html_url, str) or not html_url.startswith("https://github.com/"):
+            raise GitHubBranchProviderError("GitHub branch response did not include a valid GitHub HTML URL")
+        return GitHubBranchObservation(
+            repository=repository, branch=branch, found=True, sha=sha, html_url=html_url
+        )
 
     def branch_exists(self, repository: str, branch: str) -> bool:
         response = httpx.get(self._ref_url(repository, branch), headers=self._headers(), timeout=self.timeout_seconds)

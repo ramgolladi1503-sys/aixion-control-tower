@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import Mock, patch
+
+import httpx
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.agent_task_repository import SQLiteAgentTaskRepository
-from app.agent_worker_github_branch import GitHubBranchCreateResult, run_agent_worker_github_branch_creation
+from app.agent_worker_github_branch import (
+    GitHubBranchCreateResult,
+    GitHubBranchObservation,
+    GitHubBranchPermissionError,
+    GitHubBranchProviderError,
+    GitHubBranchTransportError,
+    GitHubRestBranchClient,
+    run_agent_worker_github_branch_creation,
+)
 from app.models import ApprovalRequest, ApprovalStatus, AgentProvider, Project, RiskAssessment, RiskLevel
 from app.store import store
 
@@ -153,3 +165,74 @@ def test_github_branch_worker_requires_task_selector() -> None:
 
     assert result.success is False
     assert result.reason == "Provide task_id or set first_approved=true."
+
+
+def _github_response(status_code: int, payload: object = None, *, text: str = "") -> Mock:
+    response = Mock()
+    response.status_code = status_code
+    response.text = text
+    response.json.return_value = payload
+    return response
+
+
+def test_github_rest_observes_target_ref_sha_and_url() -> None:
+    response = _github_response(
+        200,
+        {
+            "object": {"sha": "deadbeef"},
+            "_links": {"html": "https://github.com/acme/repo/tree/feature/demo"},
+        },
+    )
+    client = GitHubRestBranchClient("token", base_url="https://api.example.test")
+
+    with patch("app.agent_worker_github_branch.httpx.get", return_value=response) as get:
+        observed = client.observe_branch("acme/repo", "feature/demo")
+
+    assert observed == GitHubBranchObservation(
+        repository="acme/repo",
+        branch="feature/demo",
+        found=True,
+        sha="deadbeef",
+        html_url="https://github.com/acme/repo/tree/feature/demo",
+    )
+    assert get.call_args.args[0] == "https://api.example.test/repos/acme/repo/git/ref/heads/feature/demo"
+    assert get.call_args.kwargs["timeout"] == 20.0
+
+
+def test_github_rest_observes_not_found_without_treating_as_failure() -> None:
+    client = GitHubRestBranchClient("token")
+    with patch("app.agent_worker_github_branch.httpx.get", return_value=_github_response(404)):
+        observed = client.observe_branch("acme/repo", "feature/missing")
+
+    assert observed == GitHubBranchObservation(
+        repository="acme/repo", branch="feature/missing", found=False
+    )
+
+
+def test_github_rest_observation_classifies_permission_transport_and_provider_errors() -> None:
+    client = GitHubRestBranchClient("token")
+    for status_code in (401, 403):
+        with patch(
+            "app.agent_worker_github_branch.httpx.get",
+            return_value=_github_response(status_code, text="denied"),
+        ), pytest.raises(GitHubBranchPermissionError):
+            client.observe_branch("acme/repo", "feature/demo")
+
+    with patch(
+        "app.agent_worker_github_branch.httpx.get", side_effect=httpx.ConnectError("offline")
+    ), pytest.raises(GitHubBranchTransportError):
+        client.observe_branch("acme/repo", "feature/demo")
+
+    with patch(
+        "app.agent_worker_github_branch.httpx.get", return_value=_github_response(503, text="unavailable")
+    ), pytest.raises(GitHubBranchProviderError):
+        client.observe_branch("acme/repo", "feature/demo")
+
+
+def test_github_rest_observation_rejects_malformed_success_payload() -> None:
+    client = GitHubRestBranchClient("token")
+    response = _github_response(200, {"object": {"sha": "deadbeef"}, "_links": {}})
+    with patch("app.agent_worker_github_branch.httpx.get", return_value=response), pytest.raises(
+        GitHubBranchProviderError, match="valid GitHub HTML URL"
+    ):
+        client.observe_branch("acme/repo", "feature/demo")

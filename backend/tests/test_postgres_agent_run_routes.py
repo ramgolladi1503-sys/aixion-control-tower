@@ -2771,11 +2771,20 @@ def test_postgres_agent_run_capability_binding_is_durable_and_idempotent(
     assert revoked_retry.status_code == 409
 
 
-def test_postgres_agent_run_rejects_side_effect_step_before_claim_or_trust_mutation(
+@pytest.mark.parametrize(
+    "unsupported_step_type",
+    [
+        AgentRunStepType.APPLY_CHANGES,
+        AgentRunStepType.RUN_VALIDATION,
+        AgentRunStepType.CREATE_PULL_REQUEST,
+    ],
+)
+def test_postgres_agent_run_rejects_unsupported_side_effect_before_claim_or_trust_mutation(
     postgres_agent_run_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
+    unsupported_step_type: AgentRunStepType,
 ) -> None:
-    """PostgreSQL must not execute a side effect without durable run/trust coupling."""
+    """Unsupported PostgreSQL side effects fail closed before execution or trust writes."""
     import app.agent_run_routes as agent_run_routes
 
     def unexpected_execute(*_args, **_kwargs):
@@ -2805,11 +2814,13 @@ def test_postgres_agent_run_rejects_side_effect_step_before_claim_or_trust_mutat
     assert run is not None
     steps = repositories.agent_runs.list_steps_for_run(run_id)
     step = steps[0]
-    # Put the durable fixture at the first externally-effectful step. The route
-    # must reject it before acquiring a worker lease or touching trust state.
+    # Put the durable fixture at an externally-effectful step that has no
+    # dedicated PostgreSQL executor. The route must reject it before acquiring
+    # a worker lease or touching trust state. CREATE_BRANCH has its own guarded
+    # PostgreSQL path and is covered separately.
     run.current_step_index = step.sequence
     run.updated_at = now_utc()
-    step.step_type = AgentRunStepType.CREATE_BRANCH
+    step.step_type = unsupported_step_type
     step.status = AgentRunStepStatus.READY
     step.updated_at = run.updated_at
     with connect() as conn:
@@ -2853,7 +2864,7 @@ def test_postgres_agent_run_rejects_side_effect_step_before_claim_or_trust_mutat
     )
 
     assert rejected.status_code == 409
-    assert "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE" in rejected.json()["detail"]
+    assert "PostgreSQL" in rejected.json()["detail"]
     assert repositories.agent_runs.get(run_id) == before_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
     with connect() as conn:
@@ -2869,6 +2880,104 @@ def test_postgres_agent_run_rejects_side_effect_step_before_claim_or_trust_mutat
         assert conn.execute(
             "SELECT count(*) FROM audit_events WHERE entity_id=%s", (run_id,)
         ).fetchone()[0] == audits_before
+
+
+@pytest.mark.parametrize("bundle_state", ["missing", "mismatched"])
+def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_bundle(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_state: str,
+) -> None:
+    """CREATE_BRANCH must not execute through partial or mismatched app bindings."""
+    import app.agent_run_routes as agent_run_routes
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        state=state,
+        client=client,
+    )
+    attached = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    assert attached.status_code == 200, attached.text
+
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None
+    step = repositories.agent_runs.list_steps_for_run(run_id)[0]
+    run.current_step_index = step.sequence
+    run.updated_at = now_utc()
+    step.step_type = AgentRunStepType.CREATE_BRANCH
+    step.status = AgentRunStepStatus.READY
+    step.updated_at = run.updated_at
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (run.updated_at, Jsonb(run.model_dump(mode="json")), run_id, workspace.id),
+        )
+        conn.execute(
+            "UPDATE agent_run_steps SET step_type=%s,status=%s,updated_at=%s,payload=%s "
+            "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+            (
+                step.step_type.value,
+                step.status.value,
+                step.updated_at,
+                Jsonb(step.model_dump(mode="json")),
+                step.id,
+                run_id,
+                workspace.id,
+            ),
+        )
+
+    before_run = repositories.agent_runs.get(run_id)
+    before_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    with connect() as conn:
+        intents_before = conn.execute(
+            "SELECT count(*) FROM agent_run_branch_intents WHERE run_id=%s", (run_id,)
+        ).fetchone()[0]
+
+    def unexpected_execution(*_args, **_kwargs):
+        raise AssertionError("Missing repository authority reached AgentRun execution")
+
+    def unexpected_provider(*_args, **_kwargs):
+        raise AssertionError("Missing repository authority initialized a provider client")
+
+    monkeypatch.setattr(agent_run_routes, "execute_next_step", unexpected_execution)
+    monkeypatch.setattr(
+        "app.postgres_agent_run_branch_route._default_client", unexpected_provider
+    )
+    monkeypatch.setattr(
+        main.app.state, "postgres_repositories", repositories, raising=False
+    )
+    if bundle_state == "mismatched":
+        monkeypatch.setattr(
+            main.app.state, "postgres_runtime", SimpleNamespace(repositories=object()), raising=False
+        )
+    else:
+        monkeypatch.setattr(main.app.state, "postgres_runtime", None, raising=False)
+
+    rejected = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "postgres-branch-authority-guard", "timeout_seconds": 10},
+    )
+
+    assert rejected.status_code == 503, rejected.text
+    assert "lifespan-owned repository bundle" in rejected.json()["detail"]
+    assert repositories.agent_runs.get(run_id) == before_run
+    assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_branch_intents WHERE run_id=%s", (run_id,)
+        ).fetchone()[0] == intents_before
 
 
 def test_postgres_credential_revocation_route_uses_durable_workspace_state(

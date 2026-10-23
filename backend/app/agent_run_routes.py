@@ -64,6 +64,7 @@ from .application_repositories import ApplicationRepositories
 from .notification_outbox_repository import PostgresNotificationOutboxRepository
 from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .postgres_trust_repository import PostgresTrustRepository
+from .postgres_agent_run_branch_route import postgres_branch_execution_dependencies
 from .approval_decisions import (
     agent_task_repository,
     approval_decision_repository,
@@ -102,6 +103,7 @@ NON_RETRYABLE_STEP_STATUSES = {
     AgentRunStepStatus.CANCELLED,
     AgentRunStepStatus.SKIPPED,
 }
+POSTGRES_BRANCH_SOURCE_REF = "main"
 _EXECUTION_LOCK_GUARD = Lock()
 _EXECUTION_LOCKS: dict[str, Lock] = {}
 
@@ -793,13 +795,16 @@ def execute_run_next_step(
             AgentRunStepType.VALIDATE_SCOPE,
             AgentRunStepType.VERIFY_RESULT,
             AgentRunStepType.SEAL_EVIDENCE,
-        }
+        } or (
+            isinstance(run_repository, PostgresAgentRunRepository)
+            and current_step.step_type == AgentRunStepType.CREATE_BRANCH
+        )
         if isinstance(run_repository, PostgresAgentRunRepository) and not postgres_supported_step:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "PostgreSQL AgentRun execution currently supports only the "
-                    "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps."
+                    "PostgreSQL AgentRun execution supports VALIDATE_SCOPE, VERIFY_RESULT, "
+                    "SEAL_EVIDENCE, and CREATE_BRANCH with complete durable branch authority."
                 ),
             )
         if (
@@ -826,6 +831,19 @@ def execute_run_next_step(
                 isinstance(run_repository, PostgresAgentRunRepository)
                 and postgres_supported_step
             )
+            branch_coordinator = None
+            branch_request_factory = None
+            if (
+                isinstance(run_repository, PostgresAgentRunRepository)
+                and current_step.step_type == AgentRunStepType.CREATE_BRANCH
+            ):
+                if request is None:
+                    raise AgentRunConflict("PostgreSQL CREATE_BRANCH requires an app-bound request.")
+                branch_coordinator, branch_request_factory = (
+                    postgres_branch_execution_dependencies(
+                        request=request, run=run, step=current_step, actor=user
+                    )
+                )
             trust_actions = []
             if not postgres_governed_step:
                 ensure_run_capability(run, user=user)
@@ -843,6 +861,8 @@ def execute_run_next_step(
                 task_repository=task_repository,
                 approval_repository=approval_repository,
                 run_repository=run_repository,
+                postgres_branch_coordinator=branch_coordinator,
+                postgres_branch_request_factory=branch_request_factory,
             )
             consume_run_step_actions(
                 trust_actions,
