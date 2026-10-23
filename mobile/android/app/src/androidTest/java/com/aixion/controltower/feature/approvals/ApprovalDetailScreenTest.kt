@@ -213,6 +213,36 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun exactToolReviewAcknowledgementResetsWhenInvocationChanges() {
+        val original = approval(ApprovalStatus.REQUESTED).copy(
+            files = listOf(
+                FileChangeSummary(
+                    path = "codex://tool/shell",
+                    changeType = "tool_call",
+                    diff = "{\"command\":\"echo unchanged\"}",
+                    risk = RiskLevel.HIGH
+                )
+            )
+        )
+        val currentApproval = androidx.compose.runtime.mutableStateOf(original)
+        composeRule.setContent {
+            ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+        }
+
+        composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
+            .performScrollTo()
+            .performClick()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+
+        composeRule.runOnIdle {
+            currentApproval.value = original.copy(sourceInvocationId = "different-invocation")
+        }
+
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+        composeRule.onNodeWithText("Deny").assertIsEnabled()
+    }
+
+    @Test
     fun exactToolReviewAcknowledgementResetsWhenRevisionRequestReopens() {
         val original = approval(ApprovalStatus.REQUESTED).copy(
             files = listOf(

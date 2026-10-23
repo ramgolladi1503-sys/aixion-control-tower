@@ -198,7 +198,10 @@ fun ApprovalDetailContent(
         !isBlocked && !hasUnsupportedData && decisionBlockReason == null
     val hasRequiredActions = approval.requiredActions.isNotEmpty()
     val hasExactToolRequest = approval.hasExactToolRequestPayload()
-    var exactToolRequestReviewed by remember(approval.id, approval.files, approval.risk, approval.status) {
+    // Acknowledgement applies to the entire reviewed snapshot, including provider and
+    // invocation identity. If the backend rebinds an approval to another invocation,
+    // the reviewer must inspect the request context again before approving.
+    var exactToolRequestReviewed by remember(approval) {
         mutableStateOf(false)
     }
     val requiresFullDiffReview = requiresExplicitRiskConfirmation(approval.risk) &&
