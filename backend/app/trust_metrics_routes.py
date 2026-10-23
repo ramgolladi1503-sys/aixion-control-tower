@@ -19,7 +19,6 @@ def get_trust_metrics(
     request: Request,
     user: AuthUser = MaintainerDependency,
 ) -> Response:
-    workspace_id = workspace_id_for_user(user)
     runtime = getattr(request.app.state, "postgres_runtime", None)
     repositories = getattr(request.app.state, "postgres_repositories", None)
     selected_bindings = False
@@ -64,6 +63,14 @@ def get_trust_metrics(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="PostgreSQL trust metrics require the complete app-bound repository bundle",
         )
+
+    if selected_bindings:
+        workspace_id = workspace_id_for_user(
+            user,
+            membership_repository=repositories.workspace_membership,
+        )
+    else:
+        workspace_id = workspace_id_for_user(user)
 
     if selected_bindings:
         try:
