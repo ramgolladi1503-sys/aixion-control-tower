@@ -314,6 +314,56 @@ def test_list_due_pending_validates_before_limit_to_prevent_corrupt_row_starvati
     assert "approval_invalid_000" in caplog.text
 
 
+def test_list_due_pending_skips_malformed_payload_and_returns_valid_due_approval(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database = tmp_path / "approval_due_malformed_payload.sqlite3"
+    now = datetime.now(timezone.utc)
+    valid = _approval().model_copy(
+        update={
+            "id": "approval_valid_malformed_neighbor",
+            "project_id": "project_malformed_neighbor",
+            "workspace_id": "workspace_malformed_neighbor",
+            "status": ApprovalStatus.PENDING_REVIEW,
+            "created_at": now - timedelta(minutes=5),
+            "expires_at": now - timedelta(minutes=1),
+        }
+    )
+    _seed_database(database, valid)
+    malformed_id = "approval_malformed_neighbor"
+    malformed_payload = {
+        "id": malformed_id,
+        "project_id": valid.project_id,
+        "workspace_id": valid.workspace_id,
+        "status": ApprovalStatus.PENDING_REVIEW.value,
+        "created_at": (now - timedelta(minutes=4)).isoformat(),
+        "expires_at": (now - timedelta(minutes=2)).isoformat(),
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            (
+                "approval_request",
+                malformed_id,
+                json.dumps(malformed_payload, separators=(",", ":")),
+            ),
+        )
+
+    with caplog.at_level("WARNING", logger="app.approval_repository"):
+        selected = _repository(database).list_due_pending(
+            now=now,
+            legacy_ttl_seconds=600,
+            limit=250,
+            workspace_id=valid.workspace_id,
+        )
+
+    assert [approval.id for approval in selected] == [valid.id]
+    assert "skipped malformed persisted payload" in caplog.text
+    assert malformed_id in caplog.text
+    assert "Repository test approval" not in caplog.text
+
+
 def test_recent_null_expiry_approvals_are_backfilled_in_bounded_batches(
     tmp_path: Path,
 ) -> None:

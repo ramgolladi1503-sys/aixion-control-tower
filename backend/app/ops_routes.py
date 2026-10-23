@@ -45,6 +45,10 @@ class RuntimeReadinessResponse(BaseModel):
     approval_expiry_failure_count: int = 0
     approval_expiry_last_completed_at: datetime | None = None
     approval_expiry_last_changed_count: int = 0
+    approval_expiry_task_present: bool = False
+    approval_expiry_task_running: bool = False
+    approval_expiry_last_completion_fresh: bool = False
+    approval_expiry_max_completion_age_seconds: int = 180
     app_state_repository_bindings: dict[
         str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]
     ] = Field(default_factory=dict)
@@ -165,12 +169,49 @@ def build_runtime_readiness(
     expiry_last_changed_count = max(
         0, int(getattr(application_state, "approval_expiry_last_changed_count", 0) or 0)
     )
+    try:
+        expiry_poll_seconds = max(
+            1, int(getattr(settings, "approval_recovery_poll_seconds", 60))
+        )
+    except (TypeError, ValueError):
+        expiry_poll_seconds = 60
+    expiry_max_completion_age_seconds = expiry_poll_seconds * 3
+    expiry_task = getattr(application_state, "approval_expiry_task", None)
+    expiry_task_present = expiry_task is not None
+    try:
+        expiry_task_running = expiry_task_present and not expiry_task.done()
+    except Exception:
+        # Readiness must fail closed when task state cannot be inspected.
+        expiry_task_running = False
+    expiry_last_completion_fresh = False
+    if isinstance(expiry_last_completed_at, datetime):
+        try:
+            if (
+                expiry_last_completed_at.tzinfo is not None
+                and expiry_last_completed_at.utcoffset() is not None
+            ):
+                current_time = now_utc()
+                completed_at_utc = expiry_last_completed_at.astimezone(
+                    current_time.tzinfo
+                )
+                age_seconds = (current_time - completed_at_utc).total_seconds()
+                expiry_last_completion_fresh = (
+                    age_seconds >= 0
+                    and age_seconds <= expiry_max_completion_age_seconds
+                )
+        except (OverflowError, ValueError):
+            expiry_last_completion_fresh = False
     if settings.is_production and recovery_status != "healthy":
         errors.append(
             "Approval recovery is not healthy: status=" + recovery_status
         )
-    if settings.is_production and expiry_status != "healthy":
-        errors.append("Approval expiry worker is not healthy: status=" + expiry_status)
+    if settings.is_production:
+        if expiry_status != "healthy":
+            errors.append("Approval expiry worker is not healthy: status=" + expiry_status)
+        if not expiry_task_present or not expiry_task_running:
+            errors.append("Approval expiry worker task is not running")
+        if not expiry_last_completion_fresh:
+            errors.append("Approval expiry worker completion is stale or unavailable")
     postgres_probe_status: Literal["disabled", "ready", "not_ready"] = "disabled"
     postgres_probe_schema_ready: bool | None = None
     postgres_pool_size = 0
@@ -309,6 +350,10 @@ def build_runtime_readiness(
         approval_expiry_failure_count=expiry_failure_count,
         approval_expiry_last_completed_at=expiry_last_completed_at,
         approval_expiry_last_changed_count=expiry_last_changed_count,
+        approval_expiry_task_present=expiry_task_present,
+        approval_expiry_task_running=expiry_task_running,
+        approval_expiry_last_completion_fresh=expiry_last_completion_fresh,
+        approval_expiry_max_completion_age_seconds=expiry_max_completion_age_seconds,
         app_state_repository_bindings=application_repository_bindings,
         postgres_probe_enabled=settings.postgres_runtime_probe_enabled,
         postgres_auth_rate_limits_enabled=settings.postgres_auth_rate_limits_enabled,

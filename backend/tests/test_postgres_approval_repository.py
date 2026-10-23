@@ -1519,6 +1519,43 @@ def test_postgres_due_selector_includes_recent_legacy_null_expiry_records(
     assert selected[0].expires_at is None
 
 
+def test_postgres_due_selector_skips_malformed_payload_and_returns_valid_candidate(
+    postgres_repository: tuple[
+        PostgresApprovalDecisionRepository, Callable[[], Connection]
+    ],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository, connect = postgres_repository
+    workspace, project, valid, _ = _seed(connect)
+    malformed_id = f"approval_malformed_{uuid.uuid4().hex}"
+    malformed = valid.model_copy(update={"id": malformed_id}).model_dump(mode="json")
+    malformed.pop("title")
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO approval_requests "
+            "(approval_id,project_id,workspace_id,work_order_id,source_agent_id,status,"
+            "expires_at,created_at,updated_at,version,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s)",
+            (
+                malformed_id, project.id, workspace.id, valid.work_order_id,
+                valid.source_agent_id, valid.status.value, valid.expires_at,
+                valid.created_at, valid.updated_at, Jsonb(malformed),
+            ),
+        )
+
+    with caplog.at_level("WARNING", logger="app.approval_repository"):
+        selected = repository.list_due_pending(
+            now=now_utc(),
+            legacy_ttl_seconds=600,
+            limit=250,
+            workspace_id=workspace.id,
+        )
+
+    assert [item.id for item in selected] == [valid.id]
+    assert "skipped malformed persisted payload" in caplog.text
+    assert malformed_id in caplog.text
+
+
 def test_postgres_agent_task_approval_creation_commits_task_timeline_and_audit_atomically(
     postgres_repository: tuple[
         PostgresApprovalDecisionRepository, Callable[[], Connection]

@@ -501,6 +501,9 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 poll_seconds=getattr(settings, "approval_recovery_poll_seconds", 60),
             )
         )
+        # Keep the actual task observable to readiness checks. A stale "healthy"
+        # status alone cannot prove the periodic worker is still running.
+        application.state.approval_expiry_task = expiry_task
         recovery_task = asyncio.create_task(
             _approval_recovery_loop(
                 application,
@@ -539,6 +542,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         for task in (dispatch_task, email_task, recovery_task, expiry_task):
             if task is not None:
                 task.cancel()
+        application.state.approval_expiry_task = None
         for task in (dispatch_task, email_task, recovery_task, expiry_task):
             if task is not None:
                 with suppress(asyncio.CancelledError):

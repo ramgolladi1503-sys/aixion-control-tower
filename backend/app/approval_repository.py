@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 import psycopg
+from pydantic import ValidationError
 from psycopg.types.json import Jsonb
 
 from .agent_run_models import AgentRun
@@ -1354,8 +1355,15 @@ class SQLiteApprovalDecisionRepository:
             )
         due: list[ApprovalRequest] = []
         for entity_id, approval_payload, project_payload in rows:
-            approval = ApprovalRequest.model_validate_json(approval_payload)
-            project = Project.model_validate_json(project_payload)
+            try:
+                approval = ApprovalRequest.model_validate_json(approval_payload)
+                project = Project.model_validate_json(project_payload)
+            except (ValidationError, ValueError, TypeError):
+                logger.warning(
+                    "Approval expiry selector skipped malformed persisted payload entity_id=%s",
+                    entity_id,
+                )
+                continue
             if (
                 approval.id != entity_id
                 or approval.project_id != project.id
@@ -2482,7 +2490,14 @@ class PostgresApprovalDecisionRepository:
             ).fetchall()
         approvals: list[ApprovalRequest] = []
         for payload, approval_id, row_workspace_id, project_id in rows:
-            approval = ApprovalRequest.model_validate(payload)
+            try:
+                approval = ApprovalRequest.model_validate(payload)
+            except (ValidationError, ValueError, TypeError):
+                logger.warning(
+                    "Approval expiry selector skipped malformed persisted payload entity_id=%s",
+                    approval_id,
+                )
+                continue
             if (
                 approval.id != approval_id
                 or approval.workspace_id != row_workspace_id

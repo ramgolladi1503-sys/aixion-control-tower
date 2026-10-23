@@ -382,7 +382,7 @@ def test_readiness_defaults_approval_expiry_worker_to_not_started() -> None:
 
 
 def test_readiness_reports_healthy_approval_expiry_worker() -> None:
-    completed_at = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+    completed_at = datetime.now(timezone.utc)
     state = type(
         "State",
         (),
@@ -400,6 +400,82 @@ def test_readiness_reports_healthy_approval_expiry_worker() -> None:
     assert readiness.approval_expiry_failure_count == 0
     assert readiness.approval_expiry_last_completed_at == completed_at
     assert readiness.approval_expiry_last_changed_count == 2
+    assert readiness.approval_expiry_task_present is False
+    assert readiness.approval_expiry_task_running is False
+    assert readiness.approval_expiry_last_completion_fresh is True
+
+
+class _ExpiryTask:
+    def __init__(self, done: bool = False) -> None:
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+
+def _production_expiry_readiness(monkeypatch, **state_values):
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+    settings = replace(
+        get_settings(),
+        profile="production",
+        trust_enforcement=True,
+        lease_signing_key_configured=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    base_state = {
+        "approval_recovery_status": "healthy",
+        "approval_expiry_status": "healthy",
+        "approval_expiry_failure_count": 0,
+        "approval_expiry_last_completed_at": datetime.now(timezone.utc),
+        "approval_expiry_task": _ExpiryTask(),
+    }
+    base_state.update(state_values)
+    state = type("State", (), base_state)()
+    return build_runtime_readiness(application_state=state)
+
+
+def test_production_readiness_requires_live_expiry_task(monkeypatch) -> None:
+    for task in (None, _ExpiryTask(done=True)):
+        readiness = _production_expiry_readiness(
+            monkeypatch,
+            approval_expiry_task=task,
+        )
+        assert readiness.status == "not_ready"
+        assert readiness.approval_expiry_task_running is False
+        assert "Approval expiry worker task is not running" in readiness.errors
+
+
+@pytest.mark.parametrize(
+    "completed_at",
+    [
+        datetime(2020, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 10, 23, 12, 0),  # Naive timestamps are not trusted.
+        None,
+    ],
+)
+def test_production_readiness_requires_fresh_aware_expiry_completion(
+    monkeypatch, completed_at
+) -> None:
+    readiness = _production_expiry_readiness(
+        monkeypatch,
+        approval_expiry_last_completed_at=completed_at,
+    )
+    assert readiness.status == "not_ready"
+    assert readiness.approval_expiry_last_completion_fresh is False
+    assert "Approval expiry worker completion is stale or unavailable" in readiness.errors
+
+
+def test_production_readiness_accepts_live_task_and_fresh_expiry_completion(monkeypatch) -> None:
+    readiness = _production_expiry_readiness(monkeypatch)
+
+    assert readiness.approval_expiry_task_present is True
+    assert readiness.approval_expiry_task_running is True
+    assert readiness.approval_expiry_last_completion_fresh is True
+    assert readiness.approval_expiry_max_completion_age_seconds == 180
+    assert not any(
+        error.startswith("Approval expiry worker") for error in readiness.errors
+    )
 
 
 def test_readiness_reports_failed_approval_expiry_worker_without_changing_readiness() -> None:
@@ -419,6 +495,8 @@ def test_readiness_reports_failed_approval_expiry_worker_without_changing_readin
     assert readiness.approval_expiry_status == "failed"
     assert readiness.approval_expiry_failure_count == 3
     assert readiness.approval_expiry_last_changed_count == 0
+    assert readiness.approval_expiry_task_present is False
+    assert readiness.approval_expiry_task_running is False
     # This is additive diagnostics; existing local readiness semantics are unchanged.
     assert readiness.status == "ready"
 
