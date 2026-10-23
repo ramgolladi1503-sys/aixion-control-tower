@@ -24,6 +24,7 @@ from app.agent_task_models import (
     AgentTaskStatus,
 )
 from app.agent_credential_models import AgentCredentialRecord
+from app.agent_auth_repository import SQLiteExternalAgentAuthRepository
 from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
 from app.agent_run_repository import PostgresAgentRunRepository
 from app.approval_integrity import compute_approval_payload_hash
@@ -53,6 +54,7 @@ from app.models import (
     now_utc,
 )
 from app.postgres_database import run_postgres_migrations
+from app.postgres_external_agent_auth_repository import PostgresExternalAgentAuthRepository
 from app.settings import get_settings
 
 
@@ -1071,20 +1073,24 @@ def test_invocation_heartbeat_racing_delivery_claim_cannot_revive_consumed_call(
         )
 
 
-def test_connector_revoked_after_authentication_cannot_claim_delivery(approval_case) -> None:
+@pytest.mark.parametrize("credential_change", ["revocation", "rotation"])
+def test_connector_credential_changed_after_authentication_cannot_claim_delivery(
+    approval_case, credential_change: str
+) -> None:
     agent = ExternalAgent(
-        id=f"agent_revocation_contract_{uuid.uuid4().hex}",
+        id=f"agent_credential_change_contract_{uuid.uuid4().hex}",
         provider=AgentProvider.ANTIGRAVITY,
         display_name="Revocation race connector",
         auth_type=AgentAuthType.API_KEY,
         workspace_id=approval_case.workspace.id,
     )
+    presented_token = "contract-test-agent-token"
     presented_token_hash = _store_external_agent(approval_case, agent)
     approval = _approval(
         approval_case,
         source_provider=AgentProvider.ANTIGRAVITY,
         source_agent_id=agent.id,
-        source_invocation_id=f"connector-revocation:{uuid.uuid4().hex}",
+        source_invocation_id=f"connector-credential-change:{uuid.uuid4().hex}",
         status=ApprovalStatus.PENDING_REVIEW,
         expires_at=now_utc() + timedelta(minutes=5),
     )
@@ -1110,39 +1116,100 @@ def test_connector_revoked_after_authentication_cannot_claim_delivery(approval_c
         ),
     )
 
+    auth_repository = (
+        SQLiteExternalAgentAuthRepository(approval_case.connect)
+        if approval_case.backend == "sqlite"
+        else PostgresExternalAgentAuthRepository(approval_case.connect)
+    )
+    authenticated = auth_repository.authenticate_and_consume(
+        agent_id=agent.id,
+        token=presented_token,
+        occurred_at=now_utc(),
+        window_seconds=60,
+        require_workspace=False,
+    )
+    assert authenticated.reason is None
+    assert authenticated.agent is not None
+    assert authenticated.agent.id == agent.id
+    assert authenticated.agent.secret_hash == presented_token_hash
+    authenticated_agent_id = authenticated.agent.id
+    authenticated_token_hash = presented_token_hash
+
+    rotated_at = now_utc()
+    replacement_token_hash = hashlib.sha256(b"replacement-contract-token").hexdigest()
     with approval_case.connect() as connection:
         if approval_case.backend == "sqlite":
-            row = connection.execute(
+            credential_row = connection.execute(
                 "SELECT payload FROM kv_store "
                 "WHERE entity_type='external_agent_credential' AND entity_id=?",
                 (agent.id,),
             ).fetchone()
-            credential = AgentCredentialRecord.model_validate_json(row[0]).model_copy(
-                update={"token_revoked_at": now_utc(), "updated_at": now_utc()}
+            credential = AgentCredentialRecord.model_validate_json(
+                credential_row[0]
             )
+            if credential_change == "revocation":
+                credential = credential.model_copy(
+                    update={"token_revoked_at": rotated_at, "updated_at": rotated_at}
+                )
+            else:
+                credential = credential.model_copy(
+                    update={"token_rotated_at": rotated_at, "updated_at": rotated_at}
+                )
             connection.execute(
                 "UPDATE kv_store SET payload=? "
                 "WHERE entity_type='external_agent_credential' AND entity_id=?",
                 (credential.model_dump_json(), agent.id),
             )
+            if credential_change == "rotation":
+                agent_row = connection.execute(
+                    "SELECT payload FROM kv_store "
+                    "WHERE entity_type='external_agent' AND entity_id=?",
+                    (agent.id,),
+                ).fetchone()
+                rotated_agent = ExternalAgent.model_validate_json(agent_row[0]).model_copy(
+                    update={"secret_hash": replacement_token_hash}
+                )
+                connection.execute(
+                    "UPDATE kv_store SET payload=? "
+                    "WHERE entity_type='external_agent' AND entity_id=?",
+                    (rotated_agent.model_dump_json(), agent.id),
+                )
         else:
-            row = connection.execute(
+            credential_row = connection.execute(
                 "SELECT payload FROM external_agent_credentials WHERE agent_id=%s",
                 (agent.id,),
             ).fetchone()
-            credential = AgentCredentialRecord.model_validate(row[0]).model_copy(
-                update={"token_revoked_at": now_utc(), "updated_at": now_utc()}
+            credential = AgentCredentialRecord.model_validate(
+                credential_row[0]
             )
+            credential_updates = {"updated_at": rotated_at}
+            if credential_change == "revocation":
+                credential_updates["token_revoked_at"] = rotated_at
+            else:
+                credential_updates["token_rotated_at"] = rotated_at
+            credential = credential.model_copy(update=credential_updates)
             connection.execute(
-                "UPDATE external_agent_credentials SET token_revoked_at=%s,updated_at=%s,payload=%s "
+                "UPDATE external_agent_credentials SET token_revoked_at=%s,token_rotated_at=%s,"
+                "updated_at=%s,payload=%s "
                 "WHERE agent_id=%s",
                 (
                     credential.token_revoked_at,
+                    credential.token_rotated_at,
                     credential.updated_at,
                     Jsonb(credential.model_dump(mode="json")),
                     agent.id,
                 ),
             )
+            if credential_change == "rotation":
+                rotated_agent = agent.model_copy(update={"secret_hash": replacement_token_hash})
+                connection.execute(
+                    "UPDATE external_agents SET secret_hash=%s,payload=%s WHERE agent_id=%s",
+                    (
+                        replacement_token_hash,
+                        Jsonb(rotated_agent.model_dump(mode="json")),
+                        agent.id,
+                    ),
+                )
 
     claim_event = AuditEvent(
         event_type="approval.delivery_claimed",
@@ -1156,10 +1223,10 @@ def test_connector_revoked_after_authentication_cannot_claim_delivery(approval_c
         approval_case.repository.claim_approved_delivery(
             approval_id=approval.id,
             workspace_id=approval.workspace_id,
-            source_agent_id=agent.id,
+            source_agent_id=authenticated_agent_id,
             source_invocation_id=approval.source_invocation_id,
             expected_payload_hash=approved.approved_payload_hash,
-            presented_token_hash=presented_token_hash,
+            presented_token_hash=authenticated_token_hash,
             audit_event=claim_event,
         )
 
