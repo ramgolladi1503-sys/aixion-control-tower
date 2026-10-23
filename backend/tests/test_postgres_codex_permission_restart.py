@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -342,12 +343,18 @@ def _wait_for_approval(
     *,
     agent_id: str,
     process: subprocess.Popen[str],
+    exclude_invocation_id: str | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + 12
     while time.monotonic() < deadline:
         approvals = _read_approvals(connect, agent_id)
-        if approvals:
-            return max(approvals, key=lambda approval: approval.get("created_at", ""))
+        matching = [
+            approval
+            for approval in approvals
+            if approval.get("source_invocation_id") != exclude_invocation_id
+        ]
+        if matching:
+            return max(matching, key=lambda approval: approval.get("created_at", ""))
         assert process.poll() is None, "Codex hook exited before creating a pending approval"
         time.sleep(0.05)
     pytest.fail("Codex hook did not persist a pending approval before the deadline")
@@ -458,6 +465,178 @@ def test_identified_codex_invocation_survives_postgres_api_restart_and_consumes_
         assert [item["id"] for item in invocation_approvals] == [approval["id"]]
     finally:
         for process in (hook_process, replay_process):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)
+        if schema_created:
+            with psycopg.connect(base_dsn, autocommit=True) as admin:
+                admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_codex_dead_hook_expired_lease_rejects_review_and_isolates_next_invocation(
+    tmp_path: Path,
+) -> None:
+    """A dead native callback cannot be approved or lend its approval to a new callback."""
+    base_dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not base_dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL Codex restart tests")
+
+    schema = f"ct_codex_dead_hook_{uuid.uuid4().hex}"
+    schema_created = False
+    with psycopg.connect(base_dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        schema_created = True
+
+    connect = _schema_connector(base_dsn, schema)
+    api_process: subprocess.Popen[bytes] | None = None
+    dead_hook: subprocess.Popen[str] | None = None
+    next_hook: subprocess.Popen[str] | None = None
+    try:
+        run_postgres_migrations(connect)
+        _, project, user = _seed_workspace_project(connect)
+        bootstrap_dir = tmp_path / "api_bootstrap"
+        _write_bootstrap(bootstrap_dir)
+        (tmp_path / "sqlite-fallback").mkdir(mode=0o700)
+        port = _free_loopback_port()
+        api_process, base_url = _start_api(
+            runtime_dsn=base_dsn,
+            db_path=tmp_path / "sqlite-fallback" / "unused.sqlite3",
+            bootstrap_dir=bootstrap_dir,
+            user=user,
+            schema=schema,
+            port=port,
+        )
+        agent_id, token = _create_codex_agent(base_url, project.id)
+        environment = _hook_environment(base_url, project.id, agent_id, token)
+        original_event = {
+            "hook_event_name": "PermissionRequest",
+            "session_id": "codex-dead-hook-session",
+            "turn_id": "codex-dead-hook-turn",
+            "tool_use_id": "codex-dead-hook-tool-use-1",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo must-not-resume-after-hook-crash"},
+        }
+
+        dead_hook = _launch_hook(original_event, environment)
+        old_approval = _wait_for_approval(connect, agent_id=agent_id, process=dead_hook)
+        assert old_approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert dead_hook.poll() is None
+
+        # Simulate the native Codex callback process disappearing while its
+        # approval is still pending. The API process deliberately stays alive.
+        dead_hook.kill()
+        dead_hook.communicate(timeout=5)
+        assert dead_hook.poll() is not None
+        dead_hook = None
+
+        # Expire only this test-owned lease. Keep the approval's own deadline in
+        # the future so the decision route must reject specifically on liveness.
+        with connect() as connection:
+            connection.execute(
+                "UPDATE approval_invocation_leases SET heartbeat_at=now()-interval '2 minutes',"
+                "expires_at=now()-interval '1 minute' WHERE approval_id=%s",
+                (old_approval["id"],),
+            )
+            lease = connection.execute(
+                "SELECT heartbeat_at,expires_at FROM approval_invocation_leases "
+                "WHERE approval_id=%s",
+                (old_approval["id"],),
+            ).fetchone()
+            assert lease is not None and lease[1] > lease[0]
+            assert lease[1] < datetime.now(timezone.utc)
+
+        with connect() as connection:
+            before_audit_events = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s",
+                (old_approval["id"],),
+            ).fetchone()[0]
+            before_decision_events = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.decision'",
+                (old_approval["id"],),
+            ).fetchone()[0]
+            before_notifications = connection.execute(
+                "SELECT COUNT(*) FROM notifications WHERE approval_id=%s",
+                (old_approval["id"],),
+            ).fetchone()[0]
+        assert before_decision_events == 0
+
+        with httpx.Client(base_url=base_url, timeout=5) as reviewer:
+            rejected = reviewer.post(
+                f"/approvals/{old_approval['id']}/decision",
+                json={"decision": "approve", "reason": "stale Codex callback regression"},
+            )
+        assert rejected.status_code == 409, rejected.text
+
+        with connect() as connection:
+            old_row = connection.execute(
+                "SELECT status,payload->>'status',expires_at FROM approval_requests "
+                "WHERE approval_id=%s",
+                (old_approval["id"],),
+            ).fetchone()
+            assert old_row is not None
+            assert old_row[0] == "PENDING_REVIEW"
+            assert old_row[1] == "PENDING_REVIEW"
+            assert old_row[2] > datetime.now(timezone.utc)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s",
+                (old_approval["id"],),
+            ).fetchone()[0] == before_audit_events
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.decision'",
+                (old_approval["id"],),
+            ).fetchone()[0] == before_decision_events
+            assert connection.execute(
+                "SELECT COUNT(*) FROM notifications WHERE approval_id=%s",
+                (old_approval["id"],),
+            ).fetchone()[0] == before_notifications
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (old_approval["id"],),
+            ).fetchone()[0] == 0
+
+        # A subsequent callback with a distinct provider invocation identity
+        # must create its own approval. It can complete only that new approval;
+        # the expired request remains pending and unclaimed.
+        next_event = {
+            **original_event,
+            "tool_use_id": "codex-dead-hook-tool-use-2",
+            "tool_input": {"command": "echo distinct-invocation"},
+        }
+        next_hook = _launch_hook(next_event, environment)
+        next_approval = _wait_for_approval(
+            connect,
+            agent_id=agent_id,
+            process=next_hook,
+            exclude_invocation_id=old_approval["source_invocation_id"],
+        )
+        assert next_approval["id"] != old_approval["id"]
+        assert next_approval["source_invocation_id"] != old_approval["source_invocation_id"]
+        assert next_approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+
+        next_decision = _decide(base_url, next_approval["id"])
+        assert next_decision["status"] == "APPROVED"
+        hook_decision, stderr = _finish_hook(next_hook)
+        next_hook = None
+        _assert_terminal_diagnostic(
+            stderr, approval_id=next_approval["id"], decision="allow"
+        )
+        assert hook_decision == {"behavior": "allow"}
+        assert _claim_count(connect, old_approval["id"]) == 0
+        assert _claim_count(connect, next_approval["id"]) == 1
+
+        old_after_new_invocation = next(
+            item for item in _read_approvals(connect, agent_id) if item["id"] == old_approval["id"]
+        )
+        assert old_after_new_invocation["status"] == "PENDING_REVIEW"
+        assert old_after_new_invocation["source_invocation_id"] != next_approval[
+            "source_invocation_id"
+        ]
+    finally:
+        for process in (dead_hook, next_hook):
             if process is not None and process.poll() is None:
                 process.kill()
                 process.communicate(timeout=5)

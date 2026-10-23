@@ -541,6 +541,285 @@ def _apply_execution_result(
     )
 
 
+def _build_postgres_scope_validation_records(
+    *,
+    task: AgentTask,
+    approval: ApprovalRequest,
+    run: AgentRun,
+    steps: list[AgentRunStep],
+    worker_id: str,
+    lease_token: str,
+) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+    """Build the scope-only completion records without touching process state."""
+    updated_run = run.model_copy(deep=True)
+    updated_steps = [item.model_copy(deep=True) for item in steps]
+    current = next((item for item in updated_steps if item.id == run.current_step_id), None)
+    if (
+        current is None
+        or current.step_type != AgentRunStepType.VALIDATE_SCOPE
+        or current.status != AgentRunStepStatus.READY
+        or run.lease_owner != worker_id
+        or run.lease_token != lease_token
+    ):
+        raise AgentRunRepositoryConflict("Scope validation snapshot is no longer executable.")
+
+    events: list[AgentRunEvent] = []
+
+    def append(
+        event_type: AgentRunEventType,
+        *,
+        step: AgentRunStep | None = None,
+        previous_status: str | None = None,
+        new_status: str | None = None,
+        message: str,
+        reason: str = "",
+        input_hash: str | None = None,
+        output_hash: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        events.append(
+            AgentRunEvent(
+                run_id=updated_run.id,
+                task_id=updated_run.task_id,
+                step_id=step.id if step else None,
+                correlation_id=updated_run.correlation_id,
+                event_type=event_type,
+                previous_status=previous_status,
+                new_status=new_status,
+                message=message,
+                reason=reason,
+                actor=worker_id,
+                attempt_number=step.attempt_count if step else None,
+                input_evidence_hash=input_hash,
+                output_evidence_hash=output_hash,
+                metadata=metadata or {},
+            )
+        )
+
+    if updated_run.status in {AgentRunStatus.SCHEDULED, AgentRunStatus.RETRY_WAIT}:
+        previous_run, new_run = transition_run(updated_run, AgentRunStatus.RUNNING)
+        append(
+            AgentRunEventType.RUN_STATE_CHANGED,
+            previous_status=previous_run.value,
+            new_status=new_run.value,
+            message="Mission Control worker started or resumed execution.",
+        )
+
+    previous_step, new_step = transition_step(current, AgentRunStepStatus.RUNNING)
+    current.lease_owner = worker_id
+    current.lease_token = lease_token
+    current.lease_expires_at = updated_run.lease_expires_at
+    current.heartbeat_at = _now()
+    updated_run.current_step_id = current.id
+    updated_run.current_step_index = current.sequence
+    append(
+        AgentRunEventType.STEP_STARTED,
+        step=current,
+        previous_status=previous_step.value,
+        new_status=new_step.value,
+        message=f"Executing {current.step_type.value}.",
+        input_hash=canonical_evidence_hash(
+            {
+                "run_id": updated_run.id,
+                "task_id": updated_run.task_id,
+                "step_type": current.step_type.value,
+                "attempt": current.attempt_count,
+            }
+        ),
+        metadata={"idempotency_key": current.idempotency_key},
+    )
+
+    result = validate_scope_contract(task, approval)
+    current.decision = result.decision
+    current.reason = result.reason
+    current.evidence = result.evidence
+    current.evidence_hash = canonical_evidence_hash(result.evidence)
+    current.output_reference = result.output_reference
+    current.updated_at = _now()
+
+    if result.decision == VerificationDecision.PASS:
+        previous, new = transition_step(
+            current, AgentRunStepStatus.SUCCEEDED, reason=result.reason
+        )
+        append(
+            AgentRunEventType.STEP_SUCCEEDED,
+            step=current,
+            previous_status=previous.value,
+            new_status=new.value,
+            message=result.reason,
+            output_hash=current.evidence_hash,
+            metadata={
+                "decision": result.decision.value,
+                "output_reference": result.output_reference,
+            },
+        )
+        next_step = next(
+            (
+                item
+                for item in updated_steps
+                if item.sequence > current.sequence
+                and item.status == AgentRunStepStatus.PENDING
+            ),
+            None,
+        )
+        if next_step is None:
+            previous_run, new_run = transition_run(updated_run, AgentRunStatus.SUCCEEDED)
+            append(
+                AgentRunEventType.RUN_STATE_CHANGED,
+                previous_status=previous_run.value,
+                new_status=new_run.value,
+                message="Every Mission Control step passed.",
+            )
+        else:
+            previous, new = transition_step(next_step, AgentRunStepStatus.READY)
+            updated_run.current_step_id = next_step.id
+            updated_run.current_step_index = next_step.sequence
+            updated_run.status = AgentRunStatus.RUNNING
+            updated_run.updated_at = _now()
+            append(
+                AgentRunEventType.STEP_READY,
+                step=next_step,
+                previous_status=previous.value,
+                new_status=new.value,
+                message="Previous step passed; next step is ready.",
+            )
+    elif result.decision == VerificationDecision.BLOCK_POLICY:
+        previous, new = transition_step(
+            current, AgentRunStepStatus.BLOCKED, reason=result.reason
+        )
+        previous_run, new_run = transition_run(
+            updated_run, AgentRunStatus.BLOCKED, reason=result.reason
+        )
+        append(
+            AgentRunEventType.STEP_BLOCKED,
+            step=current,
+            previous_status=previous.value,
+            new_status=new.value,
+            message="Policy violation blocked the run permanently.",
+            reason=result.reason,
+            metadata={
+                "run_previous_status": previous_run.value,
+                "run_new_status": new_run.value,
+            },
+        )
+    elif result.decision in {
+        VerificationDecision.NEEDS_REVISION,
+        VerificationDecision.NEEDS_HUMAN,
+    }:
+        previous, new = transition_step(
+            current, AgentRunStepStatus.NEEDS_HUMAN, reason=result.reason
+        )
+        previous_run, new_run = transition_run(
+            updated_run, AgentRunStatus.NEEDS_HUMAN, reason=result.reason
+        )
+        append(
+            AgentRunEventType.STEP_NEEDS_HUMAN,
+            step=current,
+            previous_status=previous.value,
+            new_status=new.value,
+            message="Execution requires an operator decision or revised plan.",
+            reason=result.reason,
+            metadata={
+                "decision": result.decision.value,
+                "run_previous_status": previous_run.value,
+                "run_new_status": new_run.value,
+            },
+        )
+    elif result.decision == VerificationDecision.RETRY_TRANSIENT:
+        if current.attempt_count < current.max_attempts:
+            previous, new = transition_step(
+                current, AgentRunStepStatus.RETRY_WAIT, reason=result.reason
+            )
+            delay_seconds = min(300, 2 ** max(1, current.attempt_count))
+            current.next_retry_at = _now() + timedelta(seconds=delay_seconds)
+            previous_run, new_run = transition_run(
+                updated_run, AgentRunStatus.RETRY_WAIT, reason=result.reason
+            )
+            append(
+                AgentRunEventType.STEP_RETRY_SCHEDULED,
+                step=current,
+                previous_status=previous.value,
+                new_status=new.value,
+                message="Transient failure scheduled for bounded retry.",
+                reason=result.reason,
+                output_hash=current.evidence_hash,
+                metadata={
+                    "decision": result.decision.value,
+                    "next_retry_at": current.next_retry_at.isoformat(),
+                    "run_previous_status": previous_run.value,
+                    "run_new_status": new_run.value,
+                },
+            )
+        else:
+            reason = "Retry budget exhausted. " + result.reason
+            previous, new = transition_step(
+                current, AgentRunStepStatus.NEEDS_HUMAN, reason=reason
+            )
+            previous_run, new_run = transition_run(
+                updated_run, AgentRunStatus.NEEDS_HUMAN, reason=result.reason
+            )
+            append(
+                AgentRunEventType.STEP_NEEDS_HUMAN,
+                step=current,
+                previous_status=previous.value,
+                new_status=new.value,
+                message="Retry budget exhausted; operator action is required.",
+                reason=result.reason,
+                metadata={
+                    "run_previous_status": previous_run.value,
+                    "run_new_status": new_run.value,
+                },
+            )
+    else:
+        previous, new = transition_step(
+            current, AgentRunStepStatus.FAILED, reason=result.reason
+        )
+        previous_run, new_run = transition_run(
+            updated_run, AgentRunStatus.FAILED, reason=result.reason
+        )
+        append(
+            AgentRunEventType.STEP_FAILED,
+            step=current,
+            previous_status=previous.value,
+            new_status=new.value,
+            message="Execution failed permanently.",
+            reason=result.reason,
+            metadata={
+                "run_previous_status": previous_run.value,
+                "run_new_status": new_run.value,
+            },
+        )
+
+    # Any non-terminal result leaves the run active, but this worker's lease
+    # ends with this atomic step completion.
+    if updated_run.status not in {
+        AgentRunStatus.BLOCKED,
+        AgentRunStatus.SUCCEEDED,
+        AgentRunStatus.FAILED,
+        AgentRunStatus.CANCELLED,
+    }:
+        updated_run.lease_owner = None
+        updated_run.lease_token = None
+        updated_run.lease_expires_at = None
+    updated_run.updated_at = _now()
+    audit = AuditEvent(
+        event_type="agent_run.step_completed",
+        entity_id=updated_run.id,
+        workspace_id=updated_run.workspace_id,
+        actor=worker_id,
+        details={
+            "task_id": updated_run.task_id,
+            "step_id": current.id,
+            "step_type": current.step_type,
+            "decision": result.decision,
+            "run_status": updated_run.status,
+            "attempt_count": current.attempt_count,
+            "evidence_hash": current.evidence_hash,
+        },
+    )
+    return updated_run, updated_steps, events, audit
+
+
 def execute_next_step(
     run_id: str,
     *,
@@ -717,6 +996,81 @@ def execute_next_step(
                 "PostgreSQL SEAL_EVIDENCE requires the canonical step plan "
                 "with every prior step succeeded."
             )
+
+    if (
+        postgres_repository_execution
+        and step.step_type == AgentRunStepType.VALIDATE_SCOPE
+        and isinstance(task_repository, PostgresAgentTaskRepository)
+        and isinstance(approval_repository, PostgresApprovalDecisionRepository)
+    ):
+        # Scope authority and completion must be one PostgreSQL unit. The
+        # repository locks and reads the current task/approval before asking
+        # this pure builder to produce the completion records.
+        durable_run = active_run_repository.get(run.id)
+        durable_steps = active_run_repository.list_steps_for_run(run.id)
+        if durable_run is None:
+            release_run_lease(
+                run,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                run_repository=active_run_repository,
+            )
+            raise AgentRunConflict("AgentRun disappeared before scope validation.")
+
+        def build_scope_records(
+            task: AgentTask,
+            approval: ApprovalRequest,
+            locked_run: AgentRun,
+            locked_steps: list[AgentRunStep],
+        ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+            if locked_run != durable_run or locked_steps != durable_steps:
+                raise AgentRunRepositoryConflict(
+                    "AgentRun changed while preparing scope validation."
+                )
+            return _build_postgres_scope_validation_records(
+                task=task,
+                approval=approval,
+                run=locked_run,
+                steps=locked_steps,
+                worker_id=worker_id,
+                lease_token=lease_token,
+            )
+
+        try:
+            updated_run, updated_steps, events, audit = active_run_repository.commit_scope_validation(
+                expected_run=durable_run,
+                expected_steps=durable_steps,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                build_records=build_scope_records,
+            )
+        except Exception as error:
+            # The completion transaction rolls back as a unit. Release only
+            # this worker's still-current lease; a replacement lease is never
+            # touched because update_lease validates the exact token.
+            release_run_lease(
+                run,
+                worker_id=worker_id,
+                lease_token=lease_token,
+                run_repository=active_run_repository,
+            )
+            raise AgentRunConflict(
+                "PostgreSQL scope validation could not be committed."
+            ) from error
+        store.project_agent_run_control_transition(
+            updated_run,
+            updated_steps,
+            events,
+            [audit],
+        )
+        completed_step = next(item for item in updated_steps if item.id == step.id)
+        return AgentRunStepExecutionResult(
+            success=completed_step.status == AgentRunStepStatus.SUCCEEDED,
+            decision=completed_step.decision or VerificationDecision.BLOCK_POLICY,
+            reason=completed_step.reason,
+            evidence=completed_step.evidence,
+            output_reference=completed_step.output_reference,
+        )
 
     durable_run_after_ready = active_run_repository.get(run.id)
     durable_steps_after_ready = active_run_repository.list_steps_for_run(run.id)

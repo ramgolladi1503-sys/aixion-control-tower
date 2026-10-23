@@ -5,7 +5,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Barrier
+from threading import Barrier, Event
 from types import SimpleNamespace
 
 import psycopg
@@ -24,6 +24,7 @@ from app.agent_run_models import (
     VerificationDecision,
 )
 from app.agent_run_repository import AgentRunRepositoryConflict
+from app.agent_run_supervisor import _build_postgres_scope_validation_records
 from app.agent_run_verifier import canonical_evidence_hash
 from app.agent_run_routes import MaintainerDependency, MetricsDependency, ReviewerDependency
 from app.agent_worker_validation_runner import (
@@ -814,6 +815,254 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
     assert "VALIDATE_SCOPE, VERIFY_RESULT, and SEAL_EVIDENCE steps" in rejected.json()["detail"]
     assert repositories.agent_runs.get(run_id) == durable_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
+
+
+def test_postgres_scope_validation_rolls_back_all_completion_writes_on_audit_conflict(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, _workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][_workspace.id]
+    client = TestClient(main.app)
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    _leased_run, lease_event, lease_audit = repositories.agent_runs.acquire_lease(
+        run_id=run_id,
+        worker_id="scope-rollback-worker",
+        lease_seconds=120,
+        now=now_utc(),
+    )
+    assert lease_event is not None and lease_audit is not None
+    before_run = repositories.agent_runs.get(run_id)
+    assert before_run is not None
+    before_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    before_events = repositories.agent_runs.list_events_for_run(run_id)
+    with connect() as conn:
+        before_completion_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_type='agent_run' "
+            "AND entity_id=%s AND event_type='agent_run.step_completed'",
+            (run_id,),
+        ).fetchone()[0]
+
+    def duplicate_audit_id(task, approval, durable_run, durable_steps):
+        records = _build_postgres_scope_validation_records(
+            task=task,
+            approval=approval,
+            run=durable_run,
+            steps=durable_steps,
+            worker_id="scope-rollback-worker",
+            lease_token=durable_run.lease_token or "",
+        )
+        updated_run, updated_steps, events, audit = records
+        return updated_run, updated_steps, events, audit.model_copy(update={"id": lease_audit.id})
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        repositories.agent_runs.commit_scope_validation(
+            expected_run=before_run,
+            expected_steps=before_steps,
+            worker_id="scope-rollback-worker",
+            lease_token=before_run.lease_token or "",
+            build_records=duplicate_audit_id,
+        )
+
+    assert repositories.agent_runs.get(run_id) == before_run
+    assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
+    assert repositories.agent_runs.list_events_for_run(run_id) == before_events
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_type='agent_run' "
+            "AND entity_id=%s AND event_type='agent_run.step_completed'",
+            (run_id,),
+        ).fetchone()[0] == before_completion_audits
+
+
+def test_postgres_scope_validation_rejects_stale_lease_without_completion_mutation(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, _workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][_workspace.id]
+    client = TestClient(main.app)
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    repositories.agent_runs.acquire_lease(
+        run_id=run_id,
+        worker_id="scope-stale-worker",
+        lease_seconds=120,
+        now=now_utc(),
+    )
+    leased = repositories.agent_runs.get(run_id)
+    assert leased is not None
+    stale = leased.model_copy(update={"lease_expires_at": now_utc() - timedelta(seconds=5)})
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET lease_expires_at=%s,updated_at=%s,payload=%s WHERE run_id=%s",
+            (stale.lease_expires_at, stale.updated_at, Jsonb(stale.model_dump(mode="json")), run_id),
+        )
+    stale = repositories.agent_runs.get(run_id)
+    assert stale is not None
+    before_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    before_events = repositories.agent_runs.list_events_for_run(run_id)
+    callback_invoked = False
+
+    def should_not_build(*_args):
+        nonlocal callback_invoked
+        callback_invoked = True
+        raise AssertionError("stale lease must not build completion records")
+
+    with pytest.raises(AgentRunRepositoryConflict, match="lease is stale"):
+        repositories.agent_runs.commit_scope_validation(
+            expected_run=stale,
+            expected_steps=before_steps,
+            worker_id="scope-stale-worker",
+            lease_token=stale.lease_token or "",
+            build_records=should_not_build,
+        )
+    assert callback_invoked is False
+    assert repositories.agent_runs.get(run_id) == stale
+    assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
+    assert repositories.agent_runs.list_events_for_run(run_id) == before_events
+
+
+def test_postgres_scope_validation_rejects_run_revision_mismatch_without_completion(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, _workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][_workspace.id]
+    created = TestClient(main.app).post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    repositories.agent_runs.acquire_lease(
+        run_id=run_id,
+        worker_id="scope-cas-worker",
+        lease_seconds=120,
+        now=now_utc(),
+    )
+    stale_snapshot = repositories.agent_runs.get(run_id)
+    assert stale_snapshot is not None
+    before_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    before_events = repositories.agent_runs.list_events_for_run(run_id)
+    changed_snapshot = stale_snapshot.model_copy(
+        update={
+            "metadata": {**stale_snapshot.metadata, "concurrent_revision": "test"},
+            "updated_at": now_utc() + timedelta(seconds=1),
+        }
+    )
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET updated_at=%s,payload=%s WHERE run_id=%s",
+            (
+                changed_snapshot.updated_at,
+                Jsonb(changed_snapshot.model_dump(mode="json")),
+                run_id,
+            ),
+        )
+    expected_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    callback_invoked = False
+
+    def should_not_build(*_args):
+        nonlocal callback_invoked
+        callback_invoked = True
+        raise AssertionError("a mismatched AgentRun revision must not build completion records")
+
+    with pytest.raises(AgentRunRepositoryConflict, match="revision changed"):
+        repositories.agent_runs.commit_scope_validation(
+            expected_run=stale_snapshot,
+            expected_steps=expected_steps,
+            worker_id="scope-cas-worker",
+            lease_token=stale_snapshot.lease_token or "",
+            build_records=should_not_build,
+        )
+    assert callback_invoked is False
+    assert repositories.agent_runs.get(run_id) == changed_snapshot
+    assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
+    assert repositories.agent_runs.list_events_for_run(run_id) == before_events
+
+
+def test_postgres_scope_validation_holds_approval_revision_lock_through_completion(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    repositories.agent_runs.acquire_lease(
+        run_id=run_id,
+        worker_id="scope-concurrency-worker",
+        lease_seconds=120,
+        now=now_utc(),
+    )
+    expected_run = repositories.agent_runs.get(run_id)
+    assert expected_run is not None
+    expected_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    approval_id = expected_run.approval_request_id
+    assert approval_id is not None
+    builder_entered = Event()
+    allow_completion = Event()
+    writer_started = Event()
+    writer_finished = Event()
+
+    def held_builder(task, approval, durable_run, durable_steps):
+        builder_entered.set()
+        assert allow_completion.wait(timeout=10), "test did not release scope completion"
+        return _build_postgres_scope_validation_records(
+            task=task,
+            approval=approval,
+            run=durable_run,
+            steps=durable_steps,
+            worker_id="scope-concurrency-worker",
+            lease_token=durable_run.lease_token or "",
+        )
+
+    def concurrent_approval_revision() -> None:
+        writer_started.set()
+        with connect() as conn:
+            conn.execute(
+                "UPDATE approval_requests SET version=version+1 WHERE approval_id=%s",
+                (approval_id,),
+            )
+        writer_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        completion = pool.submit(
+            repositories.agent_runs.commit_scope_validation,
+            expected_run=expected_run,
+            expected_steps=expected_steps,
+            worker_id="scope-concurrency-worker",
+            lease_token=expected_run.lease_token or "",
+            build_records=held_builder,
+        )
+        assert builder_entered.wait(timeout=10), "scope builder did not enter its transaction"
+        writer = pool.submit(concurrent_approval_revision)
+        assert writer_started.wait(timeout=10), "approval revision writer did not start"
+        assert not writer_finished.wait(timeout=0.25), (
+            "approval revision changed while scope completion held its authority lock"
+        )
+        allow_completion.set()
+        completion.result(timeout=10)
+        writer.result(timeout=10)
+    assert writer_finished.is_set()
+    durable_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    assert durable_steps[0].attempt_count == 1
+    assert durable_steps[0].decision is not None
+    assert durable_steps[0].status not in {
+        AgentRunStepStatus.READY,
+        AgentRunStepStatus.RUNNING,
+    }
 
 
 def test_postgres_scope_validation_rejects_sqlite_approval_authority(

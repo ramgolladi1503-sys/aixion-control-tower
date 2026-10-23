@@ -6,12 +6,14 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
@@ -47,6 +49,34 @@ import kotlin.math.roundToInt
 class ApprovalInboxScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun inboxSyncStatusIsAnnouncedWhenRefreshStateChanges() {
+        val refreshing = androidx.compose.runtime.mutableStateOf(false)
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    refreshing = refreshing.value
+                )
+            )
+        }
+
+        val status = composeRule.onNodeWithTag("approval-inbox-sync-status")
+        composeRule.onNodeWithText("Review pending requests or browse recorded decisions.").assertExists()
+        assertEquals(
+            LiveRegionMode.Polite,
+            status.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+
+        composeRule.runOnIdle { refreshing.value = true }
+
+        composeRule.onNodeWithText("Refreshing. Requests are read-only until sync completes.").assertExists()
+        assertEquals(
+            LiveRegionMode.Polite,
+            status.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+    }
 
     @Test
     fun rendersApprovalBucketsForCanonicalAndLegacyStatuses() {

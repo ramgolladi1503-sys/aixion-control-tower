@@ -2543,6 +2543,247 @@ class PostgresAgentRunRepository:
                 ),
             )
 
+    def commit_scope_validation(
+        self,
+        *,
+        expected_run: AgentRun,
+        expected_steps: list[AgentRunStep],
+        worker_id: str,
+        lease_token: str,
+        build_records: Callable[
+            [AgentTask, ApprovalRequest, AgentRun, list[AgentRunStep]],
+            tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent],
+        ],
+    ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+        """Read scope authority and atomically complete VALIDATE_SCOPE.
+
+        Lock order is approval -> task -> run -> steps, matching approval/task
+        transition writers. The callback must be pure: it only builds records
+        from the locked authority and durable run snapshot.
+        """
+        if (
+            not expected_run.workspace_id
+            or not expected_run.approval_request_id
+            or not expected_run.lease_token
+            or expected_run.lease_owner != worker_id
+            or expected_run.lease_token != lease_token
+        ):
+            raise AgentRunRepositoryConflict("Scope validation lease identity is invalid")
+
+        with self._connect() as conn:
+            with conn.transaction():
+                approval_row = conn.execute(
+                    "SELECT payload,approval_id,workspace_id,project_id,status,version "
+                    "FROM approval_requests WHERE approval_id=%s AND workspace_id=%s FOR SHARE",
+                    (expected_run.approval_request_id, expected_run.workspace_id),
+                ).fetchone()
+                if approval_row is None:
+                    raise AgentRunRepositoryNotFound(
+                        "Scope validation approval is not visible in this workspace"
+                    )
+                try:
+                    approval = ApprovalRequest.model_validate(approval_row[0])
+                except Exception as error:
+                    raise AgentRunRepositoryIntegrityError(
+                        "Stored scope validation approval payload is invalid"
+                    ) from error
+                if (
+                    approval.id != approval_row[1]
+                    or approval.workspace_id != approval_row[2]
+                    or approval.project_id != approval_row[3]
+                    or approval.status.value != approval_row[4]
+                    or approval.id != expected_run.approval_request_id
+                    or approval.workspace_id != expected_run.workspace_id
+                    or approval.project_id != expected_run.project_id
+                    or int(approval_row[5]) < 0
+                ):
+                    raise AgentRunRepositoryIntegrityError(
+                        "Scope validation approval identity or revision is inconsistent"
+                    )
+
+                task_row = conn.execute(
+                    "SELECT task_id,project_id,workspace_id,approval_request_id,status,updated_at,payload "
+                    "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR SHARE",
+                    (expected_run.task_id, expected_run.workspace_id),
+                ).fetchone()
+                if task_row is None:
+                    raise AgentRunRepositoryNotFound(
+                        "Scope validation task is not visible in this workspace"
+                    )
+                try:
+                    task = AgentTask.model_validate(task_row[6])
+                except Exception as error:
+                    raise AgentRunRepositoryIntegrityError(
+                        "Stored scope validation task payload is invalid"
+                    ) from error
+                if (
+                    task.id != task_row[0]
+                    or task.project_id != task_row[1]
+                    or task.workspace_id != task_row[2]
+                    or task.approval_request_id != task_row[3]
+                    or task.status.value != task_row[4]
+                    or task.updated_at != task_row[5]
+                    or task.id != expected_run.task_id
+                    or task.project_id != expected_run.project_id
+                    or task.workspace_id != expected_run.workspace_id
+                    or task.approval_request_id != approval.id
+                ):
+                    raise AgentRunRepositoryIntegrityError(
+                        "Scope validation task identity, revision, or approval link is inconsistent"
+                    )
+                if task.status != AgentTaskStatus.APPROVED:
+                    raise AgentRunRepositoryConflict(
+                        "Scope validation task is no longer approved"
+                    )
+
+                durable_run, durable_steps = self.get_control_snapshot_in_transaction(
+                    conn,
+                    run_id=expected_run.id,
+                    workspace_id=expected_run.workspace_id,
+                )
+                if durable_run != expected_run:
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun revision changed before scope validation completion"
+                    )
+                if {step.id: step for step in durable_steps} != {
+                    step.id: step for step in expected_steps
+                }:
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun step revisions changed before scope validation completion"
+                    )
+                checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+                if (
+                    durable_run.lease_owner != worker_id
+                    or durable_run.lease_token != lease_token
+                    or durable_run.lease_expires_at is None
+                    or durable_run.lease_expires_at <= checked_at
+                ):
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun lease is stale before scope validation completion"
+                    )
+                current_step = next(
+                    (item for item in durable_steps if item.id == durable_run.current_step_id),
+                    None,
+                )
+                if (
+                    current_step is None
+                    or current_step.step_type != AgentRunStepType.VALIDATE_SCOPE
+                    or current_step.status != AgentRunStepStatus.READY
+                ):
+                    raise AgentRunRepositoryConflict(
+                        "VALIDATE_SCOPE step is no longer ready for completion"
+                    )
+
+                updated_run, updated_steps, events, audit = build_records(
+                    task, approval, durable_run, durable_steps
+                )
+                # Validate the generated completion using the existing shared
+                # state/identity contract, represented as its in-transaction
+                # RUNNING checkpoint. No intermediate checkpoint is persisted.
+                running_run = durable_run.model_copy(deep=True)
+                if running_run.status in {AgentRunStatus.SCHEDULED, AgentRunStatus.RETRY_WAIT}:
+                    running_run.status = AgentRunStatus.RUNNING
+                    running_run.started_at = running_run.started_at or checked_at
+                running_steps = [item.model_copy(deep=True) for item in durable_steps]
+                running_step = next(item for item in running_steps if item.id == current_step.id)
+                running_step.status = AgentRunStepStatus.RUNNING
+                running_step.lease_owner = worker_id
+                running_step.lease_token = lease_token
+                running_step.lease_expires_at = durable_run.lease_expires_at
+                running_step.attempt_count += 1
+                completion_expected = running_run.model_copy(deep=True)
+                completion_steps = [item.model_copy(deep=True) for item in running_steps]
+                # The common validator checks step completion invariants. Its
+                # timestamp must be the database clock sampled under the lock.
+                _validate_step_completion(
+                    expected_run=completion_expected,
+                    updated_run=updated_run,
+                    expected_steps=completion_steps,
+                    updated_steps=updated_steps,
+                    events=events,
+                    audit=audit,
+                    now=checked_at,
+                )
+
+                changed = conn.execute(
+                    "UPDATE agent_runs SET status=%s,current_step_id=%s,lease_owner=%s,"
+                    "lease_token=%s,lease_expires_at=%s,updated_at=%s,payload=%s "
+                    "WHERE run_id=%s AND workspace_id=%s AND updated_at=%s "
+                    "AND lease_owner=%s AND lease_token=%s AND lease_expires_at>clock_timestamp()",
+                    (
+                        updated_run.status.value,
+                        updated_run.current_step_id,
+                        updated_run.lease_owner,
+                        updated_run.lease_token,
+                        updated_run.lease_expires_at,
+                        updated_run.updated_at,
+                        Jsonb(updated_run.model_dump(mode="json")),
+                        durable_run.id,
+                        durable_run.workspace_id,
+                        durable_run.updated_at,
+                        worker_id,
+                        lease_token,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun changed during scope validation completion"
+                    )
+                updated_by_id = {item.id: item for item in updated_steps}
+                for durable_step in durable_steps:
+                    updated_step = updated_by_id.get(durable_step.id)
+                    if updated_step is None:
+                        raise AgentRunRepositoryConflict(
+                            "Scope validation changed the durable AgentRun step set"
+                        )
+                    changed = conn.execute(
+                        "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                        "WHERE step_id=%s AND run_id=%s AND workspace_id=%s AND updated_at=%s",
+                        (
+                            updated_step.status.value,
+                            updated_step.updated_at,
+                            Jsonb(updated_step.model_dump(mode="json")),
+                            durable_step.id,
+                            durable_run.id,
+                            durable_run.workspace_id,
+                            durable_step.updated_at,
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise AgentRunRepositoryConflict(
+                            "AgentRun step changed during scope validation completion"
+                        )
+                for event in events:
+                    conn.execute(
+                        "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,"
+                        "created_at,event_type,payload) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            event.id,
+                            event.run_id,
+                            event.task_id,
+                            durable_run.workspace_id,
+                            event.created_at,
+                            event.event_type.value,
+                            Jsonb(event.model_dump(mode="json")),
+                        ),
+                    )
+                conn.execute(
+                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,"
+                    "entity_id,event_type,actor,details,created_at,payload) "
+                    "VALUES(%s,%s,NULL,'agent_run',%s,%s,%s,%s,%s,%s)",
+                    (
+                        audit.id,
+                        durable_run.workspace_id,
+                        durable_run.id,
+                        audit.event_type,
+                        audit.actor,
+                        Jsonb(audit.details),
+                        audit.created_at,
+                        Jsonb(audit.model_dump(mode="json")),
+                    ),
+                )
+                return updated_run, updated_steps, events, audit
+
     def create(
         self,
         *,
