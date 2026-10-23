@@ -161,6 +161,43 @@ def test_direct_recovery_export_fails_closed_when_request_has_postgres_runtime(
     assert "authoritative recovery repository" in raised.value.detail
 
 
+def test_direct_recovery_export_fails_closed_when_postgres_repository_bundle_is_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = AuthUser(
+        id="owner-postgres-repository-mode",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id="workspace-postgres-repository-mode",
+    )
+
+    def unexpected_snapshot_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite recovery snapshot must not be read with PostgreSQL repositories")
+
+    monkeypatch.setattr(
+        recovery_routes,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=False),
+    )
+    monkeypatch.setattr(
+        recovery_routes.recovery_snapshot_repository,
+        "read_snapshot",
+        unexpected_snapshot_read,
+    )
+    app.state.postgres_runtime = None
+    app.state.postgres_repositories = SimpleNamespace()
+    request = Request({"type": "http", "app": app})
+
+    try:
+        with pytest.raises(HTTPException) as raised:
+            recovery_routes.export_recovery_snapshot(user, request=request)
+        assert raised.value.status_code == 503
+        assert "authoritative recovery repository" in raised.value.detail
+    finally:
+        app.state.postgres_repositories = None
+
+
 def test_recovery_export_includes_durable_approval_missing_from_compatibility_cache() -> None:
     workspace_id = "workspace_recovery_authority"
     project = Project(name="Recovery authority", workspace_id=workspace_id)

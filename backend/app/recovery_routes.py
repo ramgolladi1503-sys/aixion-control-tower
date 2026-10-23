@@ -495,7 +495,16 @@ def _require_sqlite_recovery_runtime(request: Request | None = None) -> None:
     postgres_runtime = (
         getattr(request.app.state, "postgres_runtime", None) if request is not None else None
     )
-    if postgres_runtime is not None or get_settings().postgres_auth_enabled:
+    postgres_repositories = (
+        getattr(request.app.state, "postgres_repositories", None)
+        if request is not None
+        else None
+    )
+    if (
+        postgres_runtime is not None
+        or postgres_repositories is not None
+        or get_settings().postgres_auth_enabled
+    ):
         raise HTTPException(
             status_code=503,
             detail=(
