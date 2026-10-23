@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 import hashlib
 import importlib.util
+import json
 import multiprocessing
+import subprocess
+import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -333,6 +336,7 @@ def _serve_postgres_approval_http_api(
     reviewer_id: str,
     reviewer_email: str,
     workspace_id: str,
+    requested_port: int | None,
     status_queue: multiprocessing.queues.Queue,
     stop_event: multiprocessing.synchronize.Event,
 ) -> None:
@@ -378,7 +382,7 @@ def _serve_postgres_approval_http_api(
 
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", 0))
+        listener.bind(("127.0.0.1", requested_port or 0))
         listener.listen(128)
         port = listener.getsockname()[1]
         config = uvicorn.Config(
@@ -428,6 +432,7 @@ def _start_postgres_approval_http_api(
     dsn: str,
     schema: str,
     reviewer: AuthUser,
+    port: int | None = None,
 ) -> tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]:
     """Start an isolated app process and wait until its real HTTP server is ready."""
     process_context = multiprocessing.get_context("spawn")
@@ -441,6 +446,7 @@ def _start_postgres_approval_http_api(
             reviewer.id,
             reviewer.email,
             reviewer.workspace_id or "",
+            port,
             status_queue,
             stop_event,
         ),
@@ -1626,6 +1632,152 @@ def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
                 (approval_id,),
             ).fetchone()[0] == 1
     finally:
+        for server in reversed(servers):
+            if server[0].is_alive():
+                _stop_postgres_approval_http_api(server)
+
+
+def test_postgres_antigravity_hook_process_stays_pending_across_api_restart(
+    postgres_approval_route_runtime,
+) -> None:
+    """The same blocked Antigravity hook process resumes after only API restart."""
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    connect, workspace, project, user, _repositories, agent, agent_token, schema = (
+        postgres_approval_route_runtime
+    )
+    servers: list[
+        tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]
+    ] = []
+    hook_process: subprocess.Popen[str] | None = None
+
+    def start_server(
+        *, port: int | None = None
+    ) -> tuple[multiprocessing.Process, multiprocessing.synchronize.Event, str]:
+        handle = _start_postgres_approval_http_api(
+            dsn=dsn,
+            schema=schema,
+            reviewer=user,
+            port=port,
+        )
+        servers.append(handle)
+        return handle
+
+    try:
+        first_server = start_server()
+        payload = {
+            "conversationId": f"session-antigravity-pg-subprocess-{uuid.uuid4().hex}",
+            "stepIdx": 41,
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "echo postgres-process-restart"},
+            },
+        }
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "AIXION_API_BASE_URL": first_server[2],
+                "AIXION_AGENT_ID": agent.id,
+                "AIXION_AGENT_TOKEN": agent_token,
+                "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+                "AIXION_PROJECT_ID": project.id,
+                "AIXION_APPROVAL_TIMEOUT_SECONDS": "30",
+            }
+        )
+        hook_process = subprocess.Popen(
+            [sys.executable, str(ANTIGRAVITY_HOOK_PATH)],
+            cwd=Path(__file__).parents[2],
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert hook_process.stdin is not None
+        hook_process.stdin.write(json.dumps(payload))
+        hook_process.stdin.close()
+        hook_process.stdin = None
+
+        deadline = time.monotonic() + 15
+        approval: dict | None = None
+        while time.monotonic() < deadline:
+            with connect() as connection:
+                row = connection.execute(
+                    "SELECT payload FROM approval_requests WHERE workspace_id=%s "
+                    "AND source_agent_id=%s AND source_provider='ANTIGRAVITY' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (workspace.id, agent.id),
+                ).fetchone()
+            if row is not None:
+                candidate = row[0]
+                if candidate.get("source_session_id") == payload["conversationId"]:
+                    approval = candidate
+                    break
+            assert hook_process.poll() is None, "Antigravity hook exited before pending approval"
+            time.sleep(0.05)
+
+        assert approval is not None, "Antigravity hook did not persist a PostgreSQL approval"
+        assert hook_process.poll() is None, "Antigravity hook must remain blocked pending review"
+        approval_id = approval["id"]
+        invocation_id = approval["source_invocation_id"]
+        assert approval["status"] == ApprovalStatus.PENDING_REVIEW
+        with connect() as connection:
+            lease = connection.execute(
+                "SELECT workspace_id,source_agent_id,source_invocation_id,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()
+        assert lease is not None
+        assert lease[:3] == (workspace.id, agent.id, invocation_id)
+        assert lease[3] > datetime.now(timezone.utc)
+
+        # Restart only the API process. The original hook subprocess remains
+        # blocked and keeps its invocation identity and heartbeat loop.
+        _stop_postgres_approval_http_api(first_server)
+        original_port = int(urlparse(first_server[2]).port)
+        restarted_server = start_server(port=original_port)
+        assert restarted_server[2] == first_server[2]
+        assert hook_process.poll() is None
+        with httpx.Client(timeout=10) as reviewer_client:
+            decision = reviewer_client.post(
+                f"{restarted_server[2]}/approvals/{approval_id}/decision",
+                json={"decision": "approve", "reason": "approve after API restart"},
+            )
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["status"] == ApprovalStatus.APPROVED
+
+        stdout, stderr = hook_process.communicate(timeout=20)
+        assert hook_process.returncode == 0, stderr
+        outputs = [line for line in stdout.splitlines() if line.strip()]
+        assert len(outputs) == 1
+        assert json.loads(outputs[0]) == {
+            "decision": "allow",
+            "reason": "Approved from Aixion Control Tower",
+        }
+
+        with connect() as connection:
+            approval_rows = connection.execute(
+                "SELECT approval_id,status,source_invocation_id FROM approval_requests "
+                "WHERE workspace_id=%s AND source_agent_id=%s AND source_invocation_id=%s",
+                (workspace.id, agent.id, invocation_id),
+            ).fetchall()
+            assert approval_rows == [(approval_id, ApprovalStatus.APPROVED, invocation_id)]
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0] == 1
+            for event_type in (
+                "approval.created_by_agent",
+                "approval.decision",
+                "approval.delivery_claimed",
+            ):
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s AND event_type=%s",
+                    (approval_id, event_type),
+                ).fetchone()[0] == 1
+    finally:
+        if hook_process is not None and hook_process.poll() is None:
+            hook_process.kill()
+            hook_process.communicate(timeout=5)
         for server in reversed(servers):
             if server[0].is_alive():
                 _stop_postgres_approval_http_api(server)
