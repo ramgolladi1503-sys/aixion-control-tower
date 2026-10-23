@@ -18,20 +18,22 @@ from .agent_run_models import (
     AgentRunStatus,
     AgentRunStep,
     AgentRunStepStatus,
+    AgentRunStepType,
 )
-from .agent_task_models import AgentTask
+from .agent_task_models import AgentTask, AgentTaskStatus
 from .approval_integrity import compute_approval_payload_hash
 from .trust_action_authorization_models import (
     ActionAuthorization,
     ActionAuthorizationDecision,
 )
 from .trust_crypto import sha256_hex, verify_payload_signature
-from .models import AgentProvider, ApprovalRequest, RiskLevel
+from .models import AgentProvider, ApprovalRequest, ApprovalStatus, RiskLevel
 from .trust_models import (
     ActionConsumption,
     AgentReliabilityScorecard,
     CapabilityLease,
     CapabilityLeaseStatus,
+    CapabilityActionType,
     CredentialGrant,
     PolicyDecision,
     PolicyDecisionType,
@@ -192,6 +194,440 @@ class PostgresTrustRepository:
                 "Proposed action does not match the durable AgentRun step identity"
             )
         return action
+
+    def lock_agent_run_validation_command_binding(
+        self,
+        conn: Connection,
+        *,
+        action_id: str,
+        workspace_id: str,
+        run_id: str,
+        step_id: str,
+        worker_id: str,
+        lease_token: str,
+        lock_capability_lease: bool = True,
+    ) -> ProposedAction:
+        """Validate one RUN_COMMAND against the durable approved test plan.
+
+        This method is a trust-binding primitive only. It does not authorize,
+        consume, or execute an action. Callers must perform those operations in
+        a separately reviewed durable transaction.
+        """
+        self._require_scope(workspace_id)
+        if (
+            not run_id
+            or not step_id
+            or not worker_id
+            or not lease_token
+            or conn.autocommit
+        ):
+            raise ValueError("Validation command binding requires a transaction and full lease identity")
+
+        # Read the parent IDs without locks, then acquire the authority rows
+        # in approval -> task -> run -> step -> action -> capability-lease order.
+        identity = conn.execute(
+            "SELECT task_id,project_id,approval_id FROM agent_runs "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (run_id, workspace_id),
+        ).fetchone()
+        if identity is None or not identity[0] or not identity[2]:
+            raise PostgresTrustRepositoryConflict("AgentRun approval scope is not visible in this workspace")
+
+        approval_row = conn.execute(
+            "SELECT approval_id,project_id,workspace_id,status,payload FROM approval_requests "
+            "WHERE approval_id=%s AND workspace_id=%s FOR UPDATE",
+            (identity[2], workspace_id),
+        ).fetchone()
+        if approval_row is None:
+            raise PostgresTrustRepositoryConflict("Approved validation plan is not visible in this workspace")
+        try:
+            approval = ApprovalRequest.model_validate(approval_row[4])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored approval payload is invalid") from error
+        if (
+            approval.id != approval_row[0]
+            or approval.project_id != approval_row[1]
+            or approval.workspace_id != approval_row[2]
+            or approval.status != ApprovalStatus.APPROVED
+            or approval.id != identity[2]
+            or approval.project_id != identity[1]
+            or approval.workspace_id != workspace_id
+            or not approval.approved_payload_hash
+            or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+        ):
+            raise PostgresTrustRepositoryConflict("Approval is not current or its reviewed payload changed")
+        # Reuse the existing validation-command policy; do not fork its prefix,
+        # shell-control, count, length, or duplicate-command rules here.
+        from .agent_worker_validation_plan import validate_validation_plan
+
+        validation_error = validate_validation_plan(approval)
+        if validation_error:
+            raise PostgresTrustRepositoryConflict(
+                "Approved validation plan is not executable under current policy"
+            )
+
+        task_row = conn.execute(
+            "SELECT task_id,project_id,workspace_id,approval_request_id,status,payload "
+            "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR UPDATE",
+            (identity[0], workspace_id),
+        ).fetchone()
+        if task_row is None:
+            raise PostgresTrustRepositoryConflict("AgentTask is not visible in this workspace")
+        try:
+            task = AgentTask.model_validate(task_row[5])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored AgentTask payload is invalid") from error
+        if (
+            task.id != task_row[0]
+            or task.project_id != task_row[1]
+            or task.workspace_id != task_row[2]
+            or task.approval_request_id != task_row[3]
+            or task.status.value != task_row[4]
+            or task.id != identity[0]
+            or task.project_id != identity[1]
+            or task.workspace_id != workspace_id
+            or task.approval_request_id != approval.id
+            or task.status != AgentTaskStatus.APPROVED
+        ):
+            raise PostgresTrustRepositoryConflict("AgentTask approval or workspace binding is inconsistent")
+
+        run_row = conn.execute(
+            "SELECT run_id,task_id,project_id,workspace_id,approval_id,status,"
+            "current_step_id,lease_owner,lease_token,lease_expires_at,updated_at,payload "
+            "FROM agent_runs WHERE run_id=%s AND workspace_id=%s FOR UPDATE",
+            (run_id, workspace_id),
+        ).fetchone()
+        if run_row is None:
+            raise PostgresTrustRepositoryConflict("AgentRun is not visible in this workspace")
+        try:
+            run = AgentRun.model_validate(run_row[11])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored AgentRun payload is invalid") from error
+        if (
+            run.id != run_row[0]
+            or run.task_id != run_row[1]
+            or run.project_id != run_row[2]
+            or run.workspace_id != run_row[3]
+            or run.approval_request_id != run_row[4]
+            or run.status.value != run_row[5]
+            or run.current_step_id != run_row[6]
+            or run.lease_owner != run_row[7]
+            or run.lease_token != run_row[8]
+            or run.lease_expires_at != run_row[9]
+            or run.updated_at != run_row[10]
+            or run.task_id != identity[0]
+            or run.project_id != identity[1]
+            or run.approval_request_id != identity[2]
+        ):
+            raise PostgresTrustRepositoryError("Stored AgentRun identity or lease is inconsistent")
+        if (
+            run.status != AgentRunStatus.RUNNING
+            or run.current_step_id != step_id
+            or run.lease_owner != worker_id
+            or run.lease_token != lease_token
+            or run.lease_expires_at is None
+            or not run.approval_request_id
+            or not run.capability_lease_id
+        ):
+            raise PostgresTrustRepositoryConflict("AgentRun execution lease or approval scope is not current")
+
+        step_row = conn.execute(
+            "SELECT step_id,run_id,task_id,workspace_id,sequence,status,updated_at,payload "
+            "FROM agent_run_steps WHERE step_id=%s AND workspace_id=%s FOR UPDATE",
+            (step_id, workspace_id),
+        ).fetchone()
+        if step_row is None:
+            raise PostgresTrustRepositoryConflict("AgentRun step is not visible in this workspace")
+        try:
+            step = AgentRunStep.model_validate(step_row[7])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored AgentRun step payload is invalid") from error
+        if (
+            step.id != step_row[0]
+            or step.run_id != step_row[1]
+            or step.task_id != step_row[2]
+            or step.sequence != step_row[4]
+            or step.status.value != step_row[5]
+            or step.updated_at != step_row[6]
+            or step.run_id != run.id
+            or step.task_id != run.task_id
+            or step_row[3] != workspace_id
+        ):
+            raise PostgresTrustRepositoryError("Stored AgentRun step identity or scope is inconsistent")
+        if (
+            step.step_type != AgentRunStepType.RUN_VALIDATION
+            or step.status != AgentRunStepStatus.RUNNING
+            or step.lease_owner != worker_id
+            or step.lease_token != lease_token
+            or step.lease_expires_at is None
+        ):
+            raise PostgresTrustRepositoryConflict("AgentRun step lease or type is not eligible for validation")
+
+        action = self.get_proposed_action(conn, action_id, workspace_id, for_update=True)
+        if action is None:
+            raise PostgresTrustRepositoryConflict("Proposed validation command not found")
+        command_index = action.metadata.get("command_index")
+        if isinstance(command_index, bool) or not isinstance(command_index, int):
+            raise PostgresTrustRepositoryConflict("Validation command index is invalid")
+        if not 0 <= command_index < len(approval.test_plan):
+            raise PostgresTrustRepositoryConflict("Validation command index is outside the approved plan")
+        command = approval.test_plan[command_index]
+        required_metadata = {
+            "step_id": step.id,
+            "step_type": AgentRunStepType.RUN_VALIDATION.value,
+            "idempotency_key": step.idempotency_key,
+            "approval_request_id": approval.id,
+            "approved_payload_hash": approval.approved_payload_hash,
+            "command_source": "approval.test_plan",
+            "command_sha256": sha256_hex({"command": command}),
+        }
+        if (
+            action.action_type != CapabilityActionType.RUN_COMMAND
+            or action.command != command
+            or action.lease_id != run.capability_lease_id
+            or action.workspace_id != workspace_id
+            or action.project_id != run.project_id
+            or action.task_id != run.task_id
+            or action.run_id != run.id
+            or action.provider != task.provider
+            or action.agent_id != task.external_agent_id
+            or action.repository != run.repository
+            or any(action.metadata.get(key) != value for key, value in required_metadata.items())
+        ):
+            raise PostgresTrustRepositoryConflict("Proposed command does not match the approved validation provenance")
+
+        lease = self.get_capability_lease(
+            conn,
+            run.capability_lease_id,
+            workspace_id,
+            for_update=lock_capability_lease,
+        )
+        if lease is None:
+            raise PostgresTrustRepositoryConflict("Capability lease is not visible in this workspace")
+        if (
+            lease.id != run.capability_lease_id
+            or lease.approval_request_id != approval.id
+            or lease.workspace_id != workspace_id
+            or lease.approved_payload_hash != approval.approved_payload_hash
+            or lease.provider != task.provider
+            or lease.agent_id != task.external_agent_id
+            or lease.status != CapabilityLeaseStatus.ACTIVE
+            or CapabilityActionType.RUN_COMMAND not in lease.scope.allowed_actions
+            or command not in lease.scope.allowed_commands
+            or lease.scope.repository != run.repository
+            or action.branch != lease.scope.branch
+            or not verify_payload_signature(lease_receipt_payload(lease), lease.receipt_signature)
+        ):
+            raise PostgresTrustRepositoryConflict("Capability lease does not authorize this exact validation command")
+        checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+        if (
+            run.lease_expires_at <= checked_at
+            or step.lease_expires_at <= checked_at
+            or lease.expires_at <= checked_at
+        ):
+            raise PostgresTrustRepositoryConflict("AgentRun, step, or capability lease expired")
+        return action
+
+    def evaluate_agent_run_validation_command(
+        self,
+        conn: Connection,
+        *,
+        action: ProposedAction,
+        workspace_id: str,
+        run_id: str,
+        step_id: str,
+        worker_id: str,
+        lease_token: str,
+        actor: str,
+        trust_event_repository: PostgresTrustEventRepository,
+    ) -> tuple[PolicyDecision, CapabilityLease]:
+        """Evaluate a persisted exact RUN_VALIDATION command atomically.
+
+        The caller owns the transaction. This records policy and audit evidence
+        only; it never approves a reviewer request, consumes a capability, or
+        executes the command. The action must already exist and retries are
+        accepted only when its payload, lease, and original trust events match.
+        """
+        self._require_scope(workspace_id)
+        if conn.autocommit or not actor:
+            raise ValueError("Validation command evaluation requires an actor and transaction")
+
+        # The binding helper takes locks through the action. Defer its lease
+        # lock so the established action -> policy -> lease ordering holds.
+        bound_action = self.lock_agent_run_validation_command_binding(
+            conn,
+            action_id=action.id,
+            workspace_id=workspace_id,
+            run_id=run_id,
+            step_id=step_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            lock_capability_lease=False,
+        )
+        if bound_action.model_dump(mode="json") != action.model_dump(mode="json"):
+            raise PostgresTrustRepositoryConflict(
+                "Persisted validation command differs from the supplied action payload"
+            )
+
+        existing_decision = self.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id, for_update=True
+        )
+        lease_id = action.lease_id
+        if not lease_id:
+            raise PostgresTrustRepositoryConflict("Validation command has no capability lease")
+        lease = self.get_capability_lease(
+            conn, lease_id, workspace_id, for_update=True
+        )
+        if lease is None or lease.status != CapabilityLeaseStatus.ACTIVE:
+            raise PostgresTrustRepositoryConflict("Validation command capability lease is inactive")
+
+        # Recheck the complete signed scope after locking the lease. The first
+        # binding pass validated identity and acquired authority/action locks,
+        # but intentionally read the lease unlocked to preserve lock order.
+        # Another transaction may have changed its mutable state meanwhile.
+        if (
+            lease.id != action.lease_id
+            or lease.workspace_id != workspace_id
+            or lease.approval_request_id != action.metadata.get("approval_request_id")
+            or lease.approved_payload_hash != action.metadata.get("approved_payload_hash")
+            or lease.provider != action.provider
+            or lease.agent_id != action.agent_id
+            or lease.status != CapabilityLeaseStatus.ACTIVE
+            or CapabilityActionType.RUN_COMMAND not in lease.scope.allowed_actions
+            or action.command not in lease.scope.allowed_commands
+            or lease.scope.repository != action.repository
+            or lease.scope.branch != action.branch
+            or not verify_payload_signature(lease_receipt_payload(lease), lease.receipt_signature)
+        ):
+            raise PostgresTrustRepositoryConflict("Locked capability lease no longer matches the command")
+
+        run_row = conn.execute(
+            "SELECT payload FROM agent_runs WHERE run_id=%s AND workspace_id=%s",
+            (run_id, workspace_id),
+        ).fetchone()
+        step_row = conn.execute(
+            "SELECT payload FROM agent_run_steps WHERE step_id=%s AND workspace_id=%s",
+            (step_id, workspace_id),
+        ).fetchone()
+        if run_row is None or step_row is None:
+            raise PostgresTrustRepositoryConflict("Validation run or step disappeared during evaluation")
+        try:
+            run = AgentRun.model_validate(run_row[0])
+            step = AgentRunStep.model_validate(step_row[0])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored validation run or step payload is invalid") from error
+        checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+        if (
+            run.lease_owner != worker_id
+            or run.lease_token != lease_token
+            or run.current_step_id != step_id
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= checked_at
+            or step.lease_owner != worker_id
+            or step.lease_token != lease_token
+            or step.status != AgentRunStepStatus.RUNNING
+            or step.lease_expires_at is None
+            or step.lease_expires_at <= checked_at
+            or lease.expires_at <= checked_at
+        ):
+            raise PostgresTrustRepositoryConflict("Validation worker, step, or capability lease expired")
+
+        evaluated = evaluate_action_policy(action, lease, now=checked_at)
+        action_payload_hash = sha256_hex(action.model_dump(mode="json"))
+        if existing_decision is not None:
+            if (
+                existing_decision.lease_id != lease.id
+                or existing_decision.evaluated_policy_version != "trust-policy-v1"
+                or existing_decision.decision != evaluated.decision
+                or existing_decision.risk_level != evaluated.risk_level
+                or existing_decision.reasons != evaluated.reasons
+                or existing_decision.obligations != evaluated.obligations
+            ):
+                raise PostgresTrustRepositoryConflict(
+                    "Existing action decision is not an idempotent validation evaluation"
+                )
+            events = trust_event_repository.list_workspace_events(
+                conn,
+                workspace_id=workspace_id,
+                entity_type="proposed_action",
+                entity_id=action.id,
+            )
+            received = [event for event in events if event.event_type == TrustEventType.ACTION_RECEIVED]
+            outcomes = [
+                event for event in events
+                if event.event_type in {
+                    TrustEventType.ACTION_ALLOWED,
+                    TrustEventType.ACTION_REQUIRES_APPROVAL,
+                    TrustEventType.ACTION_BLOCKED,
+                }
+            ]
+            expected_outcome = {
+                PolicyDecisionType.ALLOW: TrustEventType.ACTION_ALLOWED,
+                PolicyDecisionType.REQUIRE_APPROVAL: TrustEventType.ACTION_REQUIRES_APPROVAL,
+                PolicyDecisionType.BLOCK: TrustEventType.ACTION_BLOCKED,
+            }[existing_decision.decision]
+            if (
+                len(received) != 1
+                or len(outcomes) != 1
+                or received[0].payload.get("action_payload_sha256") != action_payload_hash
+                or received[0].payload.get("lease_id") != lease.id
+                or received[0].payload.get("run_id") != run_id
+                or received[0].payload.get("step_id") != step_id
+                or outcomes[0].event_type != expected_outcome
+                or outcomes[0].payload.get("decision_id") != existing_decision.id
+                or outcomes[0].payload.get("decision") != existing_decision.decision
+            ):
+                raise PostgresTrustRepositoryConflict(
+                    "Existing validation decision has no matching immutable receipt"
+                )
+            return existing_decision, lease
+
+        decision = evaluated
+        self.insert_policy_decision(conn, decision, workspace_id=workspace_id)
+        trust_event_repository.append_in_transaction(
+            conn,
+            TrustEventType.ACTION_RECEIVED,
+            entity_type="proposed_action",
+            entity_id=action.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            correlation_id=run_id,
+            payload={
+                "provider": action.provider,
+                "agent_id": action.agent_id,
+                "action_type": action.action_type,
+                "lease_id": lease.id,
+                "run_id": run_id,
+                "step_id": step_id,
+                "idempotency_key": action.metadata["idempotency_key"],
+                "command_source": action.metadata["command_source"],
+                "command_index": action.metadata["command_index"],
+                "command_sha256": action.metadata["command_sha256"],
+                "action_payload_sha256": action_payload_hash,
+            },
+        )
+        event_type = {
+            PolicyDecisionType.ALLOW: TrustEventType.ACTION_ALLOWED,
+            PolicyDecisionType.REQUIRE_APPROVAL: TrustEventType.ACTION_REQUIRES_APPROVAL,
+            PolicyDecisionType.BLOCK: TrustEventType.ACTION_BLOCKED,
+        }[decision.decision]
+        trust_event_repository.append_in_transaction(
+            conn,
+            event_type,
+            entity_type="proposed_action",
+            entity_id=action.id,
+            actor=actor,
+            workspace_id=workspace_id,
+            correlation_id=run_id,
+            payload={
+                "decision_id": decision.id,
+                "decision": decision.decision,
+                "risk_level": decision.risk_level,
+                "reasons": decision.reasons,
+                "obligations": decision.obligations,
+            },
+        )
+        return decision, lease
 
     def evaluate_agent_run_action(
         self,

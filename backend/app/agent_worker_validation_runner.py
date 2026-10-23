@@ -43,6 +43,12 @@ class CommandExecutionResult:
     output_truncated: bool = False
     output_chars: int = 0
     allowed_prefix: str = "UNKNOWN"
+    stdout_sha256: str | None = None
+    stdout_bytes: int | None = None
+    stderr_sha256: str | None = None
+    stderr_bytes: int | None = None
+    stream_evidence_complete: bool = False
+    output_limit_exceeded: bool = False
 
     @property
     def passed(self) -> bool:

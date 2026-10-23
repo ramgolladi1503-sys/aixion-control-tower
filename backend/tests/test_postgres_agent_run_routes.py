@@ -21,6 +21,7 @@ from app.agent_run_models import (
     AgentRunEvent,
     AgentRunEventType,
     AgentRunStatus,
+    AgentRunStepExecutionResult,
     AgentRunStepStatus,
     AgentRunStepType,
     VerificationDecision,
@@ -29,10 +30,6 @@ from app.agent_run_repository import AgentRunRepositoryConflict
 from app.agent_run_supervisor import _build_postgres_scope_validation_records
 from app.agent_run_verifier import canonical_evidence_hash
 from app.agent_run_routes import MaintainerDependency, MetricsDependency, ReviewerDependency
-from app.agent_worker_validation_runner import (
-    CommandExecutionResult,
-    run_agent_worker_validation_commands,
-)
 from app.agent_task_models import (
     AgentTask,
     AgentTaskEvent,
@@ -65,6 +62,7 @@ from app.store import store
 from app.trust_crypto import sign_payload
 from app.trust_models import (
     CapabilityActionType,
+    ActionConsumption,
     CapabilityLease,
     CapabilityLeaseMode,
     CapabilityLeaseStatus,
@@ -72,6 +70,7 @@ from app.trust_models import (
     CredentialGrant,
     CredentialGrantType,
     TrustEventType,
+    ProposedAction,
 )
 from app.postgres_trust_repository import PostgresTrustRepository, PostgresTrustRepositoryConflict
 from app.trust_policy import lease_receipt_payload
@@ -259,6 +258,7 @@ def postgres_agent_run_route_runtime(
             "approval_decision_repository": repositories.approval_decisions,
             "agent_task_repository": repositories.agent_tasks,
             "agent_run_repository": repositories.agent_runs,
+            "agent_run_validation_intent_repository": repositories.agent_run_validation_intents,
             "workspace_membership_repository": repositories.workspace_membership,
         }.items():
             monkeypatch.setattr(main.app.state, name, value, raising=False)
@@ -810,42 +810,56 @@ def _seed_postgres_verify_result_ready(
     client: TestClient,
     include_evidence: bool = True,
 ) -> str:
-    with connect() as conn:
-        task_row = conn.execute(
-            "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
-            (task_id, workspace.id),
-        ).fetchone()
-        task = AgentTask.model_validate(task_row[0])
-        task.repository = "owner/approved-repository"
-        task.branch_preference = "feature/approved-branch"
-        conn.execute(
-            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
-            (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
-        )
-        approval_row = conn.execute(
-            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
-            (task.approval_request_id, workspace.id),
-        ).fetchone()
-        approval = ApprovalRequest.model_validate(approval_row[0])
-        approval.test_plan = ["python -m pytest"]
-        approval.approved_payload_hash = compute_approval_payload_hash(approval)
-        conn.execute(
-            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
-            (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
-        )
-
-    created = client.post("/agent/runs", json={"task_id": task_id})
-    assert created.status_code == 200, created.text
-    run_id = created.json()["run"]["id"]
     if include_evidence:
-        validation = run_agent_worker_validation_commands(
+        seeded = _seed_postgres_validation_completion_records(
+            connect=connect,
+            workspace=workspace,
             task_id=task_id,
-            worker_id=f"mission-control:{run_id}:validation",
-            executor=lambda command: CommandExecutionResult(command=command, exit_code=0),
-            task_repository=repositories.agent_tasks,
-            approval_repository=repositories.approval_decisions,
+            state={},
+            repositories=repositories,
+            client=client,
         )
-        assert validation.success is True, validation.reason
+        seeded_run, seeded_steps, worker, intent_id, task_event, build_records = seeded
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=seeded_run,
+            expected_steps=seeded_steps,
+            worker_id=worker,
+            lease_token=seeded_run.lease_token or "",
+            step_type=AgentRunStepType.RUN_VALIDATION,
+            validation_intent_id=intent_id,
+            validation_task_event=task_event,
+            build_records=build_records,
+        )
+        run_id = seeded_run.id
+        task = repositories.agent_tasks.get(task_id)
+        assert task is not None
+    else:
+        with connect() as conn:
+            task_row = conn.execute(
+                "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+                (task_id, workspace.id),
+            ).fetchone()
+            task = AgentTask.model_validate(task_row[0])
+            task.repository = "owner/approved-repository"
+            task.branch_preference = "feature/approved-branch"
+            conn.execute(
+                "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+                (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
+            )
+            approval_row = conn.execute(
+                "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+                (task.approval_request_id, workspace.id),
+            ).fetchone()
+            approval = ApprovalRequest.model_validate(approval_row[0])
+            approval.test_plan = ["python -m pytest"]
+            approval.approved_payload_hash = compute_approval_payload_hash(approval)
+            conn.execute(
+                "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+                (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
+            )
+        created = client.post("/agent/runs", json={"task_id": task_id})
+        assert created.status_code == 200, created.text
+        run_id = created.json()["run"]["id"]
     run = repositories.agent_runs.get(run_id)
     assert run is not None
     steps = repositories.agent_runs.list_steps_for_run(run_id)
@@ -858,6 +872,30 @@ def _seed_postgres_verify_result_ready(
     run.updated_at = now
     task.status = AgentTaskStatus.READY_FOR_PR
     task.updated_at = now
+    validation_success_event = None
+    if include_evidence:
+        validation_step = next(
+            step for step in steps if step.step_type == AgentRunStepType.RUN_VALIDATION
+        )
+        validation_success_event = next(
+            (
+                event for event in repositories.agent_runs.list_events_for_run(run_id)
+                if event.step_id == validation_step.id
+                and event.event_type == AgentRunEventType.STEP_SUCCEEDED
+            ),
+            None,
+        )
+        if (
+            validation_success_event is None
+            or validation_step.evidence.get("validation_intent_id") != intent_id
+            or validation_step.evidence.get("bundle_revision") is None
+            or validation_step.evidence.get("bundle_git_tree_sha") is None
+            or validation_success_event.metadata.get("bundle_revision")
+            != validation_step.evidence["bundle_revision"]
+            or validation_success_event.metadata.get("bundle_git_tree_sha")
+            != validation_step.evidence["bundle_git_tree_sha"]
+        ):
+            raise AssertionError("Completed validation provenance is missing from the run snapshot.")
     with connect() as conn:
         conn.execute(
             "UPDATE agent_runs SET status=%s,current_step_id=%s,updated_at=%s,payload=%s "
@@ -886,10 +924,11 @@ def _seed_postgres_verify_result_ready(
             if step.sequence < verify_step.sequence:
                 step.status = AgentRunStepStatus.SUCCEEDED
                 step.decision = VerificationDecision.PASS
-                step.reason = "Prior worker step fixture completed."
-                step.evidence = {"fixture": "prior_worker_step_completed"}
-                step.evidence_hash = canonical_evidence_hash(step.evidence)
-                step.completed_at = now
+                if step.step_type != AgentRunStepType.RUN_VALIDATION:
+                    step.reason = "Prior worker step fixture completed."
+                    step.evidence = {"fixture": "prior_worker_step_completed"}
+                    step.evidence_hash = canonical_evidence_hash(step.evidence)
+                    step.completed_at = now
             elif step.id == verify_step.id:
                 step.status = AgentRunStepStatus.READY
             else:
@@ -908,6 +947,8 @@ def _seed_postgres_verify_result_ready(
                 ),
             )
             if step.sequence < verify_step.sequence:
+                if step.step_type == AgentRunStepType.RUN_VALIDATION and include_evidence:
+                    continue
                 success_event = AgentRunEvent(
                     run_id=run_id,
                     task_id=task_id,
@@ -1422,7 +1463,7 @@ def test_postgres_agent_run_verifies_run_bound_durable_evidence_once(
                 "AND event_type='agent_run.step_completed'",
                 (workspace.id, run_id),
             ).fetchone()[0]
-            == 1
+            == 2
         )
 
     sealed = client.post(
@@ -1447,8 +1488,120 @@ def test_postgres_agent_run_verifies_run_bound_durable_evidence_once(
                 "AND event_type='agent_run.step_completed'",
                 (workspace.id, run_id),
             ).fetchone()[0]
-            == 2
+            == 3
         )
+
+
+def test_postgres_run_validation_requires_bundle_provider_before_acquiring_lease(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.postgres_runtime import PostgresRuntime
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    command = "python -m pytest"
+    with connect() as conn:
+        task_row = conn.execute(
+            "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        task = AgentTask.model_validate(task_row[0])
+        task.repository = "owner/approved-repository"
+        task.branch_preference = "feature/approved-branch"
+        conn.execute(
+            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
+        )
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (task.approval_request_id, workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+        approval.test_plan = [command]
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
+        )
+
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        state=state,
+        client=client,
+        lease_actions=[CapabilityActionType.RUN_COMMAND],
+        allowed_commands=[command],
+    )
+    attached = client.post(
+        f"/agent/runs/{run_id}/capability-lease",
+        json={"capability_lease_id": lease.id},
+    )
+    assert attached.status_code == 200, attached.text
+    run = repositories.agent_runs.get(run_id)
+    steps = repositories.agent_runs.list_steps_for_run(run_id)
+    validation_step = next(step for step in steps if step.step_type == AgentRunStepType.RUN_VALIDATION)
+    now = now_utc()
+    run.status = AgentRunStatus.RUNNING
+    run.current_step_id = validation_step.id
+    run.current_step_index = validation_step.sequence
+    run.started_at = now
+    run.updated_at = now
+    for step in steps:
+        step.updated_at = now
+        if step.sequence < validation_step.sequence:
+            step.status = AgentRunStepStatus.SUCCEEDED
+        elif step.id == validation_step.id:
+            step.status = AgentRunStepStatus.READY
+        else:
+            step.status = AgentRunStepStatus.PENDING
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status=%s,current_step_id=%s,updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (run.status.value, run.current_step_id, now, Jsonb(run.model_dump(mode="json")), run.id, workspace.id),
+        )
+        for step in steps:
+            conn.execute(
+                "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                "WHERE step_id=%s AND workspace_id=%s",
+                (step.status.value, step.updated_at, Jsonb(step.model_dump(mode="json")), step.id, workspace.id),
+            )
+
+    runtime = PostgresRuntime(_dsn="postgresql://fixture", profile="test", _connector=connect)
+    monkeypatch.setenv("AIXION_POSTGRES_RUN_VALIDATION_ENABLED", "true")
+    monkeypatch.setenv(
+        "AIXION_VALIDATION_CONTAINER_IMAGE",
+        "python:3.12-slim@sha256:" + "a" * 64,
+    )
+    for name, value in {
+        "postgres_runtime": runtime,
+        "postgres_repositories": runtime.repositories,
+        "agent_run_repository": runtime.repositories.agent_runs,
+        "agent_task_repository": runtime.repositories.agent_tasks,
+        "approval_decision_repository": runtime.repositories.approval_decisions,
+        "trust_repository": runtime.repositories.trust,
+        "agent_run_validation_intent_repository": runtime.repositories.agent_run_validation_intents,
+        "agent_run_validation_bundle_provider": None,
+    }.items():
+        monkeypatch.setattr(main.app.state, name, value, raising=False)
+
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "validation-route-test", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 503
+    assert "bundle provider" in response.json()["detail"]
+    persisted_run = runtime.repositories.agent_runs.get(run_id)
+    assert persisted_run is not None
+    assert persisted_run.lease_token is None
+    assert persisted_run.lease_owner is None
 
 
 def test_postgres_verify_result_serializes_concurrent_task_evidence_insert(
@@ -1777,7 +1930,7 @@ def test_postgres_agent_run_seals_durable_evidence_and_rejects_replay(
                 "AND event_type='agent_run.step_completed'",
                 (workspace.id, run_id),
             ).fetchone()[0]
-            == 2
+            == 3
         )
 
     replay = client.post(
@@ -2431,7 +2584,7 @@ def test_postgres_agent_run_releases_lease_if_prerequisite_changes_after_claim(
 
 @pytest.mark.parametrize(
     ("evidence_field", "invalid_value"),
-    [("command_count", True), ("exit_code", False)],
+    [("command_index", True), ("exit_code", False)],
 )
 def test_postgres_verify_result_rejects_boolean_as_json_integer(
     postgres_agent_run_route_runtime,
@@ -2456,10 +2609,7 @@ def test_postgres_verify_result_rejects_boolean_as_json_integer(
         for item in repositories.agent_tasks.list_events(task_id, workspace_id=workspace.id)
         if item.event_type == AgentTaskEventType.TESTS_PASSED
     )
-    if evidence_field == "command_count":
-        event.metadata[evidence_field] = invalid_value
-    else:
-        event.metadata["results"][0][evidence_field] = invalid_value
+    event.metadata["command_results"][0][evidence_field] = invalid_value
     with connect() as conn:
         conn.execute(
             "UPDATE agent_task_events SET payload=%s WHERE event_id=%s",
@@ -2558,6 +2708,11 @@ def test_postgres_agent_run_verify_result_rolls_back_completion_when_audit_fails
     before_events = repositories.agent_runs.list_events_for_run(run_id)
     assert before_run is not None and before_run.lease_token is not None
     with connect() as conn:
+        before_step_completed_audit_count = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type='agent_run.step_completed'",
+            (workspace.id, run_id),
+        ).fetchone()[0]
         conn.execute(
             "CREATE FUNCTION reject_verify_result_audit() RETURNS trigger "
             "LANGUAGE plpgsql AS $$ BEGIN "
@@ -2620,7 +2775,7 @@ def test_postgres_agent_run_verify_result_rolls_back_completion_when_audit_fails
                 "AND event_type='agent_run.step_completed'",
                 (workspace.id, run_id),
             ).fetchone()[0]
-            == 0
+            == before_step_completed_audit_count
         )
 
 
@@ -2701,6 +2856,7 @@ def _create_run_with_postgres_capability_lease(
     lease_max_retries: int = 3,
     lease_actions: list[CapabilityActionType] | None = None,
     allowed_path_prefixes: list[str] | None = None,
+    allowed_commands: list[str] | None = None,
 ) -> tuple[str, CapabilityLease]:
     with connect() as conn:
         task_row = conn.execute(
@@ -2735,6 +2891,7 @@ def _create_run_with_postgres_capability_lease(
             branch=lease_branch,
             allowed_actions=lease_actions or [CapabilityActionType.CREATE_BRANCH],
             allowed_path_prefixes=allowed_path_prefixes or [],
+            allowed_commands=allowed_commands or [],
             max_retries=lease_max_retries,
         ),
         issued_by_user_id=workspace.owner_user_id,
@@ -4050,6 +4207,697 @@ def test_postgres_agent_run_capability_binding_rejects_invalid_leases(
             ).fetchone()[0]
             == 0
         )
+
+
+def test_postgres_run_validation_completion_requires_intent_and_event_together(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run = repositories.agent_runs.get(created.json()["run"]["id"])
+    assert run is not None
+    run, _lease_event, _audit = repositories.agent_runs.acquire_lease(
+        run_id=run.id, worker_id="validation-contract-test", lease_seconds=300, now=now_utc()
+    )
+    with pytest.raises(ValueError, match="requires its intent and task event"):
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=run,
+            expected_steps=repositories.agent_runs.list_steps_for_run(run.id),
+            worker_id="validation-contract-test",
+            lease_token=run.lease_token or "",
+            step_type=AgentRunStepType.VERIFY_RESULT,
+            validation_intent_id="intent-without-event",
+            build_records=lambda *_args: pytest.fail("callback must not run"),
+        )
+
+
+def _seed_postgres_validation_completion_records(
+    *, connect, workspace, task_id, state, repositories, client,
+    include_claim: bool = True, include_consumption: bool = True,
+    result_exit_code: int = 0, claim_status: str = "RESULT_RECORDED",
+):
+    """Seed an exact RUNNING validation checkpoint, intent, claim, action, and consumption."""
+    from app.agent_run_supervisor import _build_postgres_agent_run_step_completion_records
+    from app.trust_crypto import sha256_hex
+
+    command = "python -m pytest"
+    bundle_revision = "1" * 40
+    bundle_git_tree_sha = "2" * 40
+    with connect() as conn:
+        task_row = conn.execute(
+            "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        task = AgentTask.model_validate(task_row[0])
+        task.repository = "owner/approved-repository"
+        task.branch_preference = "feature/approved-branch"
+        conn.execute(
+            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
+        )
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (task.approval_request_id, workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+        approval.test_plan = [command]
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
+        )
+
+    run_id, lease = _create_run_with_postgres_capability_lease(
+        connect=connect,
+        workspace=workspace,
+        task_id=task_id,
+        state=state,
+        client=client,
+        lease_actions=[CapabilityActionType.RUN_COMMAND],
+        allowed_commands=[command],
+    )
+    attached = client.post(
+        f"/agent/runs/{run_id}/capability-lease", json={"capability_lease_id": lease.id}
+    )
+    assert attached.status_code == 200, attached.text
+    worker = "postgres-run-validation-worker"
+    run, _lease_event, _lease_audit = repositories.agent_runs.acquire_lease(
+        run_id=run_id, worker_id=worker, lease_seconds=300, now=now_utc()
+    )
+    assert run.lease_token and run.lease_expires_at
+    steps = repositories.agent_runs.list_steps_for_run(run_id)
+    validation_step = next(step for step in steps if step.step_type == AgentRunStepType.RUN_VALIDATION)
+    now = now_utc()
+    run.status = AgentRunStatus.RUNNING
+    run.started_at = now
+    run.current_step_id = validation_step.id
+    run.current_step_index = validation_step.sequence
+    run.updated_at = now
+    for step in steps:
+        step.updated_at = now
+        if step.sequence < validation_step.sequence:
+            step.status = AgentRunStepStatus.SUCCEEDED
+            step.started_at = now
+            step.completed_at = now
+        elif step.id == validation_step.id:
+            step.status = AgentRunStepStatus.RUNNING
+            step.attempt_count = 1
+            step.lease_owner = worker
+            step.lease_token = run.lease_token
+            step.lease_expires_at = run.lease_expires_at
+            step.started_at = now
+        else:
+            step.status = AgentRunStepStatus.PENDING
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET status=%s,current_step_id=%s,updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (run.status.value, run.current_step_id, now, Jsonb(run.model_dump(mode="json")), run.id, workspace.id),
+        )
+        for step in steps:
+            conn.execute(
+                "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                "WHERE step_id=%s AND workspace_id=%s",
+                (step.status.value, step.updated_at, Jsonb(step.model_dump(mode="json")), step.id, workspace.id),
+            )
+    run = repositories.agent_runs.get(run_id)
+    assert run is not None and run.lease_token
+    steps = repositories.agent_runs.list_steps_for_run(run_id)
+    validation_step = next(step for step in steps if step.id == run.current_step_id)
+    intent_id = f"validation_{uuid.uuid4().hex}"
+    command_hash = sha256_hex({"command": command})
+    approval_hash = compute_approval_payload_hash(approval)
+    test_plan_hash = sha256_hex([command])
+    lease_token_hash = sha256_hex({"lease_token": run.lease_token})
+    action = ProposedAction(
+        lease_id=lease.id,
+        provider=task.provider,
+        agent_id=task.external_agent_id,
+        run_id=run.id,
+        task_id=task.id,
+        project_id=task.project_id,
+        workspace_id=workspace.id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository=task.repository,
+        branch=lease.scope.branch,
+        command=command,
+        estimated_runtime_seconds=30,
+        metadata={
+            "step_id": validation_step.id,
+            "step_type": AgentRunStepType.RUN_VALIDATION.value,
+            "idempotency_key": validation_step.idempotency_key,
+            "approval_request_id": approval.id,
+            "approved_payload_hash": approval.approved_payload_hash,
+            "command_source": "approval.test_plan",
+            "command_index": 0,
+            "command_sha256": command_hash,
+            "bundle_revision": bundle_revision,
+            "bundle_git_tree_sha": bundle_git_tree_sha,
+        },
+    )
+    intent_time = now_utc()
+    intent_payload = {
+        "id": intent_id,
+        "workspace_id": workspace.id,
+        "run_id": run.id,
+        "task_id": task.id,
+        "approval_id": approval.id,
+        "step_id": validation_step.id,
+        "lease_id": lease.id,
+        "idempotency_key": validation_step.idempotency_key,
+        "approval_hash": approval_hash,
+        "test_plan_hash": test_plan_hash,
+        "lease_token_hash": lease_token_hash,
+        "bundle_revision": bundle_revision,
+        "bundle_git_tree_sha": bundle_git_tree_sha,
+        "run_revision": run.updated_at.isoformat(),
+        "step_revision": validation_step.updated_at.isoformat(),
+        "status": "EXECUTION_CLAIMED",
+        "reason": "",
+        "created_at": intent_time.isoformat(),
+        "updated_at": intent_time.isoformat(),
+    }
+    action_consumption = ActionConsumption(
+        actual_runtime_seconds=30,
+        retry_consumed=validation_step.attempt_count > 1,
+        evidence={
+            "workspace_id": workspace.id,
+            "run_id": run.id,
+            "task_id": task.id,
+            "approval_id": approval.id,
+            "step_id": validation_step.id,
+            "action_id": action.id,
+            "lease_id": lease.id,
+            "intent_id": intent_id,
+            "command_index": 0,
+            "command_sha256": command_hash,
+            "runtime_seconds_reserved": 30,
+            "authorized_attempt_count": validation_step.attempt_count,
+            "authorized_retry_consumed": validation_step.attempt_count > 1,
+        },
+    )
+    consumed_at = intent_time
+    claimed_at = consumed_at + timedelta(milliseconds=1)
+    claim_updated_at = claimed_at + timedelta(milliseconds=1)
+    claim_payload = {
+        "intent_id": intent_id,
+        "workspace_id": workspace.id,
+        "action_id": action.id,
+        "command_index": 0,
+        "command_hash": command_hash,
+        "status": "RESULT_RECORDED",
+        "exit_code": result_exit_code,
+        "timed_out": False,
+        "stdout_sha256": "a" * 64,
+        "stdout_bytes": 0,
+        "stderr_sha256": "b" * 64,
+        "stderr_bytes": 0,
+        "reason": "",
+        "claimed_at": claimed_at.isoformat(),
+        "updated_at": claim_updated_at.isoformat(),
+    }
+    with connect() as conn:
+        PostgresTrustRepository().insert_proposed_action(conn, action)
+        if include_consumption:
+            envelope = {
+                "action_id": action.id,
+                "workspace_id": workspace.id,
+                "lease_id": lease.id,
+                "consumed_at": consumed_at.isoformat(),
+                "consumption": action_consumption.model_dump(mode="json"),
+            }
+            conn.execute(
+                "INSERT INTO action_consumptions(action_id,workspace_id,lease_id,consumed_at,payload) "
+                "VALUES(%s,%s,%s,%s,%s)",
+                (action.id, workspace.id, lease.id, consumed_at, Jsonb(envelope)),
+            )
+        conn.execute(
+            "INSERT INTO agent_run_validation_intents(intent_id,workspace_id,run_id,task_id,approval_id,step_id,"
+            "lease_id,idempotency_key,approval_hash,test_plan_hash,lease_token_hash,bundle_revision,"
+            "bundle_git_tree_sha,run_revision,step_revision,status,reason,created_at,updated_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'EXECUTION_CLAIMED','',%s,%s,%s)",
+            (
+                intent_id, workspace.id, run.id, task.id, approval.id, validation_step.id, lease.id,
+                validation_step.idempotency_key, approval_hash, test_plan_hash, lease_token_hash,
+                bundle_revision, bundle_git_tree_sha,
+                run.updated_at, validation_step.updated_at, intent_time, intent_time, Jsonb(intent_payload),
+            ),
+        )
+        if include_claim and claim_status == "RESULT_RECORDED":
+            conn.execute(
+                "INSERT INTO agent_run_validation_command_claims(intent_id,workspace_id,action_id,command_index,"
+                "command_hash,status,exit_code,timed_out,stdout_sha256,stdout_bytes,stderr_sha256,stderr_bytes,"
+                "reason,claimed_at,updated_at,payload) "
+                "VALUES(%s,%s,%s,0,%s,'RESULT_RECORDED',%s,FALSE,%s,0,%s,0,'',%s,%s,%s)",
+                (
+                    intent_id, workspace.id, action.id, command_hash, result_exit_code, "a" * 64,
+                    "b" * 64, claimed_at, claim_updated_at, Jsonb(claim_payload),
+                ),
+            )
+        elif include_claim:
+            ambiguous_payload = dict(claim_payload)
+            ambiguous_payload.update(
+                status="CLAIMED", exit_code=None, timed_out=None,
+                stdout_sha256=None, stdout_bytes=None, stderr_sha256=None, stderr_bytes=None,
+            )
+            conn.execute(
+                "INSERT INTO agent_run_validation_command_claims(intent_id,workspace_id,action_id,command_index,"
+                "command_hash,status,exit_code,timed_out,stdout_sha256,stdout_bytes,stderr_sha256,stderr_bytes,"
+                "reason,claimed_at,updated_at,payload) "
+                "VALUES(%s,%s,%s,0,%s,'CLAIMED',NULL,NULL,NULL,NULL,NULL,NULL,'',%s,%s,%s)",
+                (
+                    intent_id, workspace.id, action.id, command_hash, claimed_at,
+                    claim_updated_at, Jsonb(ambiguous_payload),
+                ),
+            )
+    event = AgentTaskEvent(
+        task_id=task.id,
+        event_type=(
+            AgentTaskEventType.TESTS_PASSED if result_exit_code == 0 else AgentTaskEventType.TESTS_FAILED
+        ),
+        status=AgentTaskStatus.APPROVED if result_exit_code == 0 else AgentTaskStatus.FAILED,
+        actor=worker,
+        created_at=now_utc(),
+        metadata={
+            "run_id": run.id,
+            "step_id": validation_step.id,
+            "intent_id": intent_id,
+            "attempt_count": validation_step.attempt_count,
+            "approval_hash": approval_hash,
+            "test_plan_hash": test_plan_hash,
+            "lease_token_hash": lease_token_hash,
+            "bundle_revision": bundle_revision,
+            "bundle_git_tree_sha": bundle_git_tree_sha,
+            "command_results": [{
+                "command_index": 0,
+                "command_hash": command_hash,
+                "exit_code": result_exit_code,
+                "timed_out": False,
+                "stdout_sha256": "a" * 64,
+                "stdout_bytes": 0,
+                "stderr_sha256": "b" * 64,
+                "stderr_bytes": 0,
+            }],
+        },
+    )
+
+    def build_records(_task, _approval, _task_events, durable_run, durable_steps):
+        updated_run, updated_steps, events, audit = _build_postgres_agent_run_step_completion_records(
+            run=durable_run,
+            steps=durable_steps,
+            step_type=AgentRunStepType.RUN_VALIDATION,
+            result=AgentRunStepExecutionResult(
+                success=result_exit_code == 0,
+                decision=(
+                    VerificationDecision.PASS
+                    if result_exit_code == 0 else VerificationDecision.FAIL_PERMANENT
+                ),
+                reason=(
+                    "Validation commands passed."
+                    if result_exit_code == 0 else "The first approved validation command failed."
+                ),
+                evidence={
+                    "validation_intent_id": intent_id,
+                    "test_plan_hash": test_plan_hash,
+                    "bundle_revision": bundle_revision,
+                    "bundle_git_tree_sha": bundle_git_tree_sha,
+                },
+            ),
+            worker_id=worker,
+            lease_token=durable_run.lease_token or "",
+            already_running=True,
+        )
+        audit_details = {
+            **audit.details,
+            "validation_intent_id": intent_id,
+            "approval_hash": approval_hash,
+            "test_plan_hash": test_plan_hash,
+            "lease_token_hash": lease_token_hash,
+            "bundle_revision": bundle_revision,
+            "bundle_git_tree_sha": bundle_git_tree_sha,
+        }
+        events = [
+            item.model_copy(update={
+                "metadata": {
+                    **item.metadata,
+                    "bundle_revision": bundle_revision,
+                    "bundle_git_tree_sha": bundle_git_tree_sha,
+                }
+            }) if item.step_id == validation_step.id else item
+            for item in events
+        ]
+        return updated_run, updated_steps, events, audit.model_copy(update={"details": audit_details})
+
+    return run, steps, worker, intent_id, event, build_records
+
+
+def test_postgres_run_validation_completion_commits_success_atomically(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = postgres_agent_run_route_runtime
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    values = _seed_postgres_validation_completion_records(
+        connect=connect, workspace=workspace, task_id=task_id, state=state,
+        repositories=repositories, client=TestClient(main.app),
+    )
+    run, steps, worker, intent_id, task_event, build_records = values
+    updated_run, updated_steps, completed_events, completion_audit = repositories.agent_runs.commit_authoritative_task_step(
+        expected_run=run,
+        expected_steps=steps,
+        worker_id=worker,
+        lease_token=run.lease_token or "",
+        step_type=AgentRunStepType.RUN_VALIDATION,
+        validation_intent_id=intent_id,
+        validation_task_event=task_event,
+        build_records=build_records,
+    )
+    assert updated_run.lease_token is None
+    completed_step = next(step for step in updated_steps if step.step_type == AgentRunStepType.RUN_VALIDATION)
+    assert completed_step.status == AgentRunStepStatus.SUCCEEDED
+    assert completed_step.evidence["bundle_revision"] == task_event.metadata["bundle_revision"]
+    assert completed_step.evidence["bundle_git_tree_sha"] == task_event.metadata["bundle_git_tree_sha"]
+    step_events = [event for event in completed_events if event.step_id == completed_step.id]
+    assert step_events
+    assert all(
+        event.metadata["bundle_revision"] == task_event.metadata["bundle_revision"]
+        and event.metadata["bundle_git_tree_sha"] == task_event.metadata["bundle_git_tree_sha"]
+        for event in step_events
+    )
+    assert completion_audit.details["bundle_revision"] == task_event.metadata["bundle_revision"]
+    assert completion_audit.details["bundle_git_tree_sha"] == task_event.metadata["bundle_git_tree_sha"]
+    assert repositories.agent_tasks.get(task_id).status == AgentTaskStatus.APPROVED
+    with connect() as conn:
+        persisted_task_event = conn.execute(
+            "SELECT event_type,payload FROM agent_task_events WHERE event_id=%s AND task_id=%s "
+            "AND workspace_id=%s",
+            (task_event.id, task_id, workspace.id),
+        ).fetchone()
+        assert persisted_task_event is not None, (task_event.id, task_id, workspace.id, conn.execute(
+            "SELECT event_id,task_id,workspace_id,event_type FROM agent_task_events WHERE task_id=%s",
+            (task_id,),
+        ).fetchall())
+        assert persisted_task_event[0] == AgentTaskEventType.TESTS_PASSED.value
+        assert persisted_task_event[1] == task_event.model_dump(mode="json")
+        assert conn.execute(
+            "SELECT status FROM agent_run_validation_intents WHERE intent_id=%s", (intent_id,)
+        ).fetchone()[0] == "COMPLETED"
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_type='agent_task' AND entity_id=%s "
+            "AND event_type='agent_worker.validation_run_completed'", (task_id,)
+        ).fetchone()[0] == 1
+        task_audit_details = conn.execute(
+            "SELECT details FROM audit_events WHERE entity_type='agent_task' AND entity_id=%s "
+            "AND event_type='agent_worker.validation_run_completed'",
+            (task_id,),
+        ).fetchone()[0]
+        assert task_audit_details["bundle_revision"] == task_event.metadata["bundle_revision"]
+        assert task_audit_details["bundle_git_tree_sha"] == task_event.metadata["bundle_git_tree_sha"]
+
+
+def test_postgres_run_validation_completion_commits_first_deterministic_failure(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = postgres_agent_run_route_runtime
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    run, steps, worker, intent_id, task_event, build_records = _seed_postgres_validation_completion_records(
+        connect=connect, workspace=workspace, task_id=task_id, state=state,
+        repositories=repositories, client=TestClient(main.app), result_exit_code=2,
+    )
+    updated_run, updated_steps, _events, _audit = repositories.agent_runs.commit_authoritative_task_step(
+        expected_run=run, expected_steps=steps, worker_id=worker,
+        lease_token=run.lease_token or "", step_type=AgentRunStepType.RUN_VALIDATION,
+        validation_intent_id=intent_id, validation_task_event=task_event,
+        build_records=build_records,
+    )
+    completed_step = next(step for step in updated_steps if step.step_type == AgentRunStepType.RUN_VALIDATION)
+    assert completed_step.status == AgentRunStepStatus.FAILED
+    assert updated_run.status == AgentRunStatus.FAILED
+    assert repositories.agent_tasks.get(task_id).status == AgentTaskStatus.FAILED
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status,reason,payload->>'reason' FROM agent_run_validation_intents WHERE intent_id=%s",
+            (intent_id,),
+        ).fetchone() == (
+            "COMPLETED",
+            "Approved validation command failed or timed out; later commands were not executed.",
+            "Approved validation command failed or timed out; later commands were not executed.",
+        )
+        assert conn.execute(
+            "SELECT event_type,payload->>'status' FROM agent_task_events WHERE event_id=%s",
+            (task_event.id,),
+        ).fetchone() == (AgentTaskEventType.TESTS_FAILED.value, AgentTaskStatus.FAILED.value)
+
+
+@pytest.mark.parametrize("missing", ["claim", "consumption"])
+def test_postgres_run_validation_completion_rejects_missing_claim_or_consumption(
+    postgres_agent_run_route_runtime, missing: str,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = postgres_agent_run_route_runtime
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    values = _seed_postgres_validation_completion_records(
+        connect=connect, workspace=workspace, task_id=task_id, state=state,
+        repositories=repositories, client=TestClient(main.app),
+        include_claim=missing != "claim", include_consumption=missing != "consumption",
+    )
+    run, steps, worker, intent_id, task_event, build_records = values
+    before_run = repositories.agent_runs.get(run.id)
+    before_steps = repositories.agent_runs.list_steps_for_run(run.id)
+    with pytest.raises(AgentRunRepositoryConflict):
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=run, expected_steps=steps, worker_id=worker,
+            lease_token=run.lease_token or "", step_type=AgentRunStepType.RUN_VALIDATION,
+            validation_intent_id=intent_id, validation_task_event=task_event,
+            build_records=build_records,
+        )
+    assert repositories.agent_runs.get(run.id) == before_run
+    assert repositories.agent_runs.list_steps_for_run(run.id) == before_steps
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_run_validation_intents WHERE intent_id=%s", (intent_id,)
+        ).fetchone()[0] == "EXECUTION_CLAIMED"
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE event_id=%s", (task_event.id,)
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "claim_hash", "consumption_evidence", "task_event", "task_event_bundle",
+        "action_metadata_bundle", "step_evidence_bundle", "run_event_bundle", "audit_bundle",
+    ],
+)
+def test_postgres_run_validation_completion_rejects_mismatched_evidence(
+    postgres_agent_run_route_runtime, tamper: str,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = postgres_agent_run_route_runtime
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    run, steps, worker, intent_id, task_event, build_records = _seed_postgres_validation_completion_records(
+        connect=connect, workspace=workspace, task_id=task_id, state=state,
+        repositories=repositories, client=TestClient(main.app),
+    )
+    if tamper == "claim_hash":
+        with connect() as conn:
+            payload = conn.execute(
+                "SELECT payload FROM agent_run_validation_command_claims WHERE intent_id=%s",
+                (intent_id,),
+            ).fetchone()[0]
+            payload["command_hash"] = "c" * 64
+            conn.execute(
+                "UPDATE agent_run_validation_command_claims SET command_hash=%s,payload=%s "
+                "WHERE intent_id=%s AND command_index=0",
+                ("c" * 64, Jsonb(payload), intent_id),
+            )
+    elif tamper == "consumption_evidence":
+        with connect() as conn:
+            action_id = conn.execute(
+                "SELECT action_id FROM agent_run_validation_command_claims WHERE intent_id=%s",
+                (intent_id,),
+            ).fetchone()[0]
+            envelope = conn.execute(
+                "SELECT payload FROM action_consumptions WHERE action_id=%s", (action_id,)
+            ).fetchone()[0]
+            envelope["consumption"]["evidence"]["command_sha256"] = "d" * 64
+            conn.execute(
+                "UPDATE action_consumptions SET payload=%s WHERE action_id=%s",
+                (Jsonb(envelope), action_id),
+            )
+    elif tamper == "task_event":
+        metadata = dict(task_event.metadata)
+        metadata["test_plan_hash"] = "e" * 64
+        task_event = task_event.model_copy(update={"metadata": metadata})
+    elif tamper == "task_event_bundle":
+        metadata = dict(task_event.metadata)
+        metadata["bundle_revision"] = "3" * 40
+        task_event = task_event.model_copy(update={"metadata": metadata})
+    elif tamper == "action_metadata_bundle":
+        with connect() as conn:
+            action_id = conn.execute(
+                "SELECT action_id FROM agent_run_validation_command_claims WHERE intent_id=%s",
+                (intent_id,),
+            ).fetchone()[0]
+            action_payload = conn.execute(
+                "SELECT payload FROM proposed_actions WHERE action_id=%s", (action_id,)
+            ).fetchone()[0]
+            action_payload["metadata"]["bundle_git_tree_sha"] = "4" * 40
+            conn.execute(
+                "UPDATE proposed_actions SET payload=%s WHERE action_id=%s",
+                (Jsonb(action_payload), action_id),
+            )
+    else:
+        original_build_records = build_records
+
+        def tampered_build_records(*args):
+            updated_run, updated_steps, events, audit = original_build_records(*args)
+            if tamper == "step_evidence_bundle":
+                step = next(item for item in updated_steps if item.step_type == AgentRunStepType.RUN_VALIDATION)
+                step.evidence["bundle_revision"] = "5" * 40
+                step.evidence_hash = canonical_evidence_hash(step.evidence)
+            elif tamper == "run_event_bundle":
+                events = [
+                    item.model_copy(update={
+                        "metadata": {**item.metadata, "bundle_git_tree_sha": "6" * 40}
+                    }) if item.step_id == run.current_step_id else item
+                    for item in events
+                ]
+            elif tamper == "audit_bundle":
+                details = dict(audit.details)
+                details["bundle_revision"] = "7" * 40
+                audit = audit.model_copy(update={"details": details})
+            return updated_run, updated_steps, events, audit
+
+        build_records = tampered_build_records
+
+    before_run = repositories.agent_runs.get(run.id)
+    before_steps = repositories.agent_runs.list_steps_for_run(run.id)
+    with pytest.raises(AgentRunRepositoryConflict):
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=run, expected_steps=steps, worker_id=worker,
+            lease_token=run.lease_token or "", step_type=AgentRunStepType.RUN_VALIDATION,
+            validation_intent_id=intent_id, validation_task_event=task_event,
+            build_records=build_records,
+        )
+    assert repositories.agent_runs.get(run.id) == before_run
+    assert repositories.agent_runs.list_steps_for_run(run.id) == before_steps
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_run_validation_intents WHERE intent_id=%s", (intent_id,)
+        ).fetchone()[0] == "EXECUTION_CLAIMED"
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE event_id=%s", (task_event.id,)
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("claim_state", ["ambiguous", "extra"])
+def test_postgres_run_validation_completion_rejects_ambiguous_or_extra_claims(
+    postgres_agent_run_route_runtime, claim_state: str,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = postgres_agent_run_route_runtime
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    run, steps, worker, intent_id, task_event, build_records = _seed_postgres_validation_completion_records(
+        connect=connect, workspace=workspace, task_id=task_id, state=state,
+        repositories=repositories, client=TestClient(main.app),
+        claim_status="CLAIMED" if claim_state == "ambiguous" else "RESULT_RECORDED",
+    )
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT workspace_id,action_id,command_hash,claimed_at,updated_at,payload "
+            "FROM agent_run_validation_command_claims WHERE intent_id=%s AND command_index=0",
+            (intent_id,),
+        ).fetchone()
+        if claim_state == "extra":
+            extra_payload = dict(row[5])
+            extra_payload["command_index"] = 1
+            extra_payload["command_hash"] = "f" * 64
+            conn.execute(
+                "INSERT INTO agent_run_validation_command_claims(intent_id,workspace_id,action_id,command_index,"
+                "command_hash,status,exit_code,timed_out,stdout_sha256,stdout_bytes,stderr_sha256,stderr_bytes,"
+                "reason,claimed_at,updated_at,payload) "
+                "VALUES(%s,%s,%s,1,%s,'RESULT_RECORDED',0,FALSE,%s,0,%s,0,'',%s,%s,%s)",
+                (
+                    intent_id, row[0], row[1], "f" * 64, "a" * 64, "b" * 64,
+                    row[3], row[4], Jsonb(extra_payload),
+                ),
+            )
+    with pytest.raises(AgentRunRepositoryConflict):
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=run, expected_steps=steps, worker_id=worker,
+            lease_token=run.lease_token or "", step_type=AgentRunStepType.RUN_VALIDATION,
+            validation_intent_id=intent_id, validation_task_event=task_event,
+            build_records=build_records,
+        )
+    assert repositories.agent_runs.get(run.id) == run
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_run_validation_intents WHERE intent_id=%s", (intent_id,)
+        ).fetchone()[0] == "EXECUTION_CLAIMED"
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE event_id=%s", (task_event.id,)
+        ).fetchone()[0] == 0
+
+
+def test_postgres_run_validation_completion_rolls_back_all_writes_on_task_event_conflict(
+    postgres_agent_run_route_runtime,
+) -> None:
+    connect, workspace, _project, _other_workspace, _other_project, state = postgres_agent_run_route_runtime
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    run, steps, worker, intent_id, task_event, build_records = _seed_postgres_validation_completion_records(
+        connect=connect, workspace=workspace, task_id=task_id, state=state,
+        repositories=repositories, client=TestClient(main.app),
+    )
+    conflicting_event = task_event.model_copy(update={
+        "event_type": AgentTaskEventType.NOTE,
+        "status": None,
+        "metadata": {"preexisting": True},
+    })
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+            (
+                conflicting_event.id, conflicting_event.task_id, workspace.id,
+                conflicting_event.event_type.value, conflicting_event.actor,
+                conflicting_event.created_at, Jsonb(conflicting_event.model_dump(mode="json")),
+            ),
+        )
+    before_run = repositories.agent_runs.get(run.id)
+    before_steps = repositories.agent_runs.list_steps_for_run(run.id)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        repositories.agent_runs.commit_authoritative_task_step(
+            expected_run=run, expected_steps=steps, worker_id=worker,
+            lease_token=run.lease_token or "", step_type=AgentRunStepType.RUN_VALIDATION,
+            validation_intent_id=intent_id, validation_task_event=task_event,
+            build_records=build_records,
+        )
+    assert repositories.agent_runs.get(run.id) == before_run
+    assert repositories.agent_runs.list_steps_for_run(run.id) == before_steps
+    assert repositories.agent_tasks.get(task_id).status == AgentTaskStatus.APPROVED
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_run_validation_intents WHERE intent_id=%s", (intent_id,)
+        ).fetchone()[0] == "EXECUTION_CLAIMED"
+        task_events = conn.execute(
+            "SELECT event_type,payload FROM agent_task_events WHERE event_id=%s", (task_event.id,)
+        ).fetchall()
+        assert len(task_events) == 1
+        assert task_events[0][0] == AgentTaskEventType.NOTE.value
+        assert task_events[0][1]["metadata"] == {"preexisting": True}
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_type='agent_run' AND entity_id=%s "
+            "AND event_type='agent_run.validation_completed'", (run.id,),
+        ).fetchone()[0] == 0
 
 
 def test_postgres_apply_change_intent_repository_persists_observation_cas(

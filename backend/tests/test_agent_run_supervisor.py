@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from threading import Barrier
 
 import pytest
@@ -20,6 +22,7 @@ from app.agent_run_models import (
     VerificationDecision,
 )
 from app.agent_run_supervisor import (
+    AgentRunValidationBundle,
     AgentRunConflict,
     DefaultAgentRunStepExecutor,
     acquire_run_lease,
@@ -27,6 +30,7 @@ from app.agent_run_supervisor import (
     create_agent_run,
     execute_next_step,
     heartbeat_run,
+    inspect_validation_bundle,
     pause_agent_run,
     recover_stale_leases,
     release_run_lease,
@@ -665,3 +669,46 @@ def test_heartbeat_after_lease_expiry_is_rejected() -> None:
     durable_run = agent_run_repository.get(run.id)
     assert durable_run == run
     assert durable_run.lease_token == token
+
+
+def test_validation_bundle_inspection_binds_clean_git_head_and_tree(tmp_path: Path) -> None:
+    checkout = tmp_path / "bundle"
+    checkout.mkdir()
+
+    def git(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", "-C", str(checkout), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            shell=False,
+        )
+        return completed.stdout.strip()
+
+    git("init", "--initial-branch=feature/approved")
+    git("config", "user.email", "test@example.test")
+    git("config", "user.name", "Validation test")
+    (checkout / "README.md").write_text("pinned content\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-m", "seed approved snapshot")
+    revision = git("rev-parse", "--verify", "HEAD")
+    tree_sha = git("rev-parse", "--verify", "HEAD^{tree}")
+    bundle = AgentRunValidationBundle(
+        path=checkout,
+        repository="owner/repository",
+        branch="feature/approved",
+        revision=revision,
+        git_tree_sha=tree_sha,
+    )
+
+    assert inspect_validation_bundle(bundle) == tree_sha
+    git("config", "core.excludesFile", str(checkout / ".git/info/exclude"))
+    with (checkout / ".git/info/exclude").open("a", encoding="utf-8") as excludes:
+        excludes.write("ignored-secret.txt\n")
+    (checkout / "ignored-secret.txt").write_text("ignored contents\n", encoding="utf-8")
+    with pytest.raises(AgentRunConflict, match="wrong ref, dirty, or has changed identity"):
+        inspect_validation_bundle(bundle)
+    (checkout / "ignored-secret.txt").unlink()
+    (checkout / "README.md").write_text("changed after provider check\n", encoding="utf-8")
+    with pytest.raises(AgentRunConflict, match="wrong ref, dirty, or has changed identity"):
+        inspect_validation_bundle(bundle)

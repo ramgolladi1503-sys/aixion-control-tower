@@ -44,6 +44,7 @@ from .agent_run_supervisor import (
     execute_next_step,
     heartbeat_run,
     pause_agent_run,
+    postgres_run_validation_enabled,
     recover_stale_leases,
     resume_agent_run,
     retry_agent_run_step,
@@ -67,6 +68,8 @@ from .postgres_trust_repository import PostgresTrustRepository
 from .postgres_agent_run_branch_route import postgres_branch_execution_dependencies
 from .postgres_agent_run_apply_changes_route import postgres_apply_changes_execution_dependencies
 from .postgres_agent_run_apply_changes_executor import postgres_apply_changes_enabled
+from .postgres_agent_run_validation import PostgresAgentRunValidationIntentRepository
+from .postgres_agent_run_validation_route import postgres_validation_execution_dependencies
 from .approval_decisions import (
     agent_task_repository,
     approval_decision_repository,
@@ -91,6 +94,7 @@ MaintainerDependency = Depends(require_maintainer)
 MetricsDependency = Depends(require_metrics_or_maintainer)
 MAX_RUN_LEASE_SECONDS = 3600
 RUN_LEASE_OVERHEAD_SECONDS = 60
+RUN_VALIDATION_COMMAND_OVERHEAD_SECONDS = 30
 TERMINAL_RUN_STATUSES = {
     AgentRunStatus.BLOCKED,
     AgentRunStatus.SUCCEEDED,
@@ -188,14 +192,18 @@ def _durable_detail(run: AgentRun, request: Request) -> AgentRunDetail:
 
 
 def _safe_lease_seconds(payload: AgentRunExecuteRequest) -> int:
-    required = payload.timeout_seconds * MAX_VALIDATION_COMMANDS + RUN_LEASE_OVERHEAD_SECONDS
+    required = (
+        (payload.timeout_seconds + RUN_VALIDATION_COMMAND_OVERHEAD_SECONDS)
+        * MAX_VALIDATION_COMMANDS
+        + RUN_LEASE_OVERHEAD_SECONDS
+    )
     if required > MAX_RUN_LEASE_SECONDS:
         raise HTTPException(
             status_code=422,
             detail=(
                 "timeout_seconds is too large for the bounded Mission Control lease. "
                 f"Maximum safe value is "
-                f"{(MAX_RUN_LEASE_SECONDS - RUN_LEASE_OVERHEAD_SECONDS) // MAX_VALIDATION_COMMANDS}."
+                f"{(MAX_RUN_LEASE_SECONDS - RUN_LEASE_OVERHEAD_SECONDS) // MAX_VALIDATION_COMMANDS - RUN_VALIDATION_COMMAND_OVERHEAD_SECONDS}."
             ),
         )
     return max(payload.lease_seconds, required)
@@ -793,6 +801,22 @@ def execute_run_next_step(
         )
         if current_step is None:
             raise HTTPException(status_code=409, detail="Run has no current step")
+        validation_intent_repository = (
+            getattr(request.app.state, "agent_run_validation_intent_repository", None)
+            if request is not None else None
+        )
+        if (
+            isinstance(run_repository, PostgresAgentRunRepository)
+            and current_step.step_type == AgentRunStepType.VERIFY_RESULT
+            and not isinstance(
+                validation_intent_repository,
+                PostgresAgentRunValidationIntentRepository,
+            )
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL VERIFY_RESULT requires the lifespan-bound validation intent repository.",
+            )
         postgres_supported_step = current_step.step_type in {
             AgentRunStepType.VALIDATE_SCOPE,
             AgentRunStepType.VERIFY_RESULT,
@@ -804,13 +828,17 @@ def execute_run_next_step(
             isinstance(run_repository, PostgresAgentRunRepository)
             and current_step.step_type == AgentRunStepType.APPLY_CHANGES
             and postgres_apply_changes_enabled()
+        ) or (
+            isinstance(run_repository, PostgresAgentRunRepository)
+            and current_step.step_type == AgentRunStepType.RUN_VALIDATION
+            and postgres_run_validation_enabled()
         )
         if isinstance(run_repository, PostgresAgentRunRepository) and not postgres_supported_step:
             raise HTTPException(
                 status_code=409,
                 detail=(
                     "PostgreSQL AgentRun execution supports VALIDATE_SCOPE, VERIFY_RESULT, "
-                    "SEAL_EVIDENCE, CREATE_BRANCH, and explicitly enabled APPLY_CHANGES "
+                    "SEAL_EVIDENCE, CREATE_BRANCH, and explicitly enabled APPLY_CHANGES/RUN_VALIDATION "
                     "with complete durable authority."
                 ),
             )
@@ -842,6 +870,9 @@ def execute_run_next_step(
             branch_request_factory = None
             apply_change_coordinator = None
             apply_change_request_factory = None
+            validation_coordinator = None
+            validation_request_factory = None
+            validation_coordinator_intent_repository = None
             if (
                 isinstance(run_repository, PostgresAgentRunRepository)
                 and current_step.step_type == AgentRunStepType.CREATE_BRANCH
@@ -867,6 +898,22 @@ def execute_run_next_step(
                         request=request, run=run, step=current_step, actor=payload.worker_id,
                     )
                 )
+            if (
+                isinstance(run_repository, PostgresAgentRunRepository)
+                and current_step.step_type == AgentRunStepType.RUN_VALIDATION
+            ):
+                if request is None:
+                    raise AgentRunConflict("PostgreSQL RUN_VALIDATION requires an app-bound request.")
+                (
+                    validation_coordinator,
+                    validation_request_factory,
+                    validation_coordinator_intent_repository,
+                ) = postgres_validation_execution_dependencies(
+                    request=request,
+                    run=run,
+                    step=current_step,
+                    actor=user.email,
+                )
             trust_actions = []
             if not postgres_governed_step:
                 ensure_run_capability(run, user=user)
@@ -888,6 +935,12 @@ def execute_run_next_step(
                 postgres_branch_request_factory=branch_request_factory,
                 postgres_apply_change_coordinator=apply_change_coordinator,
                 postgres_apply_change_request_factory=apply_change_request_factory,
+                postgres_validation_coordinator=validation_coordinator,
+                postgres_validation_request_factory=validation_request_factory,
+                postgres_validation_intent_repository=(
+                    validation_coordinator_intent_repository
+                    or validation_intent_repository
+                ),
             )
             consume_run_step_actions(
                 trust_actions,

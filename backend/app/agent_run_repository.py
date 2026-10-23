@@ -29,7 +29,7 @@ from .approval_integrity import compute_approval_payload_hash
 from .models import ApprovalRequest, ApprovalStatus, AuditEvent, Project
 from .postgres_trust_repository import PostgresTrustRepository
 from .trust_crypto import sha256_hex, verify_payload_signature
-from .trust_models import CapabilityLeaseStatus
+from .trust_models import ActionConsumption, CapabilityActionType, CapabilityLeaseStatus
 from .trust_policy import lease_receipt_payload
 
 
@@ -2798,6 +2798,8 @@ class PostgresAgentRunRepository:
         worker_id: str,
         lease_token: str,
         step_type: AgentRunStepType,
+        validation_intent_id: str | None = None,
+        validation_task_event: AgentTaskEvent | None = None,
         build_records: Callable[
             [AgentTask, ApprovalRequest, list[AgentTaskEvent], AgentRun, list[AgentRunStep]],
             tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent],
@@ -2805,14 +2807,26 @@ class PostgresAgentRunRepository:
     ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
         """Read task authority/evidence and atomically complete a governed step.
 
-        Lock order is approval -> task -> run -> steps, matching approval/task
+        Lock order is approval -> task -> run -> steps -> validation intent ->
+        validation command claims, matching approval/task
         transition writers. VERIFY_RESULT also locks its event rows after the
         task lock; the task row lock blocks repository event writers from
         inserting phantom evidence while the result is computed. The callback
-        must be pure and must not perform I/O or side effects.
+        must be pure and must not perform I/O or side effects. RUN_VALIDATION
+        requires a durable validation intent and an exact TESTS_PASSED or
+        TESTS_FAILED task event. The intent's pinned Git commit and tree must
+        match the action metadata, step result evidence, task event, AgentRun
+        result events, and completion audit. A failed task event is permitted
+        only for a contiguous command prefix ending at its first deterministic
+        failure. Event metadata contains only indexed command result digests;
+        it never carries command text or stdout/stderr contents.
         """
         if (
-            step_type not in {AgentRunStepType.VALIDATE_SCOPE, AgentRunStepType.VERIFY_RESULT}
+            step_type not in {
+                AgentRunStepType.VALIDATE_SCOPE,
+                AgentRunStepType.VERIFY_RESULT,
+                AgentRunStepType.RUN_VALIDATION,
+            }
             or not expected_run.workspace_id
             or not expected_run.approval_request_id
             or not expected_run.lease_token
@@ -2820,6 +2834,12 @@ class PostgresAgentRunRepository:
             or expected_run.lease_token != lease_token
         ):
             raise AgentRunRepositoryConflict("Governed step lease identity is invalid")
+        if (
+            (step_type == AgentRunStepType.RUN_VALIDATION)
+            != (validation_intent_id is not None and validation_task_event is not None)
+            or (validation_intent_id is None) != (validation_task_event is None)
+        ):
+            raise ValueError("RUN_VALIDATION completion requires its intent and task event")
 
         with self._connect() as conn:
             with conn.transaction():
@@ -2904,6 +2924,291 @@ class PostgresAgentRunRepository:
                     raise AgentRunRepositoryConflict(
                         "AgentRun step revisions changed before governed-step completion"
                     )
+                validation_intent: dict[str, object] | None = None
+                validation_claims: list[dict[str, object]] = []
+                validation_step: AgentRunStep | None = None
+                if step_type == AgentRunStepType.RUN_VALIDATION:
+                    from .agent_worker_validation_plan import validate_validation_plan
+
+                    validation_step = next(
+                        (item for item in durable_steps if item.id == durable_run.current_step_id),
+                        None,
+                    )
+                    if (
+                        validation_step is None
+                        or validation_step.step_type != AgentRunStepType.RUN_VALIDATION
+                        or validation_step.status != AgentRunStepStatus.RUNNING
+                        or durable_run.status != AgentRunStatus.RUNNING
+                        or validation_step.lease_owner != worker_id
+                        or validation_step.lease_token != lease_token
+                        or validation_step.lease_expires_at != durable_run.lease_expires_at
+                        or approval.status != ApprovalStatus.APPROVED
+                        or task.status != AgentTaskStatus.APPROVED
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "RUN_VALIDATION authority or current step is no longer valid"
+                        )
+                    if any((
+                        task.worker_lease_owner,
+                        task.worker_lease_token,
+                        task.worker_lease_expires_at,
+                    )) and (
+                        task.worker_lease_owner != worker_id
+                        or task.worker_lease_token != lease_token
+                        or task.worker_lease_expires_at is None
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "AgentTask worker lease belongs to another or incomplete execution"
+                        )
+                    intent_row = conn.execute(
+                        "SELECT intent_id,workspace_id,run_id,task_id,approval_id,step_id,lease_id,"
+                        "idempotency_key,approval_hash,test_plan_hash,lease_token_hash,bundle_revision,"
+                        "bundle_git_tree_sha,run_revision,step_revision,"
+                        "status,reason,created_at,updated_at,payload FROM agent_run_validation_intents "
+                        "WHERE intent_id=%s AND workspace_id=%s FOR UPDATE",
+                        (validation_intent_id, expected_run.workspace_id),
+                    ).fetchone()
+                    if intent_row is None:
+                        raise AgentRunRepositoryConflict("Validation intent is missing during completion")
+                    try:
+                        validation_intent = dict(intent_row[19])
+                        def _payload_datetime(value: object) -> datetime | None:
+                            if isinstance(value, datetime):
+                                return value
+                            if isinstance(value, str):
+                                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+                            return None
+
+                        indexed_intent = (
+                            validation_intent.get("id"), validation_intent.get("workspace_id"),
+                            validation_intent.get("run_id"), validation_intent.get("task_id"),
+                            validation_intent.get("approval_id"), validation_intent.get("step_id"),
+                            validation_intent.get("lease_id"),
+                            validation_intent.get("idempotency_key"), validation_intent.get("approval_hash"),
+                            validation_intent.get("test_plan_hash"), validation_intent.get("lease_token_hash"),
+                            validation_intent.get("bundle_revision"),
+                            validation_intent.get("bundle_git_tree_sha"),
+                            _payload_datetime(validation_intent.get("run_revision")),
+                            _payload_datetime(validation_intent.get("step_revision")),
+                            validation_intent.get("status"), validation_intent.get("reason", ""),
+                            _payload_datetime(validation_intent.get("created_at")),
+                            _payload_datetime(validation_intent.get("updated_at")),
+                        )
+                    except Exception as error:
+                        raise AgentRunRepositoryIntegrityError(
+                            "Stored validation intent payload is invalid"
+                        ) from error
+                    if indexed_intent != tuple(intent_row[:19]):
+                        raise AgentRunRepositoryIntegrityError(
+                            "Validation intent indexed state is inconsistent"
+                        )
+                    approved_plan = list(approval.test_plan)
+                    approval_hash = compute_approval_payload_hash(approval)
+                    test_plan_hash = sha256_hex(approved_plan)
+                    lease_token_hash = sha256_hex({"lease_token": lease_token})
+                    bundle_revision = validation_intent.get("bundle_revision")
+                    bundle_git_tree_sha = validation_intent.get("bundle_git_tree_sha")
+                    plan_error = validate_validation_plan(approval)
+                    if (
+                        validation_intent.get("status") not in {"EXECUTION_CLAIMED", "RECONCILIATION_REQUIRED"}
+                        or validation_intent.get("workspace_id") != durable_run.workspace_id
+                        or validation_intent.get("run_id") != durable_run.id
+                        or validation_intent.get("task_id") != durable_run.task_id
+                        or validation_intent.get("approval_id") != approval.id
+                        or validation_intent.get("step_id") != validation_step.id
+                        or validation_intent.get("lease_id") != durable_run.capability_lease_id
+                        or _payload_datetime(validation_intent.get("run_revision")) != durable_run.updated_at
+                        or _payload_datetime(validation_intent.get("step_revision")) != validation_step.updated_at
+                        or validation_intent.get("approval_hash") != approval_hash
+                        or approval.approved_payload_hash != approval_hash
+                        or validation_intent.get("test_plan_hash") != test_plan_hash
+                        or validation_intent.get("lease_token_hash") != lease_token_hash
+                        or not isinstance(bundle_revision, str)
+                        or len(bundle_revision) != 40
+                        or any(char not in "0123456789abcdef" for char in bundle_revision)
+                        or not isinstance(bundle_git_tree_sha, str)
+                        or len(bundle_git_tree_sha) != 40
+                        or any(char not in "0123456789abcdef" for char in bundle_git_tree_sha)
+                        or plan_error is not None
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "Validation intent no longer matches approved plan, run, step, or worker lease"
+                        )
+                    claim_rows = conn.execute(
+                        "SELECT intent_id,workspace_id,action_id,command_index,command_hash,status,exit_code,timed_out,"
+                        "stdout_sha256,stdout_bytes,stderr_sha256,stderr_bytes,reason,claimed_at,updated_at,payload "
+                        "FROM agent_run_validation_command_claims WHERE intent_id=%s AND workspace_id=%s "
+                        "ORDER BY command_index FOR UPDATE",
+                        (validation_intent_id, durable_run.workspace_id),
+                    ).fetchall()
+                    if not claim_rows or len(claim_rows) > len(approved_plan):
+                        raise AgentRunRepositoryConflict(
+                            "Validation command claim set is empty or exceeds the approved plan"
+                        )
+                    for index, claim_row in enumerate(claim_rows):
+                        try:
+                            claim = dict(claim_row[15])
+                            payload_claimed_at = _payload_datetime(claim.get("claimed_at"))
+                            payload_updated_at = _payload_datetime(claim.get("updated_at"))
+                        except Exception as error:
+                            raise AgentRunRepositoryIntegrityError(
+                                "Stored validation command claim payload is invalid"
+                            ) from error
+                        indexed_claim = (
+                            claim.get("intent_id"), claim.get("workspace_id"), claim.get("action_id"),
+                            claim.get("command_index"), claim.get("command_hash"), claim.get("status"),
+                            claim.get("exit_code"), claim.get("timed_out"), claim.get("stdout_sha256"),
+                            claim.get("stdout_bytes"), claim.get("stderr_sha256"), claim.get("stderr_bytes"),
+                            claim.get("reason", ""), payload_claimed_at, payload_updated_at,
+                        )
+                        if indexed_claim != tuple(claim_row[:15]):
+                            raise AgentRunRepositoryIntegrityError(
+                                "Validation command claim indexed state is inconsistent"
+                            )
+                        command_hash = sha256_hex({"command": approved_plan[index]})
+                        if (
+                            claim.get("intent_id") != validation_intent_id
+                            or claim.get("workspace_id") != durable_run.workspace_id
+                            or not isinstance(claim.get("action_id"), str)
+                            or not claim.get("action_id")
+                            or type(claim.get("command_index")) is not int
+                            or claim.get("command_index") != index
+                            or claim.get("command_hash") != command_hash
+                            or claim.get("status") != "RESULT_RECORDED"
+                            or type(claim.get("exit_code")) is not int
+                            or type(claim.get("timed_out")) is not bool
+                            or any(
+                                not isinstance(claim.get(field), str)
+                                or len(claim[field]) != 64
+                                or any(char not in "0123456789abcdef" for char in claim[field])
+                                for field in ("stdout_sha256", "stderr_sha256")
+                            )
+                            or any(
+                                type(claim.get(field)) is not int or not 0 <= claim[field] <= 1048576
+                                for field in ("stdout_bytes", "stderr_bytes")
+                            )
+                            or any(field in claim for field in ("command", "stdout", "stderr"))
+                        ):
+                            raise AgentRunRepositoryConflict(
+                                "Validation command claim is missing, ambiguous, or not an exact-plan result"
+                            )
+                        trust = PostgresTrustRepository()
+                        action = trust.get_proposed_action(
+                            conn, str(claim["action_id"]), durable_run.workspace_id, for_update=True
+                        )
+                        required_action_metadata = {
+                            "step_id": validation_step.id,
+                            "step_type": AgentRunStepType.RUN_VALIDATION.value,
+                            "idempotency_key": validation_step.idempotency_key,
+                            "approval_request_id": approval.id,
+                            "approved_payload_hash": approval.approved_payload_hash,
+                            "command_source": "approval.test_plan",
+                            "command_index": index,
+                            "command_sha256": command_hash,
+                            "bundle_revision": bundle_revision,
+                            "bundle_git_tree_sha": bundle_git_tree_sha,
+                        }
+                        if (
+                            action is None
+                            or action.id != claim["action_id"]
+                            or action.action_type != CapabilityActionType.RUN_COMMAND
+                            or action.command != approved_plan[index]
+                            or action.workspace_id != durable_run.workspace_id
+                            or action.run_id != durable_run.id
+                            or action.task_id != durable_run.task_id
+                            or action.project_id != durable_run.project_id
+                            or action.lease_id != durable_run.capability_lease_id
+                            or action.provider != task.provider
+                            or action.agent_id != task.external_agent_id
+                            or action.repository != durable_run.repository
+                            or action.retry_number != max(0, validation_step.attempt_count - 1)
+                            or not 1 <= action.estimated_runtime_seconds <= 3600
+                            or any(
+                                action.metadata.get(field) != value
+                                for field, value in required_action_metadata.items()
+                            )
+                        ):
+                            raise AgentRunRepositoryConflict(
+                                "Validation claim is not bound to its exact approved RUN_COMMAND action"
+                            )
+                        consumption_row = conn.execute(
+                            "SELECT action_id,workspace_id,lease_id,consumed_at,payload "
+                            "FROM action_consumptions WHERE action_id=%s AND workspace_id=%s FOR SHARE",
+                            (action.id, durable_run.workspace_id),
+                        ).fetchone()
+                        if consumption_row is None:
+                            raise AgentRunRepositoryConflict(
+                                "Validation RUN_COMMAND lacks its durable action consumption"
+                            )
+                        try:
+                            consumption_envelope = dict(consumption_row[4])
+                            consumption = ActionConsumption.model_validate(
+                                consumption_envelope["consumption"]
+                            )
+                        except Exception as error:
+                            raise AgentRunRepositoryIntegrityError(
+                                "Stored validation action consumption is invalid"
+                            ) from error
+                        if (
+                            consumption_envelope.get("action_id") != consumption_row[0]
+                            or consumption_envelope.get("workspace_id") != consumption_row[1]
+                            or consumption_envelope.get("lease_id") != consumption_row[2]
+                            or _payload_datetime(consumption_envelope.get("consumed_at")) != consumption_row[3]
+                            or consumption_row[0] != action.id
+                            or consumption_row[1] != durable_run.workspace_id
+                            or consumption_row[2] != durable_run.capability_lease_id
+                            or consumption_row[3] > claim_row[13]
+                            or consumption.evidence != {
+                                "workspace_id": durable_run.workspace_id,
+                                "run_id": durable_run.id,
+                                "task_id": durable_run.task_id,
+                                "approval_id": approval.id,
+                                "step_id": validation_step.id,
+                                "action_id": action.id,
+                                "lease_id": durable_run.capability_lease_id,
+                                "intent_id": validation_intent_id,
+                                "command_index": index,
+                                "command_sha256": command_hash,
+                                "runtime_seconds_reserved": action.estimated_runtime_seconds,
+                                "authorized_attempt_count": validation_step.attempt_count,
+                                "authorized_retry_consumed": validation_step.attempt_count > 1,
+                            }
+                            or type(consumption.evidence.get("command_index")) is not int
+                            or type(consumption.evidence.get("authorized_attempt_count")) is not int
+                            or type(consumption.evidence.get("authorized_retry_consumed")) is not bool
+                            or type(consumption.evidence.get("runtime_seconds_reserved")) is not int
+                            or not 1 <= consumption.evidence["runtime_seconds_reserved"] <= 3600
+                            or action.estimated_runtime_seconds != consumption.evidence["runtime_seconds_reserved"]
+                            or consumption.actual_runtime_seconds != consumption.evidence["runtime_seconds_reserved"]
+                            or consumption.actual_cost_usd != 0
+                            or consumption.pull_requests_created != 0
+                            or consumption.retry_consumed != (validation_step.attempt_count > 1)
+                            or consumption.output_reference is not None
+                        ):
+                            raise AgentRunRepositoryConflict(
+                                "Validation action consumption lacks exact command provenance"
+                            )
+                        validation_claims.append(claim)
+                    failure_positions = [
+                        index for index, claim in enumerate(validation_claims)
+                        if claim["exit_code"] != 0 or claim["timed_out"] is True
+                    ]
+                    validation_passed = (
+                        len(validation_claims) == len(approved_plan)
+                        and not failure_positions
+                    )
+                    validation_failed = (
+                        bool(failure_positions)
+                        and failure_positions == [len(validation_claims) - 1]
+                        and all(
+                            claim["exit_code"] == 0 and claim["timed_out"] is False
+                            for claim in validation_claims[:-1]
+                        )
+                    )
+                    if not validation_passed and not validation_failed:
+                        raise AgentRunRepositoryConflict(
+                            "Validation evidence is incomplete, noncontiguous, or contradictory"
+                        )
                 checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
                 if (
                     durable_run.lease_owner != worker_id
@@ -2918,10 +3223,15 @@ class PostgresAgentRunRepository:
                     (item for item in durable_steps if item.id == durable_run.current_step_id),
                     None,
                 )
+                expected_current_status = (
+                    AgentRunStepStatus.RUNNING
+                    if step_type == AgentRunStepType.RUN_VALIDATION
+                    else AgentRunStepStatus.READY
+                )
                 if (
                     current_step is None
                     or current_step.step_type != step_type
-                    or current_step.status != AgentRunStepStatus.READY
+                    or current_step.status != expected_current_status
                 ):
                     raise AgentRunRepositoryConflict(
                         f"{step_type.value} step is no longer ready for completion"
@@ -2977,20 +3287,99 @@ class PostgresAgentRunRepository:
                 updated_run, updated_steps, events, audit = build_records(
                     task, approval, task_events, durable_run, durable_steps
                 )
+                if step_type == AgentRunStepType.RUN_VALIDATION:
+                    task_event = validation_task_event
+                    expected_results = [
+                        {
+                            "command_index": claim["command_index"],
+                            "command_hash": claim["command_hash"],
+                            "exit_code": claim["exit_code"],
+                            "timed_out": claim["timed_out"],
+                            "stdout_sha256": claim["stdout_sha256"],
+                            "stdout_bytes": claim["stdout_bytes"],
+                            "stderr_sha256": claim["stderr_sha256"],
+                            "stderr_bytes": claim["stderr_bytes"],
+                        }
+                        for claim in validation_claims
+                    ]
+                    metadata = task_event.metadata if task_event is not None else {}
+                    expected_metadata = {
+                        "run_id": durable_run.id,
+                        "step_id": validation_step.id,
+                        "intent_id": validation_intent_id,
+                        "attempt_count": validation_step.attempt_count,
+                        "approval_hash": validation_intent["approval_hash"],
+                        "test_plan_hash": validation_intent["test_plan_hash"],
+                        "lease_token_hash": validation_intent["lease_token_hash"],
+                        "bundle_revision": bundle_revision,
+                        "bundle_git_tree_sha": bundle_git_tree_sha,
+                        "command_results": expected_results,
+                    }
+                    if (
+                        task_event is None
+                        or task_event.task_id != task.id
+                        or task_event.event_type != (
+                            AgentTaskEventType.TESTS_PASSED
+                            if validation_passed else AgentTaskEventType.TESTS_FAILED
+                        )
+                        or task_event.status != (
+                            AgentTaskStatus.APPROVED if validation_passed else AgentTaskStatus.FAILED
+                        )
+                        or task_event.actor != worker_id
+                        or type(metadata.get("attempt_count")) is not int
+                        or metadata != expected_metadata
+                        or task_event.created_at > checked_at
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "RUN_VALIDATION task event does not exactly bind durable command results"
+                        )
+                    if (
+                        audit.details.get("validation_intent_id") != validation_intent_id
+                        or audit.details.get("approval_hash") != validation_intent["approval_hash"]
+                        or audit.details.get("test_plan_hash") != validation_intent["test_plan_hash"]
+                        or audit.details.get("lease_token_hash") != validation_intent["lease_token_hash"]
+                        or audit.details.get("bundle_revision") != bundle_revision
+                        or audit.details.get("bundle_git_tree_sha") != bundle_git_tree_sha
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "RUN_VALIDATION audit does not bind the durable validation authority"
+                        )
+                    result_step = next(
+                        (item for item in updated_steps if item.id == validation_step.id), None
+                    )
+                    step_evidence = result_step.evidence if result_step is not None else {}
+                    if (
+                        step_evidence.get("bundle_revision") != bundle_revision
+                        or step_evidence.get("bundle_git_tree_sha") != bundle_git_tree_sha
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "RUN_VALIDATION step result does not bind the inspected bundle"
+                        )
+                    run_result_events = [item for item in events if item.step_id == validation_step.id]
+                    if not run_result_events or any(
+                        item.metadata.get("bundle_revision") != bundle_revision
+                        or item.metadata.get("bundle_git_tree_sha") != bundle_git_tree_sha
+                        for item in run_result_events
+                    ):
+                        raise AgentRunRepositoryConflict(
+                            "RUN_VALIDATION AgentRun event does not bind the inspected bundle"
+                        )
                 # Validate the generated completion using the existing shared
                 # state/identity contract, represented as its in-transaction
                 # RUNNING checkpoint. No intermediate checkpoint is persisted.
+                already_running_validation = step_type == AgentRunStepType.RUN_VALIDATION
                 running_run = durable_run.model_copy(deep=True)
-                if running_run.status in {AgentRunStatus.SCHEDULED, AgentRunStatus.RETRY_WAIT}:
-                    running_run.status = AgentRunStatus.RUNNING
-                    running_run.started_at = running_run.started_at or checked_at
                 running_steps = [item.model_copy(deep=True) for item in durable_steps]
-                running_step = next(item for item in running_steps if item.id == current_step.id)
-                running_step.status = AgentRunStepStatus.RUNNING
-                running_step.lease_owner = worker_id
-                running_step.lease_token = lease_token
-                running_step.lease_expires_at = durable_run.lease_expires_at
-                running_step.attempt_count += 1
+                if not already_running_validation:
+                    if running_run.status in {AgentRunStatus.SCHEDULED, AgentRunStatus.RETRY_WAIT}:
+                        running_run.status = AgentRunStatus.RUNNING
+                        running_run.started_at = running_run.started_at or checked_at
+                    running_step = next(item for item in running_steps if item.id == current_step.id)
+                    running_step.status = AgentRunStepStatus.RUNNING
+                    running_step.lease_owner = worker_id
+                    running_step.lease_token = lease_token
+                    running_step.lease_expires_at = durable_run.lease_expires_at
+                    running_step.attempt_count += 1
                 completion_expected = running_run.model_copy(deep=True)
                 completion_steps = [item.model_copy(deep=True) for item in running_steps]
                 # The common validator checks step completion invariants. Its
@@ -3065,6 +3454,100 @@ class PostgresAgentRunRepository:
                             event.created_at,
                             event.event_type.value,
                             Jsonb(event.model_dump(mode="json")),
+                        ),
+                    )
+                if step_type == AgentRunStepType.RUN_VALIDATION:
+                    completed_intent = dict(validation_intent)
+                    intent_reason = (
+                        "All approved validation commands completed successfully."
+                        if validation_passed
+                        else "Approved validation command failed or timed out; later commands were not executed."
+                    )
+                    completed_intent.update(
+                        status="COMPLETED",
+                        reason=intent_reason,
+                        updated_at=checked_at.isoformat(),
+                    )
+                    changed = conn.execute(
+                        "UPDATE agent_run_validation_intents SET status='COMPLETED',reason=%s,updated_at=%s,payload=%s "
+                        "WHERE intent_id=%s AND workspace_id=%s AND status=%s AND run_revision=%s "
+                        "AND step_revision=%s AND lease_token_hash=%s",
+                        (
+                            completed_intent["reason"], checked_at, Jsonb(completed_intent),
+                            validation_intent_id, durable_run.workspace_id,
+                            validation_intent["status"], validation_intent["run_revision"],
+                            validation_intent["step_revision"], validation_intent["lease_token_hash"],
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise AgentRunRepositoryConflict("Validation intent completion lost its CAS")
+                    conn.execute(
+                        "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+                        "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                        (
+                            task_event.id, task_event.task_id, task.workspace_id, task_event.event_type.value,
+                            task_event.actor, task_event.created_at, Jsonb(task_event.model_dump(mode="json")),
+                        ),
+                    )
+                    validation_audit = AuditEvent(
+                        event_type="agent_worker.validation_run_completed",
+                        entity_id=task.id,
+                        workspace_id=task.workspace_id,
+                        actor=worker_id,
+                        created_at=checked_at,
+                        details={
+                            "event_id": task_event.id,
+                            "worker_id": worker_id,
+                            "approval_request_id": approval.id,
+                            "passed": validation_passed,
+                            "command_count": len(validation_claims),
+                            "validation_intent_id": validation_intent_id,
+                            "approval_hash": validation_intent["approval_hash"],
+                            "test_plan_hash": validation_intent["test_plan_hash"],
+                            "lease_token_hash": validation_intent["lease_token_hash"],
+                            "bundle_revision": bundle_revision,
+                            "bundle_git_tree_sha": bundle_git_tree_sha,
+                        },
+                    )
+                    updated_task = task.model_copy(deep=True)
+                    if not validation_passed:
+                        updated_task.status = AgentTaskStatus.FAILED
+                    if task.worker_lease_owner is not None:
+                        updated_task.worker_lease_owner = None
+                        updated_task.worker_lease_token = None
+                        updated_task.worker_lease_expires_at = None
+                    if updated_task != task:
+                        updated_task.updated_at = checked_at
+                        changed = conn.execute(
+                            "UPDATE agent_tasks SET status=%s,updated_at=%s,payload=%s "
+                            "WHERE task_id=%s AND workspace_id=%s AND status=%s AND updated_at=%s",
+                            (
+                                updated_task.status.value,
+                                updated_task.updated_at,
+                                Jsonb(updated_task.model_dump(mode="json")),
+                                task.id,
+                                task.workspace_id,
+                                task.status.value,
+                                task_row[5],
+                            ),
+                        )
+                        if changed.rowcount != 1:
+                            raise AgentRunRepositoryConflict(
+                                "AgentTask changed during validation completion"
+                            )
+                    conn.execute(
+                        "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,"
+                        "event_type,actor,details,created_at,payload) "
+                        "VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                        (
+                            validation_audit.id,
+                            task.workspace_id,
+                            task.id,
+                            validation_audit.event_type,
+                            validation_audit.actor,
+                            Jsonb(validation_audit.details),
+                            validation_audit.created_at,
+                            Jsonb(validation_audit.model_dump(mode="json")),
                         ),
                     )
                 conn.execute(

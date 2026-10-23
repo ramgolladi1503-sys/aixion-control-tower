@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+import os
 from pathlib import Path
-from typing import Callable
+import re
+import subprocess
+from typing import Callable, Protocol
 from urllib.parse import urlsplit
 
 from .agent_run_faults import InjectedAgentRunFault, default_fault_reason, raise_if_fault_configured
@@ -56,6 +59,13 @@ from .postgres_agent_run_apply_changes_executor import (
     ApplyChangeRequest, ApplyChangeState, PostgresApplyChangesCoordinator,
     postgres_apply_changes_enabled,
 )
+from .postgres_agent_run_validation import (
+    AgentRunValidationCommandClaim,
+    AgentRunValidationIntent,
+    PostgresAgentRunValidationIntentRepository,
+    RunValidationCommandStatus,
+    RunValidationIntentStatus,
+)
 from .agent_task_repository import (
     AgentTaskRepository,
     PostgresAgentTaskRepository,
@@ -87,6 +97,8 @@ from .agent_worker_workspace import (
     prepare_agent_worker_workspace,
 )
 from .models import ApprovalRequest, ApprovalStatus, AuditEvent, now_utc
+from .trust_crypto import sha256_hex
+from .trust_models import CapabilityActionType, ProposedAction
 from .store import store
 from .workspace_access import agent_run_scope_is_consistent
 
@@ -97,6 +109,419 @@ PostgresBranchRequestFactory = Callable[
 PostgresApplyChangeRequestFactory = Callable[
     [AgentRun, AgentRunStep, str, int], ApplyChangeRequest
 ]
+@dataclass(frozen=True)
+class AgentRunValidationBundle:
+    """A provider-pinned, already materialized repository bundle."""
+
+    path: Path
+    repository: str
+    branch: str
+    revision: str
+    git_tree_sha: str = ""
+
+
+class AgentRunValidationBundleProvider(Protocol):
+    def resolve_bundle(
+        self, *, run: AgentRun, step: AgentRunStep, task: AgentTask,
+        approval: ApprovalRequest,
+    ) -> AgentRunValidationBundle | None: ...
+
+
+@dataclass(frozen=True)
+class PostgresRunValidationRequest:
+    expected_run: AgentRun
+    expected_step: AgentRunStep
+    task: AgentTask
+    approval: ApprovalRequest
+    worker_id: str
+    worker_lease_token: str
+    actor: str
+    timeout_seconds: int
+    expected_bundle_revision: str
+    bundle: AgentRunValidationBundle
+    container_runtime: ContainerRuntime
+    intent_repository: PostgresAgentRunValidationIntentRepository
+
+
+PostgresRunValidationRequestFactory = Callable[
+    [AgentRun, AgentRunStep, str, int], PostgresRunValidationRequest
+]
+
+
+@dataclass(frozen=True)
+class PostgresRunValidationOutcome:
+    result: AgentRunStepExecutionResult
+    intent_id: str
+    task_event: AgentTaskEvent
+
+
+def inspect_validation_bundle(bundle: AgentRunValidationBundle) -> str:
+    """Verify labels against a clean, checked-out Git commit without running project code."""
+    if not bundle.path.is_dir() or re.fullmatch(r"[0-9a-f]{40}", bundle.revision) is None:
+        raise AgentRunConflict("Validation bundle path or revision is invalid.")
+    try:
+        root = str(bundle.path.resolve(strict=True))
+
+        def git(*args: str) -> str:
+            git_environment = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_OPTIONAL_LOCKS": "0",
+                "LC_ALL": "C",
+            }
+            completed = subprocess.run(
+                [
+                    "git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                    "-C", root, *args,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+                shell=False,
+                env=git_environment,
+            )
+            if completed.returncode != 0:
+                raise ValueError("Git bundle inspection failed")
+            return completed.stdout.strip()
+
+        revision = git("rev-parse", "--verify", "HEAD")
+        branch = git("rev-parse", "--abbrev-ref", "HEAD")
+        tree_sha = git("rev-parse", "--verify", "HEAD^{tree}")
+        dirty = git(
+            "status", "--porcelain", "--untracked-files=all",
+            "--ignored=matching", "--ignore-submodules=none",
+        )
+    except Exception as error:
+        raise AgentRunConflict("Validation bundle Git identity could not be verified.") from error
+    if (
+        revision != bundle.revision
+        or branch != bundle.branch
+        or dirty
+        or re.fullmatch(r"[0-9a-f]{40}", tree_sha) is None
+        or (bundle.git_tree_sha and bundle.git_tree_sha != tree_sha)
+    ):
+        raise AgentRunConflict("Validation bundle is on the wrong ref, dirty, or has changed identity.")
+    return tree_sha
+
+
+def postgres_run_validation_enabled() -> bool:
+    """Explicit default-off gate for PostgreSQL RUN_VALIDATION execution."""
+    return os.getenv("AIXION_POSTGRES_RUN_VALIDATION_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+class PostgresAgentRunValidationCoordinator:
+    """Claim each exact approved command before container-only execution."""
+
+    def execute(self, request: PostgresRunValidationRequest) -> PostgresRunValidationOutcome:
+        run = request.expected_run
+        step = request.expected_step
+        task = request.task
+        approval = request.approval
+        bundle = request.bundle
+        bundle_tree_sha = inspect_validation_bundle(bundle)
+        if (
+            not run.workspace_id or not run.approval_request_id or not run.capability_lease_id
+            or run.status != AgentRunStatus.RUNNING or run.lease_owner != request.worker_id
+            or run.lease_token != request.worker_lease_token
+            or step.step_type != AgentRunStepType.RUN_VALIDATION
+            or step.status != AgentRunStepStatus.RUNNING
+            or step.run_id != run.id or step.task_id != task.id
+            or task.id != run.task_id or task.workspace_id != run.workspace_id
+            or task.repository != run.repository or approval.id != run.approval_request_id
+            or approval.status != ApprovalStatus.APPROVED
+            or bundle.repository != task.repository
+            or not task.branch_preference
+            or bundle.branch != task.branch_preference
+            or bundle.revision != request.expected_bundle_revision
+            or not re.fullmatch(r"[0-9a-f]{40}", bundle.revision)
+            or not bundle.path.is_dir()
+            or not 1 <= request.timeout_seconds <= 3600
+        ):
+            raise AgentRunConflict("PostgreSQL validation bundle or authority is incomplete.")
+
+        now = _now()
+        intent = request.intent_repository.get_for_step(
+            workspace_id=run.workspace_id,
+            run_id=run.id,
+            step_id=step.id,
+            idempotency_key=step.idempotency_key,
+        )
+        if intent is not None:
+            recovered_claims = request.intent_repository.list_command_claims(
+                intent_id=intent.id,
+                workspace_id=intent.workspace_id,
+            )
+            unresolved_claim = next(
+                (
+                    claim for claim in recovered_claims
+                    if claim.status in {
+                        RunValidationCommandStatus.CLAIMED,
+                        RunValidationCommandStatus.RECONCILIATION_REQUIRED,
+                    }
+                ),
+                None,
+            )
+            if unresolved_claim is not None:
+                if unresolved_claim.status == RunValidationCommandStatus.CLAIMED:
+                    request.intent_repository.mark_reconciliation_required(
+                        intent_id=intent.id,
+                        workspace_id=intent.workspace_id,
+                        command_index=unresolved_claim.command_index,
+                        reason="Prior worker claim has no durable result and cannot be replayed.",
+                    )
+                raise AgentRunConflict("Validation command requires operator reconciliation.")
+        if intent is None:
+            intent = AgentRunValidationIntent(
+                id="validation_" + sha256_hex({
+                    "run_id": run.id, "step_id": step.id,
+                    "idempotency_key": step.idempotency_key,
+                }),
+                workspace_id=run.workspace_id,
+                run_id=run.id,
+                task_id=task.id,
+                approval_id=approval.id,
+                step_id=step.id,
+                lease_id=run.capability_lease_id,
+                idempotency_key=step.idempotency_key,
+                approval_hash=approval.approved_payload_hash or "",
+                test_plan_hash=sha256_hex(approval.test_plan),
+                lease_token_hash=sha256_hex({"lease_token": request.worker_lease_token}),
+                bundle_revision=bundle.revision,
+                bundle_git_tree_sha=bundle_tree_sha,
+                run_revision=run.updated_at,
+                step_revision=step.updated_at,
+                created_at=now,
+                updated_at=now,
+            )
+            intent = request.intent_repository.record_intent(
+                record=intent,
+                expected_run=run,
+                expected_step=step,
+                approval=approval,
+                worker_id=request.worker_id,
+                lease_token=request.worker_lease_token,
+                actor=request.actor,
+            )
+        if (
+            intent.status not in {
+                RunValidationIntentStatus.INTENT,
+                RunValidationIntentStatus.EXECUTION_CLAIMED,
+            }
+            or intent.run_revision != run.updated_at
+            or intent.step_revision != step.updated_at
+            or intent.lease_token_hash != sha256_hex({"lease_token": request.worker_lease_token})
+            or intent.approval_hash != approval.approved_payload_hash
+            or intent.test_plan_hash != sha256_hex(approval.test_plan)
+            or intent.bundle_revision != bundle.revision
+            or intent.bundle_git_tree_sha != bundle_tree_sha
+        ):
+            raise AgentRunConflict("Persisted validation intent is stale or fenced.")
+
+        executor = ContainerValidationExecutor(
+            cwd=bundle.path,
+            timeout_seconds=request.timeout_seconds,
+            policy=ContainerValidationPolicy(),
+            runtime=request.container_runtime,
+        )
+        claims = request.intent_repository.list_command_claims(
+            intent_id=intent.id, workspace_id=intent.workspace_id,
+        )
+        for command_index, command in enumerate(approval.test_plan):
+            if command_index < len(claims):
+                prior = claims[command_index]
+                if prior.status != RunValidationCommandStatus.RESULT_RECORDED:
+                    request.intent_repository.mark_reconciliation_required(
+                        intent_id=intent.id,
+                        workspace_id=intent.workspace_id,
+                        command_index=command_index,
+                        reason="Previous command execution has no durable result.",
+                    )
+                    raise AgentRunConflict("Validation command requires operator reconciliation.")
+                if prior.exit_code != 0 or prior.timed_out:
+                    break
+                continue
+            try:
+                if inspect_validation_bundle(bundle) != bundle_tree_sha:
+                    raise AgentRunConflict("Validation bundle changed after its initial inspection.")
+            except Exception as error:
+                raise AgentRunConflict("Validation bundle changed before command execution.") from error
+            command_hash = sha256_hex({"command": command})
+            action_id = "action_" + sha256_hex({
+                "intent_id": intent.id,
+                "command_index": command_index,
+                "command_sha256": command_hash,
+                "attempt_count": step.attempt_count,
+            })
+            action = ProposedAction(
+                id=action_id,
+                lease_id=intent.lease_id,
+                provider=task.provider,
+                agent_id=task.external_agent_id,
+                run_id=run.id,
+                task_id=task.id,
+                project_id=run.project_id,
+                workspace_id=run.workspace_id,
+                action_type=CapabilityActionType.RUN_COMMAND,
+                repository=task.repository,
+                branch=task.branch_preference,
+                command=command,
+                estimated_runtime_seconds=request.timeout_seconds,
+                retry_number=max(0, step.attempt_count - 1),
+                metadata={
+                    "command_index": command_index,
+                    "command_source": "approval.test_plan",
+                    "command_sha256": command_hash,
+                    "step_id": step.id,
+                    "step_type": AgentRunStepType.RUN_VALIDATION.value,
+                    "idempotency_key": step.idempotency_key,
+                    "approval_request_id": approval.id,
+                    "approved_payload_hash": approval.approved_payload_hash,
+                    "bundle_revision": intent.bundle_revision,
+                    "bundle_git_tree_sha": intent.bundle_git_tree_sha,
+                },
+            )
+            claim = request.intent_repository.claim_next_command(
+                intent=intent,
+                expected_run=run,
+                expected_step=step,
+                approval=approval,
+                action=action,
+                worker_id=request.worker_id,
+                lease_token=request.worker_lease_token,
+                actor=request.actor,
+                timeout_seconds=request.timeout_seconds,
+            )
+            try:
+                output = executor(command)
+            except Exception as error:
+                request.intent_repository.mark_reconciliation_required(
+                    intent_id=intent.id,
+                    workspace_id=intent.workspace_id,
+                    command_index=claim.command_index,
+                    reason=f"Container execution outcome is ambiguous ({type(error).__name__}).",
+                )
+                raise AgentRunConflict("Container execution requires operator reconciliation.") from error
+            try:
+                if inspect_validation_bundle(bundle) != bundle_tree_sha:
+                    raise AgentRunConflict("Validation bundle changed during container execution.")
+            except Exception as error:
+                request.intent_repository.mark_reconciliation_required(
+                    intent_id=intent.id,
+                    workspace_id=intent.workspace_id,
+                    command_index=claim.command_index,
+                    reason="Validation bundle identity changed during command execution.",
+                )
+                raise AgentRunConflict("Validation bundle requires operator reconciliation.") from error
+            if (
+                not output.stream_evidence_complete
+                or output.output_limit_exceeded
+                or not isinstance(output.stdout_sha256, str)
+                or not isinstance(output.stderr_sha256, str)
+                or type(output.stdout_bytes) is not int
+                or type(output.stderr_bytes) is not int
+                or not 0 <= output.stdout_bytes <= 1_048_576
+                or not 0 <= output.stderr_bytes <= 1_048_576
+            ):
+                request.intent_repository.mark_reconciliation_required(
+                    intent_id=intent.id,
+                    workspace_id=intent.workspace_id,
+                    command_index=claim.command_index,
+                    reason="Bounded separate output evidence is unavailable or exceeded its limit.",
+                )
+                raise AgentRunConflict("Validation output requires operator reconciliation.")
+            try:
+                request.intent_repository.record_result(
+                    claim=claim,
+                    worker_id=request.worker_id,
+                    lease_token=request.worker_lease_token,
+                    exit_code=output.exit_code,
+                    timed_out=output.timed_out,
+                    stdout_sha256=output.stdout_sha256,
+                    stdout_bytes=output.stdout_bytes,
+                    stderr_sha256=output.stderr_sha256,
+                    stderr_bytes=output.stderr_bytes,
+                )
+            except Exception as error:
+                request.intent_repository.mark_reconciliation_required(
+                    intent_id=intent.id,
+                    workspace_id=intent.workspace_id,
+                    command_index=claim.command_index,
+                    reason="Command result could not be committed under current lease authority.",
+                )
+                raise AgentRunConflict("Validation result requires operator reconciliation.") from error
+            claims = request.intent_repository.list_command_claims(
+                intent_id=intent.id, workspace_id=intent.workspace_id,
+            )
+            if output.exit_code != 0 or output.timed_out:
+                break
+
+        claims = request.intent_repository.list_command_claims(
+            intent_id=intent.id, workspace_id=intent.workspace_id,
+        )
+        passed = (
+            len(claims) == len(approval.test_plan)
+            and all(
+                claim.status == RunValidationCommandStatus.RESULT_RECORDED
+                and claim.exit_code == 0 and claim.timed_out is False
+                for claim in claims
+            )
+        )
+        results = [self._claim_result(claim) for claim in claims]
+        task_event = AgentTaskEvent(
+            task_id=task.id,
+            event_type=AgentTaskEventType.TESTS_PASSED if passed else AgentTaskEventType.TESTS_FAILED,
+            status=AgentTaskStatus.APPROVED if passed else AgentTaskStatus.FAILED,
+            actor=request.worker_id,
+            created_at=_now(),
+            metadata={
+                "run_id": run.id,
+                "step_id": step.id,
+                "intent_id": intent.id,
+                "attempt_count": step.attempt_count,
+                "approval_hash": intent.approval_hash,
+                "test_plan_hash": intent.test_plan_hash,
+                "lease_token_hash": intent.lease_token_hash,
+                "bundle_revision": intent.bundle_revision,
+                "bundle_git_tree_sha": intent.bundle_git_tree_sha,
+                "command_results": results,
+            },
+        )
+        safe_evidence = {
+            "validation_intent_id": intent.id,
+            "repository": bundle.repository,
+            "branch": bundle.branch,
+            "bundle_revision": bundle.revision,
+            "bundle_git_tree_sha": bundle_tree_sha,
+            "command_results": results,
+            "containerized": True,
+            "command_output_content_persisted": False,
+        }
+        result = classify_execution_result(
+            success=passed,
+            reason=(
+                "All exact approved validation commands passed in the restricted container."
+                if passed else "An exact approved validation command failed or timed out."
+            ),
+            evidence=safe_evidence,
+        )
+        return PostgresRunValidationOutcome(result, intent.id, task_event)
+
+    @staticmethod
+    def _claim_result(claim: AgentRunValidationCommandClaim) -> dict[str, object]:
+        return {
+            "command_index": claim.command_index,
+            "command_hash": claim.command_hash,
+            "exit_code": claim.exit_code,
+            "timed_out": claim.timed_out,
+            "stdout_sha256": claim.stdout_sha256,
+            "stdout_bytes": claim.stdout_bytes,
+            "stderr_sha256": claim.stderr_sha256,
+            "stderr_bytes": claim.stderr_bytes,
+        }
 
 
 class AgentRunConflict(RuntimeError):
@@ -692,6 +1117,18 @@ def _build_postgres_agent_run_step_completion_records(
         previous, new = transition_step(
             current, AgentRunStepStatus.SUCCEEDED, reason=result.reason
         )
+        success_metadata = {
+            "decision": result.decision.value,
+            "output_reference": result.output_reference,
+        }
+        if step_type == AgentRunStepType.RUN_VALIDATION:
+            if not isinstance(result.evidence, dict):
+                raise AgentRunRepositoryConflict("RUN_VALIDATION completion evidence is malformed.")
+            for key in ("validation_intent_id", "bundle_revision", "bundle_git_tree_sha"):
+                value = result.evidence.get(key)
+                if not isinstance(value, str) or not value:
+                    raise AgentRunRepositoryConflict("RUN_VALIDATION provenance is incomplete.")
+                success_metadata[key] = value
         append(
             AgentRunEventType.STEP_SUCCEEDED,
             step=current,
@@ -699,10 +1136,7 @@ def _build_postgres_agent_run_step_completion_records(
             new_status=new.value,
             message=result.reason,
             output_hash=current.evidence_hash,
-            metadata={
-                "decision": result.decision.value,
-                "output_reference": result.output_reference,
-            },
+            metadata=success_metadata,
         )
         next_step = next(
             (
@@ -1034,6 +1468,9 @@ def execute_next_step(
     postgres_branch_request_factory: PostgresBranchRequestFactory | None = None,
     postgres_apply_change_coordinator: PostgresApplyChangesCoordinator | None = None,
     postgres_apply_change_request_factory: PostgresApplyChangeRequestFactory | None = None,
+    postgres_validation_coordinator: PostgresAgentRunValidationCoordinator | None = None,
+    postgres_validation_request_factory: PostgresRunValidationRequestFactory | None = None,
+    postgres_validation_intent_repository: PostgresAgentRunValidationIntentRepository | None = None,
 ) -> AgentRunStepExecutionResult:
     if (postgres_branch_coordinator is None) != (postgres_branch_request_factory is None):
         raise AgentRunConflict(
@@ -1051,6 +1488,13 @@ def execute_next_step(
         or not callable(postgres_apply_change_request_factory)
     ):
         raise AgentRunConflict("PostgreSQL apply execution injections have invalid types.")
+    if (postgres_validation_coordinator is None) != (postgres_validation_request_factory is None):
+        raise AgentRunConflict("PostgreSQL validation coordinator and request factory must be injected together.")
+    if postgres_validation_coordinator is not None and (
+        not isinstance(postgres_validation_coordinator, PostgresAgentRunValidationCoordinator)
+        or not callable(postgres_validation_request_factory)
+    ):
+        raise AgentRunConflict("PostgreSQL validation execution injections have invalid types.")
     active_run_repository = run_repository
     if active_run_repository is not None and not isinstance(
         active_run_repository,
@@ -1074,6 +1518,19 @@ def execute_next_step(
         raise AgentRunConflict("PostgreSQL CREATE_BRANCH injection is unavailable for SQLite runs.")
     if postgres_apply_change_coordinator is not None and not postgres_repository_execution:
         raise AgentRunConflict("PostgreSQL APPLY_CHANGES injection is unavailable for SQLite runs.")
+    if postgres_validation_coordinator is not None and not postgres_repository_execution:
+        raise AgentRunConflict("PostgreSQL RUN_VALIDATION injection is unavailable for SQLite runs.")
+    if postgres_repository_execution and not postgres_run_validation_enabled() and (
+        postgres_validation_coordinator is not None
+        or (
+            (current_step := store.agent_run_steps.get(run.current_step_id or "")) is not None
+            and current_step.step_type == AgentRunStepType.RUN_VALIDATION
+        )
+    ):
+        raise AgentRunConflict(
+            "PostgreSQL RUN_VALIDATION is disabled by the default-off "
+            "AIXION_POSTGRES_RUN_VALIDATION_ENABLED rollout gate."
+        )
     if postgres_repository_execution:
         current_step = store.agent_run_steps.get(run.current_step_id or "")
         if current_step is None or current_step.step_type not in {
@@ -1089,19 +1546,32 @@ def execute_next_step(
             and postgres_apply_changes_enabled()
             and postgres_apply_change_coordinator is not None
             and postgres_apply_change_request_factory is not None
+        ) and not (
+            current_step.step_type == AgentRunStepType.RUN_VALIDATION
+            and postgres_run_validation_enabled()
+            and postgres_validation_coordinator is not None
+            and postgres_validation_request_factory is not None
         ):
             raise AgentRunConflict(
                 "PostgreSQL AgentRun execution currently supports only the "
                 "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), and "
-                "explicitly enabled APPLY_CHANGES (with its dedicated coordinator), "
+                "explicitly enabled APPLY_CHANGES and RUN_VALIDATION (with dedicated coordinators), "
                 "VERIFY_RESULT, and SEAL_EVIDENCE steps."
             )
         if current_step.step_type in {
             AgentRunStepType.VALIDATE_SCOPE,
+            AgentRunStepType.RUN_VALIDATION,
             AgentRunStepType.VERIFY_RESULT,
         } and (
             not isinstance(task_repository, PostgresAgentTaskRepository)
             or not isinstance(approval_repository, PostgresApprovalDecisionRepository)
+            or (
+                current_step.step_type == AgentRunStepType.VERIFY_RESULT
+                and not isinstance(
+                    postgres_validation_intent_repository,
+                    PostgresAgentRunValidationIntentRepository,
+                )
+            )
         ):
             raise AgentRunConflict(
                 "PostgreSQL scope validation and result verification require "
@@ -1187,6 +1657,11 @@ def execute_next_step(
         and postgres_apply_changes_enabled()
         and postgres_apply_change_coordinator is not None
         and postgres_apply_change_request_factory is not None
+        ) and not (
+            step.step_type == AgentRunStepType.RUN_VALIDATION
+            and postgres_run_validation_enabled()
+            and postgres_validation_coordinator is not None
+            and postgres_validation_request_factory is not None
     ):
         release_run_lease(
             run,
@@ -1197,7 +1672,7 @@ def execute_next_step(
         raise AgentRunConflict(
             "PostgreSQL AgentRun execution currently supports only the "
             "VALIDATE_SCOPE, CREATE_BRANCH (with its dedicated coordinator), and "
-            "explicitly enabled APPLY_CHANGES (with its dedicated coordinator), "
+            "explicitly enabled APPLY_CHANGES and RUN_VALIDATION (with dedicated coordinators), "
             "VERIFY_RESULT, and SEAL_EVIDENCE steps."
         )
 
@@ -1353,6 +1828,11 @@ def execute_next_step(
                 events=task_events,
                 task_repository=task_repository,
                 approval_repository=approval_repository,
+                validation_intent_repository=postgres_validation_intent_repository,
+                validation_step=next(
+                    (item for item in durable_steps if item.step_type == AgentRunStepType.RUN_VALIDATION),
+                    None,
+                ),
             )
             return _build_postgres_agent_run_step_completion_records(
                 run=locked_run,
@@ -1572,6 +2052,110 @@ def execute_next_step(
     expected_run = run.model_copy(deep=True)
     expected_steps = [item.model_copy(deep=True) for item in _run_steps(run.id)]
     persisted_event_ids = {event.id for event in _run_events(run.id)}
+
+    if postgres_repository_execution and step.step_type == AgentRunStepType.RUN_VALIDATION:
+        if postgres_validation_coordinator is None or postgres_validation_request_factory is None:
+            raise AgentRunConflict(
+                "PostgreSQL RUN_VALIDATION requires its dedicated container coordinator."
+            )
+        try:
+            validation_request = postgres_validation_request_factory(
+                expected_run, step.model_copy(deep=True), lease_token, timeout_seconds
+            )
+            expected_validation_step = next(
+                (item for item in expected_steps if item.id == step.id), None
+            )
+            if (
+                not isinstance(validation_request, PostgresRunValidationRequest)
+                or validation_request.expected_run != expected_run
+                or validation_request.expected_step != expected_validation_step
+                or validation_request.worker_id != worker_id
+                or validation_request.worker_lease_token != lease_token
+                or validation_request.timeout_seconds != timeout_seconds
+            ):
+                raise AgentRunConflict(
+                    "PostgreSQL RUN_VALIDATION request differs from its committed worker lease."
+                )
+            outcome = postgres_validation_coordinator.execute(validation_request)
+            intent = validation_request.intent_repository.get_for_step(
+                workspace_id=expected_run.workspace_id or "",
+                run_id=expected_run.id,
+                step_id=step.id,
+                idempotency_key=step.idempotency_key,
+            )
+            if intent is None or intent.id != outcome.intent_id:
+                raise AgentRunConflict("Durable PostgreSQL validation intent disappeared before completion.")
+
+            def build_validation_records(
+                task: AgentTask,
+                approval: ApprovalRequest,
+                _task_events: list[AgentTaskEvent],
+                locked_run: AgentRun,
+                locked_steps: list[AgentRunStep],
+            ) -> tuple[AgentRun, list[AgentRunStep], list[AgentRunEvent], AuditEvent]:
+                if locked_run != expected_run or locked_steps != expected_steps:
+                    raise AgentRunRepositoryConflict(
+                        "AgentRun changed while preparing validation completion."
+                    )
+                if (
+                    task.id != expected_run.task_id
+                    or task.workspace_id != expected_run.workspace_id
+                    or approval.id != expected_run.approval_request_id
+                    or outcome.task_event.task_id != task.id
+                ):
+                    raise AgentRunRepositoryConflict(
+                        "Validation completion task or approval scope changed."
+                    )
+                updated_run, updated_steps, events, audit = (
+                    _build_postgres_agent_run_step_completion_records(
+                        run=locked_run,
+                        steps=locked_steps,
+                        step_type=AgentRunStepType.RUN_VALIDATION,
+                        result=outcome.result,
+                        worker_id=worker_id,
+                        lease_token=lease_token,
+                        already_running=True,
+                    )
+                )
+                audit.details.update({
+                    "validation_intent_id": intent.id,
+                    "approval_hash": intent.approval_hash,
+                    "test_plan_hash": intent.test_plan_hash,
+                    "lease_token_hash": intent.lease_token_hash,
+                    "bundle_revision": intent.bundle_revision,
+                    "bundle_git_tree_sha": intent.bundle_git_tree_sha,
+                })
+                return updated_run, updated_steps, events, audit
+
+            updated_run, updated_steps, events, audit = (
+                active_run_repository.commit_authoritative_task_step(
+                    expected_run=expected_run,
+                    expected_steps=expected_steps,
+                    worker_id=worker_id,
+                    lease_token=lease_token,
+                    step_type=AgentRunStepType.RUN_VALIDATION,
+                    validation_intent_id=outcome.intent_id,
+                    validation_task_event=outcome.task_event,
+                    build_records=build_validation_records,
+                )
+            )
+        except Exception as error:
+            # A command claim may already be durable. Never send a validation
+            # failure through the generic executor or retry an ambiguous claim.
+            raise AgentRunConflict(
+                "PostgreSQL RUN_VALIDATION could not be completed safely."
+            ) from error
+        store.project_agent_run_control_transition(
+            updated_run, updated_steps, events, [audit]
+        )
+        completed_step = next(item for item in updated_steps if item.id == step.id)
+        return AgentRunStepExecutionResult(
+            success=completed_step.status == AgentRunStepStatus.SUCCEEDED,
+            decision=completed_step.decision or VerificationDecision.FAIL_PERMANENT,
+            reason=completed_step.reason,
+            evidence=completed_step.evidence,
+            output_reference=completed_step.output_reference,
+        )
 
     coordinated_branch_result: AgentRunStepExecutionResult | None = None
     coordinated_apply_result: AgentRunStepExecutionResult | None = None
@@ -1886,6 +2470,8 @@ def _verify_postgres_agent_run_result(
     events: list[AgentTaskEvent],
     task_repository: AgentTaskRepository | None,
     approval_repository: ApprovalDecisionRepository | None,
+    validation_intent_repository: PostgresAgentRunValidationIntentRepository | None = None,
+    validation_step: AgentRunStep | None = None,
 ) -> AgentRunStepExecutionResult:
     """Verify repository-backed, run-bound worker evidence for PostgreSQL runs."""
     reasons: list[str] = []
@@ -1922,46 +2508,100 @@ def _verify_postgres_agent_run_result(
     if approval is None or approval.status != ApprovalStatus.APPROVED or not approval_hash_valid:
         reasons.append("The linked approved request is missing, changed, or not approved.")
 
-    validation_worker = f"mission-control:{run.id}:validation"
-    validation_events = sorted(
-        (
-            event
-            for event in events
-            if event.task_id == task.id
-            and event.event_type
-            in {
-                AgentTaskEventType.TESTS_PASSED,
-                AgentTaskEventType.TESTS_FAILED,
-            }
-            and event.actor == validation_worker
-            and event.metadata.get("worker_id") == validation_worker
-            and event.metadata.get("approval_request_id") == run.approval_request_id
-        ),
-        key=lambda event: (event.created_at, event.id),
-    )
-    validation_event = validation_events[-1] if validation_events else None
     test_plan = list(approval.test_plan) if approval is not None else []
-    raw_results = validation_event.metadata.get("results") if validation_event is not None else None
+    validation_intent = None
+    validation_claims: list[AgentRunValidationCommandClaim] = []
+    if (
+        validation_intent_repository is not None
+        and validation_step is not None
+        and run.workspace_id
+    ):
+        validation_intent = validation_intent_repository.get_for_step(
+            workspace_id=run.workspace_id,
+            run_id=run.id,
+            step_id=validation_step.id,
+            idempotency_key=validation_step.idempotency_key,
+        )
+        if validation_intent is not None:
+            validation_claims = validation_intent_repository.list_command_claims(
+                intent_id=validation_intent.id,
+                workspace_id=run.workspace_id,
+            )
+    validation_events = [
+        event for event in events
+        if event.task_id == task.id
+        and event.event_type in {AgentTaskEventType.TESTS_PASSED, AgentTaskEventType.TESTS_FAILED}
+        and event.metadata.get("run_id") == run.id
+        and validation_step is not None
+        and event.metadata.get("step_id") == validation_step.id
+    ]
+    validation_event = validation_events[0] if len(validation_events) == 1 else None
+    expected_results = [
+        PostgresAgentRunValidationCoordinator._claim_result(claim)
+        for claim in validation_claims
+    ]
+    event_command_results = (
+        validation_event.metadata.get("command_results")
+        if validation_event is not None else None
+    )
+    event_command_result_types_valid = bool(
+        isinstance(event_command_results, list)
+        and len(event_command_results) == len(expected_results)
+        and all(
+            isinstance(item, dict)
+            and type(item.get("command_index")) is int
+            and type(item.get("exit_code")) is int
+            and type(item.get("stdout_bytes")) is int
+            and type(item.get("stderr_bytes")) is int
+            and type(item.get("timed_out")) is bool
+            for item in event_command_results
+        )
+    )
     validation_evidence_valid = bool(
-        validation_event is not None
+        validation_intent is not None
+        and validation_intent.status == RunValidationIntentStatus.COMPLETED
+        and validation_step is not None
+        and validation_step.step_type == AgentRunStepType.RUN_VALIDATION
+        and validation_step.status == AgentRunStepStatus.SUCCEEDED
+        and isinstance(validation_step.evidence, dict)
+        and validation_step.evidence.get("validation_intent_id") == validation_intent.id
+        and validation_step.evidence.get("bundle_revision") == validation_intent.bundle_revision
+        and validation_step.evidence.get("bundle_git_tree_sha") == validation_intent.bundle_git_tree_sha
+        and test_plan
+        and validation_intent.run_id == run.id
+        and validation_intent.task_id == task.id
+        and validation_intent.approval_id == run.approval_request_id
+        and validation_intent.step_id == validation_step.id
+        and validation_intent.approval_hash == approval.approved_payload_hash
+        and validation_intent.test_plan_hash == sha256_hex(test_plan)
+        and re.fullmatch(r"[0-9a-f]{40}", validation_intent.bundle_revision) is not None
+        and re.fullmatch(r"[0-9a-f]{40}", validation_intent.bundle_git_tree_sha) is not None
+        and len(validation_claims) == len(test_plan)
+        and all(
+            claim.command_index == index
+            and claim.command_hash == sha256_hex({"command": command})
+            and claim.status == RunValidationCommandStatus.RESULT_RECORDED
+            and claim.exit_code == 0
+            and claim.timed_out is False
+            for index, (claim, command) in enumerate(zip(validation_claims, test_plan, strict=True))
+        )
+        and validation_event is not None
         and validation_event.event_type == AgentTaskEventType.TESTS_PASSED
         and validation_event.status == AgentTaskStatus.APPROVED
-        and validation_event.metadata.get("commands_executed") is True
-        and isinstance(validation_event.metadata.get("command_count"), int)
-        and not isinstance(validation_event.metadata.get("command_count"), bool)
-        and validation_event.metadata.get("command_count") == len(test_plan)
-        and test_plan
-        and isinstance(raw_results, list)
-        and len(raw_results) == len(test_plan)
-        and all(
-            isinstance(result, dict)
-            and result.get("command") == command
-            and isinstance(result.get("exit_code"), int)
-            and not isinstance(result.get("exit_code"), bool)
-            and result.get("exit_code") == 0
-            and result.get("timed_out") is False
-            for result, command in zip(raw_results, test_plan, strict=True)
-        )
+        and bool(validation_event.actor.strip())
+        and event_command_result_types_valid
+        and validation_event.metadata == {
+            "run_id": run.id,
+            "step_id": validation_step.id,
+            "intent_id": validation_intent.id,
+            "attempt_count": validation_step.attempt_count,
+            "approval_hash": validation_intent.approval_hash,
+            "test_plan_hash": validation_intent.test_plan_hash,
+            "lease_token_hash": validation_intent.lease_token_hash,
+            "bundle_revision": validation_intent.bundle_revision,
+            "bundle_git_tree_sha": validation_intent.bundle_git_tree_sha,
+            "command_results": expected_results,
+        }
     )
     if not validation_evidence_valid:
         reasons.append("Run-bound validation evidence is missing or unsuccessful.")

@@ -26,6 +26,7 @@ from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .postgres_trust_repository import PostgresTrustRepository
 from .postgres_agent_run_branch import PostgresAgentRunBranchIntentRepository
 from .postgres_agent_run_apply_changes import PostgresAgentRunApplyChangeIntentRepository
+from .postgres_agent_run_validation import PostgresAgentRunValidationIntentRepository
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class ApplicationRepositories:
     trust: PostgresTrustRepository
     agent_run_branch_intents: PostgresAgentRunBranchIntentRepository
     agent_run_apply_change_intents: PostgresAgentRunApplyChangeIntentRepository
+    agent_run_validation_intents: PostgresAgentRunValidationIntentRepository
 
     @classmethod
     def from_connector(
@@ -90,6 +92,9 @@ class ApplicationRepositories:
                 connect, trust_repository=trust, trust_event_repository=trust_events
             ),
             agent_run_apply_change_intents=PostgresAgentRunApplyChangeIntentRepository(
+                connect, trust_repository=trust, trust_event_repository=trust_events
+            ),
+            agent_run_validation_intents=PostgresAgentRunValidationIntentRepository(
                 connect, trust_repository=trust, trust_event_repository=trust_events
             ),
         )
