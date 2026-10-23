@@ -458,7 +458,7 @@ class PostgresAgentRunValidationIntentRepository:
                 conn.execute(
                     "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,actor,details,created_at,payload) "
                     "VALUES(%s,%s,%s,'agent_run',%s,%s,%s,%s,%s,%s)",
-                    (audit.id, record.workspace_id, record.approval_id, record.run_id,
+                    (audit.id, record.workspace_id, None, record.run_id,
                      audit.event_type, actor, Jsonb(audit.details), audit.created_at,
                      Jsonb(audit.model_dump(mode="json"))),
                 )
