@@ -22,6 +22,7 @@ from app.models import (
     MCPChildServer,
     MCPToolDefinition,
     Project,
+    User,
     UserRole,
     Workspace,
 )
@@ -33,6 +34,7 @@ from app.store import store
 def postgres_mcp_transport_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[Callable[[], Connection], Workspace, Project, AuthUser, object]]:
+    mcp_gateway_routes.reset_gateway_runtime_for_test()
     dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
     if not dsn:
         pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL MCP transport tests")
@@ -53,6 +55,15 @@ def postgres_mcp_transport_runtime(
             name="MCP transport test workspace",
             owner_user_id=f"user_{uuid.uuid4().hex}",
         )
+        persisted_user = User(
+            id=workspace.owner_user_id,
+            email="mcp-transport-reviewer@example.test",
+            display_name="MCP Transport Reviewer",
+            role=UserRole.OWNER,
+            password_hash="0" * 64,
+            password_salt="0" * 32,
+            workspace_id=workspace.id,
+        )
         project = Project(
             id=f"project_{uuid.uuid4().hex}",
             name="MCP transport test project",
@@ -62,6 +73,20 @@ def postgres_mcp_transport_runtime(
             connection.execute(
                 "INSERT INTO workspaces(workspace_id,payload) VALUES (%s,%s)",
                 (workspace.id, Jsonb(workspace.model_dump(mode="json"))),
+            )
+            connection.execute(
+                "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    persisted_user.id,
+                    persisted_user.workspace_id,
+                    persisted_user.email,
+                    persisted_user.email.lower(),
+                    persisted_user.role,
+                    persisted_user.disabled,
+                    persisted_user.email_verified,
+                    Jsonb(persisted_user.model_dump(mode="json")),
+                ),
             )
             connection.execute(
                 "INSERT INTO projects(project_id,workspace_id,payload) VALUES (%s,%s,%s)",
@@ -235,35 +260,44 @@ def test_postgres_mcp_tools_call_waits_for_durable_approval_and_forwards_once(
             "session_id": "pg-transport-session",
         },
     }
-    with TestClient(main.app) as submit_client, TestClient(main.app) as reviewer_client:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                submit_client.post,
-                f"/mcp/{project.id}/jsonrpc",
-                json=call_payload,
+    submit_client = TestClient(main.app)
+    reviewer_client = TestClient(main.app)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            submit_client.post,
+            f"/mcp/{project.id}/jsonrpc",
+            json=call_payload,
+        )
+        pending = None
+        for _ in range(100):
+            candidates = repositories.mcp_pending_requests.list_for_workspace(
+                workspace.id,
+                project_id=project.id,
             )
-            pending = None
-            for _ in range(100):
-                candidates = repositories.mcp_pending_requests.list_for_workspace(
-                    workspace.id,
-                    project_id=project.id,
+            pending = next(
+                (item for item in candidates if item.session_id == "pg-transport-session"),
+                None,
+            )
+            if pending is not None:
+                break
+            if future.done():
+                early_response = future.result(timeout=1)
+                pytest.fail(
+                    "transport exited before persisting its durable MCP approval: "
+                    f"HTTP {early_response.status_code} {early_response.text}"
                 )
-                pending = next(
-                    (item for item in candidates if item.session_id == "pg-transport-session"),
-                    None,
-                )
-                if pending is not None:
-                    break
-                time.sleep(0.05)
-            assert pending is not None, "transport did not persist its durable MCP approval"
-            assert not future.done(), "mutating tools/call returned before reviewer decision"
+            time.sleep(0.05)
+        assert pending is not None, "transport did not persist its durable MCP approval"
+        assert not future.done(), "mutating tools/call returned before reviewer decision"
 
-            decision = reviewer_client.post(
-                f"/approvals/{pending.approval_request_id}/decision",
-                json={"decision": "approve", "reason": "approve PostgreSQL MCP transport"},
-            )
-            assert decision.status_code == 200, decision.text
-            response = future.result(timeout=15)
+        decision = reviewer_client.post(
+            f"/approvals/{pending.approval_request_id}/decision",
+            json={"decision": "approve", "reason": "approve PostgreSQL MCP transport"},
+        )
+        assert decision.status_code == 200, decision.text
+        response = future.result(timeout=15)
+    submit_client.close()
+    reviewer_client.close()
 
     assert response.status_code == 200, response.text
     structured = response.json()["result"]["structuredContent"]
@@ -292,33 +326,42 @@ def test_postgres_mcp_tools_call_denial_never_dispatches(
             "session_id": "pg-transport-denied-session",
         },
     }
-    with TestClient(main.app) as submit_client, TestClient(main.app) as reviewer_client:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                submit_client.post,
-                f"/mcp/{project.id}/jsonrpc",
-                json=call_payload,
+    submit_client = TestClient(main.app)
+    reviewer_client = TestClient(main.app)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            submit_client.post,
+            f"/mcp/{project.id}/jsonrpc",
+            json=call_payload,
+        )
+        pending = None
+        for _ in range(100):
+            candidates = repositories.mcp_pending_requests.list_for_workspace(
+                workspace.id,
+                project_id=project.id,
             )
-            pending = None
-            for _ in range(100):
-                candidates = repositories.mcp_pending_requests.list_for_workspace(
-                    workspace.id,
-                    project_id=project.id,
-                )
-                pending = next(
-                    (item for item in candidates if item.session_id == "pg-transport-denied-session"),
-                    None,
-                )
-                if pending is not None:
-                    break
-                time.sleep(0.05)
-            assert pending is not None, "transport did not persist its durable MCP approval"
-            decision = reviewer_client.post(
-                f"/approvals/{pending.approval_request_id}/decision",
-                json={"decision": "deny", "reason": "deny PostgreSQL MCP transport"},
+            pending = next(
+                (item for item in candidates if item.session_id == "pg-transport-denied-session"),
+                None,
             )
-            assert decision.status_code == 200, decision.text
-            response = future.result(timeout=15)
+            if pending is not None:
+                break
+            if future.done():
+                early_response = future.result(timeout=1)
+                pytest.fail(
+                    "transport exited before persisting its durable MCP approval: "
+                    f"HTTP {early_response.status_code} {early_response.text}"
+                )
+            time.sleep(0.05)
+        assert pending is not None, "transport did not persist its durable MCP approval"
+        decision = reviewer_client.post(
+            f"/approvals/{pending.approval_request_id}/decision",
+            json={"decision": "deny", "reason": "deny PostgreSQL MCP transport"},
+        )
+        assert decision.status_code == 200, decision.text
+        response = future.result(timeout=15)
+    submit_client.close()
+    reviewer_client.close()
 
     assert response.status_code == 200, response.text
     assert response.json()["result"]["isError"] is True
