@@ -2270,6 +2270,76 @@ def test_postgres_runtime_reads_durable_scorecards_without_sqlite_projection(
     assert durable_card.scope_adherence_rate == 1.0
     assert not any(card.agent_id == "process-local-only" for card in scorecards)
 
+    durable_task = repositories.agent_tasks.list(workspace_id=workspace_id)[0]
+    scored_runs = [
+        AgentRun(
+            task_id=durable_task.id,
+            workspace_id=workspace_id,
+            project_id=durable_task.project_id,
+            status=AgentRunStatus.SUCCEEDED,
+            objective="Successful first-attempt run",
+        ),
+        AgentRun(
+            task_id=durable_task.id,
+            workspace_id=workspace_id,
+            project_id=durable_task.project_id,
+            status=AgentRunStatus.FAILED,
+            objective="Failed first-attempt run",
+        ),
+    ]
+    with connect() as conn:
+        for run in scored_runs:
+            conn.execute(
+                "INSERT INTO agent_runs(run_id,task_id,project_id,workspace_id,approval_id,status,"
+                "current_step_id,lease_owner,lease_token,lease_expires_at,updated_at,payload) "
+                "VALUES(%s,%s,%s,%s,NULL,%s,NULL,NULL,NULL,NULL,%s,%s)",
+                (
+                    run.id,
+                    run.task_id,
+                    run.project_id,
+                    run.workspace_id,
+                    run.status.value,
+                    run.updated_at,
+                    Jsonb(run.model_dump(mode="json")),
+                ),
+            )
+            step = AgentRunStep(
+                run_id=run.id,
+                task_id=run.task_id,
+                sequence=0,
+                step_type=AgentRunStepType.VALIDATE_SCOPE,
+                status=(
+                    AgentRunStepStatus.SUCCEEDED
+                    if run.status == AgentRunStatus.SUCCEEDED
+                    else AgentRunStepStatus.FAILED
+                ),
+                attempt_count=1,
+                idempotency_key=f"{run.id}:VALIDATE_SCOPE:1",
+            )
+            conn.execute(
+                "INSERT INTO agent_run_steps(step_id,run_id,task_id,workspace_id,sequence,status,"
+                "updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    step.id,
+                    step.run_id,
+                    step.task_id,
+                    workspace_id,
+                    step.sequence,
+                    step.status.value,
+                    step.updated_at,
+                    Jsonb(step.model_dump(mode="json")),
+                ),
+            )
+
+    scorecards = list_scorecards(user=user, request=request)
+    task_card = next(
+        card
+        for card in scorecards
+        if card.provider == durable_task.provider
+        and card.agent_id == durable_task.external_agent_id
+    )
+    assert task_card.first_attempt_success_rate == 0.5
+
     bound = request.app.state.agent_run_repository
     request.app.state.agent_run_repository = object()
     with pytest.raises(HTTPException) as unavailable:

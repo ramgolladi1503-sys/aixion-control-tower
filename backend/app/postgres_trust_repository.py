@@ -10,7 +10,7 @@ from typing import Any, TypeVar
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from .agent_run_models import AgentRun, AgentRunEvent, AgentRunStep
+from .agent_run_models import AgentRun, AgentRunEvent, AgentRunStatus, AgentRunStep
 from .agent_task_models import AgentTask
 from .trust_action_authorization_models import (
     ActionAuthorization,
@@ -679,7 +679,8 @@ class PostgresTrustRepository:
                 for decision in decisions
             )
             first_attempt_successes = sum(
-                bool(steps_by_run.get(run.id))
+                run.status == AgentRunStatus.SUCCEEDED
+                and bool(steps_by_run.get(run.id))
                 and all(step.attempt_count <= 1 for step in steps_by_run[run.id])
                 for run in scoped_runs
             )
