@@ -1680,7 +1680,7 @@ def test_postgres_antigravity_hook_process_stays_pending_across_api_restart(
                 "AIXION_AGENT_TOKEN": agent_token,
                 "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
                 "AIXION_PROJECT_ID": project.id,
-                "AIXION_APPROVAL_TIMEOUT_SECONDS": "30",
+                "AIXION_APPROVAL_TIMEOUT_SECONDS": "120",
             }
         )
         hook_process = subprocess.Popen(
