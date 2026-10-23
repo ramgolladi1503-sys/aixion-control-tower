@@ -12,6 +12,24 @@ Current gaps include adaptive navigation, provider liveness/last-seen health on 
 
 **Scope lock:** this is a design contract for release one only. User-facing destinations are Home, Approvals (including History and request detail), Connect, and Account (including sign-in/register/logout). Agent Work, projects, command chat, MCP, technical audit, diagnostics, and administration remain outside release-one navigation. Billing and cloud deployment are outside this document. The UI must not imply that a local computer is online or that an agent resumed unless the backend/connector provides fresh evidence.
 
+## 0.1 Contract at a glance: preserve the working baseline, close the release gaps
+
+This is a source-backed implementation contract, not a device-certification claim. Keep the compact, quiet four-destination design. Prioritize the approval workflow and evidence gaps before decorative work or new destinations.
+
+| Area | Already in source or locked | Remaining release evidence or work |
+|---|---|---|
+| Navigation | Home, Approvals, Connect, Account; technical/admin routes stay hidden. | Verify labels, focus order, insets, notification routing, and adaptive navigation on device. |
+| Visual identity | Warm paper/charcoal, mineral olive, fine boundaries, system sans, monospace payloads; light/dark semantic palettes exist. | Verify both rendered palettes and composited contrast. Avoid a broad rebrand. |
+| Sign-in | Email/password, one Log in action, show/hide password, same-screen Create account. OAuth is not presented. | Verify keyboard/IME, autofill, TalkBack, scaling, and errors. Show password recovery only when it works end to end. |
+| Home and Connect | Home handles backend error/empty states and links to setup; Connect explains setup and labels provider phone flow unverified. | Add only evidence-backed liveness/last-seen; do not imply a live connection from setup state. |
+| Request review | Inbox/history split, exact-action context, acknowledgement and high-risk confirmation, fail-closed stale/unknown states. | Verify hierarchy, wrapping, sticky controls, accessibility traversal, and expiry on device. |
+| Decision history | Decision and reviewer/time are separate from delivery/execution claims. | Complete the user-facing delivery timeline; never label a request resumed without same-invocation evidence. |
+| Accessibility and windows | Scrollable Compose surfaces and semantic palettes provide a base. | Verify 200% text, TalkBack, keyboard/D-pad, landscape/foldable states, and final contrast on one exact APK. |
+
+**Implementation order:** first prove notification → exact request review → approve/deny → same invocation resumes or fails closed. Fix UI defects observed in that run. Then verify sign-in, history, notification routing, and accessibility/window behavior. Defer decorative motion, analytics, extra tabs, OAuth, and broad visual-system replacement.
+
+**Distinctive approval-card direction:** use a calm “field note” treatment: warm neutral surface, narrow olive identity rule, clear provider/project metadata, a high-contrast exact-action block, and plain-language risk/state labels. Keep the rest typographic and quiet; the request and decision should dominate the card.
+
 ## 1. Product outcome and design principles
 
 The app is a focused approval console for a user's coding-agent work that is already running on a computer. A user should be able to sign in, connect a supported local agent connector, receive an approval request, inspect the exact request and risk context, approve or reject it, and later inspect the recorded outcome. It must communicate that the computer, agent process, connector, network, and credentials need to remain available for work to resume.
