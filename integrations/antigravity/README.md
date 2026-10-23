@@ -111,10 +111,11 @@ tool arguments are written to logs.
    another project.
 
    A phone-reachable approval run requires one separately verified disposable
-   API instance reachable from both the Mac and phone. Use an HTTPS URL accepted
-   by the hook, bind and firewall the service deliberately, and configure the
-   Android build to use that same API and database. Do not substitute a
-   loopback URL in the Android build, mix different API instances, or start a
+   API instance reachable from both the Mac and phone. For an away-from-Mac
+   run, use an HTTPS URL accepted by the hook and configure the Android build
+   to use that same API and database. For local USB testing, the explicit
+   `adb reverse` procedure below may use a loopback URL because the phone's
+   loopback port is forwarded to the Mac. Do not mix API instances or start a
    second service on port 8002. A passing host-side simulation is not evidence
    of a phone approval or same-invocation Antigravity resume.
 
@@ -146,36 +147,40 @@ is no longer needed.
 ### Physical Android device over USB (local development only)
 
 For local phone verification without exposing the backend to the LAN, run one
-isolated backend on the Mac bound to `127.0.0.1:8003` with a dedicated test
-database. Configure the Antigravity hook to call `http://127.0.0.1:8003` and
-build the Android debug app with that same API URL. Both clients must use the
-same backend instance and database for the phone decision to unblock the
-pending hook call.
+isolated backend on the Mac bound to `127.0.0.1` on a selected port with a
+dedicated test database. Set `API_PORT` below to that exact port; configure the
+Antigravity hook to call `http://127.0.0.1:${API_PORT}` and build the Android
+debug app with that same API URL. Both clients must use the same backend
+instance and database for the phone decision to unblock the pending hook call.
+The prepared local E2E API in the current PR workspace uses port `8004`; use
+`API_PORT=8004` when continuing that run. The value `8003` below is only a
+generic example, not a second service to start.
 
-With USB debugging authorized, find the phone serial and forward its loopback
-port to the Mac:
+With USB debugging authorized, run the following in one terminal session. Set
+`API_PORT` to the verified isolated backend port (`8004` for the prepared local
+E2E runtime) and `ANDROID_SERIAL` to the connected device serial:
 
 ```sh
 adb devices -l
-export ANDROID_SERIAL="<serial shown above>"
-adb -s "$ANDROID_SERIAL" reverse tcp:8003 tcp:8003
+API_PORT=8003 # replace with the verified isolated backend's port
+ANDROID_SERIAL="<serial shown above>"
+export API_PORT ANDROID_SERIAL
+adb -s "$ANDROID_SERIAL" reverse "tcp:${API_PORT}" "tcp:${API_PORT}"
 adb -s "$ANDROID_SERIAL" reverse --list
-```
-
-Build and install a debug APK configured for this forwarded URL:
-
-```sh
 cd /ABSOLUTE/PATH/mobile/android
-./gradlew assembleDebug -PAIXION_API_BASE_URL=http://127.0.0.1:8003/
+./gradlew assembleDebug "-PAIXION_API_BASE_URL=http://127.0.0.1:${API_PORT}/"
 adb -s "$ANDROID_SERIAL" install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-On the phone, `127.0.0.1:8003` reaches the Mac's loopback service through the
-USB reverse mapping. Keep the backend bound to loopback; this setup does not
-expose port 8003 to the LAN. Remove the mapping when finished:
+On the phone, `127.0.0.1:${API_PORT}` reaches the Mac's loopback service through
+the USB reverse mapping. Use the matching `http://127.0.0.1:${API_PORT}` for
+the Antigravity hook. Keep the backend bound to loopback; this setup does not
+expose the selected port to the LAN. Remove the mapping when finished:
 
 ```sh
-adb -s "$ANDROID_SERIAL" reverse --remove tcp:8003
+API_PORT=8003 # set to the same verified backend port above
+ANDROID_SERIAL="<serial shown above>"
+adb -s "$ANDROID_SERIAL" reverse --remove "tcp:${API_PORT}"
 ```
 
 This path works only while the Mac backend and USB debugging connection are
