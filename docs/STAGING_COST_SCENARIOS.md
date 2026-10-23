@@ -43,7 +43,7 @@ instance time for Cloud Run jobs.”
 
 | Scenario | API workload | Two Job cadence and run time | Cloud Run subtotal if free tiers are available | Cloud Run subtotal with free tiers exhausted |
 | --- | --- | --- | ---: | ---: |
-| Low | 100,000 requests/month; 0.25 sec average | Every 15 minutes; 10 sec actual per Job | **$1.90** | **$7.20** |
+| Low | 100,000 requests/month; 0.25 sec average | Every 15 minutes; 10 sec actual per Job | **$1.90** | **$7.24** |
 | Expected | 1,000,000 requests/month; 0.5 sec average | Every 5 minutes; 30 sec actual per Job | **$22.16** | **$32.72** |
 | High | 5,000,000 requests/month; 0.5 sec average | Every 1 minute; 30 sec actual per Job | **$152.38** | **$163.62** |
 
@@ -53,8 +53,10 @@ after the Jobs free allowance. If those allowances are exhausted, the respective
 reference costs are `$13.03` and `$19.70`.
 
 For the low case with free allowances exhausted, API compute and requests are
-approximately `$0.63`, and Job compute is approximately `$6.57`, for a total of
-`$7.20` after rounding. The prior `$7.24` table value was an arithmetic error.
+approximately `$0.67` (including `$0.04` of request charges), and Job compute is
+approximately `$6.57`, for a total of `$7.24` after rounding. The independent
+Decimal recomputation in `backend/tests/test_staging_cost_scenarios.py` covers
+the CPU, memory, request, and minimum Job duration charges.
 
 The high case exceeds the proposed `$75/month` amount before adding the database
 or supporting services. The low and expected cases also do not establish that an
