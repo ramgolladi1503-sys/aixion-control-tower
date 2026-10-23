@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parents[2]
 SETUP_PATH = ROOT / "integrations" / "codex" / "setup_workspace.py"
@@ -56,3 +58,67 @@ def test_remove_preserves_unrelated_permission_request_hook(tmp_path: Path) -> N
 
     remaining = json.loads(hooks_path.read_text(encoding="utf-8"))
     assert remaining == original
+
+
+def test_install_is_idempotent_for_private_existing_config(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://api.example.test",
+        agent_id="agent-codex-test",
+        project_id="project-codex-test",
+        home=home,
+    )
+    original_hooks = hooks_path.read_bytes()
+    original_config = config_path.read_bytes()
+
+    assert config_path.stat().st_mode & 0o777 == 0o600
+    assert setup.install_workspace(
+        workspace,
+        api_base_url="https://api.example.test",
+        agent_id="agent-codex-test",
+        project_id="project-codex-test",
+        home=home,
+    ) == (config_path, hooks_path)
+    assert config_path.read_bytes() == original_config
+    assert hooks_path.read_bytes() == original_hooks
+
+
+def test_install_refuses_group_or_other_readable_config_without_mutation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://api.example.test",
+        agent_id="agent-codex-test",
+        project_id="project-codex-test",
+        home=home,
+    )
+    original_config = config_path.read_bytes()
+    original_hooks = hooks_path.read_bytes()
+
+    for unsafe_mode in (0o644, 0o640):
+        config_path.chmod(unsafe_mode)
+        unsafe_config = config_path.read_bytes()
+        unsafe_hooks = hooks_path.read_bytes()
+
+        with pytest.raises(setup.SetupError, match="permissions must exclude group and other"):
+            setup.install_workspace(
+                workspace,
+                api_base_url="https://api.example.test",
+                agent_id="agent-codex-test",
+                project_id="project-codex-test",
+                home=home,
+            )
+
+        assert config_path.read_bytes() == unsafe_config == original_config
+        assert config_path.stat().st_mode & 0o777 == unsafe_mode
+        assert hooks_path.read_bytes() == unsafe_hooks == original_hooks

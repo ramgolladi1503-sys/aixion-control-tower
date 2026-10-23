@@ -613,7 +613,13 @@ def _run(
                 timeout_seconds=remaining_seconds,
             )
         except RateLimitError as exc:
-            time.sleep(min(exc.retry_after_seconds, max(0, deadline - time.monotonic())))
+            now = time.monotonic()
+            remaining_seconds = max(0.0, deadline - now)
+            # Chunk Retry-After at the next heartbeat. A long server-directed
+            # backoff must not allow this still-running callback's lease to
+            # expire before the hook can renew it.
+            until_heartbeat_seconds = max(0.0, next_heartbeat_at - now)
+            time.sleep(min(exc.retry_after_seconds, remaining_seconds, until_heartbeat_seconds))
             continue
         except AmbiguousRequestError:
             # Decision reads are idempotent; creation and consume writes are

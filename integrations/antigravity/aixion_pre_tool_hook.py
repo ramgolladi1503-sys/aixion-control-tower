@@ -731,10 +731,15 @@ def _run(
                 timeout_seconds=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds),
             )
         except RateLimitError as exc:
-            remaining_seconds = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining_seconds = deadline - now
             if remaining_seconds <= 0:
                 break
-            time.sleep(min(exc.retry_after_seconds, remaining_seconds))
+            # Do not let a server-directed backoff outlive the connector
+            # invocation lease. Wake at the next heartbeat so liveness is
+            # renewed before retrying the decision read.
+            until_heartbeat_seconds = max(0.0, next_heartbeat_at - now)
+            time.sleep(min(exc.retry_after_seconds, remaining_seconds, until_heartbeat_seconds))
             continue
         except AmbiguousRequestError:
             # Decision reads are idempotent. Retry them with a bounded delay,

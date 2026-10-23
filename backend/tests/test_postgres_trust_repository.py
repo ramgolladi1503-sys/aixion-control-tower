@@ -1368,6 +1368,341 @@ def test_postgres_manual_consumption_route_uses_durable_trust_state(
         ).fetchone()[0] == 1
 
 
+def _postgres_decision_route_context(
+    connect: Callable[[], Connection],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    workspace_id: str,
+    user_id: str,
+):
+    repositories = ApplicationRepositories.from_connector(connect)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_repositories=repositories,
+        approval_decision_repository=repositories.approval_decisions,
+        workspace_membership_repository=repositories.workspace_membership,
+        trust_repository=repositories.trust,
+        trust_event_repository=repositories.trust_events,
+        project_repository=repositories.projects,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    user = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="PostgreSQL run-action reviewer",
+        role=UserRole.REVIEWER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    membership_resolutions: list[str] = []
+
+    def resolve_membership(_user: AuthUser, _request) -> str:
+        membership_resolutions.append(_user.id)
+        return workspace_id
+
+    monkeypatch.setattr("app.trust_routes.workspace_id_for_request", resolve_membership)
+    return request, user, repositories, membership_resolutions
+
+
+@pytest.mark.parametrize(
+    ("decision", "effective_decision"),
+    [
+        (ActionAuthorizationDecision.ALLOW, PolicyDecisionType.ALLOW),
+        (ActionAuthorizationDecision.BLOCK, PolicyDecisionType.BLOCK),
+    ],
+)
+def test_postgres_run_action_decision_route_uses_exact_durable_binding(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: ActionAuthorizationDecision,
+    effective_decision: PolicyDecisionType,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+
+    request, user, _repositories, membership_resolutions = _postgres_decision_route_context(
+        connect, monkeypatch, workspace_id=workspace_id, user_id=user_id
+    )
+    decision_payload = ActionAuthorizationCreate(
+        decision=decision, reason="Reviewed the exact durable AgentRun action."
+    )
+    authorization = decide_exact_action(action.id, decision_payload, user, request)
+
+    assert authorization.action_id == action.id
+    assert authorization.workspace_id == workspace_id
+    assert get_exact_action_decision(action.id, user, request) == authorization
+    assert decide_exact_action(action.id, decision_payload, user, request) == authorization
+    assert membership_resolutions == [user_id, user_id, user_id]
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(
+            conn, action.id, workspace_id
+        ) == authorization
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == effective_decision
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s "
+            "AND entity_id=%s AND event_type IN (%s,%s)",
+            (
+                workspace_id,
+                action.id,
+                TrustEventType.ACTION_ALLOWED.value,
+                TrustEventType.ACTION_BLOCKED.value,
+            ),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT status,current_step_id FROM agent_runs WHERE run_id=%s AND workspace_id=%s",
+            (action.run_id, workspace_id),
+        ).fetchone() == (AgentRunStatus.NEEDS_HUMAN.value, action.metadata["step_id"])
+        assert repository.get_action_consumption(conn, action.id, workspace_id) is None
+    assert action.id not in store.action_authorizations
+
+
+def test_postgres_run_action_decision_route_hides_foreign_workspace_action(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+
+    foreign_workspace_id = f"ws_{uuid.uuid4().hex}"
+    request, user, _repositories, membership_resolutions = _postgres_decision_route_context(
+        connect, monkeypatch, workspace_id=foreign_workspace_id, user_id=f"user_{uuid.uuid4().hex}"
+    )
+    with pytest.raises(HTTPException) as not_found:
+        decide_exact_action(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Attempt a cross-workspace decision.",
+            ),
+            user,
+            request,
+        )
+    assert not_found.value.status_code == 404
+    assert membership_resolutions == [user.id]
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(conn, action.id, workspace_id) is None
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == PolicyDecisionType.REQUIRE_APPROVAL
+
+
+def test_postgres_run_action_decision_route_requires_workspace_membership(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+
+    request, user, _repositories, _membership_resolutions = _postgres_decision_route_context(
+        connect, monkeypatch, workspace_id=workspace_id, user_id=user_id
+    )
+    membership_calls: list[str] = []
+
+    def no_membership(_user: AuthUser, _request):
+        membership_calls.append(_user.id)
+        return None
+
+    monkeypatch.setattr("app.trust_routes.workspace_id_for_request", no_membership)
+    with pytest.raises(HTTPException) as forbidden:
+        decide_exact_action(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Attempt to approve without workspace membership.",
+            ),
+            user,
+            request,
+        )
+    assert forbidden.value.status_code == 403
+    assert membership_calls == [user_id]
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(conn, action.id, workspace_id) is None
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == PolicyDecisionType.REQUIRE_APPROVAL
+
+
+def test_postgres_run_action_decision_route_rejects_stale_current_step(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM agent_runs WHERE run_id=%s AND workspace_id=%s",
+            (action.run_id, workspace_id),
+        ).fetchone()
+        run = AgentRun.model_validate(row[0]).model_copy(
+            update={"current_step_id": f"step_{uuid.uuid4().hex}"}
+        )
+        conn.execute(
+            "UPDATE agent_runs SET current_step_id=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (run.current_step_id, Jsonb(run.model_dump(mode="json")), action.run_id, workspace_id),
+        )
+
+    request, user, _repositories, _membership_resolutions = _postgres_decision_route_context(
+        connect, monkeypatch, workspace_id=workspace_id, user_id=user_id
+    )
+    with pytest.raises(HTTPException) as stale:
+        decide_exact_action(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Attempt to approve a stale run step.",
+            ),
+            user,
+            request,
+        )
+    assert stale.value.status_code == 409
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(conn, action.id, workspace_id) is None
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == PolicyDecisionType.REQUIRE_APPROVAL
+
+
+def test_postgres_run_action_decision_route_rejects_incomplete_binding_without_fallback(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+        malformed = action.model_copy(update={"metadata": {"step_type": "CREATE_BRANCH"}})
+        conn.execute(
+            "UPDATE proposed_actions SET payload=%s WHERE action_id=%s AND workspace_id=%s",
+            (Jsonb(malformed.model_dump(mode="json")), action.id, workspace_id),
+        )
+
+    request, user, _repositories, _membership_resolutions = _postgres_decision_route_context(
+        connect, monkeypatch, workspace_id=workspace_id, user_id=user_id
+    )
+    with pytest.raises(HTTPException) as incomplete:
+        decide_exact_action(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Attempt to approve an incomplete run action.",
+            ),
+            user,
+            request,
+        )
+    assert incomplete.value.status_code == 409
+    assert "exact durable AgentRun binding" in incomplete.value.detail
+    assert action.id not in store.proposed_actions
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(conn, action.id, workspace_id) is None
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == PolicyDecisionType.REQUIRE_APPROVAL
+
+
+def test_postgres_run_action_decision_route_rolls_back_on_ledger_failure(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+        conn.execute(
+            "UPDATE trust_event_heads SET event_hash=%s WHERE singleton=TRUE",
+            ("0" * 64,),
+        )
+
+    request, user, _repositories, _membership_resolutions = _postgres_decision_route_context(
+        connect, monkeypatch, workspace_id=workspace_id, user_id=user_id
+    )
+    with pytest.raises(PostgresTrustEventRepositoryError, match="ledger"):
+        decide_exact_action(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Attempt to approve while the audit ledger is invalid.",
+            ),
+            user,
+            request,
+        )
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(conn, action.id, workspace_id) is None
+        assert repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        ).decision == PolicyDecisionType.REQUIRE_APPROVAL
+
+
 @pytest.mark.parametrize(
     ("authorization_decision", "effective_decision"),
     [

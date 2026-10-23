@@ -46,16 +46,20 @@ def _identifier(label: str, value: str) -> str:
     return value
 
 
-def _read_json(path: Path, *, allow_missing: bool) -> dict:
+def _read_json(path: Path, *, allow_missing: bool, require_private: bool = False) -> dict:
     if not os.path.lexists(path):
         if allow_missing:
             return {}
         raise SetupError(f"Managed file is missing: {path}")
     try:
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-            raise SetupError(f"Managed file must be a regular file owned by this user: {path}")
-        raw = path.read_bytes()
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise SetupError(f"Managed file must be a regular file owned by this user: {path}")
+            if require_private and stat.S_IMODE(metadata.st_mode) & 0o077:
+                raise SetupError(f"Managed config permissions must exclude group and other users: {path}")
+            raw = stream.read(MAX_JSON_BYTES + 1)
         if len(raw) > MAX_JSON_BYTES:
             raise SetupError(f"Managed JSON file exceeds {MAX_JSON_BYTES} bytes: {path}")
         value = json.loads(raw)
@@ -172,8 +176,10 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
     if managed and managed != [expected_entry]:
         raise SetupError(f"Hook {HOOK_NAME!r} already exists with different contents")
     config_exists = os.path.lexists(config_path)
-    if config_exists and _read_json(config_path, allow_missing=False) != config:
-        raise SetupError("Workspace Codex config exists with different values; refusing overwrite")
+    if config_exists:
+        existing_config = _read_json(config_path, allow_missing=False, require_private=True)
+        if existing_config != config:
+            raise SetupError("Workspace Codex config exists with different values; refusing overwrite")
     config_created = False
     if not config_exists:
         _atomic_write(config_path, (json.dumps(config, indent=2) + "\n").encode(), 0o600)
@@ -213,7 +219,7 @@ def remove_workspace(workspace: Path, *, home: Path | None = None,
         raise SetupError("Existing Aixion Codex hook differs from installer; refusing removal")
     config_exists = os.path.lexists(config_path)
     if config_exists:
-        _read_json(config_path, allow_missing=False)
+        _read_json(config_path, allow_missing=False, require_private=True)
     remaining = [item for item in entries if item not in managed]
     if remaining:
         hooks["PermissionRequest"] = remaining

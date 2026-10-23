@@ -686,6 +686,85 @@ def test_run_honors_retry_after_only_until_host_deadline(
     assert "POST consume" not in calls
 
 
+def test_long_retry_after_renews_invocation_lease_before_retrying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    calls: list[tuple[str, float]] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "120"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
+        calls.append((url.rsplit("/", 1)[-1], clock.now))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            if clock.now < 190:
+                raise hook.RateLimitError(90)
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._payload_hash(approved)
+            return approved
+        if method == "POST" and url.endswith("/heartbeat"):
+            return _invocation_heartbeat(created)
+        if method == "POST" and url.endswith("/consume"):
+            return {"consumed": True}
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "allow"
+    heartbeat_times = [at for endpoint, at in calls if endpoint == "heartbeat"]
+    assert heartbeat_times
+    assert all(
+        at - previous <= hook.INVOCATION_HEARTBEAT_INTERVAL_SECONDS
+        for previous, at in zip([100.0, *heartbeat_times], heartbeat_times)
+    )
+    first_heartbeat = calls.index(("heartbeat", heartbeat_times[0]))
+    assert calls[first_heartbeat + 1][0] == "decision"
+    assert clock.now == 190
+    assert "consume" in [endpoint for endpoint, _ in calls]
+
+
+@pytest.mark.parametrize("heartbeat_failure", ["not_live", "rate_limited"])
+def test_long_retry_after_with_failed_heartbeat_denies_without_consuming(
+    monkeypatch: pytest.MonkeyPatch,
+    heartbeat_failure: str,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    calls: list[str] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "120"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
+        endpoint = url.rsplit("/", 1)[-1]
+        calls.append(endpoint)
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            raise hook.RateLimitError(90)
+        if method == "POST" and url.endswith("/heartbeat"):
+            if heartbeat_failure == "rate_limited":
+                raise hook.RateLimitError(90)
+            return {**_invocation_heartbeat(created), "live": False}
+        raise AssertionError(f"Failed liveness must stop the approval wait: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert result["reason"] == "Connector liveness could not be confirmed"
+    assert calls == ["approvals", "decision", "heartbeat"]
+    assert clock.sleeps == [hook.INVOCATION_HEARTBEAT_INTERVAL_SECONDS]
+    assert "consume" not in calls
+
+
 def test_pending_poll_sleep_does_not_extend_configured_wait_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -20,6 +20,7 @@ from .trust_action_authorization import (
     ActionAuthorizationConflict,
     record_action_authorization,
     record_action_authorization_postgres,
+    record_agent_run_action_authorization_postgres,
     verify_action_authorization_payload,
 )
 from .trust_action_authorization_models import (
@@ -608,6 +609,65 @@ def decide_exact_action(
         if workspace_id is None:
             raise HTTPException(status_code=403, detail="Workspace membership is required")
         repositories = request.app.state.postgres_repositories
+        # Run-linked actions use a separate transaction primitive that locks
+        # and validates the durable run -> current step -> action binding. Derive
+        # that scope from the authenticated workspace's stored action; never
+        # accept run or step identifiers from the reviewer request.
+        try:
+            with runtime.connect() as conn:
+                with conn.transaction():
+                    action = repositories.trust.get_proposed_action(
+                        conn, action_id, workspace_id, for_update=True
+                    )
+        except (PostgresTrustRepositoryConflict, PostgresTrustRepositoryError) as error:
+            raise _trust_error(error) from error
+        if action is None:
+            raise HTTPException(status_code=404, detail="Proposed action not found")
+        if action.run_id is not None or action.task_id is not None:
+            metadata = action.metadata
+            run_id = action.run_id
+            task_id = action.task_id
+            step_id = metadata.get("step_id") if isinstance(metadata, dict) else None
+            step_type = metadata.get("step_type") if isinstance(metadata, dict) else None
+            idempotency_key = (
+                metadata.get("idempotency_key") if isinstance(metadata, dict) else None
+            )
+            if (
+                not isinstance(run_id, str)
+                or not run_id.strip()
+                or not isinstance(task_id, str)
+                or not task_id.strip()
+                or not isinstance(step_id, str)
+                or not step_id.strip()
+                or not isinstance(step_type, str)
+                or not step_type.strip()
+                or not isinstance(idempotency_key, str)
+                or not idempotency_key.strip()
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Run-linked action is missing its exact durable AgentRun binding",
+                )
+            try:
+                return record_agent_run_action_authorization_postgres(
+                    action_id,
+                    payload,
+                    expected_run_id=run_id,
+                    expected_step_id=step_id,
+                    user=user,
+                    workspace_id=workspace_id,
+                    connect=runtime.connect,
+                    trust_repository=repositories.trust,
+                    trust_event_repository=repositories.trust_events,
+                    now=now_utc(),
+                )
+            except (
+                ValueError,
+                ActionAuthorizationConflict,
+                PostgresTrustRepositoryConflict,
+                PostgresTrustRepositoryError,
+            ) as error:
+                raise _trust_error(error) from error
         try:
             return record_action_authorization_postgres(
                 action_id,
