@@ -157,6 +157,38 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
         if (state.notice.isNotBlank()) item { Text(state.notice, color = palette.positive) }
         if (state.error.isNotBlank()) item { Text(state.error, color = palette.danger) }
 
+        if (!state.loading && state.projectsLoaded && state.projects.isEmpty()) {
+            item {
+                TowerPanel(elevated = true) {
+                    Text("Create your first project", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(TowerSpacing.xs))
+                    Text(
+                        "Projects keep each agent connector scoped to work in your account. New projects use Strict mode.",
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.height(TowerSpacing.sm))
+                    OutlinedTextField(
+                        value = state.newProjectName,
+                        onValueChange = viewModel::setNewProjectName,
+                        enabled = !state.working,
+                        label = { Text("Project name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(TowerSpacing.sm))
+                    Button(
+                        onClick = viewModel::createProject,
+                        enabled = !state.working && !state.loading && state.projectsLoaded &&
+                            !state.projectCreationNeedsRefresh && state.newProjectName.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (state.working) "Creating project…" else "Create project")
+                    }
+                }
+            }
+        }
+
         item {
             TowerPanel {
                 Text("Choose platform", color = palette.ink, fontWeight = FontWeight.SemiBold)
@@ -236,7 +268,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                 Box {
                     OutlinedButton(
                         onClick = { projectMenuOpen = true },
-                        enabled = state.projects.isNotEmpty(),
+                        enabled = !state.loading && !state.working && state.projects.isNotEmpty(),
                         modifier = Modifier.fillMaxWidth()
                     ) { Text(selectedProject?.name ?: "Select a project") }
                     DropdownMenu(expanded = projectMenuOpen, onDismissRequest = { projectMenuOpen = false }) {
@@ -256,7 +288,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                 Spacer(Modifier.height(TowerSpacing.md))
                 Button(
                     onClick = viewModel::createAgent,
-                    enabled = !state.working && !state.loading && state.selectedProjectId != null,
+                    enabled = canCreateApprovalAgent(state),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (state.working) "Working…" else "Create connector and issue token") }
             }

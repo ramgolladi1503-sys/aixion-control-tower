@@ -143,6 +143,46 @@ To roll back, run `setup_workspace.py --workspace "/absolute/path/to/project"
 config, preserving unrelated hooks. Revoke the agent token from the phone if it
 is no longer needed.
 
+### Physical Android device over USB (local development only)
+
+For local phone verification without exposing the backend to the LAN, run one
+isolated backend on the Mac bound to `127.0.0.1:8003` with a dedicated test
+database. Configure the Antigravity hook to call `http://127.0.0.1:8003` and
+build the Android debug app with that same API URL. Both clients must use the
+same backend instance and database for the phone decision to unblock the
+pending hook call.
+
+With USB debugging authorized, find the phone serial and forward its loopback
+port to the Mac:
+
+```sh
+adb devices -l
+export ANDROID_SERIAL="<serial shown above>"
+adb -s "$ANDROID_SERIAL" reverse tcp:8003 tcp:8003
+adb -s "$ANDROID_SERIAL" reverse --list
+```
+
+Build and install a debug APK configured for this forwarded URL:
+
+```sh
+cd /ABSOLUTE/PATH/mobile/android
+./gradlew assembleDebug -PAIXION_API_BASE_URL=http://127.0.0.1:8003/
+adb -s "$ANDROID_SERIAL" install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+On the phone, `127.0.0.1:8003` reaches the Mac's loopback service through the
+USB reverse mapping. Keep the backend bound to loopback; this setup does not
+expose port 8003 to the LAN. Remove the mapping when finished:
+
+```sh
+adb -s "$ANDROID_SERIAL" reverse --remove tcp:8003
+```
+
+This path works only while the Mac backend and USB debugging connection are
+available. It supports local device verification, not away-from-Mac use or
+production reachability. Those require a deployed HTTPS API reachable by both
+the phone and host, plus production notification and host-availability setup.
+
 For the isolated E2E workspace, remove using the same explicit config home:
 
 ```sh

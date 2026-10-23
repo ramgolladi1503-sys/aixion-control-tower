@@ -25,6 +25,9 @@ data class AgentAccessUiState(
     val working: Boolean = false,
     val agents: List<AgentAccessSummary> = emptyList(),
     val projects: List<ProjectDto> = emptyList(),
+    val projectsLoaded: Boolean = false,
+    val projectCreationNeedsRefresh: Boolean = false,
+    val newProjectName: String = "",
     val selectedProvider: String = "ANTIGRAVITY",
     val selectedProjectId: String? = null,
     val displayName: String = "Antigravity on this Mac",
@@ -37,6 +40,15 @@ data class AgentAccessUiState(
     val error: String = ""
 )
 
+internal fun canCreateApprovalAgent(state: AgentAccessUiState): Boolean =
+    !state.loading &&
+        !state.working &&
+        state.error.isBlank() &&
+        state.projectsLoaded &&
+        !state.projectCreationNeedsRefresh &&
+        !state.selectedProjectId.isNullOrBlank() &&
+        state.projects.any { it.id.isNotBlank() && it.id == state.selectedProjectId }
+
 internal fun agentAccessUiStateForProvider(provider: String?): AgentAccessUiState {
     val selectedProvider = when (provider?.trim()?.uppercase(Locale.ROOT)) {
         "CODEX" -> "CODEX"
@@ -48,11 +60,17 @@ internal fun agentAccessUiStateForProvider(provider: String?): AgentAccessUiStat
     )
 }
 
-class AgentAccessViewModel(
+class AgentAccessViewModel internal constructor(
     application: Application,
-    savedStateHandle: SavedStateHandle
+    savedStateHandle: SavedStateHandle,
+    private val repository: AgentAccessRepository
 ) : AndroidViewModel(application) {
-    private val repository = AgentAccessRepository(ApiClient.create(application.applicationContext))
+    constructor(application: Application, savedStateHandle: SavedStateHandle) : this(
+        application,
+        savedStateHandle,
+        AgentAccessRepository(ApiClient.create(application.applicationContext))
+    )
+
     private val _state = MutableStateFlow(agentAccessUiStateForProvider(savedStateHandle["provider"]))
     val state: StateFlow<AgentAccessUiState> = _state.asStateFlow()
 
@@ -71,6 +89,8 @@ class AgentAccessViewModel(
                 _state.value = current.copy(
                     loading = false,
                     projects = projects,
+                    projectsLoaded = true,
+                    projectCreationNeedsRefresh = false,
                     agents = agents,
                     selectedProjectId = current.selectedProjectId
                         ?.takeIf { id -> projects.any { it.id == id } }
@@ -82,6 +102,7 @@ class AgentAccessViewModel(
             } catch (_: Exception) {
                 _state.value = _state.value.copy(
                     loading = false,
+                    projectsLoaded = false,
                     error = "Could not load projects or ${providerDisplayName(_state.value.selectedProvider)} agents. Check owner access and connection, then retry."
                 )
             }
@@ -122,12 +143,60 @@ class AgentAccessViewModel(
         }
     }
 
+    fun setNewProjectName(value: String) {
+        if (_state.value.working) return
+        _state.value = _state.value.copy(newProjectName = value, error = "")
+    }
+
+    fun createProject() {
+        val current = _state.value
+        val name = current.newProjectName.trim()
+        if (current.loading || current.working || !current.projectsLoaded ||
+            current.projectCreationNeedsRefresh || current.error.isNotBlank()
+        ) return
+        if (current.projects.isNotEmpty()) {
+            _state.value = current.copy(
+                error = "A project is already available. Select it or refresh before creating another."
+            )
+            return
+        }
+        if (name.isBlank()) {
+            _state.value = current.copy(error = "Enter a project name to continue.")
+            return
+        }
+
+        viewModelScope.launch {
+            _state.value = _state.value.copy(working = true, error = "", notice = "")
+            try {
+                val project = repository.createProject(name)
+                val latest = _state.value
+                _state.value = latest.copy(
+                    working = false,
+                    projects = (latest.projects.filterNot { it.id == project.id } + project),
+                    selectedProjectId = project.id,
+                    newProjectName = "",
+                    projectCreationNeedsRefresh = false,
+                    notice = "Project created in your account workspace using Strict mode. You can now create a project-limited connector.",
+                    error = ""
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(
+                    working = false,
+                    projectCreationNeedsRefresh = true,
+                    error = "Project creation was not confirmed. Refresh the project list before retrying."
+                )
+            }
+        }
+    }
+
     fun createAgent() {
         val current = _state.value
         val name = current.displayName.trim()
         val projectId = current.selectedProjectId
         val provider = current.selectedProvider
-        if (name.isBlank() || projectId == null || current.working) {
+        if (name.isBlank() || projectId == null || current.working || !canCreateApprovalAgent(current)) {
             _state.value = current.copy(error = "Enter an agent name and select one project.")
             return
         }

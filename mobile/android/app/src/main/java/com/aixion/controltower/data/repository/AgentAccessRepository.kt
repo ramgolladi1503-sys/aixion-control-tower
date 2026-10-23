@@ -7,7 +7,9 @@ import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.core.api.dto.AgentRegistrationResponseDto
 import com.aixion.controltower.core.api.dto.ExternalAgentDto
 import com.aixion.controltower.core.api.dto.LOCAL_APPROVAL_CONNECTOR_PROVIDERS
+import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
+import java.util.Locale
 
 data class AgentAccessSummary(
     val agent: ExternalAgentDto,
@@ -37,6 +39,28 @@ class AgentAccessRepository(private val api: ControlTowerApi) {
     }
 
     suspend fun listProjects(): List<ProjectDto> = api.listProjects()
+
+    /**
+     * Creates a project through the authenticated account-scoped API. The mobile
+     * onboarding flow never accepts or invents a local workspace path.
+     */
+    suspend fun createProject(name: String): ProjectDto {
+        val normalizedName = name.trim()
+        require(normalizedName.isNotEmpty()) { "Project name must not be blank." }
+
+        val project = api.createProject(
+            ProjectCreateDto(name = normalizedName, mode = "STRICT")
+        )
+        if (project.id.isBlank() ||
+            project.name != normalizedName ||
+            project.mode?.uppercase(Locale.ROOT) != "STRICT"
+        ) {
+            throw IllegalStateException(
+                "Server did not confirm the requested strict project. Refresh projects before continuing."
+            )
+        }
+        return project
+    }
 
     suspend fun createApprovalAgent(
         displayName: String,
