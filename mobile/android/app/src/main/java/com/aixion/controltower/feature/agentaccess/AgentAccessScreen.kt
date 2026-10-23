@@ -6,6 +6,8 @@ import android.content.ClipDescription
 import android.content.ContextWrapper
 import android.os.Build
 import android.os.PersistableBundle
+import java.net.URI
+import java.util.Locale
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,6 +51,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aixion.controltower.BuildConfig
 import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.data.repository.AgentAccessSummary
 import com.aixion.controltower.core.ui.components.StatusBadge
@@ -342,14 +345,57 @@ private fun copyNonSecretCommand(context: android.content.Context, label: String
 internal fun keychainSetupCommand(agentId: String): String =
     "security add-generic-password -U -s com.aixion.controltower.agent -a ${shellQuote(agentId)} -w"
 
-internal fun hookInstallCommand(provider: String, agentId: String, projectId: String): String {
+internal fun normalizeWorkspacePath(rawPath: String): String? {
+    if (rawPath.isBlank() || rawPath != rawPath.trim() ||
+        rawPath.any { it == '\u0000' || it == '\n' || it == '\r' }
+    ) return null
+    return runCatching {
+        val path = java.nio.file.Paths.get(rawPath)
+        if (!path.isAbsolute) return null
+        val normalized = path.normalize()
+        if (normalized == normalized.root) return null
+        normalized.toString()
+    }.getOrNull()
+}
+
+internal fun hookInstallCommand(
+    provider: String,
+    workspacePath: String,
+    agentId: String,
+    projectId: String,
+    apiBaseUrl: String = BuildConfig.AIXION_API_BASE_URL
+): String? {
+    val normalizedWorkspace = normalizeWorkspacePath(workspacePath) ?: return null
+    val normalizedApiBaseUrl = normalizedMacApiBaseUrl(apiBaseUrl) ?: return null
     val hookDirectory = if (provider == "CODEX") "codex" else "antigravity"
-    return "python3 ${shellQuote("/ABSOLUTE/PATH/integrations/$hookDirectory/setup_workspace.py")} \\\n" +
-        "  --workspace ${shellQuote("/ABSOLUTE/PATH/TO/PROJECT")} \\\n" +
-        "  --api-base-url ${shellQuote("https://CONTROL-TOWER-URL")} \\\n" +
+    return "python3 ${shellQuote("integrations/$hookDirectory/setup_workspace.py")} \\\n" +
+        "  --workspace ${shellQuote(normalizedWorkspace)} \\\n" +
+        "  --api-base-url ${shellQuote(normalizedApiBaseUrl)} \\\n" +
         "  --agent-id ${shellQuote(agentId)} \\\n" +
         "  --project-id ${shellQuote(projectId)}"
 }
+
+internal fun isMacCompatibleApiBaseUrl(rawUrl: String): Boolean =
+    normalizedMacApiBaseUrl(rawUrl) != null
+
+private fun normalizedMacApiBaseUrl(rawUrl: String): String? = runCatching {
+    if (rawUrl != rawUrl.trim()) return null
+    val value = rawUrl.trimEnd('/')
+    if (value.isBlank() || '?' in value || '#' in value) return null
+    val uri = URI(value)
+    val host = uri.host?.removePrefix("[")?.removeSuffix("]")?.lowercase(Locale.ROOT)
+    val port = uri.port
+    if (port !in -1..65535) return null
+    if (host.isNullOrBlank() || uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null) {
+        return null
+    }
+    val allowed = when {
+        uri.scheme.equals("https", ignoreCase = true) -> true
+        uri.scheme.equals("http", ignoreCase = true) -> host in setOf("localhost", "127.0.0.1", "::1")
+        else -> false
+    }
+    value.takeIf { allowed }
+}.getOrNull()
 
 private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
 
@@ -370,7 +416,7 @@ private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRota
             Column(modifier = Modifier.weight(1f)) {
                 Text(agent.display_name, color = palette.ink, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(4.dp))
-                Text(agent.id, color = palette.inkMuted, fontSize = 11.sp)
+                Text(agent.id, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
             }
             val credentialState = if (agent.enabled) agentSummary.credentialState else "DISABLED"
             val statusColor = when (credentialState) {
@@ -384,11 +430,18 @@ private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRota
         Text(
             authenticatedActivityLabel(agentSummary.credential),
             color = palette.inkMuted,
-            fontSize = 12.sp,
-            lineHeight = 17.sp
+            style = MaterialTheme.typography.bodyMedium
         )
-        Text("Projects: ${agent.allowed_project_ids.joinToString().ifBlank { "none" }}", color = palette.inkMuted, fontSize = 12.sp)
-        Text("Actions: ${agent.allowed_actions.joinToString()}", color = palette.inkMuted, fontSize = 12.sp, lineHeight = 17.sp)
+        Text(
+            "Projects: ${agent.allowed_project_ids.joinToString().ifBlank { "none" }}",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text(
+            "Actions: ${agent.allowed_actions.joinToString()}",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
@@ -411,6 +464,7 @@ internal fun OneTimeTokenPanel(
     agentName: String,
     agentId: String,
     projectId: String,
+    apiBaseUrl: String = BuildConfig.AIXION_API_BASE_URL,
     onCopy: () -> Unit,
     onCopyKeychainCommand: (String) -> Boolean,
     onCopyHookInstallCommand: (String) -> Boolean,
@@ -420,8 +474,15 @@ internal fun OneTimeTokenPanel(
     val providerName = agentProviderName(provider)
     var keychainCopyMessage by remember(provider, agentId, projectId) { mutableStateOf<String?>(null) }
     var hookCopyMessage by remember(provider, agentId, projectId) { mutableStateOf<String?>(null) }
+    var workspacePath by remember(provider, agentId, projectId) { mutableStateOf("") }
+    val normalizedWorkspacePath = normalizeWorkspacePath(workspacePath)
     val keychainCommand = keychainSetupCommand(agentId)
-    val installCommand = hookInstallCommand(provider, agentId, projectId)
+    val apiUrlUsable = isMacCompatibleApiBaseUrl(apiBaseUrl)
+    val installCommand = if (apiUrlUsable) normalizedWorkspacePath?.let {
+        hookInstallCommand(provider, it, agentId, projectId, apiBaseUrl)
+    } else {
+        null
+    }
     TowerPanel(elevated = true) {
         StatusBadge(label = "ONE-TIME SECRET", color = palette.caution)
         Spacer(Modifier.height(TowerSpacing.sm))
@@ -471,23 +532,48 @@ internal fun OneTimeTokenPanel(
         }
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
-            "Install the ${providerName} hook only in the project you want to protect. Replace the project folder and API URL placeholders below with values reachable from your Mac. This does not install a Mac app; it adds project-scoped hook settings and preserves other hooks.",
+            "Install the ${providerName} hook only in the project you want to protect. Enter that project's absolute folder path on your Mac. Run the command from the Control Tower repository root, with this local hook repository available, and confirm the API URL in the command is reachable from your Mac. This does not install a Control Tower Mac app; it adds project-scoped hook settings and preserves other hooks.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
-        Text(
-            installCommand,
-            color = palette.ink,
-            style = TowerCodeTextStyle
+        OutlinedTextField(
+            value = workspacePath,
+            onValueChange = { workspacePath = it },
+            label = { Text("Absolute local project directory") },
+            placeholder = { Text("/Users/you/Projects/example") },
+            supportingText = {
+                Text(
+                    if (workspacePath.isBlank() || normalizedWorkspacePath != null) {
+                        "Use a normalized absolute Mac path, for example /Users/you/Projects/example."
+                    } else {
+                        "Enter a valid absolute project path, such as /Users/you/Projects/example."
+                    }
+                )
+            },
+            isError = workspacePath.isNotBlank() && normalizedWorkspacePath == null,
+            modifier = Modifier.fillMaxWidth()
         )
+        if (!apiUrlUsable) {
+            Text(
+                "This app build's API URL cannot be used from the Mac. Configure an HTTPS endpoint, or localhost/127.0.0.1/::1 for development, then rebuild the app. The hook command is unavailable until then.",
+                color = palette.danger,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+            )
+        }
+        installCommand?.let { command ->
+            Text(command, color = palette.ink, style = TowerCodeTextStyle)
+        }
         OutlinedButton(
             onClick = {
-                hookCopyMessage = if (onCopyHookInstallCommand(installCommand)) {
-                    "Hook install command copied. Replace the project folder and API URL before running."
+                val command = installCommand ?: return@OutlinedButton
+                hookCopyMessage = if (onCopyHookInstallCommand(command)) {
+                    "Hook install command copied. Run it from the Control Tower repository root."
                 } else {
                     "Could not copy the hook install command. Try again."
                 }
             },
+            enabled = installCommand != null,
             modifier = Modifier.fillMaxWidth()
         ) { Text("Copy hook install command") }
         hookCopyMessage?.let { message ->

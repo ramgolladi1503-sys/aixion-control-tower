@@ -10,6 +10,8 @@ import com.aixion.controltower.core.api.dto.webhookNativeSessionLimitation
 import com.aixion.controltower.data.repository.AgentAccessSummary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AgentAccessPolicyTest {
@@ -146,5 +148,57 @@ class AgentAccessPolicyTest {
         assertFalse(isExpectedApprovalConnectorAgent(codexAgent.copy(enabled = false), "project-1", "CODEX"))
         assertFalse(isExpectedApprovalConnectorAgent(codexAgent.copy(allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS + "APPROVE"), "project-1", "CODEX"))
         assertFalse(isExpectedApprovalConnectorAgent(codexAgent, "project-1", "OTHER"))
+    }
+
+    @Test
+    fun setupPathAndApiValidationFailClosedAndNormalizeSafeInputs() {
+        assertNull(normalizeWorkspacePath("relative/project"))
+        assertNull(normalizeWorkspacePath("/"))
+        assertNull(normalizeWorkspacePath(" /Users/test/project"))
+        assertNull(normalizeWorkspacePath("/Users/test/Project\nInjected"))
+        assertEquals(
+            "/Users/test/project",
+            normalizeWorkspacePath("/Users/test/./folder/../project")
+        )
+
+        assertFalse(isMacCompatibleApiBaseUrl("http://10.0.2.2:8000/"))
+        assertFalse(isMacCompatibleApiBaseUrl("http://192.168.1.20:8000/"))
+        assertFalse(isMacCompatibleApiBaseUrl("https://user:pass@api.example.test/"))
+        assertFalse(isMacCompatibleApiBaseUrl("https://api.example.test/?token=secret"))
+        assertFalse(isMacCompatibleApiBaseUrl("https://api.example.test:65536/"))
+        assertTrue(isMacCompatibleApiBaseUrl("https://api.example.test/"))
+        assertTrue(isMacCompatibleApiBaseUrl("http://127.0.0.1:8000/"))
+    }
+
+    @Test
+    fun setupCommandUsesConfiguredSafeEndpointAndNeverIncludesSecret() {
+        val command = hookInstallCommand(
+            provider = "CODEX",
+            workspacePath = "/Users/test/Projects/it's a project",
+            agentId = "agent-example",
+            projectId = "project-example",
+            apiBaseUrl = "https://api.example.test/"
+        )
+
+        assertEquals(
+            "python3 'integrations/codex/setup_workspace.py' \\\n" +
+                "  --workspace '/Users/test/Projects/it'\\''s a project' \\\n" +
+                "  --api-base-url 'https://api.example.test' \\\n" +
+                "  --agent-id 'agent-example' \\\n" +
+                "  --project-id 'project-example'",
+            command
+        )
+        assertFalse(command.orEmpty().contains("one-time-secret"))
+        assertFalse(command.orEmpty().contains("/ABSOLUTE/PATH"))
+        assertFalse(command.orEmpty().contains("CONTROL-TOWER-URL"))
+        assertNull(
+            hookInstallCommand(
+                provider = "CODEX",
+                workspacePath = "/Users/test/project",
+                agentId = "agent-example",
+                projectId = "project-example",
+                apiBaseUrl = "http://10.0.2.2:8000/"
+            )
+        )
     }
 }
