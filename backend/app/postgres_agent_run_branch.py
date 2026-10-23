@@ -125,6 +125,7 @@ def _validate_branch_authority(
     decision: Any,
     intent: AgentRunBranchIntent,
     now: datetime,
+    post_claim_reconciliation: bool = False,
 ) -> None:
     """Revalidate immutable branch authority before claim, observation, or reporting."""
     if (
@@ -142,8 +143,10 @@ def _validate_branch_authority(
         or approval.target_branch != intent.target_ref
         or approval.approved_payload_hash is None
         or approval.approved_payload_hash != compute_approval_payload_hash(approval)
-        or lease.status != CapabilityLeaseStatus.ACTIVE
-        or lease.expires_at <= now
+        or (
+            not post_claim_reconciliation
+            and (lease.status != CapabilityLeaseStatus.ACTIVE or lease.expires_at <= now)
+        )
         or not verify_payload_signature(
             lease_receipt_payload(lease), lease.receipt_signature
         )
@@ -175,7 +178,7 @@ def _validate_branch_authority(
         or action.metadata.get("repository") != intent.repository
         or decision.proposed_action_id != action.id
         or decision.lease_id != action.lease_id
-        or decision.decision.value != "ALLOW"
+        or (not post_claim_reconciliation and decision.decision.value != "ALLOW")
     ):
         raise PostgresTrustRepositoryConflict(
             "Branch authorization, task scope, or capability lease changed"
@@ -525,6 +528,352 @@ class PostgresAgentRunBranchIntentRepository:
                 )
                 return record, durable_run, [durable_step], [event], audit
 
+    def rebind_intent_lease(
+        self,
+        *,
+        intent: AgentRunBranchIntent,
+        expected_run: AgentRun,
+        expected_step: AgentRunStep,
+        worker_lease_token: str,
+        actor: str,
+        now: datetime,
+    ) -> AgentRunBranchIntent:
+        """Rebind an unclaimed INTENT after a worker lease is reacquired.
+
+        This only updates durable lease/revision fences. It never calls a
+        provider and cannot rebind an intent after its one-shot POST claim.
+        """
+        return self._rebind_worker_lease(
+            intent=intent,
+            expected_run=expected_run,
+            expected_step=expected_step,
+            worker_lease_token=worker_lease_token,
+            actor=actor,
+            now=now,
+            allowed_statuses={BranchIntentStatus.INTENT},
+            require_live_authority=True,
+            event_message="Branch intent rebound to the current worker lease before POST.",
+        )
+
+    def rebind_for_reconciliation(
+        self,
+        *,
+        intent: AgentRunBranchIntent,
+        expected_run: AgentRun,
+        expected_step: AgentRunStep,
+        worker_lease_token: str,
+        actor: str,
+        now: datetime,
+    ) -> AgentRunBranchIntent:
+        """Acquire GET-only recovery ownership after an irreversible POST claim.
+
+        The stored status remains POST_CLAIMED, REMOTE_VERIFIED, or
+        RECONCILIATION_REQUIRED.
+        Neither this method nor its result can authorize another provider POST.
+        """
+        return self._rebind_worker_lease(
+            intent=intent,
+            expected_run=expected_run,
+            expected_step=expected_step,
+            worker_lease_token=worker_lease_token,
+            actor=actor,
+            now=now,
+            allowed_statuses={
+                BranchIntentStatus.POST_CLAIMED,
+                BranchIntentStatus.REMOTE_VERIFIED,
+                BranchIntentStatus.RECONCILIATION_REQUIRED,
+            },
+            require_live_authority=False,
+            event_message="GET-only branch reconciliation rebound to the current worker lease.",
+        )
+
+    def _rebind_worker_lease(
+        self,
+        *,
+        intent: AgentRunBranchIntent,
+        expected_run: AgentRun,
+        expected_step: AgentRunStep,
+        worker_lease_token: str,
+        actor: str,
+        now: datetime,
+        allowed_statuses: set[BranchIntentStatus],
+        require_live_authority: bool,
+        event_message: str,
+    ) -> AgentRunBranchIntent:
+        if not worker_lease_token or not actor:
+            raise ValueError("Branch intent recovery requires a worker lease and actor")
+        candidate_hash = sha256_hex({"lease_token": worker_lease_token})
+        if (
+            expected_run.workspace_id != intent.workspace_id
+            or expected_run.id != intent.run_id
+            or expected_step.run_id != intent.run_id
+            or expected_step.id != intent.step_id
+            or expected_step.task_id != intent.task_id
+            or not intent.workspace_id
+        ):
+            raise PostgresTrustRepositoryConflict("Branch recovery scope is invalid")
+
+        with self._connect() as conn:
+            with conn.transaction():
+                approval_row = conn.execute(
+                    "SELECT approval_id,project_id,workspace_id,status,payload FROM approval_requests "
+                    "WHERE approval_id=%s AND workspace_id=%s FOR SHARE",
+                    (intent.approval_id, intent.workspace_id),
+                ).fetchone()
+                task_row = conn.execute(
+                    "SELECT task_id,project_id,workspace_id,approval_request_id,status,payload "
+                    "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR SHARE",
+                    (intent.task_id, intent.workspace_id),
+                ).fetchone()
+                run_row = conn.execute(
+                    "SELECT run_id,workspace_id,task_id,project_id,status,current_step_id,updated_at,payload "
+                    "FROM agent_runs WHERE run_id=%s AND workspace_id=%s FOR UPDATE",
+                    (intent.run_id, intent.workspace_id),
+                ).fetchone()
+                step_row = conn.execute(
+                    "SELECT step_id,run_id,task_id,workspace_id,status,updated_at,payload "
+                    "FROM agent_run_steps WHERE step_id=%s AND run_id=%s AND workspace_id=%s FOR UPDATE",
+                    (intent.step_id, intent.run_id, intent.workspace_id),
+                ).fetchone()
+                intent_row = conn.execute(
+                    f"SELECT {_COLUMNS} FROM agent_run_branch_intents "
+                    "WHERE intent_id=%s AND workspace_id=%s FOR UPDATE",
+                    (intent.id, intent.workspace_id),
+                ).fetchone()
+                if None in (approval_row, task_row, run_row, step_row, intent_row):
+                    raise PostgresTrustRepositoryConflict("Branch recovery scope is missing")
+                try:
+                    approval = ApprovalRequest.model_validate(approval_row[4])
+                    task = AgentTask.model_validate(task_row[5])
+                    run = AgentRun.model_validate(run_row[7])
+                    step = AgentRunStep.model_validate(step_row[6])
+                except Exception as error:
+                    raise PostgresTrustRepositoryError("Stored branch recovery scope is invalid") from error
+                current = _decode(intent_row)
+                db_now = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+                if (
+                    current.id != intent.id
+                    or current.workspace_id != intent.workspace_id
+                    or current.run_id != intent.run_id
+                    or current.task_id != intent.task_id
+                    or current.approval_id != intent.approval_id
+                    or current.step_id != intent.step_id
+                    or current.action_id != intent.action_id
+                    or current.lease_id != intent.lease_id
+                    or current.idempotency_key != intent.idempotency_key
+                    or current.repository != intent.repository
+                    or current.source_branch != intent.source_branch
+                    or current.target_ref != intent.target_ref
+                    or current.source_sha != intent.source_sha
+                    or current.initial_lease_token_hash != intent.initial_lease_token_hash
+                    or current.status not in allowed_statuses
+                    or run != expected_run
+                    or step != expected_step
+                    or run.id != run_row[0]
+                    or run.workspace_id != run_row[1]
+                    or run.task_id != run_row[2]
+                    or run.project_id != run_row[3]
+                    or run.status.value != run_row[4]
+                    or run.current_step_id != run_row[5]
+                    or run.updated_at != run_row[6]
+                    or step.id != step_row[0]
+                    or step.run_id != step_row[1]
+                    or step.task_id != step_row[2]
+                    or step.status.value != step_row[4]
+                    or step.updated_at != step_row[5]
+                    or run.current_step_id != step.id
+                    or run.status.value != "RUNNING"
+                    or run.lease_owner != actor
+                    or run.lease_token != worker_lease_token
+                    or run.lease_expires_at is None
+                    or run.lease_expires_at <= db_now
+                    or run.capability_lease_id != current.lease_id
+                    or run.approval_request_id != current.approval_id
+                    or step.status != AgentRunStepStatus.RUNNING
+                    or step.lease_owner != actor
+                    or step.lease_token != worker_lease_token
+                    or step.lease_expires_at is None
+                    or step.lease_expires_at <= db_now
+                    or run.pause_requested
+                    or run.cancel_requested
+                    or task.id != task_row[0]
+                    or task.project_id != task_row[1]
+                    or task.workspace_id != task_row[2]
+                    or task.approval_request_id != task_row[3]
+                    or task.status.value != task_row[4]
+                    or approval.id != approval_row[0]
+                    or approval.project_id != approval_row[1]
+                    or approval.workspace_id != approval_row[2]
+                    or approval.status.value != approval_row[3]
+                    or task.workspace_id != current.workspace_id
+                    or task.id != current.task_id
+                    or task.approval_request_id != current.approval_id
+                    or task.project_id != run.project_id
+                    or task.repository != current.repository
+                    or task.branch_preference != current.target_ref
+                    or approval.id != current.approval_id
+                    or approval.workspace_id != current.workspace_id
+                    or approval.project_id != run.project_id
+                    or approval.target_branch != current.target_ref
+                ):
+                    raise PostgresTrustRepositoryConflict(
+                        "Branch intent recovery lost workspace, authority, or worker-lease CAS"
+                    )
+
+                action = self._trust.get_proposed_action(
+                    conn, current.action_id, current.workspace_id, for_update=True
+                )
+                decision = self._trust.get_latest_policy_decision_for_action(
+                    conn, current.action_id, current.workspace_id, for_update=True
+                )
+                capability_lease = self._trust.get_capability_lease(
+                    conn, current.lease_id, current.workspace_id, for_update=True
+                )
+                if action is None or decision is None or capability_lease is None:
+                    raise PostgresTrustRepositoryConflict("Branch recovery action authority is missing")
+                if (
+                    decision.proposed_action_id != current.action_id
+                    or decision.lease_id != current.lease_id
+                    or action.workspace_id != current.workspace_id
+                    or action.run_id != current.run_id
+                    or action.task_id != current.task_id
+                ):
+                    raise PostgresTrustRepositoryConflict("Branch recovery decision/action scope changed")
+                if require_live_authority:
+                    _validate_branch_authority(
+                        task=task, approval=approval, lease=capability_lease,
+                        action=action, decision=decision, intent=current, now=db_now,
+                    )
+                elif (
+                    action.action_type != CapabilityActionType.CREATE_BRANCH
+                    or action.workspace_id != current.workspace_id
+                    or action.run_id != current.run_id
+                    or action.task_id != current.task_id
+                    or action.lease_id != current.lease_id
+                    or action.repository != current.repository
+                    or action.branch != current.target_ref
+                    or action.metadata.get("source_sha") != current.source_sha
+                    or action.metadata.get("source_branch") != current.source_branch
+                    or action.metadata.get("target_ref") != current.target_ref
+                    or action.metadata.get("idempotency_key") != current.idempotency_key
+                    or action.metadata.get("step_id") != current.step_id
+                    or action.metadata.get("task_id") != current.task_id
+                    or action.metadata.get("approval_id") != current.approval_id
+                    or action.metadata.get("lease_id") != current.lease_id
+                    or action.metadata.get("repository") != current.repository
+                    or action.provider != task.provider
+                    or action.agent_id != task.external_agent_id
+                    or action.project_id != task.project_id
+                    or task.status != AgentTaskStatus.APPROVED
+                    or task.project_id != run.project_id
+                    or task.repository != current.repository
+                    or approval.status != ApprovalStatus.APPROVED
+                    or approval.project_id != task.project_id
+                    or approval.target_branch != current.target_ref
+                    or approval.approved_payload_hash is None
+                    or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+                    or capability_lease.approval_request_id != current.approval_id
+                    or capability_lease.workspace_id != current.workspace_id
+                    or capability_lease.approved_payload_hash != approval.approved_payload_hash
+                    or capability_lease.provider != task.provider
+                    or capability_lease.agent_id != task.external_agent_id
+                    or capability_lease.scope.repository != current.repository
+                    or capability_lease.scope.branch != current.target_ref
+                    or CapabilityActionType.CREATE_BRANCH not in capability_lease.scope.allowed_actions
+                    or not verify_payload_signature(
+                        lease_receipt_payload(capability_lease),
+                        capability_lease.receipt_signature,
+                    )
+                ):
+                    raise PostgresTrustRepositoryConflict("Branch reconciliation action changed")
+
+                # Idempotent retry by the worker that already owns this exact
+                # recovery lease. It still cannot transition into INTENT.
+                if (
+                    current.lease_token_hash == candidate_hash
+                    and current.run_revision == run.updated_at
+                    and current.step_revision == step.updated_at
+                ):
+                    return current
+
+                if current == intent:
+                    expected_hash = intent.lease_token_hash
+                    expected_run_revision = intent.run_revision
+                    expected_step_revision = intent.step_revision
+                else:
+                    # A stale snapshot is accepted only when immutable intent
+                    # identity matched above; row locking and the latest
+                    # durable run/step lease fence the new owner.
+                    expected_hash = current.lease_token_hash
+                    expected_run_revision = current.run_revision
+                    expected_step_revision = current.step_revision
+                updated = current.model_copy(update={
+                    "lease_token_hash": candidate_hash,
+                    "run_revision": run.updated_at,
+                    "step_revision": step.updated_at,
+                    "updated_at": now,
+                })
+                changed = conn.execute(
+                    "UPDATE agent_run_branch_intents SET lease_token_hash=%s,run_revision=%s,"
+                    "step_revision=%s,updated_at=%s,payload=%s WHERE intent_id=%s "
+                    "AND workspace_id=%s AND run_id=%s AND step_id=%s AND approval_id=%s "
+                    "AND action_id=%s AND idempotency_key=%s AND source_sha=%s "
+                    "AND status=%s AND lease_token_hash=%s AND run_revision=%s AND step_revision=%s",
+                    (
+                        updated.lease_token_hash, updated.run_revision, updated.step_revision,
+                        updated.updated_at, Jsonb(_payload(updated)), updated.id,
+                        updated.workspace_id, updated.run_id, updated.step_id,
+                        updated.approval_id, updated.action_id, updated.idempotency_key,
+                        updated.source_sha, current.status.value, expected_hash,
+                        expected_run_revision, expected_step_revision,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise PostgresTrustRepositoryConflict("Branch recovery lease rebind lost its CAS")
+                event = AgentRunEvent(
+                    run_id=updated.run_id,
+                    task_id=updated.task_id,
+                    step_id=updated.step_id,
+                    correlation_id=run.correlation_id,
+                    event_type=AgentRunEventType.OPERATOR_ACTION,
+                    actor=actor,
+                    attempt_number=step.attempt_count,
+                    message=event_message,
+                    metadata={
+                        "intent_id": updated.id,
+                        "action_id": updated.action_id,
+                        "status": updated.status.value,
+                        "idempotency_key": updated.idempotency_key,
+                    },
+                    created_at=now,
+                )
+                audit = AuditEvent(
+                    event_type="agent_run.branch_intent_rebound",
+                    entity_id=updated.run_id,
+                    workspace_id=updated.workspace_id,
+                    actor=actor,
+                    details={
+                        "intent_id": updated.id,
+                        "action_id": updated.action_id,
+                        "step_id": updated.step_id,
+                        "status": updated.status.value,
+                    },
+                    created_at=now,
+                )
+                conn.execute(
+                    "INSERT INTO agent_run_events(event_id,run_id,task_id,workspace_id,created_at,event_type,payload) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    (event.id, event.run_id, event.task_id, updated.workspace_id,
+                     event.created_at, event.event_type.value, Jsonb(event.model_dump(mode="json"))),
+                )
+                conn.execute(
+                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,actor,details,created_at,payload) "
+                    "VALUES(%s,%s,NULL,'agent_run',%s,%s,%s,%s,%s,%s)",
+                    (audit.id, updated.workspace_id, updated.run_id, audit.event_type, actor,
+                     Jsonb(audit.details), audit.created_at, Jsonb(audit.model_dump(mode="json"))),
+                )
+                return updated
+
     def record_remote_observation(
         self,
         *,
@@ -645,6 +994,11 @@ class PostgresAgentRunBranchIntentRepository:
                 _validate_branch_authority(
                     task=task, approval=approval, lease=lease, action=action,
                     decision=decision, intent=current, now=checked_at,
+                    post_claim_reconciliation=current.status in {
+                        BranchIntentStatus.POST_CLAIMED,
+                        BranchIntentStatus.REMOTE_VERIFIED,
+                        BranchIntentStatus.RECONCILIATION_REQUIRED,
+                    },
                 )
                 if (
                     task.id != current.task_id or task.workspace_id != current.workspace_id
@@ -660,7 +1014,14 @@ class PostgresAgentRunBranchIntentRepository:
                     or approval.status != ApprovalStatus.APPROVED or approval_row[3] != "APPROVED"
                     or approval.approved_payload_hash is None
                     or approval.approved_payload_hash != compute_approval_payload_hash(approval)
-                    or lease.status != CapabilityLeaseStatus.ACTIVE or lease.expires_at <= checked_at
+                    or (
+                        current.status not in {
+                            BranchIntentStatus.POST_CLAIMED,
+                            BranchIntentStatus.REMOTE_VERIFIED,
+                            BranchIntentStatus.RECONCILIATION_REQUIRED,
+                        }
+                        and (lease.status != CapabilityLeaseStatus.ACTIVE or lease.expires_at <= checked_at)
+                    )
                     or lease.approval_request_id != current.approval_id
                     or lease.approved_payload_hash != approval.approved_payload_hash
                     or action.action_type.value != "CREATE_BRANCH"

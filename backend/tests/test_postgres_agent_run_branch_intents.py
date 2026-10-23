@@ -321,6 +321,256 @@ def test_postgres_branch_create_claim_has_one_cross_connection_winner(pg_branch_
     assert persisted.status == BranchIntentStatus.POST_CLAIMED
 
 
+def _renew_branch_worker_lease(c: dict, *, token: str, actor: str | None = None):
+    now = now_utc()
+    owner = actor or c["actor"]
+    run = c["run"].model_copy(update={
+        "lease_owner": owner,
+        "lease_token": token,
+        "lease_expires_at": now + timedelta(minutes=5),
+        "updated_at": now,
+    })
+    step = c["step"].model_copy(update={
+        "lease_owner": owner,
+        "lease_token": token,
+        "lease_expires_at": run.lease_expires_at,
+        "updated_at": now,
+    })
+    with c["connect"]() as conn:
+        conn.execute(
+            "UPDATE agent_runs SET lease_owner=%s,lease_token=%s,lease_expires_at=%s,updated_at=%s,payload=%s "
+            "WHERE run_id=%s AND workspace_id=%s",
+            (owner, token, run.lease_expires_at, now, Jsonb(run.model_dump(mode="json")),
+             run.id, run.workspace_id),
+        )
+        conn.execute(
+            "UPDATE agent_run_steps SET updated_at=%s,payload=%s "
+            "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+            (now, Jsonb(step.model_dump(mode="json")), step.id, step.run_id, run.workspace_id),
+        )
+    return run, step, now
+
+
+def test_postgres_unclaimed_intent_rebinds_to_reacquired_lease_and_is_replay_safe(pg_branch_context) -> None:
+    c = pg_branch_context
+    token = "reacquired-worker-lease"
+    run, step, now = _renew_branch_worker_lease(c, token=token)
+
+    rebound = c["repository"].rebind_intent_lease(
+        intent=c["intent"], expected_run=run, expected_step=step,
+        worker_lease_token=token, actor=c["actor"], now=now,
+    )
+    assert rebound.status == BranchIntentStatus.INTENT
+    assert rebound.lease_token_hash == sha256_hex({"lease_token": token})
+    assert rebound.initial_lease_token_hash == c["intent"].initial_lease_token_hash
+    assert rebound.run_revision == run.updated_at
+    assert rebound.step_revision == step.updated_at
+
+    replay = c["repository"].rebind_intent_lease(
+        intent=rebound, expected_run=run, expected_step=step,
+        worker_lease_token=token, actor=c["actor"], now=now_utc(),
+    )
+    assert replay == rebound
+    with c["connect"]() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_run_events WHERE run_id=%s", (run.id,)
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_run.branch_intent_rebound'", (run.id,),
+        ).fetchone()[0] == 1
+
+    claimed = c["repository"].claim_create_once(
+        intent=rebound, expected_run=run, expected_step=step,
+        worker_lease_token=token, now=now_utc(),
+    )
+    assert claimed.status == BranchIntentStatus.POST_CLAIMED
+
+
+def test_postgres_unclaimed_intent_rebind_has_one_concurrent_lease_winner(pg_branch_context) -> None:
+    c = pg_branch_context
+    token = "current-worker-lease"
+    run, step, now = _renew_branch_worker_lease(c, token=token)
+    barrier = Barrier(2)
+
+    def rebind(candidate: str) -> str:
+        barrier.wait()
+        try:
+            c["repository"].rebind_intent_lease(
+                intent=c["intent"], expected_run=run, expected_step=step,
+                worker_lease_token=candidate, actor=c["actor"], now=now_utc(),
+            )
+            return "rebound"
+        except PostgresTrustRepositoryConflict:
+            return "fenced"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(rebind, [token, "stale-worker-lease"]))
+    assert sorted(outcomes) == ["fenced", "rebound"]
+    stored = c["repository"].get_for_step(
+        workspace_id=c["workspace_id"], run_id=run.id, step_id=step.id,
+        idempotency_key=step.idempotency_key,
+    )
+    assert stored is not None
+    assert stored.lease_token_hash == sha256_hex({"lease_token": token})
+    assert stored.status == BranchIntentStatus.INTENT
+
+
+@pytest.mark.parametrize("stale_scope", ["workspace", "run_revision", "step_revision", "actor"])
+def test_postgres_unclaimed_intent_rebind_rejects_stale_scope(pg_branch_context, stale_scope: str) -> None:
+    c = pg_branch_context
+    token = "reacquired-worker-lease"
+    run, step, now = _renew_branch_worker_lease(c, token=token)
+    intent = c["intent"]
+    actor = c["actor"]
+    if stale_scope == "workspace":
+        intent = intent.model_copy(update={"workspace_id": "other-workspace"})
+    elif stale_scope == "run_revision":
+        run = run.model_copy(update={"updated_at": run.updated_at + timedelta(seconds=1)})
+    elif stale_scope == "step_revision":
+        step = step.model_copy(update={"updated_at": step.updated_at + timedelta(seconds=1)})
+    else:
+        actor = "different-worker"
+
+    with pytest.raises(PostgresTrustRepositoryConflict):
+        c["repository"].rebind_intent_lease(
+            intent=intent, expected_run=run, expected_step=step,
+            worker_lease_token=token, actor=actor, now=now,
+        )
+    with c["connect"]() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_run_branch_intents WHERE intent_id=%s", (c["intent"].id,)
+        ).fetchone()[0] == "INTENT"
+
+
+@pytest.mark.parametrize("capability_state", ["revoked", "expired"])
+def test_postgres_reconciliation_rebind_after_post_claim_never_reopens_post(
+    pg_branch_context, capability_state: str,
+) -> None:
+    c = pg_branch_context
+    claimed = c["repository"].claim_create_once(
+        intent=c["intent"], expected_run=c["run"], expected_step=c["step"],
+        worker_lease_token=c["token"], now=now_utc(),
+    )
+    update = {"updated_at": now_utc()}
+    if capability_state == "revoked":
+        update.update({"status": CapabilityLeaseStatus.REVOKED, "revoked_at": now_utc()})
+    else:
+        update["expires_at"] = now_utc() - timedelta(seconds=1)
+    inactive_lease = c["lease"].model_copy(update=update)
+    inactive_lease.receipt_signature = sign_payload(lease_receipt_payload(inactive_lease))
+    with c["connect"]() as conn:
+        conn.execute(
+            "UPDATE capability_leases SET status=%s,expires_at=%s,updated_at=%s,payload=%s WHERE lease_id=%s",
+            (inactive_lease.status.value, inactive_lease.expires_at, inactive_lease.updated_at,
+             Jsonb(inactive_lease.model_dump(mode="json")), inactive_lease.id),
+        )
+    token = "reconciliation-worker-lease"
+    run, step, now = _renew_branch_worker_lease(c, token=token)
+    recovered = c["repository"].rebind_for_reconciliation(
+        intent=claimed, expected_run=run, expected_step=step,
+        worker_lease_token=token, actor=c["actor"], now=now,
+    )
+    assert recovered.status == BranchIntentStatus.POST_CLAIMED
+    assert recovered.lease_token_hash == sha256_hex({"lease_token": token})
+
+    with pytest.raises(PostgresTrustRepositoryConflict, match="already consumed"):
+        c["repository"].claim_create_once(
+            intent=recovered, expected_run=run, expected_step=step,
+            worker_lease_token=token, now=now_utc(),
+        )
+
+    # A restart can now perform a GET observation under the new worker lease.
+    observed = c["repository"].record_remote_observation(
+        intent=recovered, expected_run=run, expected_step=step,
+        worker_lease_token=token, verified_sha=c["intent"].source_sha,
+        branch_url="https://example.test/owner/repo/tree/feature/approved-branch",
+        reason="", now=now_utc(),
+    )
+    assert observed.status == BranchIntentStatus.REMOTE_VERIFIED
+
+
+def test_postgres_reconciliation_required_can_rebind_and_observe_after_capability_expiry(
+    pg_branch_context,
+) -> None:
+    c = pg_branch_context
+    repo = c["repository"]
+    claimed = repo.claim_create_once(
+        intent=c["intent"], expected_run=c["run"], expected_step=c["step"],
+        worker_lease_token=c["token"], now=now_utc(),
+    )
+    unresolved = repo.record_remote_observation(
+        intent=claimed, expected_run=c["run"], expected_step=c["step"],
+        worker_lease_token=c["token"], verified_sha="b" * 40,
+        branch_url=None, reason="provider result is ambiguous", now=now_utc(),
+    )
+    assert unresolved.status == BranchIntentStatus.RECONCILIATION_REQUIRED
+
+    expired = c["lease"].model_copy(update={
+        "expires_at": now_utc() - timedelta(seconds=1), "updated_at": now_utc(),
+    })
+    expired.receipt_signature = sign_payload(lease_receipt_payload(expired))
+    with c["connect"]() as conn:
+        conn.execute(
+            "UPDATE capability_leases SET expires_at=%s,updated_at=%s,payload=%s WHERE lease_id=%s",
+            (expired.expires_at, expired.updated_at,
+             Jsonb(expired.model_dump(mode="json")), expired.id),
+        )
+
+    token = "reconciliation-worker-lease"
+    run, step, now = _renew_branch_worker_lease(c, token=token)
+    rebound = repo.rebind_for_reconciliation(
+        intent=unresolved, expected_run=run, expected_step=step,
+        worker_lease_token=token, actor=c["actor"], now=now,
+    )
+    assert rebound.status == BranchIntentStatus.RECONCILIATION_REQUIRED
+    observed = repo.record_remote_observation(
+        intent=rebound, expected_run=run, expected_step=step,
+        worker_lease_token=token, verified_sha=c["intent"].source_sha,
+        branch_url="https://example.test/owner/repo/tree/feature/approved-branch",
+        reason="", now=now_utc(),
+    )
+    assert observed.status == BranchIntentStatus.REMOTE_VERIFIED
+
+
+@pytest.mark.parametrize("mutation", ["approval", "action"])
+def test_postgres_reconciliation_rebind_revalidates_approval_and_action_scope(
+    pg_branch_context, mutation: str,
+) -> None:
+    c = pg_branch_context
+    claimed = c["repository"].claim_create_once(
+        intent=c["intent"], expected_run=c["run"], expected_step=c["step"],
+        worker_lease_token=c["token"], now=now_utc(),
+    )
+    token = "reconciliation-worker-lease"
+    run, step, now = _renew_branch_worker_lease(c, token=token)
+    with c["connect"]() as conn:
+        if mutation == "approval":
+            changed = c["approval"].model_copy(update={"target_branch": "feature/other"})
+            changed.approved_payload_hash = compute_approval_payload_hash(changed)
+            conn.execute(
+                "UPDATE approval_requests SET payload=%s WHERE approval_id=%s",
+                (Jsonb(changed.model_dump(mode="json")), changed.id),
+            )
+        else:
+            changed = c["action"].model_copy(update={
+                "metadata": {**c["action"].metadata, "source_sha": "b" * 40}
+            })
+            conn.execute(
+                "UPDATE proposed_actions SET payload=%s WHERE action_id=%s",
+                (Jsonb(changed.model_dump(mode="json")), changed.id),
+            )
+    with pytest.raises(PostgresTrustRepositoryConflict):
+        c["repository"].rebind_for_reconciliation(
+            intent=claimed, expected_run=run, expected_step=step,
+            worker_lease_token=token, actor=c["actor"], now=now,
+        )
+    with c["connect"]() as conn:
+        assert conn.execute(
+            "SELECT status FROM agent_run_branch_intents WHERE intent_id=%s", (claimed.id,)
+        ).fetchone()[0] == "POST_CLAIMED"
+
+
 def test_postgres_branch_claim_fails_after_capability_revocation_or_expiry(pg_branch_context) -> None:
     c = pg_branch_context
     for update in (
@@ -511,8 +761,17 @@ def test_postgres_branch_intent_consumption_rolls_back_as_one_transaction(pg_bra
         assert lease.consumed_runtime_seconds == 0
 
 
-def _complete_verified_branch(c: dict, intent: AgentRunBranchIntent, *, now) -> None:
-    completed_run = c["run"].model_copy(update={
+def _complete_verified_branch(
+    c: dict,
+    intent: AgentRunBranchIntent,
+    *,
+    now,
+    expected_run: AgentRun | None = None,
+    expected_step: AgentRunStep | None = None,
+) -> None:
+    run = expected_run or c["run"]
+    step = expected_step or c["step"]
+    completed_run = run.model_copy(update={
         "status": AgentRunStatus.SUCCEEDED,
         "current_step_id": None,
         "lease_owner": None,
@@ -522,7 +781,7 @@ def _complete_verified_branch(c: dict, intent: AgentRunBranchIntent, *, now) -> 
         "completed_at": now,
         "updated_at": now,
     })
-    completed_step = c["step"].model_copy(update={
+    completed_step = step.model_copy(update={
         "status": AgentRunStepStatus.SUCCEEDED,
         "lease_owner": None,
         "lease_token": None,
@@ -531,15 +790,15 @@ def _complete_verified_branch(c: dict, intent: AgentRunBranchIntent, *, now) -> 
         "updated_at": now,
     })
     run_event = AgentRunEvent(
-        run_id=c["run"].id, task_id=c["task"].id, step_id=c["step"].id,
-        correlation_id=c["run"].correlation_id,
+        run_id=run.id, task_id=c["task"].id, step_id=step.id,
+        correlation_id=run.correlation_id,
         event_type=AgentRunEventType.STEP_SUCCEEDED, actor=c["actor"],
         message="Create branch verified", created_at=now,
     )
     run_audit = AuditEvent(
         event_type="agent_run.step_completed", entity_id=c["run"].id,
         workspace_id=c["workspace_id"], actor=c["actor"],
-        details={"step_id": c["step"].id}, created_at=now,
+        details={"step_id": step.id}, created_at=now,
     )
     task_event = AgentTaskEvent(
         task_id=c["task"].id, actor=c["actor"], event_type=AgentTaskEventType.NOTE,
@@ -552,12 +811,63 @@ def _complete_verified_branch(c: dict, intent: AgentRunBranchIntent, *, now) -> 
         details={"branch_intent_id": intent.id}, created_at=now,
     )
     PostgresAgentRunRepository(c["connect"]).commit_step_completion(
-        expected_run=c["run"], updated_run=completed_run,
-        expected_steps=[c["step"]], updated_steps=[completed_step],
+        expected_run=run, updated_run=completed_run,
+        expected_steps=[step], updated_steps=[completed_step],
         events=[run_event], audit=run_audit, now=now,
         branch_intent_id=intent.id, branch_task_event=task_event,
         branch_task_audit=task_audit,
     )
+
+
+def test_postgres_verified_branch_can_rebind_after_restart_without_reopening_post(
+    pg_branch_context,
+) -> None:
+    c = pg_branch_context
+    repo = c["repository"]
+    claimed = repo.claim_create_once(
+        intent=c["intent"], expected_run=c["run"], expected_step=c["step"],
+        worker_lease_token=c["token"], now=now_utc(),
+    )
+    verified = repo.record_remote_observation(
+        intent=claimed, expected_run=c["run"], expected_step=c["step"],
+        worker_lease_token=c["token"], verified_sha=c["intent"].source_sha,
+        branch_url="https://example.test/owner/repo/tree/feature/approved-branch",
+        reason="GET confirmed exact source SHA", now=now_utc(),
+    )
+    assert verified.status == BranchIntentStatus.REMOTE_VERIFIED
+
+    # Simulate the worker crashing after the durable GET observation but before
+    # the atomic AgentRun completion transaction.
+    token = "restarted-worker-lease"
+    run, step, now = _renew_branch_worker_lease(c, token=token)
+    recovered = repo.rebind_for_reconciliation(
+        intent=verified, expected_run=run, expected_step=step,
+        worker_lease_token=token, actor=c["actor"], now=now,
+    )
+    assert recovered.status == BranchIntentStatus.REMOTE_VERIFIED
+
+    with pytest.raises(PostgresTrustRepositoryConflict, match="already consumed"):
+        repo.claim_create_once(
+            intent=recovered, expected_run=run, expected_step=step,
+            worker_lease_token=token, now=now_utc(),
+        )
+
+    # A read-only GET can refresh verification, then completion uses the new
+    # lease/revision fence without repeating the provider POST.
+    refreshed = repo.record_remote_observation(
+        intent=recovered, expected_run=run, expected_step=step,
+        worker_lease_token=token, verified_sha=c["intent"].source_sha,
+        branch_url=recovered.branch_url, reason="", now=now_utc(),
+    )
+    _complete_verified_branch(
+        c, refreshed, now=now_utc(), expected_run=run, expected_step=step,
+    )
+    persisted = repo.get_for_step(
+        workspace_id=c["workspace_id"], run_id=run.id, step_id=step.id,
+        idempotency_key=step.idempotency_key,
+    )
+    assert persisted is not None
+    assert persisted.status == BranchIntentStatus.COMPLETED
 
 
 def test_postgres_verified_effect_can_be_reported_after_lease_revocation(pg_branch_context) -> None:
