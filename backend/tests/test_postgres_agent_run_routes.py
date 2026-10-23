@@ -3246,7 +3246,13 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     assert set(store.agent_run_steps) == step_ids_before | {step.id for step in steps}
     assert store.agent_tasks.get(task_id) == task_snapshot_before
     assert set(store.agent_task_events) == task_event_ids_before
-    assert {event.id for event in store.audit_events} == audit_ids_before
+    projected_audits = [
+        event for event in store.audit_events if event.id not in audit_ids_before
+    ]
+    assert len(projected_audits) == 1
+    assert projected_audits[0].event_type == "agent_run.step_started"
+    assert projected_audits[0].actor == "postgres-branch-route-test"
+    assert len(store.audit_events) == len(audit_ids_before) + 1
     assert store.approval_requests.get(approval.id) == approval_snapshot_before
 
 
