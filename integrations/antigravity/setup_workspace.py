@@ -157,6 +157,18 @@ def _validate_workspace_hooks_directory(path: Path) -> None:
         or metadata.st_uid != os.getuid()
     ):
         raise SetupError("Workspace .agents path must be a real directory owned by this user")
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise SetupError("Workspace .agents directory must not be group- or world-writable")
+
+
+def _validate_workspace_hooks_file(path: Path) -> None:
+    if not os.path.lexists(path):
+        return
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SetupError(f"Cannot safely read JSON file: {path}")
+    if stat.S_IMODE(metadata.st_mode) & 0o022:
+        raise SetupError("Workspace hooks.json must not be group- or world-writable")
 
 
 def _hook_entry(config: Path, hook_script: Path, python: str) -> dict:
@@ -232,6 +244,7 @@ def install_workspace(
     hook_script = hook_script or Path(__file__).with_name("aixion_pre_tool_hook.py")
     workspace, config_path, hooks_path = _paths(workspace, home, hook_script)
     _validate_workspace_hooks_directory(hooks_path.parent)
+    _validate_workspace_hooks_file(hooks_path)
     if config_path.parent != _ensure_config_directory(home):
         raise SetupError("Unexpected workspace config path")
 
@@ -275,6 +288,7 @@ def remove_workspace(
     _validate_config_root(home)
     workspace, config_path, hooks_path = _paths(workspace, home, hook_script)
     _validate_workspace_hooks_directory(hooks_path.parent)
+    _validate_workspace_hooks_file(hooks_path)
     hooks = _read_json(hooks_path, allow_missing=True)
     entry = hooks.get(HOOK_NAME)
     if entry is None:

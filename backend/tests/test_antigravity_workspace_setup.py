@@ -51,6 +51,93 @@ def test_install_preserves_existing_hooks_and_writes_private_workspace_config(tm
     assert stat.S_IMODE(hooks_path.stat().st_mode) == 0o640
 
 
+def test_install_rejects_group_or_world_writable_hooks_file_before_config_mutation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agents_dir = workspace / ".agents"
+    agents_dir.mkdir()
+    hooks_path = agents_dir / "hooks.json"
+    original_hooks = json.dumps({"existing-linter": {"PostToolUse": []}}).encode()
+    hooks_path.write_bytes(original_hooks)
+    hooks_path.chmod(0o666)
+    home = tmp_path / "home"
+
+    with pytest.raises(setup.SetupError, match="hooks.json must not be group- or world-writable"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://control.example.test",
+            agent_id="agent-1",
+            project_id="project-1",
+            home=home,
+            hook_script=HOOK_PATH,
+        )
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert stat.S_IMODE(hooks_path.stat().st_mode) == 0o666
+    assert not (home / ".config").exists()
+
+
+def test_install_rejects_group_or_world_writable_agents_directory_before_config_mutation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    agents_dir = workspace / ".agents"
+    agents_dir.mkdir()
+    hooks_path = agents_dir / "hooks.json"
+    original_hooks = json.dumps({"existing-linter": {"PostToolUse": []}}).encode()
+    hooks_path.write_bytes(original_hooks)
+    agents_dir.chmod(0o777)
+    home = tmp_path / "home"
+
+    with pytest.raises(setup.SetupError, match=".agents directory must not be group- or world-writable"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://control.example.test",
+            agent_id="agent-1",
+            project_id="project-1",
+            home=home,
+            hook_script=HOOK_PATH,
+        )
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert stat.S_IMODE(agents_dir.stat().st_mode) == 0o777
+    assert not (home / ".config").exists()
+
+
+@pytest.mark.parametrize("unsafe_path", ["file", "directory"])
+def test_remove_rejects_group_or_world_writable_hook_path_without_mutation(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    if unsafe_path == "file":
+        hooks_path.chmod(0o666)
+    else:
+        hooks_path.parent.chmod(0o777)
+    original_hooks = hooks_path.read_bytes()
+    original_config = config_path.read_bytes()
+
+    with pytest.raises(setup.SetupError, match="group- or world-writable"):
+        setup.remove_workspace(workspace, home=home, hook_script=HOOK_PATH)
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert config_path.read_bytes() == original_config
+
+
 def test_install_is_idempotent_and_remove_preserves_unrelated_hooks(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
