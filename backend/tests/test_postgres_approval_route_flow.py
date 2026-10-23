@@ -58,6 +58,16 @@ assert ANTIGRAVITY_HOOK_SPEC and ANTIGRAVITY_HOOK_SPEC.loader
 antigravity_hook = importlib.util.module_from_spec(ANTIGRAVITY_HOOK_SPEC)
 ANTIGRAVITY_HOOK_SPEC.loader.exec_module(antigravity_hook)
 
+CODEX_HOOK_PATH = (
+    Path(__file__).parents[2] / "integrations" / "codex" / "aixion_permission_request_hook.py"
+)
+CODEX_HOOK_SPEC = importlib.util.spec_from_file_location(
+    "codex_postgres_route_hook", CODEX_HOOK_PATH
+)
+assert CODEX_HOOK_SPEC and CODEX_HOOK_SPEC.loader
+codex_hook = importlib.util.module_from_spec(CODEX_HOOK_SPEC)
+CODEX_HOOK_SPEC.loader.exec_module(codex_hook)
+
 
 @pytest.fixture
 def postgres_approval_route_runtime(
@@ -1096,6 +1106,163 @@ def test_postgres_hook_denies_lost_consume_response_and_same_invocation_retry(
         assert connection.execute(
             "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
             "AND event_type='approval.delivery_claimed'",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_failed'",
+            (approval_id,),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_codex_hook_denies_lost_consume_response_and_same_invocation_replay(
+    postgres_approval_route_runtime,
+) -> None:
+    connect, workspace, project, user, repositories, fixture_agent, _fixture_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    codex_token = f"postgres-codex-route-token-{uuid.uuid4().hex}"
+    codex_agent = replace(
+        fixture_agent,
+        id=new_id("agent"),
+        provider=AgentProvider.CODEX,
+        display_name="Codex PostgreSQL route test",
+        secret_hash=hashlib.sha256(codex_token.encode("utf-8")).hexdigest(),
+    )
+    repositories.external_agent_auth.create(
+        agent=codex_agent,
+        credential=AgentCredentialRecord(agent_id=codex_agent.id),
+        audit_event=AuditEvent(
+            event_type="agent.registered",
+            entity_id=codex_agent.id,
+            workspace_id=workspace.id,
+            actor=f"user:{user.id}",
+            details={
+                "provider": codex_agent.provider,
+                "display_name": codex_agent.display_name,
+                "auth_type": codex_agent.auth_type,
+                "allowed_project_ids": codex_agent.allowed_project_ids,
+                "allowed_repositories": codex_agent.allowed_repositories,
+                "allowed_actions": codex_agent.allowed_actions,
+            },
+        ),
+    )
+
+    client = TestClient(main.app)
+    state: dict[str, object] = {
+        "approval_id": None,
+        "approve_on_create": True,
+        "drop_consume_response": True,
+        "consume_calls": 0,
+    }
+
+    def request(
+        method: str,
+        url: str,
+        request_config: dict[str, str],
+        request_token: str,
+        body: dict | None = None,
+        **_kwargs: object,
+    ) -> dict:
+        assert request_config["agent_id"] == codex_agent.id
+        assert request_token == codex_token
+        parsed = urlparse(url)
+        response = client.request(
+            method,
+            parsed.path,
+            headers={
+                "X-Aixion-Agent-Id": codex_agent.id,
+                "X-Aixion-Agent-Token": codex_token,
+                "X-Aixion-Approval-Protocol": "1",
+            },
+            json=body,
+        )
+        if method == "POST" and parsed.path == "/agents/approvals":
+            assert response.status_code == 200, response.text
+            approval = response.json()
+            if state["approval_id"] is None:
+                state["approval_id"] = approval["id"]
+            else:
+                assert approval["id"] == state["approval_id"]
+            if state["approve_on_create"]:
+                decision = client.post(
+                    f"/approvals/{approval['id']}/decision",
+                    json={"decision": "approve", "reason": "Codex route integration test"},
+                )
+                assert decision.status_code == 200, decision.text
+                state["approve_on_create"] = False
+        if method == "POST" and parsed.path.endswith("/consume"):
+            state["consume_calls"] = int(state["consume_calls"]) + 1
+            if response.status_code == 200 and state["drop_consume_response"]:
+                state["drop_consume_response"] = False
+                raise codex_hook.AmbiguousRequestError(
+                    "simulated connection loss after PostgreSQL commit"
+                )
+        if response.status_code >= 400:
+            raise codex_hook.GateError(
+                f"Control Tower returned HTTP {response.status_code}"
+            )
+        return response.json()
+
+    event = {
+        "hook_event_name": "PermissionRequest",
+        "session_id": "session-postgres-codex-lost-response",
+        "turn_id": "turn-postgres-codex-lost-response",
+        "tool_use_id": "call-postgres-codex-lost-response",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo gated"},
+    }
+    environment = {
+        "AIXION_API_BASE_URL": "http://localhost:8000",
+        "AIXION_AGENT_ID": codex_agent.id,
+        "AIXION_AGENT_TOKEN": codex_token,
+        "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+        "AIXION_PROJECT_ID": project.id,
+        "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "5",
+    }
+
+    with patch.object(codex_hook, "_request", side_effect=request), patch.object(
+        codex_hook.time, "sleep"
+    ):
+        first = codex_hook.run(event, environment)
+        assert first[0] == "deny", first
+        assert "ambiguous" in first[1].lower(), first
+
+        replay = codex_hook.run(event, environment)
+        assert replay[0] == "deny", replay
+
+    approval_id = state["approval_id"]
+    assert isinstance(approval_id, str)
+    assert state["consume_calls"] == 2
+    durable = repositories.approval_decisions.get(approval_id)
+    assert durable is not None
+    assert durable.status == ApprovalStatus.APPROVED
+    assert durable.source_provider == AgentProvider.CODEX
+    assert durable.source_agent_id == codex_agent.id
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_requests WHERE approval_id=%s "
+            "AND workspace_id=%s AND source_agent_id=%s AND source_invocation_id=%s "
+            "AND source_provider=%s",
+            (
+                approval_id,
+                workspace.id,
+                codex_agent.id,
+                durable.source_invocation_id,
+                AgentProvider.CODEX.value,
+            ),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_claimed'",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_failures WHERE approval_id=%s",
             (approval_id,),
         ).fetchone()[0] == 1
         assert connection.execute(

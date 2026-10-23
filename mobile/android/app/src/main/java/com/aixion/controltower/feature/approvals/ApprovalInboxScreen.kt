@@ -1,8 +1,10 @@
 package com.aixion.controltower.feature.approvals
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -26,6 +28,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -186,7 +189,7 @@ fun ApprovalInboxContent(
             }
             Text(
                 text = when {
-                    state.loading && state.approvals.isEmpty() -> "Loading requests…"
+                    state.loading && state.approvals.isEmpty() && !state.hasError -> "Loading approval requests…"
                     state.refreshing -> "Refreshing. Requests are read-only until sync completes."
                     state.hasError -> "Approval sync unavailable."
                     else -> "Review pending requests or browse recorded decisions."
@@ -345,6 +348,11 @@ fun ApprovalInboxContent(
                     )
                 }
             }
+            if (state.historyLoading && !state.historyLoaded && state.historyErrorMessage == null) {
+                item {
+                    ApprovalLoadingSkeletons(testTag = "approval-history-loading-skeletons")
+                }
+            }
             state.historyErrorMessage?.let { message ->
                 item {
                     TowerPanel(elevated = true) {
@@ -363,6 +371,14 @@ fun ApprovalInboxContent(
             it.status == ApprovalStatus.BLOCKED && it.risk != RiskLevel.BLOCKED
         }
         val disabledApprovals = (unsupported + blockedRisk + blockedStatus).distinctBy { it.id }
+        if (
+            selectedSection == ApprovalInboxSection.NEEDS_REVIEW &&
+            state.loading && state.approvals.isEmpty() && !state.hasError
+        ) {
+            item {
+                ApprovalLoadingSkeletons(testTag = "approval-inbox-loading-skeletons")
+            }
+        }
         if (!state.hasError && selectedSection == ApprovalInboxSection.NEEDS_REVIEW && !state.loading && !state.refreshing && visibleApprovals.isEmpty()) {
             item {
                 TowerPanel(elevated = true) {
@@ -485,6 +501,44 @@ fun ApprovalInboxContent(
             }
         }
     }
+}
+
+/** Quiet, static placeholders that preserve the approximate shape of approval cards. */
+@Composable
+private fun ApprovalLoadingSkeletons(testTag: String) {
+    val palette = LocalTowerPalette.current
+    val placeholder = palette.surfaceSubtle
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(testTag),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)
+    ) {
+        repeat(2) { index ->
+            TowerPanel(elevated = true) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    SkeletonBlock(Modifier.fillMaxWidth(0.38f).height(14.dp), placeholder)
+                    SkeletonBlock(Modifier.fillMaxWidth(0.2f).height(14.dp), placeholder)
+                }
+                Spacer(Modifier.height(TowerSpacing.md))
+                SkeletonBlock(Modifier.fillMaxWidth(if (index == 0) 0.78f else 0.62f).height(20.dp), placeholder)
+                Spacer(Modifier.height(TowerSpacing.sm))
+                SkeletonBlock(Modifier.fillMaxWidth().height(14.dp), placeholder)
+                Spacer(Modifier.height(TowerSpacing.xs))
+                SkeletonBlock(Modifier.fillMaxWidth(0.72f).height(14.dp), placeholder)
+                Spacer(Modifier.height(TowerSpacing.md))
+                SkeletonBlock(Modifier.fillMaxWidth(0.34f).height(36.dp), placeholder)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SkeletonBlock(modifier: Modifier, color: androidx.compose.ui.graphics.Color) {
+    Box(modifier.clip(RoundedCornerShape(6.dp)).background(color))
 }
 
 @Composable

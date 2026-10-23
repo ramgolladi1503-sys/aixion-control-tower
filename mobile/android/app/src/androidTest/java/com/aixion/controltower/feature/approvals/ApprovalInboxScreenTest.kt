@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
@@ -95,6 +96,73 @@ class ApprovalInboxScreenTest {
             LiveRegionMode.Polite,
             loadingStatus.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
         )
+        composeRule.onNodeWithTag("approval-history-loading-skeletons").assertExists()
+    }
+
+    @Test
+    fun approvalSkeletonsOnlyAppearDuringInitialLoadAndDisappearForEveryResult() {
+        val state = androidx.compose.runtime.mutableStateOf(ApprovalsUiState(loading = true))
+        composeRule.setContent { ApprovalInboxContent(state = state.value) }
+
+        composeRule.onNodeWithTag("approval-inbox-loading-skeletons").assertExists()
+        val loadingStatus = composeRule.onNodeWithTag("approval-inbox-sync-status")
+        loadingStatus.assertTextContains("Loading approval requests")
+        assertEquals(
+            LiveRegionMode.Polite,
+            loadingStatus.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+
+        composeRule.runOnIdle {
+            state.value = ApprovalsUiState(
+                loading = false,
+                approvals = listOf(approval("loaded", "Loaded approval", ApprovalStatus.REQUESTED))
+            )
+        }
+        composeRule.onAllNodesWithTag("approval-inbox-loading-skeletons").assertCountEquals(0)
+        composeRule.onNodeWithText("Loaded approval").assertExists()
+
+        composeRule.runOnIdle { state.value = ApprovalsUiState(loading = false) }
+        composeRule.onAllNodesWithTag("approval-inbox-loading-skeletons").assertCountEquals(0)
+        composeRule.onNodeWithText("No requests need review").assertExists()
+
+        composeRule.runOnIdle {
+            state.value = ApprovalsUiState(
+                loading = false,
+                errorMessage = "Backend unavailable"
+            )
+        }
+        composeRule.onAllNodesWithTag("approval-inbox-loading-skeletons").assertCountEquals(0)
+        composeRule.onNodeWithText("Approval data unavailable").assertExists()
+    }
+
+    @Test
+    fun historySkeletonDisappearsAfterLoadedEmptyAndErrorResults() {
+        val state = androidx.compose.runtime.mutableStateOf(
+            ApprovalsUiState(loading = false, historyLoading = true)
+        )
+        composeRule.setContent { ApprovalInboxContent(state = state.value) }
+        composeRule.onNodeWithText("History").performClick()
+        composeRule.onNodeWithTag("approval-history-loading-skeletons").assertExists()
+
+        composeRule.runOnIdle {
+            state.value = ApprovalsUiState(
+                loading = false,
+                historyLoading = false,
+                historyLoaded = true
+            )
+        }
+        composeRule.onAllNodesWithTag("approval-history-loading-skeletons").assertCountEquals(0)
+        composeRule.onNodeWithText("No decisions recorded").assertExists()
+
+        composeRule.runOnIdle {
+            state.value = ApprovalsUiState(
+                loading = false,
+                historyLoading = false,
+                historyErrorMessage = "History unavailable"
+            )
+        }
+        composeRule.onAllNodesWithTag("approval-history-loading-skeletons").assertCountEquals(0)
+        composeRule.onNodeWithText("Decision history unavailable").assertExists()
     }
 
     @Test
@@ -255,7 +323,8 @@ class ApprovalInboxScreenTest {
             ApprovalInboxContent(state = ApprovalsUiState(loading = true))
         }
 
-        composeRule.onNodeWithText("Loading approval decisions...").assertExists()
+        composeRule.onNodeWithText("Loading approval requests…").assertExists()
+        composeRule.onNodeWithTag("approval-inbox-loading-skeletons").assertExists()
         composeRule.onAllNodesWithText("0 pending").assertCountEquals(0)
         composeRule.onAllNodesWithText("Needs review 0").assertCountEquals(0)
     }

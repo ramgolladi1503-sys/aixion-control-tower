@@ -45,16 +45,22 @@ def _validate_identifier(label: str, value: str) -> str:
     return value
 
 
-def _read_json(path: Path, *, allow_missing: bool) -> dict:
+def _read_json(path: Path, *, allow_missing: bool, require_private: bool = False) -> dict:
     if not os.path.lexists(path):
         if allow_missing:
             return {}
         raise SetupError(f"Expected file is missing: {path}")
     try:
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode):
-            raise SetupError(f"Refusing non-regular file: {path}")
-        raw = path.read_bytes()
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise SetupError(f"Managed file must be a regular file owned by this user: {path}")
+            if require_private and stat.S_IMODE(metadata.st_mode) & 0o077:
+                raise SetupError(
+                    f"Managed config permissions must exclude group and other users: {path}"
+                )
+            raw = stream.read(MAX_CONFIG_BYTES + 1)
         if len(raw) > MAX_CONFIG_BYTES:
             raise SetupError(f"JSON file exceeds {MAX_CONFIG_BYTES} bytes: {path}")
         value = json.loads(raw)
@@ -193,7 +199,7 @@ def install_workspace(
     if agents is not None and agents != expected_hook:
         raise SetupError(f"Hook name {HOOK_NAME!r} already exists; refusing to replace it")
     if os.path.lexists(config_path):
-        existing = _read_json(config_path, allow_missing=False)
+        existing = _read_json(config_path, allow_missing=False, require_private=True)
         if existing != config:
             raise SetupError("Workspace config already exists with different values; refusing overwrite")
     config_created = False
@@ -231,7 +237,7 @@ def remove_workspace(
         # installer emits; unknown files at the derived path remain untouched.
         if not os.path.lexists(config_path):
             return False, False
-        config = _read_json(config_path, allow_missing=False)
+        config = _read_json(config_path, allow_missing=False, require_private=True)
         if set(config) != {"api_base_url", "agent_id", "project_id"}:
             raise SetupError("Orphan workspace config differs from this installer; refusing to remove it")
         try:
@@ -254,7 +260,7 @@ def remove_workspace(
     # malformed or unsafe (for example, a symlink), leave the active hook intact.
     config_exists = os.path.lexists(config_path)
     if config_exists:
-        _read_json(config_path, allow_missing=False)
+        _read_json(config_path, allow_missing=False, require_private=True)
     del hooks[HOOK_NAME]
     mode = stat.S_IMODE(hooks_path.stat().st_mode)
     if hooks:

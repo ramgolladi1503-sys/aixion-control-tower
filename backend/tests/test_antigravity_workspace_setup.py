@@ -259,7 +259,7 @@ def test_installer_refuses_symlinked_hooks_file(tmp_path: Path) -> None:
     target.write_text("{}")
     (agents / "hooks.json").symlink_to(target)
 
-    with pytest.raises(setup.SetupError, match="non-regular"):
+    with pytest.raises(setup.SetupError, match="safely read"):
         setup.install_workspace(
             workspace,
             api_base_url="https://control.example.test",
@@ -268,6 +268,110 @@ def test_installer_refuses_symlinked_hooks_file(tmp_path: Path) -> None:
             home=tmp_path / "home",
             hook_script=HOOK_PATH,
         )
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640])
+@pytest.mark.parametrize("operation", ["install", "remove"])
+def test_insecure_managed_config_fails_before_mutating_hooks(
+    tmp_path: Path, mode: int, operation: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    kwargs = dict(
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    config_path, hooks_path = setup.install_workspace(workspace, **kwargs)
+    config_path.chmod(mode)
+    if operation == "install":
+        hooks_path.unlink()
+        hooks_path.write_text(json.dumps({"user-hook": {"PostToolUse": []}}))
+    original_hooks = hooks_path.read_bytes()
+
+    with pytest.raises(setup.SetupError, match="permissions must exclude"):
+        if operation == "install":
+            setup.install_workspace(workspace, **kwargs)
+        else:
+            setup.remove_workspace(
+                workspace, home=home, hook_script=HOOK_PATH, python="python3"
+            )
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert stat.S_IMODE(config_path.stat().st_mode) == mode
+
+
+def test_managed_config_symlink_is_rejected_before_hook_mutation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    kwargs = dict(
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    config_path, hooks_path = setup.install_workspace(workspace, **kwargs)
+    original_hooks = hooks_path.read_bytes()
+    outside = tmp_path / "outside.json"
+    original_config = config_path.read_bytes()
+    outside.write_bytes(original_config)
+    config_path.unlink()
+    config_path.symlink_to(outside)
+
+    with pytest.raises(setup.SetupError, match="safely read"):
+        setup.remove_workspace(workspace, home=home, hook_script=HOOK_PATH)
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert config_path.is_symlink()
+    assert outside.read_bytes() == original_config
+
+
+def test_config_replacement_with_symlink_between_presence_check_and_open_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    kwargs = dict(
+        api_base_url="https://control.example.test",
+        agent_id="agent-1",
+        project_id="project-1",
+        home=home,
+        hook_script=HOOK_PATH,
+        python="python3",
+    )
+    config_path, hooks_path = setup.install_workspace(workspace, **kwargs)
+    hooks_path.unlink()
+    hooks_path.write_text(json.dumps({"user-hook": {"PostToolUse": []}}))
+    original_hooks = hooks_path.read_bytes()
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(config_path.read_bytes())
+    original_open = setup.os.open
+    replaced = False
+
+    def replace_before_open(path: object, flags: int, *args: object, **options: object) -> int:
+        nonlocal replaced
+        if Path(path) == config_path and not replaced:
+            replaced = True
+            config_path.unlink()
+            config_path.symlink_to(outside)
+        return original_open(path, flags, *args, **options)
+
+    monkeypatch.setattr(setup.os, "open", replace_before_open)
+    with pytest.raises(setup.SetupError, match="safely read"):
+        setup.install_workspace(workspace, **kwargs)
+
+    assert replaced
+    assert hooks_path.read_bytes() == original_hooks
+    assert config_path.is_symlink()
+    assert outside.is_file()
 
 
 def test_installer_refuses_symlinked_agents_directory_without_external_writes(
