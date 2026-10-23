@@ -111,6 +111,7 @@ def postgres_branch_execution_dependencies(
                 metadata={
                     "source_sha": source_sha, "source_branch": SOURCE_BRANCH,
                     "target_ref": target_ref, "step_id": step.id,
+                    "step_type": current_step.step_type.value,
                     "idempotency_key": step.idempotency_key, "task_id": task.id,
                     "approval_id": approval.id, "lease_id": lease.id,
                     "repository": repository,
