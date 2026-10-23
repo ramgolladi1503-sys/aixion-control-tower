@@ -116,6 +116,33 @@ def test_install_rejects_group_or_other_writable_hooks_file_without_mutation(
     assert not (home / ".config" / "aixion").exists()
 
 
+@pytest.mark.parametrize("unsafe_mode", [0o622, 0o666])
+def test_remove_rejects_group_or_other_writable_hooks_file_without_mutation(
+    tmp_path: Path, unsafe_mode: int,
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://api.example.test",
+        agent_id="agent-codex-test",
+        project_id="project-codex-test",
+        home=home,
+    )
+    original_hooks = hooks_path.read_bytes()
+    original_config = config_path.read_bytes()
+    hooks_path.chmod(unsafe_mode)
+
+    with pytest.raises(setup.SetupError, match="must not be group- or other-writable"):
+        setup.remove_workspace(workspace, home=home)
+
+    assert hooks_path.read_bytes() == original_hooks
+    assert hooks_path.stat().st_mode & 0o777 == unsafe_mode
+    assert config_path.read_bytes() == original_config
+
+
 def test_install_refuses_group_or_other_readable_config_without_mutation(
     tmp_path: Path,
 ) -> None:

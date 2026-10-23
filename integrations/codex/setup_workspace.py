@@ -211,7 +211,7 @@ def remove_workspace(workspace: Path, *, home: Path | None = None,
     config_dir = home / ".config" / "aixion" / "workspaces"
     _validate_config_root(home, config_dir)
     _, config_path, hooks_path = _managed_paths(workspace, home, hook_script)
-    hooks_file = _read_json(hooks_path, allow_missing=True)
+    hooks_file = _read_json(hooks_path, allow_missing=True, reject_shared_write=True)
     hooks = hooks_file.get("hooks", {})
     if not isinstance(hooks, dict):
         raise SetupError("Codex hooks.json 'hooks' field must be an object")
