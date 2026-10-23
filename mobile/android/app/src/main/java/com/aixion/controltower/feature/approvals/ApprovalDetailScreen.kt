@@ -43,6 +43,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
@@ -371,6 +372,8 @@ fun ApprovalDetailContent(
                 decisionInFlight = decisionInFlight,
                 decisionNeedsReconciliation = decisionNeedsReconciliation,
                 onReconcileDecision = onReconcileDecision,
+                approvalTitle = approval.title,
+                approvalRisk = approval.risk.name.lowercase().replace('_', ' '),
                 onApprove = {
                     if (requiresRiskConfirmation) {
                         showRiskConfirmation = true
@@ -766,6 +769,8 @@ private fun DecisionPanel(
     decisionInFlight: Boolean,
     decisionNeedsReconciliation: Boolean,
     onReconcileDecision: () -> Unit,
+    approvalTitle: String,
+    approvalRisk: String,
     onApprove: () -> Unit,
     onReject: () -> Unit,
     modifier: Modifier = Modifier
@@ -814,14 +819,24 @@ private fun DecisionPanel(
             ) {
                 OutlinedButton(
                     onClick = onReject,
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = "Deny request: $approvalTitle. Risk: $approvalRisk."
+                        },
                     enabled = canDecide
                 ) { Text("Deny", color = palette.danger) }
                 Button(
                     onClick = onApprove,
                     enabled = canApprove,
                     colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.onBrand),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = "Approve request: $approvalTitle. Risk: $approvalRisk."
+                        }
                 ) { Text("Approve request") }
             }
         }

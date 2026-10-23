@@ -8,6 +8,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
@@ -138,6 +139,27 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("+test").assertExists()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
         composeRule.onNodeWithText("Deny").assertIsEnabled()
+    }
+
+    @Test
+    fun decisionControlsAnnounceRequestIdentityAndRiskToScreenReaders() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            title = "Run production migration",
+            risk = RiskLevel.HIGH
+        )
+        composeRule.setContent {
+            ApprovalDetailContent(request, null, {}, {}, {})
+        }
+
+        composeRule.onNodeWithContentDescription(
+            "Deny request: Run production migration. Risk: high."
+        ).assertExists()
+        composeRule.onNodeWithContentDescription(
+            "Approve request: Run production migration. Risk: high."
+        ).assertExists()
+        // Keep concise visible button labels unchanged for sighted reviewers.
+        composeRule.onNodeWithText("Deny").assertExists()
+        composeRule.onNodeWithText("Approve request").assertExists()
     }
 
     @Test
