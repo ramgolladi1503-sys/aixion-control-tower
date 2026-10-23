@@ -3153,8 +3153,13 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     final_run = runtime_repositories.agent_runs.get(run_id)
     final_steps = runtime_repositories.agent_runs.list_steps_for_run(run_id)
     assert final_run is not None
-    assert final_run.status == AgentRunStatus.SUCCEEDED
     completed_step = next(step for step in final_steps if step.id == branch_step.id)
+    run_events = runtime_repositories.agent_runs.list_events_for_run(run_id)
+    assert final_run.status == AgentRunStatus.SUCCEEDED, (
+        f"run_status={final_run.status.value}; step_status={completed_step.status.value}; "
+        f"step_reason={completed_step.reason!r}; evidence={completed_step.evidence!r}; "
+        f"events={[event.model_dump(mode='json') for event in run_events]!r}"
+    )
     assert completed_step.status == AgentRunStepStatus.SUCCEEDED
     assert completed_step.output_reference == (
         "https://github.com/owner/approved-repository/tree/feature/approved-branch"
@@ -3190,7 +3195,6 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     assert branch_events[0].event_type == AgentTaskEventType.NOTE
     assert branch_events[0].metadata["source_sha"] == source_sha
 
-    run_events = runtime_repositories.agent_runs.list_events_for_run(run_id)
     success_events = [
         event
         for event in run_events
