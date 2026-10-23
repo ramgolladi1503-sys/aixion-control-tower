@@ -12,8 +12,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -63,7 +65,20 @@ fun ApprovalCard(
             lineHeight = 22.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(text = approval.summary, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            text = "Request preview",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.labelSmall
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text(
+            text = approval.summary,
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.testTag("approval-card-summary-preview")
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         val expiryLabel = formatApprovalExpiry(approval.expiresAt)
         Text(
