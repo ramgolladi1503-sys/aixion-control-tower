@@ -1,7 +1,7 @@
 # Staging Cloud Run Cost Scenarios
 
 **Status:** Planning worksheet only; not a quote, a billing cap, or authorization to provision resources.
-**Pricing checked:** 2026-10-22 against the official Google Cloud pricing pages linked below.
+**Pricing checked:** 2026-10-23 against the official Google Cloud pricing pages linked below.
 **Currency and period:** USD, 30-day month.
 **Region:** `asia-south1` is proposed, not owner-approved. Published default rates below are reference rates, not a Mumbai calculator export.
 
@@ -43,7 +43,7 @@ instance time for Cloud Run jobs.”
 
 | Scenario | API workload | Two Job cadence and run time | Cloud Run subtotal if free tiers are available | Cloud Run subtotal with free tiers exhausted |
 | --- | --- | --- | ---: | ---: |
-| Low | 100,000 requests/month; 0.25 sec average | Every 15 minutes; 10 sec actual per Job | **$1.90** | **$7.24** |
+| Low | 100,000 requests/month; 0.25 sec average | Every 15 minutes; 10 sec actual per Job | **$1.90** | **$7.20** |
 | Expected | 1,000,000 requests/month; 0.5 sec average | Every 5 minutes; 30 sec actual per Job | **$22.16** | **$32.72** |
 | High | 5,000,000 requests/month; 0.5 sec average | Every 1 minute; 30 sec actual per Job | **$152.38** | **$163.62** |
 
@@ -51,6 +51,10 @@ Totals are API plus Jobs only. For example, the expected case comprises `$7.68`
 of API compute after the request-based free allowance and `$14.48` of Job compute
 after the Jobs free allowance. If those allowances are exhausted, the respective
 reference costs are `$13.03` and `$19.70`.
+
+For the low case with free allowances exhausted, API compute and requests are
+approximately `$0.63`, and Job compute is approximately `$6.57`, for a total of
+`$7.20` after rounding. The prior `$7.24` table value was an arithmetic error.
 
 The high case exceeds the proposed `$75/month` amount before adding the database
 or supporting services. The low and expected cases also do not establish that an
