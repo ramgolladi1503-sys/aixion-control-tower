@@ -83,8 +83,8 @@ def postgres_agent_run_route_runtime(
     with psycopg.connect(dsn, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
 
-    def connect() -> Connection:
-        connection = psycopg.connect(dsn)
+    def connect(_dsn: str = dsn, **connect_kwargs: object) -> Connection:
+        connection = psycopg.connect(_dsn, **connect_kwargs)
         connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
         return connection
 
