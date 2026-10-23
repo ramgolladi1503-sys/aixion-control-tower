@@ -11,14 +11,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
@@ -47,8 +45,8 @@ fun ConnectorsContent(
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item { ConnectorsHero() }
-        item { SetupJourneyPanel() }
-        item { NativeAgentAccessPanel(onOpenAgentAccess = onOpenAgentAccess) }
+        item { ProviderSetupPanel(onOpenAgentAccess = onOpenAgentAccess) }
+        item { ApprovalFlowNote() }
     }
 }
 
@@ -58,21 +56,18 @@ private fun ConnectorsHero() {
     TowerHeroPanel {
         Row(verticalAlignment = Alignment.Top) {
             Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = "ONE-TIME SETUP", color = palette.brand)
+                StatusBadge(label = "CONNECT ONCE", color = palette.brand)
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
-                    "Approve desktop work from your phone",
+                    text = "Connect your coding agent",
                     color = palette.ink,
-                    fontSize = 25.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 31.sp
+                    style = MaterialTheme.typography.headlineMedium
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    "Connect the coding agent on your computer. Keep that computer and the same agent session running while an approval is waiting.",
+                    text = "Choose the agent you use on your computer. Setup takes place in that project workspace.",
                     color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 21.sp
+                    style = MaterialTheme.typography.bodyMedium
                 )
             }
             Spacer(modifier = Modifier.padding(horizontal = TowerSpacing.xs))
@@ -82,68 +77,84 @@ private fun ConnectorsHero() {
 }
 
 @Composable
-private fun SetupJourneyPanel() {
+private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
     val palette = LocalTowerPalette.current
     TowerPanel {
-        Text("How phone approvals work", color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
-        SetupStep(number = "1", title = "Set up the agent", detail = "Install its Control Tower hook on the computer running your project.")
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        SetupStep(number = "2", title = "Keep the session running", detail = "The computer must stay online so the same agent task can resume.")
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        SetupStep(number = "3", title = "Decide from your phone", detail = "Review the exact request, then approve or deny it in the app.")
-    }
-}
-
-@Composable
-private fun SetupStep(number: String, title: String, detail: String) {
-    val palette = LocalTowerPalette.current
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
-        verticalAlignment = Alignment.Top
-    ) {
-        StatusBadge(label = number, color = palette.brand)
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, lineHeight = 20.sp)
-            Text(detail, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
-        }
-    }
-}
-
-@Composable
-private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
-    val palette = LocalTowerPalette.current
-    TowerPanel(elevated = true) {
-        StatusBadge(label = "Phone flow not verified", color = palette.caution, uppercase = false)
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Antigravity", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            "Hook and connector setup is available, but returning a phone decision to the same Antigravity task has not been verified.",
-            color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            text = "Choose a provider",
+            color = palette.ink,
+            style = MaterialTheme.typography.titleLarge
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Button(onClick = { onOpenAgentAccess("ANTIGRAVITY") }, modifier = Modifier.fillMaxWidth()) {
-            Text("Set up Antigravity")
-        }
-    }
-
-    TowerPanel {
-        StatusBadge(label = "Phone flow not verified", color = palette.caution, uppercase = false)
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Codex", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        ProviderSetupCard(
+            name = "Antigravity",
+            description = "Install the Control Tower hook in your Antigravity project.",
+            buttonLabel = "Set up Antigravity",
+            onClick = { onOpenAgentAccess("ANTIGRAVITY") }
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        ProviderSetupCard(
+            name = "Codex",
+            description = "Install the Control Tower permission hook in your Codex project.",
+            buttonLabel = "Set up Codex",
+            onClick = { onOpenAgentAccess("CODEX") }
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        StatusBadge(
+            label = "PHONE RETURN NOT VERIFIED",
+            color = palette.caution,
+            uppercase = false
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            "Setup is available, but returning a phone decision to the same Codex task has not been verified.",
+            text = "Setup is available. The same-session phone approval flow still needs live verification.",
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodySmall
+        )
+    }
+}
+
+@Composable
+private fun ProviderSetupCard(
+    name: String,
+    description: String,
+    buttonLabel: String,
+    onClick: () -> Unit
+) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(elevated = true) {
+        Text(
+            text = name,
+            color = palette.ink,
+            style = MaterialTheme.typography.titleMedium
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text(
+            text = description,
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        OutlinedButton(onClick = { onOpenAgentAccess("CODEX") }, modifier = Modifier.fillMaxWidth()) {
-            Text("View Codex setup")
+        Button(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+            Text(buttonLabel)
         }
+    }
+}
+
+@Composable
+private fun ApprovalFlowNote() {
+    val palette = LocalTowerPalette.current
+    TowerPanel {
+        Text(
+            text = "When an approval is needed",
+            color = palette.ink,
+            style = MaterialTheme.typography.titleMedium
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text(
+            text = "The request appears here. Review the exact action and approve or deny it. Keep the computer and agent session running so the same task can continue.",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
