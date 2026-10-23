@@ -402,12 +402,30 @@ fun ApprovalInboxContent(
         ) {
             item {
                 TowerPanel(elevated = true) {
-                    Text("No decisions recorded", color = palette.ink, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Recorded approve, deny, and revision decisions will appear here.",
-                        color = palette.inkMuted,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                    if (selectedHistoryFilter == ApprovalHistoryFilter.ALL) {
+                        Text("No decisions recorded", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Recorded approve, deny, and revision decisions will appear here.",
+                            color = palette.inkMuted,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else {
+                        val filterName = when (selectedHistoryFilter) {
+                            ApprovalHistoryFilter.ALL -> "decisions"
+                            ApprovalHistoryFilter.APPROVED -> "approved decisions"
+                            ApprovalHistoryFilter.REJECTED -> "denied decisions"
+                            ApprovalHistoryFilter.REVISION_REQUESTED -> "revision requests"
+                        }
+                        Text("No $filterName match", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Try another filter or show all recorded decisions.",
+                            color = palette.inkMuted,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        TextButton(onClick = { selectedHistoryFilter = ApprovalHistoryFilter.ALL }) {
+                            Text("Show all decisions")
+                        }
+                    }
                 }
             }
         }

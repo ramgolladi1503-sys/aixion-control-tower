@@ -335,8 +335,10 @@ def test_new_provider_session_cannot_reuse_previous_session_approval(
     assert not any(method == "POST" and endpoint == "consume" for method, endpoint, _body in calls)
 
 
-def test_run_denies_if_mobile_approval_payload_changes_after_creation(
+@pytest.mark.parametrize("failure", ["changed_payload", "invalid_approved_hash"])
+def test_run_denies_invalid_approval_snapshot_or_hash_before_consuming(
     monkeypatch: pytest.MonkeyPatch,
+    failure: str,
 ) -> None:
     calls: list[str] = []
     created_approval: dict = {}
@@ -348,19 +350,25 @@ def test_run_denies_if_mobile_approval_payload_changes_after_creation(
             created_approval.update(_approval_from_request(body))
             return dict(created_approval)
         if method == "GET" and url.endswith("/decision"):
-            changed = {**created_approval, "status": "APPROVED", "summary": "different invocation"}
-            changed["approved_payload_hash"] = hook._payload_hash(changed)
-            return changed
-        raise AssertionError(f"Changed payload must not be consumed: {method} {url}")
+            approved = {**created_approval, "status": "APPROVED"}
+            if failure == "changed_payload":
+                approved["summary"] = "different invocation"
+                approved["approved_payload_hash"] = hook._payload_hash(approved)
+            else:
+                approved["approved_payload_hash"] = hook._payload_hash(approved)
+                approved["approved_payload_hash"] = "sha256:" + "0" * 64
+            return approved
+        raise AssertionError(f"Invalid approval must not be consumed: {method} {url}")
 
     monkeypatch.setattr(hook, "_request", request)
 
     result = hook.run(_hook_payload(), _test_environment())
 
-    assert result == {
-        "decision": "deny",
-        "reason": "Approval payload changed after the original tool invocation",
-    }
+    assert result["decision"] == "deny"
+    if failure == "changed_payload":
+        assert result["reason"] == "Approval payload changed after the original tool invocation"
+    else:
+        assert result["reason"] == "Approved payload integrity check failed"
     assert calls == ["POST", "GET"]
 
 

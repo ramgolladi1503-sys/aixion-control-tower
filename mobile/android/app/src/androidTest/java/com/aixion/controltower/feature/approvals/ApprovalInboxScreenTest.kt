@@ -568,6 +568,35 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
+    fun filteredHistoryEmptyStateNamesFilterAndOffersReset() {
+        val approvedEvent = historyEvent(
+            decision = "approve",
+            reviewerLabel = "You",
+            requestSnapshotVerified = false,
+            requestSnapshot = null
+        )
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalInboxContent(
+                    state = ApprovalsUiState(
+                        loading = false,
+                        approvalHistory = listOf(approvedEvent),
+                        historyLoaded = true
+                    )
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+        composeRule.onNodeWithText("Denied").performClick()
+
+        composeRule.onNodeWithText("No denied decisions match").assertExists()
+        composeRule.onNodeWithText("Show all decisions").performClick()
+        composeRule.onAllNodesWithText("Approved").assertCountEquals(2)
+        composeRule.onAllNodesWithText("No decisions recorded").assertCountEquals(0)
+    }
+
+    @Test
     fun historyShowsAccessibleLoadOlderActionAndRetryState() {
         var loadRequests = 0
         composeRule.setContent {

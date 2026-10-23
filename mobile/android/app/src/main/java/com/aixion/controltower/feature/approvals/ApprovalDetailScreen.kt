@@ -420,12 +420,13 @@ fun ApprovalDetailContent(
                     }
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
                     Text(
-                        "Provider: ${approval.sourceProvider}\n" +
-                            "Connector installation: ${approval.sourceAgentId?.ifBlank { null } ?: "Not provided"}\n" +
-                            "Session: ${approval.sourceSessionId?.ifBlank { null } ?: "Not provided"}\n" +
-                            "Invocation: ${approval.sourceInvocationId?.ifBlank { null } ?: "Not provided"}\n" +
-                            "Target: ${approval.projectName.ifBlank { "Not provided" }} · ${approval.targetBranch.ifBlank { "Not provided" }}\n" +
-                            "Risk: ${approval.risk.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}",
+                        buildString {
+                            append("Provider: ${approval.sourceProvider.ifBlank { "Unknown" }}\n")
+                            append("Request ID: ${shortSafeApprovalId(approval.id)}\n")
+                            append("Invocation ID: ${approval.sourceInvocationId?.let(::shortSafeApprovalId) ?: "Not provided"}\n")
+                            append("Target: ${approval.projectName.ifBlank { "Not provided" }} · ${approval.targetBranch.ifBlank { "Not provided" }}\n")
+                            append("Risk: ${approval.risk.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}")
+                        },
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
@@ -448,6 +449,12 @@ fun ApprovalDetailContent(
             }
         )
     }
+}
+
+/** Abbreviate opaque identifiers so the dialog identifies the request without exposing raw IDs. */
+internal fun shortSafeApprovalId(raw: String): String {
+    val safeCharacters = raw.filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+    return safeCharacters.takeLast(8).ifBlank { "unavailable" }
 }
 
 @Composable

@@ -3,8 +3,10 @@ package com.aixion.controltower.feature.approvals
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -39,7 +41,8 @@ class ApprovalRiskConfirmationUiTest {
         composeRule.onNodeWithText("Target: Production workspace · release", substring = true).assertExists()
         composeRule.onNodeWithText("Risk: High", substring = true).assertExists()
         composeRule.onNodeWithText("Provider: MANUAL", substring = true).assertExists()
-        composeRule.onNodeWithText("Connector installation: Not provided", substring = true).assertExists()
+        composeRule.onNodeWithText("Request ID: val-test", substring = true).assertExists()
+        composeRule.onNodeWithText("Invocation ID: Not provided", substring = true).assertExists()
         composeRule.runOnIdle { assertEquals("Opening confirmation must not submit a decision", 0, decisionCount) }
 
         composeRule.onNodeWithText("Approve this request").assertIsEnabled().performClick()
@@ -67,11 +70,11 @@ class ApprovalRiskConfirmationUiTest {
         composeRule.onNodeWithText("Approve request").performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
         composeRule.onNodeWithText("Provider: ANTIGRAVITY", substring = true).assertExists()
-        composeRule.onNodeWithText("Connector installation: connector-installation-07", substring = true)
-            .assertExists()
-        composeRule.onNodeWithText("Session: session-42", substring = true).assertExists()
-        composeRule.onNodeWithText("Invocation: antigravity:session-42:tool-991", substring = true)
-            .assertExists()
+        composeRule.onNodeWithText("Request ID: val-test", substring = true).assertExists()
+        composeRule.onNodeWithText("Invocation ID: tool-991", substring = true).assertExists()
+        composeRule.onAllNodesWithText("connector-installation-07").assertCountEquals(0)
+        composeRule.onAllNodesWithText("session-42").assertCountEquals(0)
+        composeRule.onAllNodesWithText("antigravity:session-42:tool-991").assertCountEquals(0)
     }
 
     @Test
