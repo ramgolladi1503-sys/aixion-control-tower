@@ -355,7 +355,12 @@ def _wait_for_approval(
         ]
         if matching:
             return max(matching, key=lambda approval: approval.get("created_at", ""))
-        assert process.poll() is None, "Codex hook exited before creating a pending approval"
+        if process.poll() is not None:
+            stdout, stderr = process.communicate(timeout=5)
+            pytest.fail(
+                "Codex hook exited before creating a pending approval: "
+                f"rc={process.returncode}, stdout={stdout!r}, stderr={stderr!r}"
+            )
         time.sleep(0.05)
     pytest.fail("Codex hook did not persist a pending approval before the deadline")
 
@@ -647,3 +652,90 @@ def test_codex_dead_hook_expired_lease_rejects_review_and_isolates_next_invocati
         if schema_created:
             with psycopg.connect(base_dsn, autocommit=True) as admin:
                 admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_callback_without_provider_call_id_cannot_reuse_approval_after_hook_restart(
+    tmp_path: Path,
+) -> None:
+    """A replacement callback gets a new identity and cannot inherit the old phone decision."""
+    base_dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not base_dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL Codex restart tests")
+
+    schema = f"ct_codex_callback_restart_{uuid.uuid4().hex}"
+    with psycopg.connect(base_dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    connect = _schema_connector(base_dsn, schema)
+    api_process: subprocess.Popen[bytes] | None = None
+    lost_hook: subprocess.Popen[str] | None = None
+    replacement_hook: subprocess.Popen[str] | None = None
+    try:
+        run_postgres_migrations(connect)
+        _, project, user = _seed_workspace_project(connect)
+        bootstrap_dir = tmp_path / "api_bootstrap"
+        _write_bootstrap(bootstrap_dir)
+        fallback_dir = tmp_path / "sqlite-fallback"
+        fallback_dir.mkdir(mode=0o700)
+        port = _free_loopback_port()
+        api_process, base_url = _start_api(
+            runtime_dsn=base_dsn,
+            db_path=fallback_dir / "unused.sqlite3",
+            bootstrap_dir=bootstrap_dir,
+            user=user,
+            schema=schema,
+            port=port,
+        )
+        agent_id, token = _create_codex_agent(base_url, project.id)
+        environment = _hook_environment(base_url, project.id, agent_id, token)
+        event = {
+            "hook_event_name": "PermissionRequest",
+            "permission_mode": "default",
+            "session_id": "codex-callback-restart-session",
+            "turn_id": "codex-callback-restart-turn",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo callback-scoped-approval"},
+        }
+
+        lost_hook = _launch_hook(event, environment)
+        old_approval = _wait_for_approval(connect, agent_id=agent_id, process=lost_hook)
+        assert old_approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert old_approval["source_invocation_id"]
+        lost_hook.kill()
+        lost_hook.communicate(timeout=5)
+        lost_hook = None
+
+        _decide(base_url, old_approval["id"])
+        replacement_hook = _launch_hook(event, environment)
+        deadline = time.monotonic() + 12
+        new_approval = None
+        while time.monotonic() < deadline:
+            candidates = [
+                item
+                for item in _read_approvals(connect, agent_id)
+                if item.get("source_invocation_id") != old_approval["source_invocation_id"]
+            ]
+            if candidates:
+                new_approval = max(candidates, key=lambda item: item.get("created_at", ""))
+                break
+            assert replacement_hook.poll() is None, (
+                "replacement Codex hook exited before creating its callback-scoped approval"
+            )
+            time.sleep(0.05)
+        assert new_approval is not None, "replacement callback did not create a distinct approval"
+
+        assert new_approval["id"] != old_approval["id"]
+        assert new_approval["source_invocation_id"] != old_approval["source_invocation_id"]
+        assert new_approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert replacement_hook.poll() is None, "replacement hook returned before its own decision"
+        assert _claim_count(connect, old_approval["id"]) == 0
+        assert _claim_count(connect, new_approval["id"]) == 0
+    finally:
+        for process in (lost_hook, replacement_hook):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)
+        with psycopg.connect(base_dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))

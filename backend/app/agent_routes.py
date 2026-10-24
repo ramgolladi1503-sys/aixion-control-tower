@@ -158,11 +158,22 @@ def _work_order_repository_for_route(http_request: Request | None):
 
 
 def _agent_task_repository_for_route(http_request: Request | None):
-    repository = (
-        agent_task_repository
-        if http_request is None
-        else agent_task_repository_for_request(http_request)
-    )
+    try:
+        repository = (
+            agent_task_repository
+            if http_request is None
+            else agent_task_repository_for_request(http_request)
+        )
+    except RuntimeError:
+        # Repository selection is an authority boundary. In PostgreSQL mode a
+        # missing or mismatched lifespan bundle must not fall back to the
+        # module-level SQLite adapter; return an explicit retryable service
+        # failure instead of leaking an unhandled runtime error to the route.
+        raise HTTPException(
+            status_code=503,
+            detail="AgentTask repository is unavailable",
+            headers={"Retry-After": "1"},
+        ) from None
     if not isinstance(repository, (SQLiteAgentTaskRepository, PostgresAgentTaskRepository)):
         raise HTTPException(status_code=503, detail="AgentTask repository is unsupported")
     return repository
