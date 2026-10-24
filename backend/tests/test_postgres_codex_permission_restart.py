@@ -384,6 +384,151 @@ def _claim_count(connect, approval_id: str) -> int:
     return int(row[0])
 
 
+def _create_audit_count(connect, approval_id: str) -> int:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.created_by_agent'",
+            (approval_id,),
+        ).fetchone()
+    return int(row[0])
+
+
+def test_codex_hook_restart_reattaches_same_live_postgres_invocation_once(
+    tmp_path: Path,
+) -> None:
+    """A replacement hook for the same provider call resumes the same approval."""
+    base_dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not base_dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL Codex restart tests")
+
+    schema = f"ct_codex_reattach_{uuid.uuid4().hex}"
+    schema_created = False
+    with psycopg.connect(base_dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        schema_created = True
+
+    connect = _schema_connector(base_dsn, schema)
+    api_process: subprocess.Popen[bytes] | None = None
+    interrupted_hook: subprocess.Popen[str] | None = None
+    restarted_hook: subprocess.Popen[str] | None = None
+    replay_hook: subprocess.Popen[str] | None = None
+    try:
+        run_postgres_migrations(connect)
+        _, project, user = _seed_workspace_project(connect)
+        bootstrap_dir = tmp_path / "api_bootstrap"
+        _write_bootstrap(bootstrap_dir)
+        fallback_dir = tmp_path / "sqlite-fallback"
+        fallback_dir.mkdir(mode=0o700)
+        port = _free_loopback_port()
+        api_process, base_url = _start_api(
+            runtime_dsn=base_dsn,
+            db_path=fallback_dir / "unused.sqlite3",
+            bootstrap_dir=bootstrap_dir,
+            user=user,
+            schema=schema,
+            port=port,
+        )
+        agent_id, token = _create_codex_agent(base_url, project.id)
+        environment = _hook_environment(base_url, project.id, agent_id, token)
+        event = {
+            "hook_event_name": "PermissionRequest",
+            "permission_mode": "default",
+            "session_id": "codex-postgres-hook-restart-session",
+            "turn_id": "codex-postgres-hook-restart-turn",
+            "tool_use_id": "codex-postgres-hook-restart-tool-use-stable",
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo resume-same-postgres-approval"},
+        }
+
+        interrupted_hook = _launch_hook(event, environment)
+        original_approval = _wait_for_approval(
+            connect, agent_id=agent_id, process=interrupted_hook
+        )
+        assert original_approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert original_approval["source_provider"] == "CODEX"
+        assert original_approval["source_invocation_id"]
+        assert interrupted_hook.poll() is None
+        original_create_audits = _create_audit_count(connect, original_approval["id"])
+        assert original_create_audits == 1
+
+        # The callback process is gone, but its durable liveness lease is still
+        # valid. Do not extend, expire, delete, or otherwise rewrite the lease:
+        # the same stable provider call is reattaching within the live window.
+        interrupted_hook.kill()
+        interrupted_hook.communicate(timeout=5)
+        assert interrupted_hook.poll() is not None
+        interrupted_hook = None
+        with connect() as connection:
+            lease = connection.execute(
+                "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=%s",
+                (original_approval["id"],),
+            ).fetchone()
+        assert lease is not None
+        assert lease[:4] == (
+            original_approval["id"],
+            user.workspace_id,
+            agent_id,
+            original_approval["source_invocation_id"],
+        )
+        assert lease[4] > datetime.now(timezone.utc)
+
+        restarted_hook = _launch_hook(event, environment)
+        reattached = _wait_for_approval(
+            connect, agent_id=agent_id, process=restarted_hook
+        )
+        assert reattached["id"] == original_approval["id"]
+        assert reattached["source_invocation_id"] == original_approval["source_invocation_id"]
+        assert restarted_hook.poll() is None, "restarted hook returned before reviewer decision"
+        approvals = [
+            item
+            for item in _read_approvals(connect, agent_id)
+            if item.get("source_invocation_id") == original_approval["source_invocation_id"]
+        ]
+        assert [item["id"] for item in approvals] == [original_approval["id"]]
+        assert _create_audit_count(connect, original_approval["id"]) == original_create_audits
+        assert _claim_count(connect, original_approval["id"]) == 0
+
+        decision = _decide(base_url, original_approval["id"])
+        assert decision["status"] == "APPROVED"
+        hook_decision, stderr = _finish_hook(restarted_hook)
+        restarted_hook = None
+        _assert_terminal_diagnostic(
+            stderr, approval_id=original_approval["id"], decision="allow"
+        )
+        assert hook_decision == {"behavior": "allow"}
+        assert _claim_count(connect, original_approval["id"]) == 1
+
+        # Replaying an already-consumed provider call cannot deliver another
+        # allow decision or create a second durable delivery claim.
+        replay_hook = _launch_hook(event, environment)
+        replay_decision, replay_stderr = _finish_hook(replay_hook)
+        replay_hook = None
+        _assert_terminal_diagnostic(
+            replay_stderr, approval_id=original_approval["id"], decision="deny"
+        )
+        assert replay_decision["behavior"] == "deny"
+        assert _claim_count(connect, original_approval["id"]) == 1
+        assert _create_audit_count(connect, original_approval["id"]) == original_create_audits
+        final_approvals = [
+            item
+            for item in _read_approvals(connect, agent_id)
+            if item.get("source_invocation_id") == original_approval["source_invocation_id"]
+        ]
+        assert [item["id"] for item in final_approvals] == [original_approval["id"]]
+    finally:
+        for process in (interrupted_hook, restarted_hook, replay_hook):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)
+        if schema_created:
+            with psycopg.connect(base_dsn, autocommit=True) as admin:
+                admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 def test_identified_codex_invocation_survives_postgres_api_restart_and_consumes_once(
     tmp_path: Path,
 ) -> None:
