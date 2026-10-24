@@ -55,16 +55,22 @@ fun ConnectorsContent(
 private fun ConnectorPrerequisitesPanel() {
     val palette = LocalTowerPalette.current
     TowerPanel {
-        Text("Before you start", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+        Text("Before you connect", color = palette.ink, style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            "You’ll need the computer and project workspace where the agent runs. Keep that computer and the same agent session online while a request is waiting.",
+            "On your Mac, open the project where Antigravity or Codex runs. Keep the Mac and that same agent session running while an approval is waiting.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            "This phone creates a project-limited connector and gives you a local hook setup command. The app cannot confirm hook installation from here.",
+            "Choose a provider below, then create a connector for that project. The setup token appears once; treat it like a password. Follow the setup steps to configure approval forwarding inside the same agent and project workspace.",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text(
+            "Keep the Mac and configured Control Tower API reachable while the request is waiting. The phone can return a decision only to a running agent session; it cannot wake a sleeping Mac or restart an agent. This screen cannot confirm that setup was installed.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
@@ -86,7 +92,7 @@ private fun ConnectorsHero() {
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = "Choose the agent used by this project. Set up each project workspace on the computer where the agent runs.",
+                    text = "Choose the agent used by this project. Set up each project workspace on the Mac where the agent runs.",
                     color = palette.inkMuted,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -109,18 +115,18 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupCard(
             name = "Antigravity",
-            status = "Prior local E2E: passed",
+            status = "Phone test passed locally",
             statusColor = palette.brand,
-            description = "Same local Antigravity invocation resumed after a phone decision. Hosted and off-LAN delivery are not verified.",
+            description = "A local test returned a phone decision to the same waiting Antigravity task. Remote delivery has not been verified.",
             buttonLabel = "Set up Antigravity",
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         ProviderSetupCard(
             name = "Codex",
-            status = "Not verified for native sessions",
+            status = "Codex Desktop not verified",
             statusColor = palette.caution,
-            description = "Codex Desktop approval interception and same-session phone resume are not verified. Follow setup steps, but do not rely on native Codex interception yet.",
+            description = "Phone approvals from Codex Desktop and returning a decision to its same task have not been verified. Do not rely on Codex Desktop approvals yet.",
             buttonLabel = "Set up Codex",
             onClick = { onOpenAgentAccess("CODEX") }
         )
@@ -163,13 +169,13 @@ private fun ApprovalFlowNote() {
     val palette = LocalTowerPalette.current
     TowerPanel {
         Text(
-            text = "When an approval is needed",
+            text = "When an approval arrives",
             color = palette.ink,
             style = MaterialTheme.typography.titleMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            text = "The request appears here. Review the exact action and approve or deny it. Keep the computer and agent session running so the same task can continue.",
+            text = "The request appears in Approvals. Review the exact action, then approve or deny it. Your decision returns to the waiting task only while its Mac, agent session, and API remain reachable.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )

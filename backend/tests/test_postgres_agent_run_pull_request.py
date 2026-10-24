@@ -148,6 +148,7 @@ def _seed_pull_request_rows(schema: str, connect) -> dict:
         metadata={
             "step_id": step_id, "step_type": "CREATE_PULL_REQUEST",
             "task_id": task_id, "approval_id": approval_id, "lease_id": lease.id,
+            "approved_payload_hash": approval.approved_payload_hash,
             "idempotency_key": idempotency_key, "repository": repository_name,
             "head_branch": head_branch, "base_branch": base_branch,
             "validated_head_sha": expected_head_sha,

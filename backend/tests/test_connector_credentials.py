@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import timedelta
+import uuid
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -166,7 +167,7 @@ def test_connector_credentials_reports_only_exact_live_invocation_lease() -> Non
     store.projects[project.id].workspace_id = workspace.id
     store.agent_connectors[connector["id"]].workspace_id = workspace.id
     store.persist()
-    invocation_id = "antigravity:v1:credential-status"
+    invocation_id = f"antigravity:v1:credential-status:{uuid.uuid4().hex}"
     approval_id = _seed_invocation_lease(connector["id"], project.id, invocation_id)
 
     live = client.get(

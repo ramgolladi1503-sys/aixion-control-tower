@@ -667,8 +667,8 @@ def test_delivery_state_import_preserves_at_most_once_claim_and_failure(tmp_path
             "FROM approval_invocation_leases WHERE approval_id='a1'"
         ).fetchone()
         assert lease[:3] == ("ws1", "agent1", "inv1")
-        assert lease[3].isoformat() == "2000-01-01T00:00:00+00:00"
-        assert lease[4].isoformat() == "2000-01-01T00:05:00+00:00"
+        assert lease[3] == datetime(2000, 1, 1, tzinfo=timezone.utc)
+        assert lease[4] == datetime(2000, 1, 1, 0, 5, tzinfo=timezone.utc)
 
 
 def test_plan_blocks_delivery_claim_with_mismatched_source_invocation(tmp_path):

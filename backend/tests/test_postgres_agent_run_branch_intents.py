@@ -176,6 +176,7 @@ def pg_branch_context() -> Iterator[dict]:
             "step_type": "CREATE_BRANCH",
             "task_id": task_id,
             "approval_id": approval_id,
+            "approved_payload_hash": approval.approved_payload_hash,
             "lease_id": lease.id,
             "idempotency_key": idempotency_key,
             "repository": repository_name,
