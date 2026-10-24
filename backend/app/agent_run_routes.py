@@ -754,6 +754,16 @@ def execute_run_next_step(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
+    if request is None and get_settings().postgres_auth_enabled:
+        # A missing request must not select the module-level SQLite adapter in
+        # PostgreSQL-auth mode. HTTP requests always provide Request; this
+        # guard also protects direct/internal invocation paths from silently
+        # executing against process-local state.
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL AgentRun execution requires an app-bound request",
+            headers={"Retry-After": "1"},
+        )
     run_repository = agent_run_repository_for_request(request) if request is not None else None
     if run_repository is not None and not isinstance(
         run_repository, (SQLiteAgentRunRepository, PostgresAgentRunRepository)

@@ -376,6 +376,36 @@ def test_invocation_identity_rejects_malformed_present_tool_use_id() -> None:
     assert hook._invocation_identity(event, tool_name="shell", tool_input={"command": "pwd"}) is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("session_id", None),
+        ("session_id", "  "),
+        ("session_id", "s" * 201),
+        ("turn_id", None),
+        ("turn_id", "  "),
+        ("turn_id", "t" * 201),
+    ],
+)
+def test_missing_or_malformed_session_context_denies_before_api_request(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    event = _codex_event()
+    event[field] = value
+
+    def unexpected_request(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("invalid invocation context must not contact the API")
+
+    monkeypatch.setattr(hook, "_request", unexpected_request)
+
+    assert hook.run(event, _codex_environment()) == (
+        "deny",
+        "Codex permission request is missing stable session, turn, or tool-call identity",
+    )
+
+
 def _codex_event() -> dict:
     return {
         "hook_event_name": "PermissionRequest",

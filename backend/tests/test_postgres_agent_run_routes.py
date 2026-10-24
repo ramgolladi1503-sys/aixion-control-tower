@@ -12,14 +12,16 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from app import agent_run_metrics, main
+from app import agent_run_metrics, agent_run_routes, main
 from app.agent_run_models import (
     AgentRunEvent,
     AgentRunEventType,
+    AgentRunExecuteRequest,
     AgentRunStatus,
     AgentRunStepExecutionResult,
     AgentRunStepStatus,
@@ -75,6 +77,38 @@ from app.trust_models import (
 )
 from app.postgres_trust_repository import PostgresTrustRepository, PostgresTrustRepositoryConflict
 from app.trust_policy import lease_receipt_payload
+
+
+def test_postgres_execute_next_requires_request_before_local_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_routes,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    def reject_local_lookup(*_args, **_kwargs):
+        raise AssertionError("PostgreSQL execution must not read process-local runs")
+
+    monkeypatch.setattr(agent_run_routes, "_run_or_404", reject_local_lookup)
+    user = AuthUser(
+        id="postgres-route-test-user",
+        email="route-test@example.invalid",
+        display_name="Route Test",
+        role=UserRole.MAINTAINER,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        agent_run_routes.execute_run_next_step(
+            "missing-run",
+            AgentRunExecuteRequest(worker_id="route-test"),
+            user=user,
+            request=None,
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
 
 
 def _claim_apply_change_intent_in_process(

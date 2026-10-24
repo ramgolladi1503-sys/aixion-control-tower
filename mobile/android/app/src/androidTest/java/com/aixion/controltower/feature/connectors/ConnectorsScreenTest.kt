@@ -41,13 +41,14 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
         composeRule.onNodeWithText(
-            "A local test returned a phone decision to the same waiting Antigravity task. Remote delivery has not been verified."
+            "A local PostgreSQL phone round-trip is documented for revision 2ad22d4. This app build has not been re-tested on a phone; remote delivery remains unverified."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Set up Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText(
             "Phone approvals from Codex Desktop and returning a decision to its same task have not been verified. Do not rely on Codex Desktop approvals yet."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Phone test passed locally").assertExists()
+        composeRule.onNodeWithText("Local E2E on prior revision").assertExists()
+        composeRule.onNodeWithText("Local E2E on prior revision").performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
         composeRule.onNodeWithText("Codex Desktop not verified").performScrollTo().assertExists()
         composeRule.onNodeWithText("When an approval arrives").performScrollTo().assertExists()
@@ -93,7 +94,8 @@ class ConnectorsScreenTest {
     fun providerReadinessStatesAreDistinctAndDoNotClaimLiveConnection() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("Phone test passed locally").assertExists()
+        composeRule.onNodeWithText("Local E2E on prior revision").assertExists()
+        composeRule.onNodeWithText("Phone test passed locally").assertDoesNotExist()
         composeRule.onNodeWithText("Codex Desktop not verified").assertExists()
         composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
