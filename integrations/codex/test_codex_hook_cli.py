@@ -429,6 +429,51 @@ def _codex_environment() -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh auth login --with-token ghp_0123456789abcdefghij",
+        "mysql --password hunter2",
+        "mysql --password=hunter2",
+        "mysql -phunter2",
+        "mysql -p hunter2",
+        "tool --client-secret:arbitrary-value",
+    ],
+)
+def test_run_denies_credential_bearing_command_options_before_api_request(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    event = _codex_event()
+    event["tool_input"]["command"] = command
+
+    def unexpected_request(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("credential-bearing command must not contact the API")
+
+    monkeypatch.setattr(hook, "_request", unexpected_request)
+
+    assert hook.run(event, _codex_environment()) == (
+        "deny",
+        "Tool arguments contain secret-like material; redact it before approval",
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "mysql --password-policy=strict",
+        "mysql -P3306",
+        "find . -print",
+        "tool --tokenize input.txt",
+        "echo safe",
+    ],
+)
+def test_sensitive_option_guard_does_not_match_noncredential_option_names(
+    command: str,
+) -> None:
+    assert not hook._contains_sensitive({"command": command})
+
+
 @pytest.mark.parametrize("timeout", ["invalid", "0", str(hook.MAX_WAIT_SECONDS + 1)])
 def test_invalid_approval_timeout_denies_before_creating_pending_request(
     monkeypatch: pytest.MonkeyPatch,

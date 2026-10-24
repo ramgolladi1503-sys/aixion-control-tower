@@ -181,8 +181,9 @@ def _production_validation_errors(settings: Settings) -> tuple[str, ...]:
         return ()
     errors: list[str] = []
     errors.append(
-        "Production profile is disabled: this build only supports the single-process SQLite store; "
-        "implement and configure the PostgreSQL store before production startup."
+        "Production profile is disabled: the opt-in PostgreSQL runtime is not yet the complete "
+        "application persistence authority; finish the PostgreSQL cutover and operational gates "
+        "before production startup."
     )
     if not settings.postgres_auth_enabled:
         errors.append(

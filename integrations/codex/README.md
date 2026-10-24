@@ -46,6 +46,12 @@ credentials, and timeout.
   `EXPIRE_OWN_APPROVAL`, and must be a
   `CODEX` external agent limited to one project. Server-side limits and expiry
   remain authoritative.
+- Before transmitting tool arguments, the hook rejects known credential-bearing
+  field names, recognizable secret values, and common CLI options such as
+  `--password`, `--with-token`, and `-p`. This is a conservative heuristic, not
+  general secret detection: arbitrary credentials embedded in free-form command
+  text may not be recognized. Do not put credentials in approval-gated command
+  arguments; use the tool's supported secret store or interactive prompt.
 
 ## Install
 

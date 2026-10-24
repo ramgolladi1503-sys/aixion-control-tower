@@ -51,6 +51,16 @@ SENSITIVE_VALUE = re.compile(
     r"(?:bearer\s+[A-Za-z0-9._~-]{8,}|(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[\"']?[A-Za-z0-9._~/-]{8,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
     re.I,
 )
+# Command arguments are sent verbatim to the approval API and phone. Reject
+# credential option names even when their values do not resemble a known token
+# format (for example, arbitrary database passwords or `gh --with-token`).
+SENSITIVE_OPTION = re.compile(
+    r"(?:^|\s)--?(?:password|passwd|pass|token|access[-_]?token|refresh[-_]?token|"
+    r"api[-_]?key|secret|client[-_]?secret|with[-_]?token)(?=\s|=|:|$)",
+    re.I,
+)
+MYSQL_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?(?:mysql|mariadb)(?=\s|$)", re.I)
+MYSQL_PASSWORD_OPTION = re.compile(r"(?:^|\s)-p\S*(?=\s|=|:|$)")
 
 
 class GateError(Exception):
@@ -213,7 +223,14 @@ def _contains_sensitive(value: Any) -> bool:
         return any(SENSITIVE_KEY.search(str(key)) or _contains_sensitive(item) for key, item in value.items())
     if isinstance(value, list):
         return any(_contains_sensitive(item) for item in value)
-    return isinstance(value, str) and SENSITIVE_VALUE.search(value) is not None
+    return isinstance(value, str) and (
+        SENSITIVE_VALUE.search(value) is not None
+        or SENSITIVE_OPTION.search(value) is not None
+        or (
+            MYSQL_COMMAND.search(value) is not None
+            and MYSQL_PASSWORD_OPTION.search(value) is not None
+        )
+    )
 
 
 def _permission_reason(tool_input: Any) -> str | None:

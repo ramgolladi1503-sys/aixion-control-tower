@@ -599,7 +599,11 @@ def test_production_profile_fails_closed_until_postgresql_store_exists(
     settings = get_settings()
 
     assert settings.profile == "production"
-    assert any("single-process SQLite store" in error for error in settings.validation_errors)
+    assert any(
+        "opt-in PostgreSQL runtime is not yet the complete application persistence authority"
+        in error
+        for error in settings.validation_errors
+    )
     assert any("AIXION_EMAIL_DISPATCH_ENABLED" in error for error in settings.validation_errors)
     assert any("AIXION_EMAIL_OUTBOX_KEY" in error for error in settings.validation_errors)
     with pytest.raises(RuntimeError, match="Production profile is disabled"):
@@ -686,7 +690,7 @@ def test_complete_github_app_configuration_can_replace_static_token(
     assert settings.github_token_configured is False
     assert settings.github_app_configured is True
     assert any(
-        "implement and configure the PostgreSQL store" in error
+        "finish the PostgreSQL cutover and operational gates" in error
         for error in settings.validation_errors
     )
     assert any("Production verification email requires" in error for error in settings.validation_errors)
