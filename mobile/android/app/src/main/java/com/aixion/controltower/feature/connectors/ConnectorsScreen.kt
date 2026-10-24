@@ -109,7 +109,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupCard(
             name = "Antigravity",
-            status = "Local phone flow verified",
+            status = "Local round trip tested",
             statusColor = palette.brand,
             description = "Same local Antigravity invocation resumed after a phone decision. Hosted and off-LAN delivery are not verified.",
             buttonLabel = "Set up Antigravity",

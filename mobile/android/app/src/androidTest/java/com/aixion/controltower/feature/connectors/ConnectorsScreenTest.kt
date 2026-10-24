@@ -39,7 +39,7 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText(
             "Codex Desktop approval interception and same-session phone resume are not verified. Follow setup steps, but do not rely on native Codex interception yet."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Local phone flow verified").assertExists()
+        composeRule.onNodeWithText("Local round trip tested").assertExists()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
         composeRule.onNodeWithText("Not verified for native sessions").performScrollTo().assertExists()
         composeRule.onNodeWithText("When an approval is needed").performScrollTo().assertExists()
