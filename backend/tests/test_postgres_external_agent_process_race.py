@@ -354,11 +354,18 @@ def test_committed_token_rotation_is_observed_by_fresh_process() -> None:
                 actor=owner.email,
                 entity_id=agent.id,
                 workspace_id=workspace_id,
-                details={},
+                details={
+                    "provider": agent.provider,
+                    "display_name": agent.display_name,
+                    "auth_type": agent.auth_type,
+                    "allowed_project_ids": agent.allowed_project_ids,
+                    "allowed_repositories": agent.allowed_repositories,
+                    "allowed_actions": agent.allowed_actions,
+                },
             ),
         )
 
-        rotated_at = now_utc() + timedelta(seconds=1)
+        rotated_at = now_utc()
         rotated_agent = agent.model_copy(
             update={
                 "secret_hash": hashlib.sha256(replacement_token.encode()).hexdigest(),
