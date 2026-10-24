@@ -385,9 +385,15 @@ def create_lease(
                     trust_event_repository=repositories.trust_events,
                 )
             )
-        if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        state = getattr(getattr(request, "app", None), "state", None)
+        postgres_selected = (
+            get_settings().postgres_auth_enabled
+            or getattr(state, "postgres_runtime", None) is not None
+            or getattr(state, "postgres_repositories", None) is not None
+        )
+        if postgres_selected:
             raise HTTPException(
-                status_code=409,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="PostgreSQL lease issuance requires the complete durable approval, task, project, and trust repository bundle",
             )
         workspace_id = workspace_id_for_user(user)

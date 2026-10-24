@@ -3414,7 +3414,70 @@ def test_postgres_lease_issue_partial_repository_binding_fails_closed(
     request.app.state.project_repository = object()
     with pytest.raises(HTTPException) as error:
         create_lease(payload, user, request)
-    assert error.value.status_code == 409
+    assert error.value.status_code == 503
+
+
+def test_postgres_lease_issue_fails_closed_when_auth_selected_but_runtime_missing(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, connect, workspace_id, _approval_id, request, user, payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    request.app.state.postgres_runtime = None
+    request.app.state.postgres_repositories = None
+    monkeypatch.setattr(
+        "app.trust_routes.get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_user",
+        lambda *_args, **_kwargs: pytest.fail("lease issuance used local workspace state"),
+    )
+    monkeypatch.setattr(
+        "app.trust_routes._approval_for_user",
+        lambda *_args, **_kwargs: pytest.fail("lease issuance read local approval state"),
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.issue_capability_lease",
+        lambda *_args, **_kwargs: pytest.fail("lease issuance mutated process-local trust state"),
+    )
+    before_local = (
+        set(store.approval_requests),
+        set(store.capability_leases),
+        set(store.trust_events),
+    )
+    with connect() as conn:
+        before_postgres = (
+            conn.execute(
+                "SELECT count(*) FROM capability_leases WHERE workspace_id=%s",
+                (workspace_id,),
+            ).fetchone()[0],
+            conn.execute(
+                "SELECT count(*) FROM trust_events WHERE workspace_id=%s",
+                (workspace_id,),
+            ).fetchone()[0],
+        )
+
+    with pytest.raises(HTTPException) as error:
+        create_lease(payload, user, request)
+
+    assert error.value.status_code == 503
+    assert store.approval_requests.keys() == before_local[0]
+    assert store.capability_leases.keys() == before_local[1]
+    assert store.trust_events.keys() == before_local[2]
+    with connect() as conn:
+        after_postgres = (
+            conn.execute(
+                "SELECT count(*) FROM capability_leases WHERE workspace_id=%s",
+                (workspace_id,),
+            ).fetchone()[0],
+            conn.execute(
+                "SELECT count(*) FROM trust_events WHERE workspace_id=%s",
+                (workspace_id,),
+            ).fetchone()[0],
+        )
+    assert after_postgres == before_postgres
 
 
 def test_postgres_lease_issue_denied_by_exact_hash_attestation(
