@@ -8,14 +8,21 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -135,5 +142,40 @@ class AuthFormContentTest {
             .assertExists()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Information"))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+    }
+
+    @Test
+    fun loginAndRegistrationActionsRemainScrollableAtTwoHundredPercentText() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                        AuthFormContent(
+                            state = AuthUiState(),
+                            onEmailChange = {},
+                            onPasswordChange = {},
+                            onVerificationCodeChange = {},
+                            onLogin = {},
+                            onRegister = {},
+                            onVerify = {},
+                            onResendVerification = {}
+                        )
+                    }
+                }
+            }
+        }
+
+        val signInHeading = composeRule.onNodeWithText("Welcome back")
+        signInHeading.assertExists()
+        composeRule.runOnIdle {
+            val bounds = signInHeading.fetchSemanticsNode().boundsInRoot
+            assertTrue("Sign-in heading must stay within narrow viewport", bounds.right <= 240f)
+            assertTrue("Sign-in heading must wrap at 200% text", bounds.height > 48f)
+        }
+        composeRule.onNodeWithText("Log in").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Create account").performScrollTo().performClick()
+        composeRule.onNodeWithText("Create your account").assertExists()
+        composeRule.onNodeWithText("Create account").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Back to sign in").performScrollTo().assertExists()
     }
 }
