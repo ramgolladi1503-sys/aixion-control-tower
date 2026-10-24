@@ -25,7 +25,10 @@ from .mcp_gateway import (
 from .mcp_pending_repository import (
     MCPPendingRepositoryConflict,
     MCPPendingRepositoryError,
+    PostgresMCPPendingRepository,
 )
+from .project_repository import PostgresProjectRepository
+from .approval_repository import PostgresApprovalDecisionRepository
 from .mcp_tool_validation import validate_arguments_against_schema
 from .application_repository_access import workspace_id_for_request
 from .models import (
@@ -190,9 +193,12 @@ def _postgres_pending_repository_for_request(request: Request):
         )
     repository = getattr(repositories, "mcp_pending_requests", None)
     if (
-        repository is None
-        or getattr(repositories, "projects", None) is None
-        or getattr(repositories, "approval_decisions", None) is None
+        not isinstance(repository, PostgresMCPPendingRepository)
+        or not isinstance(getattr(repositories, "projects", None), PostgresProjectRepository)
+        or not isinstance(
+            getattr(repositories, "approval_decisions", None),
+            PostgresApprovalDecisionRepository,
+        )
     ):
         raise HTTPException(
             status_code=503,

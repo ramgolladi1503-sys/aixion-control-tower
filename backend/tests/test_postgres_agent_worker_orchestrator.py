@@ -261,6 +261,24 @@ def test_postgres_orchestrator_requires_audit_repository_before_work(
     assert store.audit_events == []
 
 
+@pytest.mark.parametrize("settings", [
+    SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+])
+def test_orchestrator_rejects_implicit_sqlite_repository_in_postgres_modes(
+    monkeypatch, settings,
+) -> None:
+    store.reset()
+    monkeypatch.setattr(orchestrator_module, "get_settings", lambda: settings)
+
+    with pytest.raises(ValueError, match="PostgreSQL orchestration repositories are required"):
+        run_approved_agent_task_worker_flow(task_id="task_missing")
+
+    assert store.agent_tasks == {}
+    assert store.agent_task_events == {}
+    assert store.audit_events == []
+
+
 def test_postgres_orchestration_summary_failure_rolls_back_and_reports_ambiguous_effects(
     postgres_repositories,
 ) -> None:

@@ -47,8 +47,15 @@ class AgentWorkerOrchestrationResult:
 
 
 def _is_postgres_pair(task_repository, approval_repository) -> bool:
+    settings = get_settings()
     task_is_postgres = isinstance(task_repository, PostgresAgentTaskRepository)
     approval_is_postgres = isinstance(approval_repository, PostgresApprovalDecisionRepository)
+    if (
+        settings.is_production or settings.postgres_auth_enabled
+    ) and task_repository is None and approval_repository is None:
+        raise ValueError(
+            "PostgreSQL orchestration repositories are required in production or PostgreSQL auth mode."
+        )
     if task_is_postgres != approval_is_postgres:
         raise ValueError("PostgreSQL orchestration requires paired task and approval repositories.")
     if task_repository is not None and not task_is_postgres:

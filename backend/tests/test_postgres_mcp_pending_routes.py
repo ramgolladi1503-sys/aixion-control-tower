@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -20,6 +21,9 @@ from app.application_repositories import ApplicationRepositories
 from app.models import AuthUser, MCPPendingRequest, MCPPendingStatus, Project, User, UserRole, Workspace, now_utc
 from app.approval_integrity import compute_approval_payload_hash
 from app.models import ApprovalStatus, AuditEvent, MCPChildServer, MCPToolDefinition
+from app.approval_repository import PostgresApprovalDecisionRepository
+from app.mcp_pending_repository import SQLiteMCPPendingRepository
+from app.project_repository import PostgresProjectRepository
 from app.postgres_database import run_postgres_migrations
 from app.store import store
 
@@ -1290,6 +1294,36 @@ def test_partial_postgres_runtime_does_not_fall_back_to_sqlite_pending_reads(
 
     assert response.status_code == 503
     assert store.mcp_pending_requests == before_pending
+
+
+def test_postgres_mcp_rejects_sqlite_pending_repository_in_mixed_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matching runtime pointer does not make a SQLite adapter PostgreSQL-authoritative."""
+    mixed = object.__new__(ApplicationRepositories)
+    object.__setattr__(mixed, "mcp_pending_requests", SQLiteMCPPendingRepository(store._connect))
+    object.__setattr__(mixed, "projects", PostgresProjectRepository(lambda: None))
+    object.__setattr__(
+        mixed,
+        "approval_decisions",
+        PostgresApprovalDecisionRepository(lambda: None),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=mixed),
+                postgres_repositories=mixed,
+            )
+        )
+    )
+    monkeypatch.setattr(
+        mcp_gateway_routes,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(HTTPException, match="PostgreSQL MCP submission repository bundle is incomplete"):
+        mcp_gateway_routes._postgres_pending_repository_for_request(request)
 
 
 def test_configured_postgres_auth_without_runtime_does_not_select_sqlite(
