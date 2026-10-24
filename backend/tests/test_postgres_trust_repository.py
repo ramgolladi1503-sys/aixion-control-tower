@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import multiprocessing
 import os
+import queue as queue_module
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier
 from types import SimpleNamespace
+from typing import Any
 
 import psycopg
 import pytest
@@ -96,6 +99,38 @@ from app.trust_models import (
     ReviewerAttestationDecision,
     TrustEventType,
 )
+
+
+def _consume_agent_run_action_in_process(
+    dsn: str,
+    schema: str,
+    barrier: Any,
+    results: Any,
+    action_id: str,
+    workspace_id: str,
+    run_id: str,
+    step_id: str,
+    consumption_payload: dict[str, Any],
+) -> None:
+    """Race one durable action consumption from an independent process."""
+    try:
+        barrier.wait(timeout=20)
+        with psycopg.connect(dsn) as conn:
+            conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+            with conn.transaction():
+                consumed = PostgresTrustRepository().consume_agent_run_action(
+                    conn,
+                    action_id=action_id,
+                    workspace_id=workspace_id,
+                    run_id=run_id,
+                    step_id=step_id,
+                    consumption=ActionConsumption.model_validate(consumption_payload),
+                    actor=f"run:{run_id}",
+                    now=now_utc(),
+                )
+        results.put(("ok", consumed.model_dump(mode="json")))
+    except BaseException as error:  # pragma: no cover - surfaced in the parent test
+        results.put(("error", f"{type(error).__name__}: {error}"))
 
 
 def _postgres_lease_issue_context(trust_repository, monkeypatch):
@@ -1438,6 +1473,91 @@ def test_postgres_agent_run_action_consumption_is_run_bound_and_replay_safe(
         assert repository.get_action_consumption(conn, action.id, workspace_id) == consumption
         persisted_lease = repository.get_capability_lease(conn, lease.id, workspace_id)
         assert persisted_lease is not None and persisted_lease.consumed_runtime_seconds == 1
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s "
+            "AND event_type=%s AND entity_id=%s",
+            (workspace_id, TrustEventType.ACTION_CONSUMED.value, action.id),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_agent_run_action_consumption_is_idempotent_across_processes(
+    trust_repository,
+):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    assert dsn, "the trust_repository fixture requires the isolated PostgreSQL test DSN"
+    with connect() as conn:
+        schema = conn.execute("SELECT current_schema()").fetchone()[0]
+
+    lease = _lease_with_runtime_budget(
+        workspace_id=workspace_id, user_id=user_id, approval_id=approval_id, runtime_budget=5
+    )
+    with connect() as conn:
+        with conn.transaction():
+            repository.insert_capability_lease(conn, lease)
+            action = _run_action_awaiting_review(
+                repository,
+                conn,
+                lease=lease,
+                workspace_id=workspace_id,
+                project_id=project_id,
+            )
+    _record_run_action_review(
+        repository, connect, action=action, workspace_id=workspace_id, user_id=user_id
+    )
+    consumption = ActionConsumption(
+        actual_runtime_seconds=1,
+        evidence={"run_id": action.run_id, "step_id": action.metadata["step_id"]},
+    )
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_consume_agent_run_action_in_process,
+            args=(
+                dsn,
+                schema,
+                barrier,
+                results,
+                action.id,
+                workspace_id,
+                action.run_id or "",
+                str(action.metadata["step_id"]),
+                consumption.model_dump(mode="json"),
+            ),
+        )
+        for _ in range(2)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        outcomes = []
+        for _ in processes:
+            try:
+                outcomes.append(results.get(timeout=30))
+            except queue_module.Empty:
+                pytest.fail("Timed out waiting for concurrent PostgreSQL action consumers")
+        for process in processes:
+            process.join(timeout=10)
+            if process.is_alive():
+                pytest.fail("PostgreSQL action-consumption worker did not exit before timeout")
+        assert [process.exitcode for process in processes] == [0, 0]
+        assert all(outcome[0] == "ok" for outcome in outcomes), outcomes
+        assert all(outcome[1] == consumption.model_dump(mode="json") for outcome in outcomes)
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+    with connect() as conn:
+        assert repository.get_action_consumption(conn, action.id, workspace_id) == consumption
+        persisted_lease = repository.get_capability_lease(conn, lease.id, workspace_id)
+        assert persisted_lease is not None
+        assert persisted_lease.consumed_runtime_seconds == 1
         assert conn.execute(
             "SELECT count(*) FROM trust_events WHERE workspace_id=%s "
             "AND event_type=%s AND entity_id=%s",

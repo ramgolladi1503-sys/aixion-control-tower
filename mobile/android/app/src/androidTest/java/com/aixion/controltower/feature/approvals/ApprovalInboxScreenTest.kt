@@ -6,9 +6,13 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -19,11 +23,13 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasText
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -91,7 +97,7 @@ class ApprovalInboxScreenTest {
         composeRule.onNodeWithText("History").performClick()
         val loadingStatus = composeRule.onNodeWithTag("approval-history-loading-status")
         loadingStatus.assertExists()
-        loadingStatus.assertTextContains("Loading decision history")
+        loadingStatus.assertTextContains("Loading decision history", substring = true)
         assertEquals(
             LiveRegionMode.Polite,
             loadingStatus.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
@@ -106,7 +112,7 @@ class ApprovalInboxScreenTest {
 
         composeRule.onNodeWithTag("approval-inbox-loading-skeletons").assertExists()
         val loadingStatus = composeRule.onNodeWithTag("approval-inbox-sync-status")
-        loadingStatus.assertTextContains("Loading approval requests")
+        loadingStatus.assertTextContains("Loading approval requests", substring = true)
         assertEquals(
             LiveRegionMode.Polite,
             loadingStatus.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
@@ -182,28 +188,32 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onAllNodesWithText("Approvals").assertCountEquals(0)
-        composeRule.onNodeWithText("Review pending requests and see the decisions recorded for each one.").assertExists()
+        composeRule.onNodeWithText("Review pending requests or browse recorded decisions.").assertExists()
         composeRule.onNodeWithText("2 pending").assertExists()
         composeRule.onAllNodesWithText("Needs review 2").assertCountEquals(0)
         composeRule.onNodeWithText("Status blocked 1").assertExists()
+        val inboxList = composeRule.onNode(hasScrollAction())
         composeRule.onNodeWithText("Pending approval").assertExists()
+        inboxList.performScrollToNode(hasText("Blocked approval"))
         composeRule.onNodeWithText("Blocked approval").assertExists()
-        composeRule.onNodeWithText("Approved approval").assertExists()
-        composeRule.onNodeWithText("Aixion Control Tower").assertExists()
-        composeRule.onNodeWithText("Regression approval summary").assertExists()
-        composeRule.onNodeWithText("Low").assertExists()
+        composeRule.onAllNodesWithText("Approved approval").assertCountEquals(0)
+        inboxList.performScrollToNode(hasText("Pending approval"))
+        composeRule.onAllNodesWithText("Aixion Control Tower").assertCountEquals(3)
+        composeRule.onAllNodesWithContentDescription("Request summary: Regression approval summary")
+            .assertCountEquals(3)
+        composeRule.onAllNodesWithText("Low").assertCountEquals(3)
         composeRule.onNodeWithText("Pending review").assertExists()
         composeRule.onAllNodesWithText("Review request").assertCountEquals(3)
-        composeRule.onNodeWithText("Review request").assert(
-            SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button)
-        )
+        composeRule.onAllNodesWithText("Review request").fetchSemanticsNodes().forEach { node ->
+            assertEquals(Role.Button, node.config[SemanticsProperties.Role])
+        }
     }
 
     @Test
     fun inboxSectionsWrapWithinNarrowLargeTextLayout() {
         composeRule.setContent {
-            Box(modifier = Modifier.width(240.dp)) {
-                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
+                Box(modifier = Modifier.width(240.dp).testTag("narrow-inbox-viewport")) {
                     ApprovalInboxContent(state = ApprovalsUiState(loading = false))
                 }
             }
@@ -213,23 +223,24 @@ class ApprovalInboxScreenTest {
         val historySection = composeRule.onNodeWithText("History")
         reviewSection.assertExists()
         historySection.assertExists()
-        composeRule.runOnIdle {
-            assertTrue(
-                "Needs review tab should remain within the narrow viewport",
-                reviewSection.fetchSemanticsNode().boundsInRoot.right <= 240f
-            )
-            assertTrue(
-                "History tab should remain within the narrow viewport",
-                historySection.fetchSemanticsNode().boundsInRoot.right <= 240f
-            )
-        }
+        val viewportBounds = composeRule.onNodeWithTag("narrow-inbox-viewport").fetchSemanticsNode().boundsInRoot
+        val reviewBounds = reviewSection.fetchSemanticsNode().boundsInRoot
+        val historyBounds = historySection.fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "Needs review tab should remain within the narrow viewport",
+            reviewBounds.left >= viewportBounds.left && reviewBounds.right <= viewportBounds.right
+        )
+        assertTrue(
+            "History tab should remain within the narrow viewport",
+            historyBounds.left >= viewportBounds.left && historyBounds.right <= viewportBounds.right
+        )
     }
 
     @Test
     fun historyFiltersWrapWithinNarrowLargeTextLayout() {
         composeRule.setContent {
-            Box(modifier = Modifier.width(240.dp)) {
-                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
+                Box(modifier = Modifier.width(240.dp).testTag("narrow-inbox-viewport")) {
                     ApprovalInboxContent(state = ApprovalsUiState(loading = false, historyLoaded = true))
                 }
             }
@@ -240,18 +251,17 @@ class ApprovalInboxScreenTest {
             .map(composeRule::onNodeWithText)
         filters.forEach { it.assertExists() }
 
-        composeRule.runOnIdle {
-            filters.forEachIndexed { index, filter ->
-                val bounds = filter.fetchSemanticsNode().boundsInRoot
-                assertTrue("History filter ${index + 1} should be within the narrow viewport", bounds.left >= 0f)
-                assertTrue("History filter ${index + 1} should fit within the narrow viewport", bounds.right <= 240f)
-                assertTrue("History filter ${index + 1} should be visible vertically", bounds.top >= 0f)
-            }
-            assertTrue(
-                "History filters should wrap onto additional rows at narrow width",
-                filters.map { it.fetchSemanticsNode().boundsInRoot.top }.distinct().size > 1
-            )
+        val viewportBounds = composeRule.onNodeWithTag("narrow-inbox-viewport").fetchSemanticsNode().boundsInRoot
+        val filterBounds = filters.map { it.fetchSemanticsNode().boundsInRoot }
+        filterBounds.forEachIndexed { index, bounds ->
+            assertTrue("History filter ${index + 1} should be within the narrow viewport", bounds.left >= viewportBounds.left)
+            assertTrue("History filter ${index + 1} should fit within the narrow viewport", bounds.right <= viewportBounds.right)
+            assertTrue("History filter ${index + 1} should be visible vertically", bounds.top >= viewportBounds.top)
         }
+        assertTrue(
+            "History filters should wrap onto additional rows at narrow width",
+            filterBounds.map { it.top }.distinct().size > 1
+        )
     }
 
     @Test
@@ -305,7 +315,7 @@ class ApprovalInboxScreenTest {
                     loading = false,
                     approvals = listOf(
                         approval(id = "approval_a", title = "First approval", status = ApprovalStatus.REQUESTED),
-                        approval(id = "approval_b", title = "Second approval", status = ApprovalStatus.APPROVED),
+                        approval(id = "approval_b", title = "Second approval", status = ApprovalStatus.REQUESTED),
                     )
                 ),
                 onApprovalSelected = { selectedId = it.id }
@@ -384,9 +394,9 @@ class ApprovalInboxScreenTest {
 
         val warning = composeRule.onNodeWithTag("approval-inbox-stale-data-warning")
         warning.assertExists()
-        warning.assertTextContains("The latest approval check failed")
-        warning.assertTextContains("Previously loaded requests are hidden")
-        warning.assertTextContains("Reconnect and retry before reviewing")
+        warning.assertTextContains("The latest approval check failed", substring = true)
+        warning.assertTextContains("Previously loaded requests are hidden", substring = true)
+        warning.assertTextContains("Reconnect and retry before reviewing", substring = true)
         assertEquals(
             LiveRegionMode.Polite,
             warning.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
@@ -527,12 +537,12 @@ class ApprovalInboxScreenTest {
 
         composeRule.onNodeWithText("History").performClick()
 
-        // The history filter and the decision record both use the same concise status label.
-        composeRule.onAllNodesWithText("Denied").assertCountEquals(2)
+        composeRule.onNodeWithText("All").assertIsSelected()
+        composeRule.onNodeWithContentDescription("Decision status: Denied").assertExists()
         composeRule.onNodeWithText("Original request that was denied").assertExists()
         composeRule.onNodeWithText("Reviewer · You").assertExists()
         composeRule.onNodeWithText(
-            "Decision record only. Delivery to the agent and execution are not confirmed here."
+            "Immutable reviewer decisions for recent requests. Decision records do not confirm delivery to the agent or execution."
         ).assertExists()
         composeRule.onAllNodesWithText("Mutable record currently says approved").assertCountEquals(0)
         composeRule.onAllNodesWithText("Execution complete").assertCountEquals(0)
@@ -559,7 +569,8 @@ class ApprovalInboxScreenTest {
 
         composeRule.onNodeWithText("History").performClick()
 
-        composeRule.onNodeWithText("Approved").assertExists()
+        composeRule.onNodeWithText("All").assertIsSelected()
+        composeRule.onNodeWithContentDescription("Decision status: Approved").assertExists()
         composeRule.onNodeWithText("Reviewer · Workspace reviewer").assertExists()
         composeRule.onNodeWithText("Request details unavailable").assertExists()
         composeRule.onNodeWithText("This older or unverifiable record is shown without request details.").assertExists()
@@ -672,18 +683,25 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onNodeWithText("History").performClick()
-        composeRule.onAllNodesWithText("Approved").assertCountEquals(3)
-        // One matching node is the selected filter chip, the other is the history status.
-        composeRule.onAllNodesWithText("Denied").assertCountEquals(3)
+        composeRule.onNodeWithText("All").assertIsSelected()
+        val historyList = composeRule.onNode(hasScrollAction())
+        historyList.performScrollToNode(hasText("The server has no usable delivery evidence for this decision."))
+        composeRule.onAllNodesWithContentDescription("Decision status: Approved").assertCountEquals(2)
         composeRule.onNodeWithText("Delivery not confirmed").assertExists()
         composeRule.onNodeWithText(
             "The server has no usable delivery evidence for this decision."
         ).assertExists()
+        historyList.performScrollToNode(hasText("Decision consumed"))
+        composeRule.onAllNodesWithContentDescription("Decision status: Approved").assertCountEquals(2)
         composeRule.onNodeWithText("Decision consumed").assertExists()
+        historyList.performScrollToNode(hasText("No delivery expected"))
+        composeRule.onAllNodesWithContentDescription("Decision status: Denied").assertCountEquals(1)
         composeRule.onNodeWithText("No delivery expected").assertExists()
         composeRule.onNodeWithText(
             "This decision does not authorize an external agent to resume."
         ).assertExists()
+        historyList.performScrollToNode(hasText("Delivery response ambiguous"))
+        composeRule.onAllNodesWithContentDescription("Decision status: Approved").assertCountEquals(2)
         composeRule.onNodeWithText("Delivery response ambiguous").assertExists()
         composeRule.onNodeWithText(
             "The connector claimed this decision once. This confirms protocol consumption, not agent execution or task completion."

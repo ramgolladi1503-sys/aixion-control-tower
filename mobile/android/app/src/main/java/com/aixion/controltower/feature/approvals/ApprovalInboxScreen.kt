@@ -30,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -619,9 +620,13 @@ internal fun ApprovalDeliveryStatusContent(
 @Composable
 private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
     val palette = LocalTowerPalette.current
+    val decisionLabel = event.decision.let(::decisionHistoryLabel)
     TowerPanel(elevated = true) {
         StatusBadge(
-            event.decision.let(::decisionHistoryLabel),
+            decisionLabel,
+            modifier = Modifier.semantics(mergeDescendants = true) {
+                contentDescription = "Decision status: $decisionLabel"
+            },
             color = when (event.decision.trim().lowercase()) {
                 "approve", "approved" -> palette.positive
                 "reject", "rejected", "deny", "denied" -> palette.danger
@@ -692,7 +697,9 @@ private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
 internal fun formatHistoryTime(raw: String?): String {
     if (raw.isNullOrBlank()) return "time unavailable"
     return runCatching {
-        val formatter = DateTimeFormatter.ofPattern("MMM d, yyyy 'at' h:mm a", Locale.getDefault())
+        // Preserve the user's local presentation while making the offset explicit in
+        // the audit/history record, which may be reviewed across time zones.
+        val formatter = DateTimeFormatter.ofPattern("MMM d, yyyy 'at' h:mm a XXX", Locale.getDefault())
             .withZone(ZoneId.systemDefault())
         formatter.format(Instant.parse(raw))
     }.getOrDefault("time unavailable")
