@@ -364,12 +364,28 @@ def create_agent_approval(
         raise HTTPException(status_code=403, detail="Agent workspace is required")
     if payload.work_order_id:
         work_order = work_order_repository.get(payload.work_order_id)
-        if (
-            work_order is None
-            or not work_order_scope_is_consistent(work_order)
-            or work_order.project_id != project.id
-            or work_order_workspace_id(work_order) != project.workspace_id
-        ):
+        if isinstance(work_order_repository, PostgresWorkOrderRepository):
+            # PostgreSQL reads validate the normalized work-order scope against
+            # its payload. Compare it with the project already resolved from
+            # the same request-selected repository; workspace_access helpers
+            # use module-level SQLite repositories and are not authoritative
+            # for this runtime.
+            work_order_scope_valid = (
+                work_order is not None
+                and work_order.workspace_id == project.workspace_id
+            )
+        elif isinstance(work_order_repository, SQLiteWorkOrderRepository):
+            work_order_scope_valid = (
+                work_order is not None
+                and work_order_scope_is_consistent(work_order)
+                and work_order_workspace_id(work_order) == project.workspace_id
+            )
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail="Work order persistence runtime is unavailable",
+            )
+        if work_order is None or not work_order_scope_valid or work_order.project_id != project.id:
             raise HTTPException(status_code=404, detail="Work order not found")
 
     risk = assess_approval_request(payload)

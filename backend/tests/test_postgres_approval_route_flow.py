@@ -46,6 +46,7 @@ from app.models import (
     User,
     UserRole,
     Workspace,
+    WorkOrder,
     new_id,
 )
 from app.postgres_database import run_postgres_migrations
@@ -765,6 +766,78 @@ def test_postgres_reviewer_routes_require_workspace_before_unscoped_repository_r
     assert set(store.approval_requests) == before_approvals
     assert {event.id for event in store.audit_events} == before_audits
     assert set(store.notifications) == before_notifications
+
+
+def test_postgres_external_approval_uses_bound_project_for_linked_work_order_scope(
+    postgres_approval_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project, user, repositories, agent, agent_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    work_order = WorkOrder(
+        project_id=project.id,
+        goal="Review a PostgreSQL-backed work order",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    audit_event = AuditEvent(
+        event_type="work_order.created",
+        entity_id=work_order.id,
+        workspace_id=workspace.id,
+        actor=user.email,
+        details={
+            "project_id": work_order.project_id,
+            "risk_level": work_order.risk_level,
+            "source_type": work_order.source_type,
+            "source_provider": work_order.source_provider,
+            "source_agent_id": work_order.source_agent_id,
+            "source_agent_name": work_order.source_agent_name,
+            "created_by_user_id": work_order.created_by_user_id,
+            "verified_source": work_order.verified_source,
+        },
+    )
+    repositories.work_orders.create(work_order=work_order, audit_event=audit_event)
+
+    def fail_on_sqlite_project_read(_project_id: str):
+        raise AssertionError("PostgreSQL approval consulted the module-level SQLite project store")
+
+    monkeypatch.setattr(
+        "app.workspace_access.project_repository.get",
+        fail_on_sqlite_project_read,
+    )
+    client = TestClient(main.app)
+    response = client.post(
+        "/agents/approvals",
+        headers={
+            "X-Aixion-Agent-Id": agent.id,
+            "X-Aixion-Agent-Token": agent_token,
+        },
+        json={
+            "project_id": project.id,
+            "work_order_id": work_order.id,
+            "title": "Review linked PostgreSQL work order",
+            "summary": "The approval must validate the linked work order in the selected store.",
+            "agent_name": agent.display_name,
+            "target_branch": "feature/approval-route-test",
+            "files": [
+                {
+                    "path": "antigravity://tool/run_command",
+                    "change_type": "tool_call",
+                    "diff": '{"command":"echo linked-work-order"}',
+                }
+            ],
+            "source_session_id": "linked-work-order-session",
+            "source_invocation_id": f"linked-work-order-{uuid.uuid4().hex}",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    approval = response.json()
+    assert approval["work_order_id"] == work_order.id
+    assert repositories.approval_decisions.get(approval["id"]) is not None
+    assert approval["id"] not in store.approval_requests
+    client.close()
 
 
 def test_postgres_approval_history_reads_verified_decision_from_runtime_bundle(

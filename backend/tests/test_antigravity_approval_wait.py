@@ -146,6 +146,42 @@ def test_invocation_retry_reuses_one_approval_and_changed_payload_conflicts() ->
     assert sum(item.entity_id == approval_id for item in store.notifications.values()) == 1
 
 
+def test_local_agent_approval_accepts_work_order_from_sqlite_repository() -> None:
+    project, agent_id, token = _setup_agent()
+    work_order_response = client.post(
+        "/work-orders",
+        json={
+            "project_id": project.id,
+            "goal": "Review a local linked work order",
+            "context": "SQLite local mode keeps its existing project scope checks.",
+        },
+    )
+    assert work_order_response.status_code == 200, work_order_response.text
+
+    response = client.post(
+        "/agents/approvals",
+        headers=_headers(agent_id, token),
+        json={
+            "project_id": project.id,
+            "work_order_id": work_order_response.json()["id"],
+            "title": "Review linked local work order",
+            "summary": "The local approval validates its linked SQLite work order.",
+            "agent_name": "Antigravity",
+            "target_branch": "current-workspace",
+            "files": [{
+                "path": "antigravity://tool/run_command",
+                "change_type": "tool_call",
+                "diff": '{"command":"echo linked-local-work-order"}',
+            }],
+            "source_session_id": "linked-local-work-order-session",
+            "source_invocation_id": f"linked-local-work-order-{uuid.uuid4().hex}",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["work_order_id"] == work_order_response.json()["id"]
+
+
 def test_approval_decision_is_visible_to_only_owning_scoped_agent() -> None:
     project, owner_id, owner_token = _setup_agent()
     _, other_id, other_token = _setup_agent()
