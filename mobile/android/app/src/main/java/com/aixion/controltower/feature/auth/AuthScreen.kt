@@ -196,7 +196,7 @@ internal fun AuthFormContent(
                 else -> "Welcome back"
             },
             color = palette.ink,
-            style = MaterialTheme.typography.headlineMedium
+            style = MaterialTheme.typography.headlineLarge
         )
         Text(
             text = when {

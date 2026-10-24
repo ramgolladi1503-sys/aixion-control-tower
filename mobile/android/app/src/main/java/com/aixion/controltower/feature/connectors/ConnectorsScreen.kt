@@ -88,7 +88,7 @@ private fun ConnectorsHero() {
                 Text(
                     text = "Connect your coding agent",
                     color = palette.ink,
-                    style = MaterialTheme.typography.headlineMedium
+                    style = MaterialTheme.typography.headlineLarge
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(

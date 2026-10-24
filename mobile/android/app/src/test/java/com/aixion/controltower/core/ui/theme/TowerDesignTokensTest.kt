@@ -8,6 +8,15 @@ import org.junit.Test
 
 class TowerDesignTokensTest {
     @Test
+    fun pageHeadingMatchesSharedLargeHeadingContract() {
+        val heading = TowerTypography.headlineLarge
+
+        assertEquals(28.sp, heading.fontSize)
+        assertEquals(36.sp, heading.lineHeight)
+        assertEquals(androidx.compose.ui.text.font.FontWeight.SemiBold, heading.fontWeight)
+    }
+
+    @Test
     fun bodyLargeMatchesApprovalReadingContract() {
         val body = TowerTypography.bodyLarge
 
