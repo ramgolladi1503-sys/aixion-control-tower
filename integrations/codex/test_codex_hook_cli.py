@@ -633,12 +633,13 @@ def _patch_clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
 
 
 def _invocation_heartbeat(approval: dict) -> dict:
+    now = datetime.now(timezone.utc)
     return {
         "approval_id": approval["id"],
         "source_agent_id": approval["source_agent_id"],
         "source_invocation_id": approval["source_invocation_id"],
-        "heartbeat_at": "2026-10-22T00:00:00+00:00",
-        "expires_at": "2026-10-22T00:01:00+00:00",
+        "heartbeat_at": now.isoformat(),
+        "expires_at": (now + timedelta(minutes=1)).isoformat(),
         "live": True,
     }
 
@@ -666,8 +667,8 @@ def test_invocation_heartbeat_retries_one_transport_failure_within_deadline(
             "approval_id": "approval-1",
             "source_agent_id": "agent-1",
             "source_invocation_id": "invocation-1",
-            "heartbeat_at": "2026-10-23T00:00:00+00:00",
-            "expires_at": "2026-10-23T00:01:00+00:00",
+            "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
             "live": True,
         }
 
