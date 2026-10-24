@@ -33,7 +33,7 @@ HOOK_PATH = (
 @pytest.mark.parametrize(
     ("decision", "expected_hook_decision", "expected_status", "expected_claims"),
     [
-        ("approve", "allow", "APPROVED", 1),
+        ("approve", "auto_approve", "APPROVED", 1),
         ("deny", "deny", "DENIED", 0),
     ],
 )

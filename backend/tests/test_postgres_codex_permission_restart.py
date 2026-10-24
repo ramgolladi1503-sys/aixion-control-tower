@@ -417,6 +417,7 @@ def test_identified_codex_invocation_survives_postgres_api_restart_and_consumes_
         environment = _hook_environment(base_url, project.id, agent_id, token)
         event = {
             "hook_event_name": "PermissionRequest",
+            "permission_mode": "default",
             "session_id": "codex-postgres-restart-session",
             "turn_id": "codex-postgres-restart-turn",
             "tool_use_id": "codex-postgres-tool-use-19",
@@ -512,6 +513,7 @@ def test_codex_dead_hook_expired_lease_rejects_review_and_isolates_next_invocati
         environment = _hook_environment(base_url, project.id, agent_id, token)
         original_event = {
             "hook_event_name": "PermissionRequest",
+            "permission_mode": "default",
             "session_id": "codex-dead-hook-session",
             "turn_id": "codex-dead-hook-turn",
             "tool_use_id": "codex-dead-hook-tool-use-1",

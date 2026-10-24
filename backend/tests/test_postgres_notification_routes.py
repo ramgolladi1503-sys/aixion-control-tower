@@ -220,7 +220,7 @@ def test_postgres_notification_routes_reject_claimed_foreign_workspace(
     assert workspace.id != foreign_claim.workspace_id
 
 
-def test_postgres_device_unregister_rejects_workspace_mismatch_without_deleting(
+def test_postgres_device_unregister_uses_persisted_membership_not_workspace_claim(
     postgres_notification_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -241,12 +241,15 @@ def test_postgres_device_unregister_rejects_workspace_mismatch_without_deleting(
 
     response = TestClient(main.app).delete(f"/notifications/devices/{device.id}")
 
-    assert response.status_code == 403
+    # Workspace scope is resolved from the authenticated user's persisted
+    # membership. A stale workspace claim cannot redirect the operation to
+    # another workspace; this registration is still owned by that user.
+    assert response.status_code == 204
     with connect() as connection:
         assert connection.execute(
             "SELECT user_id,workspace_id FROM device_registrations WHERE device_id=%s",
             (device.id,),
-        ).fetchone() == (user.id, workspace.id)
+        ).fetchone() is None
 
 
 def test_notification_routes_fail_closed_without_postgres_repository_when_auth_uses_postgres(

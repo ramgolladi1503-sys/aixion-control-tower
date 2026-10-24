@@ -532,7 +532,14 @@ internal fun OneTimeTokenPanel(
     TowerPanel(elevated = true) {
         StatusBadge(label = "One-time secret", color = palette.caution, uppercase = false)
         Spacer(Modifier.height(TowerSpacing.sm))
-        Text("Save this $providerName token in macOS Keychain now", color = palette.ink, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Save this $providerName token in macOS Keychain now",
+            modifier = Modifier
+                .testTag("agent-token-created-announcement")
+                .semantics { liveRegion = LiveRegionMode.Polite },
+            color = palette.ink,
+            fontWeight = FontWeight.SemiBold
+        )
         Text(
             "It is held only in screen memory and is cleared when you hide it or leave the app.",
             color = palette.inkMuted,

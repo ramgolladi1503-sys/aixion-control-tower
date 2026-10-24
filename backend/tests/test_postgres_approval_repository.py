@@ -948,13 +948,14 @@ def test_postgres_delivery_outcomes_distinguish_manual_and_malformed_connector(
         for item in (manual, malformed, expired):
             conn.execute(
                 "INSERT INTO approval_requests "
-                "(approval_id,project_id,workspace_id,source_agent_id,status,expires_at,"
-                "created_at,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "(approval_id,project_id,workspace_id,source_agent_id,source_invocation_id,status,expires_at,"
+                "created_at,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
                     item.id,
                     project.id,
                     workspace.id,
                     item.source_agent_id,
+                    item.source_invocation_id,
                     item.status.value,
                     item.expires_at,
                     item.created_at,

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -242,6 +243,68 @@ def test_postgres_agent_owner_lifecycle_is_scoped_audited_and_does_not_project_t
         "agent.token_revoked", "agent.auth_failed",
     ]
     assert set(store.external_agents) == initial_sqlite_ids
+
+
+def test_postgres_external_agent_token_authenticates_across_independent_app_instances(
+    postgres_agent_route_runtime,
+) -> None:
+    connect, workspace, project, _user, _first_repositories = postgres_agent_route_runtime
+    first_client = TestClient(main.app)
+    created = first_client.post(
+        "/agents",
+        json={
+            "provider": "ANTIGRAVITY",
+            "display_name": "Cross-instance Antigravity",
+            "auth_type": "API_KEY",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": sorted(action.value for action in APPROVAL_CONNECTOR_ACTIONS),
+            "enabled": True,
+        },
+    )
+    assert created.status_code == 200, created.text
+    agent_id = created.json()["agent"]["id"]
+    token = created.json()["agent_token"]
+
+    # Build a separate FastAPI app and repository adapters over the same schema,
+    # matching a second API process without sharing its in-memory route bindings.
+    second_repositories = ApplicationRepositories.from_connector(connect)
+    second_app = FastAPI()
+    second_app.include_router(agent_routes.router)
+    second_app.state.external_agent_auth_repository = second_repositories.external_agent_auth
+    second_app.state.project_repository = second_repositories.projects
+    second_app.state.workspace_membership_repository = second_repositories.workspace_membership
+    second_client = TestClient(second_app)
+    headers = {
+        "X-Aixion-Agent-Id": agent_id,
+        "X-Aixion-Agent-Token": token,
+    }
+    identity = second_client.get(
+        "/agents/identity",
+        params={"provider": "ANTIGRAVITY", "project_id": project.id},
+        headers=headers,
+    )
+    assert identity.status_code == 200, identity.text
+    assert identity.json() == {
+        "agent_id": agent_id,
+        "provider": "ANTIGRAVITY",
+        "workspace_id": workspace.id,
+        "project_id": project.id,
+    }
+
+    with connect() as conn:
+        credential = conn.execute(
+            "SELECT payload FROM external_agent_credentials WHERE agent_id=%s",
+            (agent_id,),
+        ).fetchone()
+        assert credential is not None
+        audit_events = conn.execute(
+            "SELECT event_type FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "ORDER BY created_at,event_id",
+            (workspace.id, agent_id),
+        ).fetchall()
+    assert credential[0]["last_used_at"] is not None
+    assert [row[0] for row in audit_events] == ["agent.registered"]
+    assert set(store.external_agents).isdisjoint({agent_id})
 
 
 def test_postgres_external_gateway_action_is_durable_and_partial_runtime_fails_closed(

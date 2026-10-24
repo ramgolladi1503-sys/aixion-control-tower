@@ -8,8 +8,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.BuildConfig
@@ -25,6 +28,38 @@ import org.junit.Test
 class OneTimeTokenPanelTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun newlyIssuedCredentialIsAnnouncedWithoutReadingTheSecretAloud() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                OneTimeTokenPanel(
+                    token = "one-time-token-example",
+                    provider = "ANTIGRAVITY",
+                    agentName = "Antigravity connector",
+                    agentId = "agent-example",
+                    projectId = "project-example",
+                    apiBaseUrl = "https://api.example.test/",
+                    onCopy = {},
+                    onCopyKeychainCommand = { true },
+                    onCopyHookInstallCommand = { true },
+                    onHide = {}
+                )
+            }
+        }
+
+        val announcement = composeRule.onNodeWithTag("agent-token-created-announcement")
+        announcement.assertExists()
+        assertEquals(
+            LiveRegionMode.Polite,
+            announcement.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+        composeRule.onNodeWithText("one-time-token-example").assertExists()
+        assertFalse(
+            announcement.fetchSemanticsNode().config.getOrNull(SemanticsProperties.ContentDescription)
+                ?.any { it.contains("one-time-token-example") } == true
+        )
+    }
 
     @Test
     fun setupInstructionsUseRealRepositoryRelativeCommandAndNoPlaceholders() {
