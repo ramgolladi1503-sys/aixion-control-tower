@@ -67,6 +67,7 @@ class ApprovalExactToolContextTest {
         header.assertExists()
         path.assertExists()
         exactPayload.assertExists()
+        composeRule.onNodeWithTag("approval-payload-horizontal-scroll-hint").assertDoesNotExist()
         acknowledgement.assertExists()
         context.assertTextContains("Provider: Codex · Project: Mobile app workspace")
 
@@ -129,5 +130,6 @@ class ApprovalExactToolContextTest {
             "Payload scrolling must stay within the compact screen width",
             scrollNode.fetchSemanticsNode().boundsInRoot.width <= 320f
         )
+        composeRule.onNodeWithText("Swipe horizontally to inspect the full line.").assertExists()
     }
 }

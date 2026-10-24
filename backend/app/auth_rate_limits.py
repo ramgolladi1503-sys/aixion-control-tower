@@ -58,6 +58,14 @@ def consume_auth_rate_limit(
     """
     if limit < 1 or window_seconds < 1:
         raise ValueError("Rate-limit bounds must be positive")
+    settings = get_settings()
+    if (
+        settings.postgres_auth_enabled
+        or settings.postgres_auth_rate_limits_enabled
+    ) and postgres_repository is None:
+        raise RuntimeError(
+            "PostgreSQL auth rate-limit repository is required in PostgreSQL mode"
+        )
     now = int(time.time()) if now_epoch is None else int(now_epoch)
     window_start = now - now % window_seconds
     digest = _bucket_hash(bucket, identifier)

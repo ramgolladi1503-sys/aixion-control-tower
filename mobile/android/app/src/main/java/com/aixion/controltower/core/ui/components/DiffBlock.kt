@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -28,6 +29,9 @@ import com.aixion.controltower.core.ui.theme.TowerSpacing
 @Composable
 fun DiffBlock(file: FileChangeSummary, modifier: Modifier = Modifier) {
     val palette = LocalTowerPalette.current
+    val hasHorizontallyScrollablePayload = file.diff
+        .lineSequence()
+        .any(::containsLongUnbrokenPayloadToken)
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
             text = file.path,
@@ -81,6 +85,15 @@ fun DiffBlock(file: FileChangeSummary, modifier: Modifier = Modifier) {
                     }
                 }
             }
+        }
+        if (hasHorizontallyScrollablePayload) {
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+            Text(
+                text = "Swipe horizontally to inspect the full line.",
+                color = palette.inkMuted,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("approval-payload-horizontal-scroll-hint")
+            )
         }
     }
 }

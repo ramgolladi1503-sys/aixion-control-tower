@@ -12,6 +12,7 @@ from psycopg import Connection, sql
 
 from app.main import app
 from app.application_repositories import ApplicationRepositories
+from app.auth_rate_limits import consume_auth_rate_limit
 from app.postgres_auth_rate_limits import PostgresAuthRateLimitRepository
 from app.postgres_database import run_postgres_migrations
 from app.store import store
@@ -100,4 +101,48 @@ def test_login_rate_limit_route_uses_postgres_repository(
     assert second.status_code == 429
     assert 1 <= int(second.headers["Retry-After"]) <= 60
     assert postgres_rows == [(1,)]
+    assert sqlite_rows_after == sqlite_rows_before
+
+
+def test_postgres_rate_limit_utility_fails_closed_without_repository(
+    postgres_rate_limits: tuple[
+        PostgresAuthRateLimitRepository, Callable[[], Connection]
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, connect = postgres_rate_limits
+    monkeypatch.setattr(
+        "app.auth_rate_limits.get_settings",
+        lambda: SimpleNamespace(
+            postgres_auth_enabled=False,
+            postgres_auth_rate_limits_enabled=True,
+        ),
+    )
+    with connect() as connection:
+        postgres_rows_before = connection.execute(
+            "SELECT COUNT(*) FROM auth_rate_limit_buckets"
+        ).fetchone()[0]
+    with store._connect() as connection:
+        sqlite_rows_before = connection.execute(
+            "SELECT COUNT(*) FROM auth_rate_limit_buckets"
+        ).fetchone()[0]
+
+    with pytest.raises(RuntimeError, match="PostgreSQL auth rate-limit repository is required"):
+        consume_auth_rate_limit(
+            bucket="auth.login.ip",
+            identifier="192.0.2.90",
+            limit=4,
+            window_seconds=60,
+            now_epoch=120,
+        )
+
+    with connect() as connection:
+        postgres_rows_after = connection.execute(
+            "SELECT COUNT(*) FROM auth_rate_limit_buckets"
+        ).fetchone()[0]
+    with store._connect() as connection:
+        sqlite_rows_after = connection.execute(
+            "SELECT COUNT(*) FROM auth_rate_limit_buckets"
+        ).fetchone()[0]
+    assert postgres_rows_after == postgres_rows_before
     assert sqlite_rows_after == sqlite_rows_before
