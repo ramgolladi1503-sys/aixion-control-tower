@@ -719,10 +719,12 @@ class ApprovalDetailScreenTest {
     @Test
     fun approvalDecisionContextIsReachableFromSummaryBeforeDecision() {
         val longInvocationId = "antigravity:" + "session-42:tool-19/".repeat(12)
+        val sessionId = "session-codex-42"
         val request = approval(ApprovalStatus.REQUESTED).copy(
             projectName = "Payments service",
             targetBranch = "release/production",
             sourceProvider = "ANTIGRAVITY",
+            sourceSessionId = sessionId,
             sourceInvocationId = longInvocationId,
             verifiedSource = true,
             expiresAt = "2026-10-22T14:30:00Z",
@@ -753,8 +755,14 @@ class ApprovalDetailScreenTest {
             .assertIsDisplayed()
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").performScrollTo()
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").assertIsDisplayed()
+        composeRule.onNodeWithText("Session").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(shortSafeApprovalId(sessionId)).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Invocation").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(shortSafeApprovalId(longInvocationId)).performScrollTo().assertIsDisplayed()
+        composeRule.onAllNodesWithText(sessionId).assertCountEquals(0)
         composeRule.onAllNodesWithText(longInvocationId).assertCountEquals(0)
         composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
+        composeRule.onNodeWithText("Session ID: $sessionId", substring = true).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Source invocation ID: $longInvocationId", substring = true)
             .performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("2026-10-22T14:30:00Z").performScrollTo()
@@ -774,12 +782,53 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
-        composeRule.onAllNodesWithText("Not provided").assertCountEquals(3)
+        composeRule.onAllNodesWithText("Not provided").assertCountEquals(5)
         composeRule.onNodeWithText("ANTIGRAVITY · Source not verified").assertExists()
         composeRule.onNodeWithText("No risk rationale was supplied.").assertExists()
+        composeRule.onNodeWithText("Session").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Invocation").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Expires").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
         composeRule.onNodeWithText("Source invocation ID: Not provided", substring = true).assertExists()
+    }
+
+    @Test
+    fun invocationAndSessionContextStacksAtCompactWidthAndLargeFontScale() {
+        val sessionId = "session-codex-42"
+        val invocationId = "antigravity:session-codex-42:tool-19"
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(320.dp).height(620.dp)) {
+                    ApprovalDetailContent(
+                        approval(ApprovalStatus.REQUESTED).copy(
+                            sourceSessionId = sessionId,
+                            sourceInvocationId = invocationId
+                        ),
+                        null,
+                        {},
+                        {},
+                        {}
+                    )
+                }
+            }
+        }
+
+        val sessionLabel = composeRule.onNodeWithText("Session").performScrollTo()
+        val sessionValue = composeRule.onNodeWithText(shortSafeApprovalId(sessionId)).performScrollTo()
+        val invocationLabel = composeRule.onNodeWithText("Invocation").performScrollTo()
+        val invocationValue = composeRule.onNodeWithText(shortSafeApprovalId(invocationId)).performScrollTo()
+
+        listOf(sessionLabel, sessionValue, invocationLabel, invocationValue).forEach { it.assertIsDisplayed() }
+        assertTrue(
+            "Session value should stack below its label at large font scale",
+            sessionValue.fetchSemanticsNode().boundsInRoot.top > sessionLabel.fetchSemanticsNode().boundsInRoot.bottom
+        )
+        assertTrue(
+            "Invocation value should stack below its label at large font scale",
+            invocationValue.fetchSemanticsNode().boundsInRoot.top > invocationLabel.fetchSemanticsNode().boundsInRoot.bottom
+        )
+        composeRule.onAllNodesWithText(sessionId).assertCountEquals(0)
+        composeRule.onAllNodesWithText(invocationId).assertCountEquals(0)
     }
 
     @Test
