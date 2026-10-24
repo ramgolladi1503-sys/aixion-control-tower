@@ -5,14 +5,17 @@ from datetime import datetime
 
 from psycopg import Connection
 
+from .agent_task_models import AgentTask, AgentTaskStatus
 from .agent_run_models import (
     AgentRunEvent,
     AgentRunEventType,
     AgentRunStatus,
     AgentRunStepStatus,
+    VerificationDecision,
 )
 from .agent_run_state_machine import transition_run, transition_step
-from .models import AuthUser, UserRole
+from .approval_integrity import compute_approval_payload_hash
+from .models import ApprovalRequest, ApprovalStatus, AuthUser, UserRole
 from .store import store
 from .trust_action_authorization_models import (
     ActionAuthorization,
@@ -25,6 +28,8 @@ from .postgres_trust_repository import PostgresTrustRepository
 from .trust_decisions import latest_policy_decision
 from .trust_flight_recorder import append_trust_event
 from .trust_models import PolicyDecision, PolicyDecisionType, ProposedAction, TrustEventType
+from .trust_models import CapabilityActionType, CapabilityLeaseStatus
+from .trust_policy import lease_receipt_payload
 from .workspace_access import (
     action_authorization_scope_is_consistent,
     agent_run_scope_is_consistent,
@@ -448,6 +453,253 @@ def record_action_authorization_postgres(
             return authorization
 
 
+def _validate_postgres_branch_allow_authority(
+    conn: Connection,
+    action: ProposedAction,
+) -> None:
+    """Revalidate current approved task, payload, agent, and lease before resume."""
+    if not action.workspace_id or not action.task_id or not action.lease_id:
+        raise ActionAuthorizationConflict("CREATE_BRANCH authority is missing durable scope")
+    task_row = conn.execute(
+        "SELECT task_id,project_id,workspace_id,approval_request_id,status,payload "
+        "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR SHARE",
+        (action.task_id, action.workspace_id),
+    ).fetchone()
+    if task_row is None:
+        raise ActionAuthorizationConflict("CREATE_BRANCH task authority is not visible")
+    approval_id = str(action.metadata.get("approval_id") or "")
+    approval_row = conn.execute(
+        "SELECT approval_id,project_id,workspace_id,status,payload "
+        "FROM approval_requests WHERE approval_id=%s AND workspace_id=%s FOR SHARE",
+        (approval_id, action.workspace_id),
+    ).fetchone()
+    if approval_row is None:
+        raise ActionAuthorizationConflict("CREATE_BRANCH approval authority is not visible")
+    task = AgentTask.model_validate(task_row[5])
+    approval = ApprovalRequest.model_validate(approval_row[4])
+    checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+    lease = PostgresTrustRepository().get_capability_lease(
+        conn, action.lease_id, action.workspace_id, for_update=True
+    )
+    if (
+        task.id != task_row[0]
+        or task.project_id != task_row[1]
+        or task.workspace_id != task_row[2]
+        or task.approval_request_id != task_row[3]
+        or task.status.value != task_row[4]
+        or task.status != AgentTaskStatus.APPROVED
+        or approval.id != approval_row[0]
+        or approval.project_id != approval_row[1]
+        or approval.workspace_id != approval_row[2]
+        or approval.status.value != approval_row[3]
+        or approval.status != ApprovalStatus.APPROVED
+        or approval.workspace_id != action.workspace_id
+        or approval.project_id != task.project_id
+        or task.approval_request_id != approval.id
+        or not approval.approved_payload_hash
+        or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+        or task.project_id != action.project_id
+        or task.repository != action.repository
+        or task.branch_preference != action.branch
+        or task.provider != action.provider
+        or task.external_agent_id != action.agent_id
+        or action.metadata.get("approved_payload_hash") != approval.approved_payload_hash
+        or lease is None
+        or lease.status != CapabilityLeaseStatus.ACTIVE
+        or lease.expires_at <= checked_at
+        or lease.workspace_id != action.workspace_id
+        or lease.approval_request_id != approval.id
+        or lease.approved_payload_hash != approval.approved_payload_hash
+        or lease.provider != task.provider
+        or lease.agent_id != task.external_agent_id
+        or lease.scope.repository != task.repository
+        or lease.scope.branch != task.branch_preference
+        or CapabilityActionType.CREATE_BRANCH not in lease.scope.allowed_actions
+        or not verify_payload_signature(lease_receipt_payload(lease), lease.receipt_signature)
+    ):
+        raise ActionAuthorizationConflict(
+            "CREATE_BRANCH reviewer allow no longer matches the approved task and signed lease."
+        )
+
+
+def _transition_postgres_branch_run_for_authorization(
+    conn: Connection,
+    *,
+    action: ProposedAction,
+    authorization: ActionAuthorization,
+    decision: ActionAuthorizationDecision,
+    actor: str,
+    now: datetime,
+) -> None:
+    """Commit reviewer outcome and same-step run state in the caller transaction."""
+    from .agent_run_repository import PostgresAgentRunRepository
+
+    if not action.workspace_id or not action.run_id:
+        raise ActionAuthorizationConflict("CREATE_BRANCH authorization is missing durable scope")
+    repository = PostgresAgentRunRepository(lambda: conn)
+    run, steps = repository.get_control_snapshot_in_transaction(
+        conn, run_id=action.run_id, workspace_id=action.workspace_id
+    )
+    step_id = str(action.metadata.get("step_id") or "")
+    step = next((item for item in steps if item.id == step_id), None)
+    pending = step.evidence.get("pending_action") if step is not None else None
+    if (
+        step is None
+        or step.step_type.value != "CREATE_BRANCH"
+        or step.idempotency_key != action.metadata.get("idempotency_key")
+        or run.task_id != action.task_id
+        or run.project_id != action.project_id
+        or run.capability_lease_id != action.lease_id
+        or not isinstance(pending, dict)
+        or pending.get("action_id") != action.id
+        or pending.get("payload_sha256") != action_payload_hash(action)
+    ):
+        raise ActionAuthorizationConflict(
+            "CREATE_BRANCH reviewer decision no longer matches the pending run step"
+        )
+
+    is_allow = decision == ActionAuthorizationDecision.ALLOW
+    target_run_status = AgentRunStatus.SCHEDULED if is_allow else AgentRunStatus.BLOCKED
+    target_step_status = AgentRunStepStatus.READY if is_allow else AgentRunStepStatus.BLOCKED
+    prior_review = step.evidence.get("reviewer_decision")
+    if (
+        run.current_step_id == step.id
+        and run.status == target_run_status
+        and step.status == target_step_status
+        and isinstance(prior_review, dict)
+        and prior_review.get("authorization_id") == authorization.id
+        and prior_review.get("action_id") == action.id
+        and prior_review.get("action_payload_sha256") == authorization.action_payload_hash
+        and prior_review.get("decision") == decision.value
+        and prior_review.get("reviewer_user_id") == authorization.reviewer_user_id
+        and prior_review.get("reviewer_role") == authorization.reviewer_role.value
+        and prior_review.get("signature_verified") is True
+    ):
+        return
+    if (
+        run.current_step_id != step.id
+        or run.status != AgentRunStatus.NEEDS_HUMAN
+        or step.status != AgentRunStepStatus.NEEDS_HUMAN
+        or run.lease_token is not None
+        or step.lease_token is not None
+    ):
+        raise ActionAuthorizationConflict(
+            "CREATE_BRANCH reviewer decision conflicts with the durable run state"
+        )
+
+    expected_run = run.model_copy(deep=True)
+    expected_steps = [item.model_copy(deep=True) for item in steps]
+
+    if is_allow:
+        _validate_postgres_branch_allow_authority(conn, action)
+    reason = (
+        "Exact CREATE_BRANCH action allowed by a signed reviewer decision."
+        if is_allow
+        else "Exact CREATE_BRANCH action denied by a signed reviewer decision."
+    )
+    previous_run = run.status
+    previous_step = step.status
+    transition_run(run, target_run_status, reason=reason)
+    transition_step(step, target_step_status, reason=reason)
+    run.lease_owner = None
+    run.lease_token = None
+    run.lease_expires_at = None
+    run.heartbeat_at = None
+    step.lease_owner = None
+    step.lease_token = None
+    step.lease_expires_at = None
+    step.heartbeat_at = None
+    step.decision = None if is_allow else VerificationDecision.BLOCK_POLICY
+    step.reason = reason
+    step.evidence = {
+        **step.evidence,
+        "reviewer_decision": {
+            "authorization_id": authorization.id,
+            "action_id": action.id,
+            "action_payload_sha256": authorization.action_payload_hash,
+            "decision": decision.value,
+            "reviewer_user_id": authorization.reviewer_user_id,
+            "reviewer_role": authorization.reviewer_role.value,
+            "signature_verified": True,
+        },
+    }
+    run_event = AgentRunEvent(
+        run_id=run.id,
+        task_id=run.task_id,
+        step_id=step.id,
+        correlation_id=run.correlation_id,
+        event_type=AgentRunEventType.RUN_STATE_CHANGED,
+        previous_status=previous_run.value,
+        new_status=run.status.value,
+        message=reason,
+        reason=reason,
+        actor=actor,
+        attempt_number=step.attempt_count,
+        metadata={
+            "action_id": action.id,
+            "authorization_id": authorization.id,
+            "action_payload_sha256": authorization.action_payload_hash,
+            "decision": decision.value,
+            "step_id": step.id,
+            "step_previous_status": previous_step.value,
+            "step_new_status": step.status.value,
+            "idempotency_key": step.idempotency_key,
+        },
+        created_at=now,
+    )
+    step_event = AgentRunEvent(
+        run_id=run.id,
+        task_id=run.task_id,
+        step_id=step.id,
+        correlation_id=run.correlation_id,
+        event_type=(
+            AgentRunEventType.STEP_READY
+            if is_allow
+            else AgentRunEventType.STEP_BLOCKED
+        ),
+        previous_status=previous_step.value,
+        new_status=step.status.value,
+        message=reason,
+        reason=reason,
+        actor=actor,
+        attempt_number=step.attempt_count,
+        metadata={
+            "action_id": action.id,
+            "authorization_id": authorization.id,
+            "decision": decision.value,
+            "idempotency_key": step.idempotency_key,
+        },
+        created_at=now,
+    )
+    from .models import AuditEvent
+
+    audit = AuditEvent(
+        event_type="agent_run.branch_action_authorized" if is_allow else "agent_run.branch_action_denied",
+        entity_id=run.id,
+        workspace_id=run.workspace_id,
+        actor=actor,
+        details={
+            "action_id": action.id,
+            "authorization_id": authorization.id,
+            "action_payload_sha256": authorization.action_payload_hash,
+            "decision": decision.value,
+            "step_id": step.id,
+            "idempotency_key": step.idempotency_key,
+        },
+        created_at=now,
+    )
+    updated_steps = [step if item.id == step.id else item for item in steps]
+    repository.commit_control_transition_in_transaction(
+        conn,
+        expected_run=expected_run,
+        updated_run=run,
+        expected_steps=expected_steps,
+        updated_steps=updated_steps,
+        events=[run_event, step_event],
+        audits=[audit],
+    )
+
+
 def record_agent_run_action_authorization_postgres(
     action_id: str,
     payload: ActionAuthorizationCreate,
@@ -461,11 +713,10 @@ def record_agent_run_action_authorization_postgres(
     trust_event_repository: PostgresTrustEventRepository,
     now: datetime,
 ) -> ActionAuthorization:
-    """Record a reviewer decision for one exact run-linked action.
+    """Record a signed reviewer decision for one exact run-linked action.
 
-    This persists trust state only. It intentionally does not update the run or
-    make a worker executable; the production AgentRun route remains fail-closed
-    until those writes can share one durable execution transaction.
+    CREATE_BRANCH trust writes and its same-run pending/ready/blocked transition
+    share this transaction. Other action types retain their existing behavior.
     The authenticated route must first verify reviewer workspace membership.
     """
     if not workspace_id or not expected_run_id or not expected_step_id:
@@ -491,6 +742,19 @@ def record_agent_run_action_authorization_postgres(
                 raise ActionAuthorizationConflict(
                     "Proposed action is not bound to the requested AgentRun step."
                 )
+
+            branch_action = (
+                action.action_type == CapabilityActionType.CREATE_BRANCH
+                and action.metadata.get("step_type") == "CREATE_BRANCH"
+            )
+            if branch_action:
+                from .postgres_agent_run_branch import postgres_branch_trust_enabled
+
+                if not postgres_branch_trust_enabled():
+                    raise ActionAuthorizationConflict(
+                        "PostgreSQL CREATE_BRANCH reviewer flow is disabled by the default-off "
+                        "AIXION_POSTGRES_CREATE_BRANCH_TRUST_ENABLED gate."
+                    )
 
             current = trust_repository.get_latest_policy_decision_for_action(
                 conn, action_id, workspace_id, for_update=True
@@ -529,6 +793,15 @@ def record_agent_run_action_authorization_postgres(
                 ):
                     raise ActionAuthorizationConflict(
                         "Existing run action authorization does not match this exact reviewer decision."
+                    )
+                if branch_action:
+                    _transition_postgres_branch_run_for_authorization(
+                        conn,
+                        action=action,
+                        authorization=existing,
+                        decision=existing.decision,
+                        actor=user.email,
+                        now=now,
                     )
                 return existing
 
@@ -607,4 +880,13 @@ def record_agent_run_action_authorization_postgres(
                     "step_id": expected_step_id,
                 },
             )
+            if branch_action:
+                _transition_postgres_branch_run_for_authorization(
+                    conn,
+                    action=action,
+                    authorization=authorization,
+                    decision=payload.decision,
+                    actor=user.email,
+                    now=now,
+                )
             return authorization

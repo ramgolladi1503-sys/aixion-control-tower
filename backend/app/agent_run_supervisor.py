@@ -2444,6 +2444,37 @@ def execute_next_step(
                 evidence={"operation_type": "github_branch_creation", "reconciliation_required": True},
             )
         else:
+            if branch_result.state == BranchExecutionState.REQUIRES_APPROVAL:
+                committed_run = active_run_repository.get(run.id)
+                committed_steps = active_run_repository.list_steps_for_run(run.id)
+                committed_events = active_run_repository.list_events_for_run(run.id)
+                pending_step = next(
+                    (item for item in committed_steps if item.id == step.id), None
+                )
+                if (
+                    committed_run is None
+                    or committed_run.status != AgentRunStatus.NEEDS_HUMAN
+                    or pending_step is None
+                    or pending_step.status != AgentRunStepStatus.NEEDS_HUMAN
+                    or pending_step.evidence.get("pending_action", {}).get("action_id")
+                    != branch_result.action_id
+                ):
+                    raise AgentRunConflict(
+                        "Committed CREATE_BRANCH reviewer gate does not match its exact action."
+                    )
+                store.project_agent_run_snapshot(
+                    committed_run, committed_steps, committed_events
+                )
+                return AgentRunStepExecutionResult(
+                    success=False,
+                    decision=VerificationDecision.NEEDS_HUMAN,
+                    reason=branch_result.reason,
+                    evidence={
+                        "operation_type": "github_branch_creation",
+                        "action_id": branch_result.action_id,
+                        "requires_exact_reviewer_decision": True,
+                    },
+                )
             if branch_result.state == BranchExecutionState.COMPLETED:
                 committed_run = active_run_repository.get(run.id)
                 committed_steps = active_run_repository.list_steps_for_run(run.id)

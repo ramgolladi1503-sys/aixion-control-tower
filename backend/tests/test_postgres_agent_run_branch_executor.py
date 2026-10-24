@@ -17,6 +17,7 @@ from app.agent_task_models import AgentTaskEventType
 from app.agent_worker_github_branch import GitHubBranchObservation
 from app.models import AgentProvider, AuditEvent, RiskLevel
 from app.postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus
+from app.postgres_agent_run_branch import postgres_branch_trust_enabled
 from app.postgres_agent_run_branch_route import (
     postgres_branch_enabled,
     postgres_branch_execution_dependencies,
@@ -60,6 +61,15 @@ def test_postgres_create_branch_rollout_gate_is_default_off_and_checked_before_b
     assert postgres_branch_enabled() is True
 
 
+def test_postgres_create_branch_trust_rollout_gate_is_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AIXION_POSTGRES_CREATE_BRANCH_TRUST_ENABLED", raising=False)
+    assert postgres_branch_trust_enabled() is False
+    monkeypatch.setenv("AIXION_POSTGRES_CREATE_BRANCH_TRUST_ENABLED", "true")
+    assert postgres_branch_trust_enabled() is True
+
+
 class FakeProvider:
     def __init__(self, source=None, target=None, post_error=None):
         self.log = []
@@ -82,10 +92,12 @@ class FakeProvider:
 
 
 class FakeIntentRepository:
-    def __init__(self, log, *, existing=None, allow=True):
+    def __init__(self, log, *, existing=None, allow=True, requires_approval=False, pending_action=None):
         self.log = log
         self.intent = existing
         self.allow = allow
+        self.requires_approval = requires_approval
+        self.pending_action = pending_action
 
     def get_for_step(self, **kwargs):
         self.log.append(("load-intent",))
@@ -96,10 +108,20 @@ class FakeIntentRepository:
         decision = PolicyDecision(
             proposed_action_id=kwargs["action"].id,
             lease_id=kwargs["action"].lease_id,
-            decision=PolicyDecisionType.ALLOW if self.allow else PolicyDecisionType.BLOCK,
+            decision=(
+                PolicyDecisionType.REQUIRE_APPROVAL
+                if self.requires_approval
+                else PolicyDecisionType.ALLOW if self.allow else PolicyDecisionType.BLOCK
+            ),
             risk_level=RiskLevel.MEDIUM,
         )
+        if self.pending_action is None:
+            self.pending_action = kwargs["action"]
         return decision, SimpleNamespace(id=kwargs["action"].lease_id)
+
+    def get_unconsumed_action_for_step(self, **kwargs):
+        self.log.append(("load-action",))
+        return self.pending_action
 
     def begin_intent(self, *, record, **kwargs):
         self.log.append(("begin", record.source_sha))
@@ -151,11 +173,17 @@ def absent(branch):
     return GitHubBranchObservation("acme/example", branch, False)
 
 
-def setup(*, source=None, target=None, existing=None, allow=True, post_error=None, revoked_lease=False):
+def setup(
+    *, source=None, target=None, existing=None, allow=True, requires_approval=False,
+    human_approval_enabled=False, pending_action=None, post_error=None, revoked_lease=False,
+):
     log = []
     provider = FakeProvider(source=source, target=target, post_error=post_error)
     provider.log = log
-    intent_repo = FakeIntentRepository(log, existing=existing, allow=allow)
+    intent_repo = FakeIntentRepository(
+        log, existing=existing, allow=allow,
+        requires_approval=requires_approval, pending_action=pending_action,
+    )
     run_repo = FakeRunRepository(log)
     run = AgentRun(
         id="run-1", task_id="task-1", workspace_id="ws-1", approval_request_id="approval-1",
@@ -173,7 +201,9 @@ def setup(*, source=None, target=None, existing=None, allow=True, post_error=Non
         id="task-1", workspace_id="ws-1", provider=AgentProvider.OTHER,
         external_agent_id=None, project_id="project-1", approval_request_id="approval-1",
     )
-    approval = SimpleNamespace(id="approval-1", workspace_id="ws-1")
+    approval = SimpleNamespace(
+        id="approval-1", workspace_id="ws-1", approved_payload_hash="a" * 64
+    )
     lease = SimpleNamespace(
         id="lease-1",
         status="REVOKED" if revoked_lease else "ACTIVE",
@@ -188,8 +218,9 @@ def setup(*, source=None, target=None, existing=None, allow=True, post_error=Non
             repository="acme/example", branch="feature/test",
             metadata={"source_sha": source_sha, "source_branch": "main",
                       "target_ref": "feature/test", "step_id": "step-1",
-                      "idempotency_key": "idem-1", "task_id": "task-1",
+                      "step_type": "CREATE_BRANCH", "idempotency_key": "idem-1", "task_id": "task-1",
                       "approval_id": "approval-1", "lease_id": "lease-1",
+                      "approved_payload_hash": "a" * 64,
                       "repository": "acme/example"},
         )
 
@@ -245,6 +276,7 @@ def setup(*, source=None, target=None, existing=None, allow=True, post_error=Non
     coordinator = PostgresCreateBranchCoordinator(
         intent_repository=intent_repo, run_repository=run_repo,
         provider=provider, clock=lambda: NOW,
+        human_approval_enabled=human_approval_enabled,
     )
     return coordinator, request, provider, intent_repo, run_repo, log
 
@@ -259,7 +291,7 @@ def test_create_sequence_pins_source_then_claims_then_posts_then_gets_and_commit
     assert result.state == BranchExecutionState.COMPLETED
     assert provider.post_count == 1
     assert [entry[0] for entry in log] == [
-        "load-intent", "get", "evaluate", "begin", "rebind-intent", "get", "get", "claim",
+        "load-intent", "load-action", "get", "evaluate", "begin", "rebind-intent", "get", "get", "claim",
         "post", "get", "record", "commit",
     ]
     assert run_repo.completion["branch_intent_id"] == "intent-1"
@@ -295,6 +327,66 @@ def test_blocked_policy_never_begins_intent_or_posts():
     assert result.state == BranchExecutionState.BLOCKED
     assert provider.post_count == 0
     assert "begin" not in [entry[0] for entry in log]
+
+
+def test_create_branch_require_approval_persists_exact_action_without_claim_or_post():
+    coordinator, request, provider, intent_repo, run_repo, log = setup(
+        source=[found("main")], requires_approval=True, human_approval_enabled=True
+    )
+
+    result = coordinator.execute(request)
+
+    assert result.state == BranchExecutionState.REQUIRES_APPROVAL
+    assert result.intent is None
+    assert result.action_id == "action-1"
+    assert intent_repo.intent is None
+    assert provider.post_count == 0
+    assert run_repo.completion is None
+    assert "claim" not in [entry[0] for entry in log]
+    assert "begin" not in [entry[0] for entry in log]
+
+
+def test_create_branch_require_approval_fails_closed_when_trust_gate_is_off():
+    coordinator, request, provider, intent_repo, run_repo, log = setup(
+        source=[found("main")], requires_approval=True, human_approval_enabled=False
+    )
+
+    result = coordinator.execute(request)
+
+    assert result.state == BranchExecutionState.BLOCKED
+    assert "AIXION_POSTGRES_CREATE_BRANCH_TRUST_ENABLED" in result.reason
+    assert intent_repo.intent is None
+    assert provider.post_count == 0
+    assert run_repo.completion is None
+    assert "claim" not in [entry[0] for entry in log]
+    assert "begin" not in [entry[0] for entry in log]
+
+
+def test_create_branch_after_review_reuses_the_same_pinned_action_and_source_sha():
+    pending_action = ProposedAction(
+        id="action-1", action_type=CapabilityActionType.CREATE_BRANCH,
+        workspace_id="ws-1", run_id="run-1", task_id="task-1", lease_id="lease-1",
+        project_id="project-1", repository="acme/example", branch="feature/test",
+        metadata={
+            "source_sha": SHA, "source_branch": "main", "target_ref": "feature/test",
+            "step_id": "step-1", "step_type": "CREATE_BRANCH", "idempotency_key": "idem-1",
+            "task_id": "task-1", "approval_id": "approval-1", "lease_id": "lease-1",
+            "approved_payload_hash": "a" * 64, "repository": "acme/example",
+        },
+    )
+    coordinator, request, provider, _intent_repo, run_repo, log = setup(
+        source=[found("main"), found("main")],
+        target=[absent("feature/test"), found("feature/test")],
+        pending_action=pending_action,
+    )
+
+    result = coordinator.execute(request)
+
+    assert result.state == BranchExecutionState.COMPLETED
+    assert result.intent is not None and result.intent.action_id == pending_action.id
+    assert provider.post_count == 1
+    assert ("post", "feature/test", SHA) in log
+    assert run_repo.completion["branch_intent_id"] == "intent-1"
 
 
 def test_existing_unclaimed_intent_still_requires_current_allow_decision():

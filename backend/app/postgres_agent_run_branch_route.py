@@ -13,7 +13,11 @@ from .application_repository_access import application_repositories_for_request
 from .application_repositories import ApplicationRepositories
 from .approval_repository import PostgresApprovalDecisionRepository
 from .models import now_utc
-from .postgres_agent_run_branch import AgentRunBranchIntent, PostgresAgentRunBranchIntentRepository
+from .postgres_agent_run_branch import (
+    AgentRunBranchIntent,
+    PostgresAgentRunBranchIntentRepository,
+    postgres_branch_trust_enabled,
+)
 from .postgres_agent_run_branch_executor import BranchExecutionRequest, PostgresCreateBranchCoordinator
 from .postgres_runtime import PostgresRuntime
 from .trust_crypto import sha256_hex
@@ -111,6 +115,7 @@ def postgres_branch_execution_dependencies(
         run_repository=repositories.agent_runs,
         provider=provider,
         clock=now_utc,
+        human_approval_enabled=postgres_branch_trust_enabled(),
     )
 
     def request_factory(current_run, current_step, worker_lease_token: str, timeout_seconds: int):
@@ -131,6 +136,7 @@ def postgres_branch_execution_dependencies(
                     "step_type": current_step.step_type.value,
                     "idempotency_key": step.idempotency_key, "task_id": task.id,
                     "approval_id": approval.id, "lease_id": lease.id,
+                    "approved_payload_hash": approval.approved_payload_hash,
                     "repository": repository,
                 },
             )

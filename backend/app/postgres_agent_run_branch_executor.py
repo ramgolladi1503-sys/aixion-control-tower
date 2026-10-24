@@ -30,6 +30,7 @@ from .trust_crypto import sha256_hex
 
 class BranchExecutionState(StrEnum):
     BLOCKED = "BLOCKED"
+    REQUIRES_APPROVAL = "REQUIRES_APPROVAL"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     VERIFIED = "VERIFIED"
     COMPLETED = "COMPLETED"
@@ -57,6 +58,7 @@ class BranchExecutionResult:
     reason: str
     verified_sha: str | None = None
     branch_url: str | None = None
+    action_id: str | None = None
 
 
 class BranchProvider(Protocol):
@@ -100,11 +102,13 @@ class PostgresCreateBranchCoordinator:
         run_repository: AgentRunRepository,
         provider: BranchProvider,
         clock: Callable[[], datetime],
+        human_approval_enabled: bool = False,
     ) -> None:
         self._intents = intent_repository
         self._runs = run_repository
         self._provider = provider
         self._clock = clock
+        self._human_approval_enabled = human_approval_enabled
 
     def execute(self, request: BranchExecutionRequest) -> BranchExecutionResult:
         self._validate_request(request)
@@ -143,16 +147,35 @@ class PostgresCreateBranchCoordinator:
                     "Recovery action identity differs from the durable claimed intent"
                 )
         else:
-            # For a new or unclaimed intent, obtain the pinned SHA before
-            # evaluation. An existing INTENT must still match its persisted pin.
-            source = self._observe(request.repository, request.source_branch)
-            if source is None or not source.found or not self._valid_sha(source.sha):
-                return self._blocked(intent, "Pinned source ref could not be observed safely.")
-            pinned_sha = source.sha
-            if intent is not None and pinned_sha != intent.source_sha:
-                return self._blocked(intent, "Unclaimed intent source ref no longer matches its pinned SHA.")
-
-            action = request.action_factory(pinned_sha)
+            # A pending human action itself pins the source SHA. Reuse it after
+            # reviewer allow; never mint a new invocation from a moving ref.
+            pending_action = None
+            find_existing = getattr(self._intents, "get_unconsumed_action_for_step", None)
+            if callable(find_existing):
+                pending_action = find_existing(
+                    workspace_id=request.workspace_id,
+                    run_id=request.expected_run.id,
+                    step_id=request.expected_step.id,
+                    idempotency_key=request.expected_step.idempotency_key,
+                )
+            if pending_action is not None:
+                pinned_sha = pending_action.metadata.get("source_sha")
+                if not self._valid_sha(pinned_sha):
+                    raise PostgresTrustRepositoryConflict(
+                        "Persisted CREATE_BRANCH action has an invalid pinned source SHA"
+                    )
+                # The persisted immutable action is authoritative. Rebuilding
+                # an equivalent ProposedAction would create a fresh timestamp
+                # (and can accidentally mint a different invocation identity).
+                action = pending_action
+            else:
+                source = self._observe(request.repository, request.source_branch)
+                if source is None or not source.found or not self._valid_sha(source.sha):
+                    return self._blocked(intent, "Pinned source ref could not be observed safely.")
+                pinned_sha = source.sha
+                if intent is not None and pinned_sha != intent.source_sha:
+                    return self._blocked(intent, "Unclaimed intent source ref no longer matches its pinned SHA.")
+                action = request.action_factory(pinned_sha)
             self._validate_action(request, action, pinned_sha)
             if intent is not None and action.id != intent.action_id:
                 raise PostgresTrustRepositoryConflict(
@@ -165,7 +188,30 @@ class PostgresCreateBranchCoordinator:
                 step_id=request.expected_step.id,
                 actor=request.actor,
                 now=self._clock(),
+                expected_run=request.expected_run,
+                expected_step=request.expected_step,
+                persist_human_gate=self._human_approval_enabled,
             )
+            if (
+                decision is not None
+                and evaluated_lease is not None
+                and evaluated_lease.id == action.lease_id
+                and decision.decision.value == "REQUIRE_APPROVAL"
+                and decision.proposed_action_id == action.id
+                and decision.lease_id == action.lease_id
+            ):
+                if not self._human_approval_enabled:
+                    return self._blocked(
+                        intent,
+                        "CREATE_BRANCH requires human authorization, but the default-off "
+                        "AIXION_POSTGRES_CREATE_BRANCH_TRUST_ENABLED gate is disabled.",
+                    )
+                return BranchExecutionResult(
+                    BranchExecutionState.REQUIRES_APPROVAL,
+                    None,
+                    "Exact CREATE_BRANCH action is pending reviewer authorization.",
+                    action_id=action.id,
+                )
             if (
                 decision is None
                 or evaluated_lease.id != action.lease_id
@@ -396,9 +442,12 @@ class PostgresCreateBranchCoordinator:
             or action.metadata.get("source_branch") != request.source_branch
             or action.metadata.get("target_ref") != request.target_ref
             or action.metadata.get("step_id") != request.expected_step.id
+            or action.metadata.get("step_type") != "CREATE_BRANCH"
             or action.metadata.get("idempotency_key") != request.expected_step.idempotency_key
             or action.metadata.get("task_id") != request.task.id
             or action.metadata.get("approval_id") != request.approval.id
+            or action.metadata.get("approved_payload_hash")
+            != request.approval.approved_payload_hash
             or action.metadata.get("lease_id") != request.lease.id
             or action.metadata.get("repository") != request.repository
         ):

@@ -878,9 +878,13 @@ class PostgresTrustRepository:
         ):
             raise PostgresTrustRepositoryConflict("Run branch action scope is incomplete")
 
-        # Match governed-task mutations: approval -> task -> run -> step ->
-        # action/policy -> capability lease. All CREATE_BRANCH writers use
-        # this ordering to avoid cross-step/approval deadlocks.
+        # Evaluation takes approval/task SHARE locks before locking the run,
+        # step, action, and policy decision, then locks the capability lease.
+        # Reviewer recording has a different prefix (run -> step -> action /
+        # policy, then task/approval SHARE -> lease). These parent locks are
+        # SHARE-compatible, and that reviewer path only re-reads its already
+        # locked run/step rows during the final transition; do not treat this
+        # as one global order or move locks without a demonstrated cycle.
         approval_id = str(action.metadata.get("approval_id", ""))
         approval_row = conn.execute(
             "SELECT approval_id,project_id,workspace_id,status,payload "
@@ -971,6 +975,7 @@ class PostgresTrustRepository:
             or step.idempotency_key != action.metadata.get("idempotency_key")
             or action.metadata.get("task_id") != run.task_id
             or action.metadata.get("approval_id") != run.approval_request_id
+            or action.metadata.get("approved_payload_hash") != approval.approved_payload_hash
             or action.metadata.get("lease_id") != run.capability_lease_id
             or action.metadata.get("repository") != action.repository
             or (
@@ -985,9 +990,14 @@ class PostgresTrustRepository:
         ):
             raise PostgresTrustRepositoryConflict("Run branch step identity or state is invalid")
 
-        # Global mutation lock order for this flow is run -> step -> action ->
-        # policy decision -> task/approval -> capability lease. Consumption uses
-        # the same action/policy-before-lease order.
+        # This evaluator already holds approval/task SHARE, then run/step;
+        # action and policy rows follow, with the capability lease last. The
+        # reviewer route locks run/step/action/policy first, then obtains only
+        # SHARE locks for task/approval and updates the lease. Those authority
+        # SHARE locks are compatible, and the reviewer transition reuses its
+        # already-held run/step locks. These are per-path orders, not a single
+        # global order. Consumption follows the action/policy-before-lease
+        # order after its run binding has been validated.
         existing = self.get_proposed_action(conn, action.id, workspace_id, for_update=True)
         if existing is not None and existing.model_dump(mode="json") != action.model_dump(mode="json"):
             raise PostgresTrustRepositoryConflict("Run branch action id is bound to other content")

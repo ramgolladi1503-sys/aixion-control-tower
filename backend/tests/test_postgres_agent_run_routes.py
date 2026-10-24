@@ -43,6 +43,7 @@ from app.auth import require_maintainer, require_owner, require_reviewer
 from app.models import (
     ApprovalRequest,
     ApprovalStatus,
+    AgentProvider,
     AuthUser,
     FileChange,
     Project,
@@ -3434,6 +3435,7 @@ def _create_run_with_postgres_capability_lease(
     lease_branch: str = "feature/approved-branch",
     lease_max_retries: int = 3,
     lease_actions: list[CapabilityActionType] | None = None,
+    lease_mode: CapabilityLeaseMode = CapabilityLeaseMode.BOUNDED,
     allowed_path_prefixes: list[str] | None = None,
     allowed_commands: list[str] | None = None,
 ) -> tuple[str, CapabilityLease]:
@@ -3464,7 +3466,7 @@ def _create_run_with_postgres_capability_lease(
         workspace_id=workspace.id,
         approved_payload_hash=approved_payload_hash or approval.approved_payload_hash,
         provider=task.provider,
-        mode=CapabilityLeaseMode.BOUNDED,
+        mode=lease_mode,
         scope=CapabilityScope(
             repository="owner/approved-repository",
             branch=lease_branch,
@@ -3810,9 +3812,22 @@ def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_b
         ).fetchone() == effects_before
 
 
+@pytest.mark.parametrize(
+    ("lease_mode", "human_decision"),
+    [
+        (CapabilityLeaseMode.BOUNDED, None),
+        (CapabilityLeaseMode.STRICT, "ALLOW"),
+        (CapabilityLeaseMode.STRICT, "BLOCK"),
+        (CapabilityLeaseMode.STRICT, "ALLOW_TASK_CHANGED"),
+        (CapabilityLeaseMode.STRICT, "ALLOW_APPROVAL_CHANGED"),
+        (CapabilityLeaseMode.STRICT, "ALLOW_LEGACY_REPAIR"),
+    ],
+)
 def test_postgres_create_branch_route_commits_verified_branch_and_task_records_atomically(
     postgres_agent_run_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
+    lease_mode: CapabilityLeaseMode,
+    human_decision: str | None,
 ) -> None:
     """The HTTP route uses one lifespan-owned PostgreSQL bundle end to end."""
     from app.agent_run_models import AgentRunStatus
@@ -3820,8 +3835,13 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     from app.postgres_agent_run_branch import BranchIntentStatus
     from app.postgres_agent_run_branch_executor import PostgresCreateBranchCoordinator
     from app.postgres_runtime import PostgresRuntime
+    from app.trust_action_authorization import verify_action_authorization_payload
 
     monkeypatch.setenv("AIXION_POSTGRES_CREATE_BRANCH_ENABLED", "true")
+    monkeypatch.setenv(
+        "AIXION_POSTGRES_CREATE_BRANCH_TRUST_ENABLED",
+        "true" if human_decision is not None else "false",
+    )
 
     connect, workspace, _project, _other_workspace, _other_project, state = (
         postgres_agent_run_route_runtime
@@ -3852,6 +3872,7 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
         task_id=task_id,
         state=state,
         client=client,
+        lease_mode=lease_mode,
     )
     attached = client.post(
         f"/agent/runs/{run_id}/capability-lease",
@@ -3917,11 +3938,14 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
         main.app.state, "postgres_repositories", runtime_repositories, raising=False
     )
     for state_name, repository_name in {
+        "project_repository": "projects",
         "agent_run_repository": "agent_runs",
         "agent_task_repository": "agent_tasks",
         "approval_decision_repository": "approval_decisions",
+        "workspace_membership_repository": "workspace_membership",
         "trust_repository": "trust",
         "trust_event_repository": "trust_events",
+        "external_agent_auth_repository": "external_agent_auth",
         "agent_run_branch_intent_repository": "agent_run_branch_intents",
     }.items():
         monkeypatch.setattr(
@@ -3993,6 +4017,248 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     )
 
     assert executed.status_code == 200, f"{executed.text}; branch_errors={branch_errors!r}"
+    reviewed_action_id = None
+    if lease_mode == CapabilityLeaseMode.STRICT:
+        pending_body = executed.json()
+        assert pending_body["run"]["status"] == AgentRunStatus.NEEDS_HUMAN.value
+        pending_step = next(
+            item for item in pending_body["steps"] if item["id"] == branch_step.id
+        )
+        assert pending_step["status"] == AgentRunStepStatus.NEEDS_HUMAN.value
+        assert "pending_action" in pending_step["evidence"], (
+            f"{pending_step!r}; branch_errors={branch_errors!r}"
+        )
+        reviewed_action_id = pending_step["evidence"]["pending_action"]["action_id"]
+        assert provider.post_calls == []
+        assert runtime_repositories.agent_run_branch_intents.get_for_step(
+            workspace_id=workspace.id,
+            run_id=run_id,
+            step_id=branch_step.id,
+            idempotency_key=branch_step.idempotency_key,
+        ) is None
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM action_consumptions WHERE workspace_id=%s AND action_id=%s",
+                (workspace.id, reviewed_action_id),
+            ).fetchone()[0] == 0
+
+        if human_decision == "ALLOW_TASK_CHANGED":
+            with connect() as conn:
+                task_row = conn.execute(
+                    "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+                    (task_id, workspace.id),
+                ).fetchone()
+                task = AgentTask.model_validate(task_row[0])
+                task.provider = AgentProvider.CODEX
+                conn.execute(
+                    "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+                    (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
+                )
+        elif human_decision == "ALLOW_APPROVAL_CHANGED":
+            with connect() as conn:
+                approval.status = ApprovalStatus.REJECTED
+                conn.execute(
+                    "UPDATE approval_requests SET status=%s,payload=%s "
+                    "WHERE approval_id=%s AND workspace_id=%s",
+                    (
+                        approval.status.value,
+                        Jsonb(approval.model_dump(mode="json")),
+                        approval.id,
+                        workspace.id,
+                    ),
+                )
+
+        decision_response = client.post(
+            f"/trust/gateway/actions/{reviewed_action_id}/decision",
+            json={
+                "decision": (
+                    "ALLOW"
+                    if human_decision in {
+                        "ALLOW_TASK_CHANGED",
+                        "ALLOW_APPROVAL_CHANGED",
+                        "ALLOW_LEGACY_REPAIR",
+                    }
+                    else human_decision
+                ),
+                "reason": "Reviewed this exact pinned branch action.",
+            },
+        )
+        if human_decision in {"ALLOW_TASK_CHANGED", "ALLOW_APPROVAL_CHANGED"}:
+            assert decision_response.status_code == 409, decision_response.text
+            pending_run = runtime_repositories.agent_runs.get(run_id)
+            pending_after = next(
+                item for item in runtime_repositories.agent_runs.list_steps_for_run(run_id)
+                if item.id == branch_step.id
+            )
+            assert pending_run is not None and pending_run.status == AgentRunStatus.NEEDS_HUMAN
+            assert pending_after.status == AgentRunStepStatus.NEEDS_HUMAN
+            assert provider.post_calls == []
+            with connect() as conn:
+                assert conn.execute(
+                    "SELECT count(*) FROM action_authorizations "
+                    "WHERE workspace_id=%s AND action_id=%s",
+                    (workspace.id, reviewed_action_id),
+                ).fetchone()[0] == 0
+                assert conn.execute(
+                    "SELECT count(*) FROM action_consumptions "
+                    "WHERE workspace_id=%s AND action_id=%s",
+                    (workspace.id, reviewed_action_id),
+                ).fetchone()[0] == 0
+            return
+        assert decision_response.status_code == 200, decision_response.text
+        resumed_run = runtime_repositories.agent_runs.get(run_id)
+        resumed_step = next(
+            item for item in runtime_repositories.agent_runs.list_steps_for_run(run_id)
+            if item.id == branch_step.id
+        )
+        with connect() as conn:
+            authorization = runtime_repositories.trust.get_action_authorization_for_action(
+                conn, reviewed_action_id, workspace.id
+            )
+            action = runtime_repositories.trust.get_proposed_action(
+                conn, reviewed_action_id, workspace.id
+            )
+            assert authorization is not None and action is not None
+            assert verify_action_authorization_payload(authorization, action)
+            assert conn.execute(
+                "SELECT count(*) FROM action_consumptions WHERE workspace_id=%s AND action_id=%s",
+                (workspace.id, reviewed_action_id),
+            ).fetchone()[0] == 0
+        if human_decision == "BLOCK":
+            assert resumed_run is not None and resumed_run.status == AgentRunStatus.BLOCKED
+            assert resumed_step.status == AgentRunStepStatus.BLOCKED
+            replayed_denial = client.post(
+                f"/trust/gateway/actions/{reviewed_action_id}/decision",
+                json={
+                    "decision": "BLOCK",
+                    "reason": "Reviewed this exact pinned branch action.",
+                },
+            )
+            assert replayed_denial.status_code == 200, replayed_denial.text
+            assert replayed_denial.json()["id"] == decision_response.json()["id"]
+            denied_retry = client.post(
+                f"/agent/runs/{run_id}/execute-next",
+                json={"worker_id": "postgres-branch-route-test", "timeout_seconds": 10},
+            )
+            assert denied_retry.status_code == 409, denied_retry.text
+            assert provider.post_calls == []
+            assert runtime_repositories.agent_run_branch_intents.get_for_step(
+                workspace_id=workspace.id,
+                run_id=run_id,
+                step_id=branch_step.id,
+                idempotency_key=branch_step.idempotency_key,
+            ) is None
+            with connect() as conn:
+                assert conn.execute(
+                    "SELECT count(*) FROM action_consumptions WHERE workspace_id=%s AND action_id=%s",
+                    (workspace.id, reviewed_action_id),
+                ).fetchone()[0] == 0
+            return
+        assert resumed_run is not None and resumed_run.status == AgentRunStatus.SCHEDULED
+        assert resumed_run.current_step_id == branch_step.id
+        assert resumed_step.status == AgentRunStepStatus.READY
+        assert human_decision in {"ALLOW", "ALLOW_LEGACY_REPAIR"}
+        if human_decision == "ALLOW_LEGACY_REPAIR":
+            # Model the legacy partial state: the exact signed reviewer
+            # authorization and effective ALLOW decision exist, while the
+            # same durable run/step still appear pending human review.
+            repair_at = now_utc()
+            resumed_run.status = AgentRunStatus.NEEDS_HUMAN
+            resumed_run.updated_at = repair_at
+            resumed_step.status = AgentRunStepStatus.NEEDS_HUMAN
+            resumed_step.decision = VerificationDecision.NEEDS_HUMAN
+            resumed_step.updated_at = repair_at
+            with connect() as conn:
+                conn.execute(
+                    "UPDATE agent_runs SET status=%s,updated_at=%s,payload=%s "
+                    "WHERE run_id=%s AND workspace_id=%s",
+                    (
+                        resumed_run.status.value,
+                        repair_at,
+                        Jsonb(resumed_run.model_dump(mode="json")),
+                        run_id,
+                        workspace.id,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE agent_run_steps SET status=%s,updated_at=%s,payload=%s "
+                    "WHERE step_id=%s AND run_id=%s AND workspace_id=%s",
+                    (
+                        resumed_step.status.value,
+                        repair_at,
+                        Jsonb(resumed_step.model_dump(mode="json")),
+                        branch_step.id,
+                        run_id,
+                        workspace.id,
+                    ),
+                )
+                assert conn.execute(
+                    "SELECT count(*) FROM action_authorizations "
+                    "WHERE workspace_id=%s AND action_id=%s",
+                    (workspace.id, reviewed_action_id),
+                ).fetchone()[0] == 1
+                assert conn.execute(
+                    "SELECT count(*) FROM policy_decisions "
+                    "WHERE workspace_id=%s AND action_id=%s",
+                    (workspace.id, reviewed_action_id),
+                ).fetchone()[0] == 2
+
+            repaired_decision = client.post(
+                f"/trust/gateway/actions/{reviewed_action_id}/decision",
+                json={
+                    "decision": "ALLOW",
+                    "reason": "Reviewed this exact pinned branch action.",
+                },
+            )
+            assert repaired_decision.status_code == 200, repaired_decision.text
+            assert repaired_decision.json()["id"] == decision_response.json()["id"]
+            repaired_run = runtime_repositories.agent_runs.get(run_id)
+            repaired_step = next(
+                item for item in runtime_repositories.agent_runs.list_steps_for_run(run_id)
+                if item.id == branch_step.id
+            )
+            assert repaired_run is not None
+            assert repaired_run.status == AgentRunStatus.SCHEDULED
+            assert repaired_run.current_step_id == branch_step.id
+            assert repaired_step.status == AgentRunStepStatus.READY
+            with connect() as conn:
+                assert conn.execute(
+                    "SELECT count(*) FROM action_authorizations "
+                    "WHERE workspace_id=%s AND action_id=%s",
+                    (workspace.id, reviewed_action_id),
+                ).fetchone()[0] == 1
+                assert conn.execute(
+                    "SELECT count(*) FROM policy_decisions "
+                    "WHERE workspace_id=%s AND action_id=%s",
+                    (workspace.id, reviewed_action_id),
+                ).fetchone()[0] == 2
+        replayed_decision = client.post(
+            f"/trust/gateway/actions/{reviewed_action_id}/decision",
+            json={
+                "decision": "ALLOW",
+                "reason": "Reviewed this exact pinned branch action.",
+            },
+        )
+        assert replayed_decision.status_code == 200, replayed_decision.text
+        assert replayed_decision.json()["id"] == decision_response.json()["id"]
+        assert runtime_repositories.agent_runs.get(run_id).status == AgentRunStatus.SCHEDULED
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM action_authorizations "
+                "WHERE workspace_id=%s AND action_id=%s",
+                (workspace.id, reviewed_action_id),
+            ).fetchone()[0] == 1
+            assert conn.execute(
+                "SELECT count(*) FROM policy_decisions "
+                "WHERE workspace_id=%s AND action_id=%s",
+                (workspace.id, reviewed_action_id),
+            ).fetchone()[0] == 2
+        executed = client.post(
+            f"/agent/runs/{run_id}/execute-next",
+            json={"worker_id": "postgres-branch-route-test", "timeout_seconds": 10},
+        )
+        assert executed.status_code == 200, f"{executed.text}; branch_errors={branch_errors!r}"
+
     final_run = runtime_repositories.agent_runs.get(run_id)
     final_steps = runtime_repositories.agent_runs.list_steps_for_run(run_id)
     assert final_run is not None
@@ -4017,6 +4283,8 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     )
     assert intent is not None and intent.status == BranchIntentStatus.COMPLETED
     assert intent.source_sha == source_sha
+    if reviewed_action_id is not None:
+        assert intent.action_id == reviewed_action_id
     assert provider.post_calls == [
         ("owner/approved-repository", "feature/approved-branch", source_sha)
     ]
@@ -4063,6 +4331,11 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
             "SELECT status FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
             (task_id, workspace.id),
         ).fetchone()[0]
+        if reviewed_action_id is not None:
+            assert conn.execute(
+                "SELECT count(*) FROM action_consumptions WHERE workspace_id=%s AND action_id=%s",
+                (workspace.id, reviewed_action_id),
+            ).fetchone()[0] == 1
     assert task_audits == 1
     assert run_audits == 1
     assert persisted_task_status == AgentTaskStatus.APPROVED.value
@@ -4080,10 +4353,13 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     projected_audits = [
         event for event in store.audit_events if event.id not in audit_ids_before
     ]
-    assert len(projected_audits) == 1
-    assert projected_audits[0].event_type == "agent_run.step_started"
-    assert projected_audits[0].actor == "postgres-branch-route-test"
-    assert len(store.audit_events) == len(audit_ids_before) + 1
+    assert len(projected_audits) == (2 if reviewed_action_id is not None else 1)
+    assert all(
+        event.event_type == "agent_run.step_started"
+        for event in projected_audits
+    )
+    assert all(event.actor == "postgres-branch-route-test" for event in projected_audits)
+    assert len(store.audit_events) == len(audit_ids_before) + len(projected_audits)
     assert store.approval_requests.get(approval.id) == approval_snapshot_before
 
 

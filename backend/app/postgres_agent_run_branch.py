@@ -13,8 +13,10 @@ from .agent_run_models import (
     AgentRun,
     AgentRunEvent,
     AgentRunEventType,
+    AgentRunStatus,
     AgentRunStep,
     AgentRunStepStatus,
+    VerificationDecision,
 )
 from .agent_task_models import AgentTask, AgentTaskStatus
 from .approval_integrity import compute_approval_payload_hash
@@ -30,6 +32,15 @@ from .trust_models import CapabilityLeaseStatus
 from .trust_crypto import sha256_hex
 from .trust_crypto import verify_payload_signature
 from .trust_policy import lease_receipt_payload
+
+
+def postgres_branch_trust_enabled() -> bool:
+    """Default-off gate for PostgreSQL CREATE_BRANCH human authorization."""
+    import os
+
+    return os.getenv("AIXION_POSTGRES_CREATE_BRANCH_TRUST_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes",
+    }
 
 
 class BranchIntentStatus(StrEnum):
@@ -174,6 +185,7 @@ def _validate_branch_authority(
         or action.metadata.get("step_id") != intent.step_id
         or action.metadata.get("task_id") != intent.task_id
         or action.metadata.get("approval_id") != intent.approval_id
+        or action.metadata.get("approved_payload_hash") != approval.approved_payload_hash
         or action.metadata.get("lease_id") != intent.lease_id
         or action.metadata.get("repository") != intent.repository
         or decision.proposed_action_id != action.id
@@ -212,6 +224,57 @@ class PostgresAgentRunBranchIntentRepository:
             ).fetchone()
         return _decode(row) if row else None
 
+    def get_unconsumed_action_for_step(
+        self, *, workspace_id: str, run_id: str, step_id: str, idempotency_key: str
+    ) -> ProposedAction | None:
+        """Return the sole durable, unconsumed CREATE_BRANCH action for this step.
+
+        The action payload pins the source SHA before a reviewer sees it. A retry
+        must reuse that exact payload instead of silently deriving a different
+        action from a changed source ref.
+        """
+        if not workspace_id or not run_id or not step_id or not idempotency_key:
+            raise ValueError("Branch action lookup requires complete run and step scope")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT action.action_id FROM proposed_actions AS action "
+                "WHERE action.workspace_id=%s AND action.run_id=%s "
+                "AND action.payload->>'action_type'='CREATE_BRANCH' "
+                "AND action.payload->'metadata'->>'step_id'=%s "
+                "AND action.payload->'metadata'->>'step_type'='CREATE_BRANCH' "
+                "AND action.payload->'metadata'->>'idempotency_key'=%s "
+                "AND NOT EXISTS (SELECT 1 FROM action_consumptions AS consumed "
+                "WHERE consumed.workspace_id=action.workspace_id AND consumed.action_id=action.action_id) "
+                "ORDER BY action.created_at,action.action_id LIMIT 2",
+                (workspace_id, run_id, step_id, idempotency_key),
+            ).fetchall()
+            if len(rows) > 1:
+                raise PostgresTrustRepositoryConflict(
+                    "Multiple unconsumed branch actions exist for this durable step"
+                )
+            if not rows:
+                return None
+            action = self._trust.get_proposed_action(conn, rows[0][0], workspace_id)
+            if action is None:
+                raise PostgresTrustRepositoryError("Indexed branch action disappeared")
+            if (
+                action.run_id != run_id
+                or action.workspace_id != workspace_id
+                or action.action_type != CapabilityActionType.CREATE_BRANCH
+                or action.metadata.get("step_id") != step_id
+                or action.metadata.get("step_type") != "CREATE_BRANCH"
+                or action.metadata.get("idempotency_key") != idempotency_key
+            ):
+                raise PostgresTrustRepositoryError("Stored branch action scope is inconsistent")
+            decision = self._trust.get_latest_policy_decision_for_action(
+                conn, action.id, workspace_id
+            )
+            if decision is None or decision.proposed_action_id != action.id:
+                raise PostgresTrustRepositoryError("Stored branch action has no exact policy decision")
+            if decision.decision.value == "BLOCK":
+                raise PostgresTrustRepositoryConflict("Stored branch action was denied")
+            return action
+
     def evaluate_action(
         self,
         *,
@@ -221,10 +284,13 @@ class PostgresAgentRunBranchIntentRepository:
         step_id: str,
         actor: str,
         now: datetime,
+        expected_run: AgentRun,
+        expected_step: AgentRunStep,
+        persist_human_gate: bool = False,
     ):
         with self._connect() as conn:
             with conn.transaction():
-                return self._trust.evaluate_agent_run_action(
+                decision, lease = self._trust.evaluate_agent_run_action(
                     conn,
                     action=action,
                     workspace_id=workspace_id,
@@ -234,6 +300,147 @@ class PostgresAgentRunBranchIntentRepository:
                     now=now,
                     trust_event_repository=self._trust_events,
                 )
+                if decision.decision.value == "REQUIRE_APPROVAL" and persist_human_gate:
+                    self._persist_human_gate_in_transaction(
+                        conn,
+                        action=action,
+                        decision=decision,
+                        expected_run=expected_run,
+                        expected_step=expected_step,
+                        actor=actor,
+                        now=now,
+                    )
+                return decision, lease
+
+    def _persist_human_gate_in_transaction(
+        self,
+        conn: Connection,
+        *,
+        action: ProposedAction,
+        decision: Any,
+        expected_run: AgentRun,
+        expected_step: AgentRunStep,
+        actor: str,
+        now: datetime,
+    ) -> None:
+        """Atomically park the exact run step with its persisted policy decision."""
+        from .agent_run_repository import PostgresAgentRunRepository
+        from .agent_run_state_machine import transition_run, transition_step
+
+        repository = PostgresAgentRunRepository(self._connect)
+        durable_run, durable_steps = repository.get_control_snapshot_in_transaction(
+            conn,
+            run_id=expected_run.id,
+            workspace_id=expected_run.workspace_id or "",
+        )
+        original_steps = [item.model_copy(deep=True) for item in durable_steps]
+        durable_by_id = {item.id: item for item in durable_steps}
+        durable_step = durable_by_id.get(expected_step.id)
+        if (
+            durable_run != expected_run
+            or durable_step != expected_step
+            or expected_run.current_step_id != expected_step.id
+            or expected_step.status != AgentRunStepStatus.RUNNING
+            or expected_run.status != AgentRunStatus.RUNNING
+            or expected_run.lease_owner != actor
+            or not expected_run.lease_token
+            or action.run_id != expected_run.id
+            or action.task_id != expected_run.task_id
+            or action.workspace_id != expected_run.workspace_id
+            or action.metadata.get("step_id") != expected_step.id
+            or decision.proposed_action_id != action.id
+            or decision.decision.value != "REQUIRE_APPROVAL"
+        ):
+            raise PostgresTrustRepositoryConflict(
+                "CREATE_BRANCH human gate no longer matches the active run step"
+            )
+
+        reason = "Exact CREATE_BRANCH action is waiting for a reviewer decision."
+        _, _ = transition_run(durable_run, AgentRunStatus.NEEDS_HUMAN, reason=reason)
+        durable_run.lease_owner = None
+        durable_run.lease_token = None
+        durable_run.lease_expires_at = None
+        durable_run.heartbeat_at = None
+        _, _ = transition_step(
+            durable_step, AgentRunStepStatus.NEEDS_HUMAN, reason=reason
+        )
+        durable_step.lease_owner = None
+        durable_step.lease_token = None
+        durable_step.lease_expires_at = None
+        durable_step.heartbeat_at = None
+        durable_step.decision = VerificationDecision.NEEDS_HUMAN
+        durable_step.reason = reason
+        durable_step.evidence = {
+            **durable_step.evidence,
+            "pending_action": {
+                "action_id": action.id,
+                "action_type": action.action_type.value,
+                "payload_sha256": sha256_hex(action.model_dump(mode="json")),
+                "policy_decision_id": decision.id,
+                "provider": action.provider.value,
+                "agent_id": action.agent_id,
+                "repository": action.repository,
+                "branch": action.branch,
+                "source_sha": action.metadata.get("source_sha"),
+                "source_branch": action.metadata.get("source_branch"),
+                "target_ref": action.metadata.get("target_ref"),
+                "approval_id": action.metadata.get("approval_id"),
+                "approved_payload_hash": action.metadata.get("approved_payload_hash"),
+                "lease_id": action.lease_id,
+                "step_id": expected_step.id,
+                "idempotency_key": expected_step.idempotency_key,
+            },
+        }
+
+        event = AgentRunEvent(
+            run_id=durable_run.id,
+            task_id=durable_run.task_id,
+            step_id=durable_step.id,
+            correlation_id=durable_run.correlation_id,
+            event_type=AgentRunEventType.STEP_NEEDS_HUMAN,
+            previous_status=AgentRunStepStatus.RUNNING.value,
+            new_status=AgentRunStepStatus.NEEDS_HUMAN.value,
+            message="CREATE_BRANCH is paused for an exact reviewer decision.",
+            reason=reason,
+            actor=actor,
+            attempt_number=durable_step.attempt_count,
+            metadata={
+                "action_id": action.id,
+                "action_payload_sha256": sha256_hex(action.model_dump(mode="json")),
+                "policy_decision_id": decision.id,
+                "run_previous_status": AgentRunStatus.RUNNING.value,
+                "run_new_status": AgentRunStatus.NEEDS_HUMAN.value,
+                "step_idempotency_key": durable_step.idempotency_key,
+            },
+            created_at=now,
+        )
+        audit = AuditEvent(
+            event_type="agent_run.action_requires_approval",
+            entity_id=durable_run.id,
+            workspace_id=durable_run.workspace_id,
+            actor=actor,
+            details={
+                "action_id": action.id,
+                "action_payload_sha256": sha256_hex(action.model_dump(mode="json")),
+                "policy_decision_id": decision.id,
+                "step_id": durable_step.id,
+                "idempotency_key": durable_step.idempotency_key,
+            },
+            created_at=now,
+        )
+        updated_steps = [
+            durable_step if item.id == durable_step.id else item
+            for item in durable_steps
+        ]
+        repository.commit_control_transition_in_transaction(
+            conn,
+            expected_run=expected_run,
+            updated_run=durable_run,
+            expected_steps=original_steps,
+            updated_steps=updated_steps,
+            events=[event],
+            audits=[audit],
+        )
 
     def begin_intent(
         self,
@@ -412,6 +619,7 @@ class PostgresAgentRunBranchIntentRepository:
                     or action.metadata.get("step_id") != record.step_id
                     or action.metadata.get("task_id") != record.task_id
                     or action.metadata.get("approval_id") != record.approval_id
+                    or action.metadata.get("approved_payload_hash") != approval.approved_payload_hash
                     or action.metadata.get("lease_id") != record.lease_id
                     or action.metadata.get("repository") != record.repository
                 ):
