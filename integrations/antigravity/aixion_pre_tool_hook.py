@@ -917,7 +917,7 @@ def _run(
                 return _decision("deny", "Approval claim response arrived after the host wait deadline")
             if claimed.get("consumed") is not True:
                 return _decision("deny", "Approval delivery was already claimed")
-            return _decision("allow", "Approved from Aixion Control Tower")
+            return _decision("auto_approve", "Approved from Aixion Control Tower")
         if status not in {"PENDING_REVIEW", "REQUESTED"}:
             return _decision("deny", f"Unrecognized approval state: {status}")
         # Keep polling cadence inside the configured host wait. An unbounded

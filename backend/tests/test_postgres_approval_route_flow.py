@@ -1551,7 +1551,7 @@ def test_postgres_same_invocation_recovers_after_fresh_api_process(
 
     assert process_outcome[0] == "ok", process_outcome[1]
     recovered = process_outcome[1]
-    assert recovered["decision"] == "allow"
+    assert recovered["decision"] == "auto_approve"
     durable = repositories.approval_decisions.get(approval_id)
     assert durable is not None
     assert durable.status == ApprovalStatus.APPROVED
@@ -1757,7 +1757,7 @@ def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
         environment["AIXION_API_BASE_URL"] = third_server[2]
         with patch.object(antigravity_hook.time, "sleep"):
             recovered = antigravity_hook.run(payload, environment)
-        assert recovered["decision"] == "allow"
+        assert recovered["decision"] == "auto_approve"
         assert recovered["reason"] == "Approved from Aixion Control Tower"
 
         durable = repositories.approval_decisions.get(approval_id)
@@ -1916,7 +1916,7 @@ def test_postgres_antigravity_hook_process_stays_pending_across_api_restart(
         outputs = [line for line in stdout.splitlines() if line.strip()]
         assert len(outputs) == 1
         assert json.loads(outputs[0]) == {
-            "decision": "allow",
+            "decision": "auto_approve",
             "reason": "Approved from Aixion Control Tower",
         }
 

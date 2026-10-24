@@ -23,7 +23,7 @@ SPEC.loader.exec_module(hook)
 
 @pytest.mark.parametrize(
     ("decision", "reason"),
-    [("allow", "approved"), ("deny", "rejected")],
+    [("allow", "read-only passthrough"), ("auto_approve", "phone approved"), ("deny", "rejected")],
 )
 def test_main_reads_stdin_and_emits_antigravity_decision(
     monkeypatch: pytest.MonkeyPatch,
@@ -168,7 +168,7 @@ def test_diagnostic_approval_id_requires_backend_id_format() -> None:
     assert hook._validated_diagnostic_approval_id("diagnostic_token_canary") is None
 
 
-def test_run_consumes_the_approved_invocation_before_returning_allow(
+def test_run_consumes_the_approved_invocation_before_returning_auto_approve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str, dict | None]] = []
@@ -197,7 +197,7 @@ def test_run_consumes_the_approved_invocation_before_returning_allow(
 
     result = hook.run(_hook_payload(), _test_environment())
 
-    assert result == {"decision": "allow", "reason": "Approved from Aixion Control Tower"}
+    assert result == {"decision": "auto_approve", "reason": "Approved from Aixion Control Tower"}
     assert [method for method, _url, _body in calls] == ["POST", "GET", "POST"]
     assert calls[-1][1].endswith("/agents/approvals/approval_0123456789ab/consume")
 
@@ -405,7 +405,7 @@ def test_run_recovers_lost_create_response_with_identical_invocation_retry(
     environment["AIXION_AGENT_TOKEN"] = "diagnostic_token_canary"
     result = hook.run(payload, environment)
 
-    assert result["decision"] == "allow"
+    assert result["decision"] == "auto_approve"
     assert [method for method, _url, _body in calls] == ["POST", "POST", "GET", "POST"]
     assert calls[0][2] is calls[1][2]
     assert calls[0][2]["source_invocation_id"] == persisted["source_invocation_id"]
@@ -422,7 +422,7 @@ def test_run_recovers_lost_create_response_with_identical_invocation_retry(
     assert retry["attempt"] == 2
     assert terminal["correlation_id"] == correlation_id
     assert terminal["approval_id"] == "approval_0123456789ab"
-    assert terminal["decision"] == "allow"
+    assert terminal["decision"] == "auto_approve"
     assert "diagnostic_token_canary" not in captured.err
     assert "diagnostic_action_canary" not in captured.err
 
@@ -673,7 +673,7 @@ def test_long_wait_refreshes_exact_invocation_lease_before_same_call_is_consumed
     monkeypatch.setattr(hook, "_request", request)
     result = hook.run(_hook_payload(), _test_environment())
 
-    assert result == {"decision": "allow", "reason": "Approved from Aixion Control Tower"}
+    assert result == {"decision": "auto_approve", "reason": "Approved from Aixion Control Tower"}
     assert [url.rsplit("/", 1)[-1] for _method, url, _body in calls] == [
         "approvals", "decision", "heartbeat", "decision", "consume"
     ]
@@ -765,7 +765,7 @@ def test_run_reconnects_after_ambiguous_decision_read_then_consumes_once(
     monkeypatch.setattr(hook, "_request", request)
     result = hook.run(_hook_payload(), _test_environment())
 
-    assert result["decision"] == "allow"
+    assert result["decision"] == "auto_approve"
     assert decision_reads == 2
     assert calls.count("POST consume") == 1
     assert clock.sleeps == [hook.POLL_INTERVAL_SECONDS]
@@ -832,7 +832,7 @@ def test_long_retry_after_renews_invocation_lease_before_retrying(
     monkeypatch.setattr(hook, "_request", request)
     result = hook.run(_hook_payload(), environment)
 
-    assert result["decision"] == "allow"
+    assert result["decision"] == "auto_approve"
     heartbeat_times = [at for endpoint, at in calls if endpoint == "heartbeat"]
     assert heartbeat_times
     assert all(

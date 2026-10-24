@@ -388,7 +388,7 @@ def test_unknown_tool_requires_mobile_approval_then_allows_exact_snapshot() -> N
             ENV,
         )
 
-    assert result["decision"] == "allow"
+    assert result["decision"] == "auto_approve"
     assert created_body["source_session_id"] == "conv"
     assert created_body["source_invocation_id"].startswith("antigravity:v1:")
 
@@ -555,7 +555,7 @@ def test_restart_retry_can_resume_existing_approved_invocation() -> None:
             ENV,
         )
 
-    assert result["decision"] == "allow"
+    assert result["decision"] == "auto_approve"
     assert calls == ["POST", "GET", "POST"]
 
 
@@ -656,7 +656,7 @@ def test_ambiguous_decision_poll_reconnects_and_resumes_same_approval() -> None:
             ENV,
         )
 
-    assert result["decision"] == "allow"
+    assert result["decision"] == "auto_approve"
     assert get_calls == 2
     assert [method for method, _ in calls] == ["POST", "GET", "GET", "POST"]
     sleep.assert_called_once_with(hook.POLL_INTERVAL_SECONDS)
@@ -862,7 +862,7 @@ def test_rate_limited_decision_poll_retries_after_server_delay() -> None:
             ENV,
         )
 
-    assert result["decision"] == "allow"
+    assert result["decision"] == "auto_approve"
     sleep.assert_called_once_with(7)
     assert get_calls == 2
 

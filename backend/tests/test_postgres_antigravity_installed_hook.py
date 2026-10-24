@@ -339,7 +339,7 @@ def test_installed_antigravity_command_keeps_live_invocation_across_postgres_api
         stdout, stderr = process.communicate(timeout=20)
         assert process.returncode == 0, stderr
         assert json.loads(stdout) == {
-            "decision": "allow",
+            "decision": "auto_approve",
             "reason": "Approved from Aixion Control Tower",
         }
 
@@ -531,7 +531,7 @@ def test_installed_antigravity_hook_relaunch_recovers_exact_postgres_invocation_
         stdout, stderr = recovered_process.communicate(timeout=20)
         assert recovered_process.returncode == 0, stderr
         assert json.loads(stdout) == {
-            "decision": "allow",
+            "decision": "auto_approve",
             "reason": "Approved from Aixion Control Tower",
         }
         recovered_process = None

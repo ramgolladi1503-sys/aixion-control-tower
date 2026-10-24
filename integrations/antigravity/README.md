@@ -1,10 +1,13 @@
 # Antigravity approval gate
 
 This integration pauses matching Antigravity tool calls in the host process,
-creates a Control Tower approval, and returns Antigravity's `allow` decision
-only after the same approval is approved on mobile and its frozen payload hash
-verifies. The installed Antigravity 2.24.0 hook documentation lists `allow`,
-`deny`, `ask`, and `force_ask` as valid PreToolUse decisions. A
+creates a Control Tower approval, and returns Antigravity's `auto_approve`
+decision only after the same approval is approved on mobile, its frozen payload
+hash verifies, and its at-most-once delivery claim commits. Read-only passthrough
+continues to return `allow`. The installed Antigravity 2.25.0 hook documentation
+defines `allow` as delegating to the default policy, while `auto_approve`
+approves a default-policy prompt but still honors explicit user-configured
+rules. `deny` hard-blocks execution. See the [official Antigravity hook reference](https://www.antigravity.google/docs/hooks). A
 denial, timeout, malformed response, revoked credential, or network failure
 returns `deny`.
 
@@ -26,7 +29,7 @@ Control Tower prompts may differ by tool and Antigravity configuration.
 - An enabled external agent credential with provider `ANTIGRAVITY`, project
   scope limited to the intended project, and only `CREATE_APPROVAL`,
   `READ_APPROVAL_DECISION`, `CONSUME_APPROVAL_DECISION`,
-  `REPORT_APPROVAL_DELIVERY_FAILURE`, and `EXPIRE_OWN_APPROVAL` actions. The hook claims an approved invocation exactly once before returning allow; a lost claim response fails closed, best-effort reports the ambiguous outcome, and still denies. The expiry
+  `REPORT_APPROVAL_DELIVERY_FAILURE`, and `EXPIRE_OWN_APPROVAL` actions. The hook claims an approved invocation exactly once before returning `auto_approve`; a lost claim response fails closed, best-effort reports the ambiguous outcome, and still denies. The expiry
   action can close only approvals created by that same agent. Set its request
   limit to at least 60 per minute per active hook; the default two-second poll
   interval uses about 30 decision reads per minute, plus request creation and

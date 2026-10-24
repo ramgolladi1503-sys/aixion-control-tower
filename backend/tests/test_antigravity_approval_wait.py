@@ -1211,7 +1211,7 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
         stdout, stderr = hook_process.communicate(timeout=20)
         assert hook_process.returncode == 0, stderr
         result = json.loads(stdout.strip().splitlines()[-1])
-        assert result["decision"] == "allow"
+        assert result["decision"] == "auto_approve"
         assert result["reason"] == "Approved from Aixion Control Tower"
         with httpx.Client(base_url=base_url, timeout=5) as api:
             recovered = api.get("/approvals", headers=owner_headers)

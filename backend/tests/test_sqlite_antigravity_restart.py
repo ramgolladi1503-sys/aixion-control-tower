@@ -355,7 +355,7 @@ def test_antigravity_invocation_recovers_once_after_sqlite_api_process_restart(
         environment["AIXION_API_BASE_URL"] = third_server[2]
         recovered = hook.run(invocation_payload, environment)
         assert recovered == {
-            "decision": "allow",
+            "decision": "auto_approve",
             "reason": "Approved from Aixion Control Tower",
         }
 
@@ -393,7 +393,7 @@ def test_antigravity_invocation_recovers_once_after_sqlite_api_process_restart(
 @pytest.mark.parametrize(
     ("decision_value", "expected_decision", "expected_claims"),
     [
-        ("approve", "allow", 1),
+        ("approve", "auto_approve", 1),
         ("deny", "deny", 0),
     ],
 )
@@ -577,7 +577,7 @@ def test_blocked_antigravity_invocation_survives_sqlite_api_restart(
 
 @pytest.mark.parametrize(
     ("decision_value", "expected_decision", "expected_claims"),
-    [("approve", "allow", 1), ("deny", "deny", 0)],
+    [("approve", "auto_approve", 1), ("deny", "deny", 0)],
 )
 def test_installed_antigravity_command_runs_same_invocation_approval_flow(
     tmp_path: Path,
@@ -889,7 +889,7 @@ def test_antigravity_hook_process_relaunch_recovers_exact_approved_invocation(
         assert recovered_process.returncode == 0, recovered_stderr
         recovered_process = None
         assert json.loads(recovered_stdout) == {
-            "decision": "allow",
+            "decision": "auto_approve",
             "reason": "Approved from Aixion Control Tower",
         }
 
