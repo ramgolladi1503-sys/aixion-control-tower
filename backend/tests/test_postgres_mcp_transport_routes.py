@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 from types import SimpleNamespace
 
 import psycopg
@@ -170,6 +173,43 @@ def _register_server(repositories, project: Project, workspace: Workspace) -> MC
     return server
 
 
+class _RecordingPostgresMCPChildHandler(BaseHTTPRequestHandler):
+    received: list[dict] = []
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        self.__class__.received.append(payload)
+        response = {
+            "jsonrpc": "2.0",
+            "id": payload.get("id"),
+            "result": {
+                "content": [{"type": "text", "text": "committed by local MCP child"}],
+                "structuredContent": {
+                    "committed": True,
+                    "path": payload.get("params", {}).get("arguments", {}).get("path"),
+                },
+            },
+        }
+        body = json.dumps(response).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+
+def _start_postgres_mcp_child() -> tuple[HTTPServer, str]:
+    _RecordingPostgresMCPChildHandler.received.clear()
+    server = HTTPServer(("127.0.0.1", 0), _RecordingPostgresMCPChildHandler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    return server, f"http://{host}:{port}/mcp"
+
+
 def test_postgres_mcp_initialize_and_tools_list_use_bound_repositories(
     postgres_mcp_transport_runtime,
 ) -> None:
@@ -307,6 +347,156 @@ def test_postgres_mcp_tools_call_waits_for_durable_approval_and_forwards_once(
     assert structured["result"]["server_name"] == server.name
     assert repositories.mcp_pending_requests.get(pending.id).status.value == "FORWARDED"
     assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == 1
+
+
+def test_postgres_mcp_tools_call_approved_dispatches_once_to_http_jsonrpc_child_and_returns_exact_result(
+    postgres_mcp_transport_runtime,
+) -> None:
+    connect, workspace, project, _user, repositories = postgres_mcp_transport_runtime
+    child_http, endpoint = _start_postgres_mcp_child()
+    server = MCPChildServer(
+        project_id=project.id,
+        workspace_id=workspace.id,
+        name="pg-http-child",
+        transport="http-jsonrpc",
+        endpoint=endpoint,
+        enabled=True,
+        tools=[
+            MCPToolDefinition(
+                name="write_file",
+                description="Write a file after approval.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                    "required": ["path", "content"],
+                    "additionalProperties": False,
+                },
+                mutating=True,
+            )
+        ],
+    )
+    repositories.mcp_child_servers.create(
+        server=server,
+        audit_event=AuditEvent(
+            event_type="mcp.child_server.created",
+            entity_id=server.id,
+            workspace_id=workspace.id,
+            details={"project_id": project.id, "name": server.name},
+        ),
+    )
+    request_id = "pg-http-call-20261024-001"
+    session_id = "pg-http-session-001"
+    arguments = {"path": "notes/approved.txt", "content": "approved from phone"}
+    call_payload = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "name": "write_file",
+            "server_name": server.name,
+            "arguments": arguments,
+            "session_id": session_id,
+        },
+    }
+    submit_client = TestClient(main.app)
+    reviewer_client = TestClient(main.app)
+    pending = None
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                submit_client.post,
+                f"/mcp/{project.id}/jsonrpc",
+                json=call_payload,
+            )
+            for _ in range(100):
+                candidates = repositories.mcp_pending_requests.list_for_workspace(
+                    workspace.id,
+                    project_id=project.id,
+                )
+                pending = next((item for item in candidates if item.session_id == session_id), None)
+                if pending is not None:
+                    break
+                if future.done():
+                    early = future.result(timeout=1)
+                    pytest.fail(
+                        "transport exited before persisting PostgreSQL approval: "
+                        f"HTTP {early.status_code} {early.text}"
+                    )
+                time.sleep(0.05)
+            assert pending is not None, "transport did not persist its PostgreSQL approval"
+            assert _RecordingPostgresMCPChildHandler.received == []
+            assert not future.done(), "tools/call returned before the reviewer decision"
+
+            decision = reviewer_client.post(
+                f"/approvals/{pending.approval_request_id}/decision",
+                json={"decision": "approve", "reason": "approve local HTTP JSON-RPC child call"},
+            )
+            assert decision.status_code == 200, decision.text
+            response = future.result(timeout=15)
+
+        expected_child_response = {
+            "jsonrpc": "2.0",
+            "id": session_id,
+            "result": {
+                "content": [{"type": "text", "text": "committed by local MCP child"}],
+                "structuredContent": {"committed": True, "path": arguments["path"]},
+            },
+        }
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": None,
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "Mutating MCP tool call forwarded after durable approval.",
+                }],
+                "isError": False,
+                "structuredContent": {
+                    "forwarded": True,
+                    "approval_required": True,
+                    "approval_request_id": pending.approval_request_id,
+                    "status": "APPROVED",
+                    "result": {
+                        "ok": True,
+                        "server_name": server.name,
+                        "tool_name": "write_file",
+                        "jsonrpc_response": expected_child_response,
+                    },
+                    "reason": "Mutating MCP tool call forwarded after durable approval.",
+                },
+            },
+        }
+        assert _RecordingPostgresMCPChildHandler.received == [{
+            "jsonrpc": "2.0",
+            "id": session_id,
+            "method": "tools/call",
+            "params": {"name": "write_file", "arguments": arguments},
+        }]
+
+        final_pending = repositories.mcp_pending_requests.get(pending.id)
+        assert final_pending is not None
+        assert final_pending.status.value == "FORWARDED"
+        assert final_pending.attempts == 1
+        with connect() as connection:
+            audit_rows = connection.execute(
+                "SELECT event_type, details FROM audit_events WHERE approval_id=%s",
+                (pending.approval_request_id,),
+            ).fetchall()
+        audit_by_type = {row[0]: row[1] for row in audit_rows}
+        assert {
+            "mcp.approval_requested",
+            "approval.decision",
+            "mcp.forwarded_after_approval",
+        } <= set(audit_by_type)
+        assert audit_by_type["mcp.forwarded_after_approval"]["mcp_pending_request_id"] == pending.id
+        assert audit_by_type["mcp.forwarded_after_approval"]["attempts"] == 1
+    finally:
+        submit_client.close()
+        reviewer_client.close()
+        child_http.shutdown()
+        child_http.server_close()
 
 
 def test_postgres_mcp_tools_call_denial_never_dispatches(
