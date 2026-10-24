@@ -1370,6 +1370,7 @@ def test_postgres_codex_hook_denies_lost_consume_response_and_same_invocation_re
 
     event = {
         "hook_event_name": "PermissionRequest",
+        "permission_mode": "default",
         "session_id": "session-postgres-codex-lost-response",
         "turn_id": "turn-postgres-codex-lost-response",
         "tool_use_id": "call-postgres-codex-lost-response",
