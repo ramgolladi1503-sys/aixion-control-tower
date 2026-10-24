@@ -28,13 +28,13 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
         composeRule.onNodeWithText(
-            "Install the Control Tower tool hook in this project workspace. Same-session phone approval and resume still need verification."
+            "Approved and resumed the same local Antigravity invocation on a phone. Hosted and off-LAN delivery are not verified."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Set up Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText(
             "Codex Desktop approval interception and same-session phone resume are not verified."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Hook setup available").assertExists()
+        composeRule.onNodeWithText("Local phone flow verified").assertExists()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
         composeRule.onNodeWithText("Not verified for native sessions").performScrollTo().assertExists()
         composeRule.onNodeWithText("When an approval is needed").performScrollTo().assertExists()
@@ -78,7 +78,7 @@ class ConnectorsScreenTest {
     fun providerReadinessStatesAreDistinctAndDoNotClaimLiveConnection() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("Hook setup available").assertExists()
+        composeRule.onNodeWithText("Local phone flow verified").assertExists()
         composeRule.onNodeWithText("Not verified for native sessions").assertExists()
         composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
