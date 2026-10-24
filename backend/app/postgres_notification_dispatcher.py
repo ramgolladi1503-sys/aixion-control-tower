@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from threading import Event, Thread
 
 from .models import now_utc
 from .notification_outbox_repository import PostgresNotificationOutboxRepository
@@ -16,6 +17,58 @@ from .settings import get_settings
 
 logger = logging.getLogger(__name__)
 PushSender = Callable[..., str | None]
+
+
+class _ClaimLeaseHeartbeat:
+    """Renew a live PostgreSQL claim while sequential provider I/O is in flight."""
+
+    def __init__(
+        self,
+        repository: PostgresNotificationOutboxRepository,
+        *,
+        notification_id: str,
+        attempts: int,
+        lease_seconds: int,
+    ) -> None:
+        self._repository = repository
+        self._notification_id = notification_id
+        self._attempts = attempts
+        self._lease_seconds = lease_seconds
+        self._interval = max(0.25, lease_seconds / 3)
+        self._stop = Event()
+        self.lost = False
+        self._thread = Thread(
+            target=self._run,
+            name="postgres-push-lease-heartbeat",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                renewed = self._repository.renew_claim(
+                    notification_id=self._notification_id,
+                    expected_attempts=self._attempts,
+                    lease_seconds=self._lease_seconds,
+                )
+            except Exception as error:
+                self.lost = True
+                logger.warning(
+                    "PostgreSQL push claim renewal failed error_type=%s",
+                    type(error).__name__,
+                )
+                return
+            if renewed is None:
+                self.lost = True
+                logger.warning("PostgreSQL push claim is no longer current")
+                return
 
 
 async def _drain_postgres_dispatch_task(dispatch_task: asyncio.Task[object]) -> None:
@@ -83,35 +136,52 @@ def dispatch_one_postgres_push(
         errors.append("FCM_DISPATCH_FAILED")
         devices = []
 
-    for device in devices:
-        try:
-            error = sender(
-                token=device.token,
-                title=notification.title,
-                body=notification.body,
-                data={
-                    "notification_id": notification.id,
-                    "entity_type": notification.push_entity_type,
-                    "entity_id": notification.push_entity_id,
-                },
-            )
-            if error == "SKIPPED_FCM_PROJECT_ID_NOT_CONFIGURED":
-                skipped = True
-            elif error is None:
-                accepted += 1
-            else:
-                errors.append(error)
-                if error == "FCM_TOKEN_UNREGISTERED":
-                    invalid_devices.append((device.id, device.token))
-        except Exception:
-            # Isolate provider failures per device so one broken request cannot
-            # prevent attempts to later recipients. Persist only the bounded
-            # category; provider exception text can contain secrets or tokens.
-            logger.warning(
-                "PostgreSQL push target failed for notification id=%s",
-                notification.id,
-            )
-            errors.append("FCM_DISPATCH_FAILED")
+    heartbeat = _ClaimLeaseHeartbeat(
+        repository,
+        notification_id=notification.id,
+        attempts=notification.push_attempts,
+        lease_seconds=settings.push_lease_seconds,
+    )
+    heartbeat.start()
+    try:
+        for device in devices:
+            if heartbeat.lost:
+                break
+            try:
+                error = sender(
+                    token=device.token,
+                    title=notification.title,
+                    body=notification.body,
+                    data={
+                        "notification_id": notification.id,
+                        "entity_type": notification.push_entity_type,
+                        "entity_id": notification.push_entity_id,
+                    },
+                )
+                if error == "SKIPPED_FCM_PROJECT_ID_NOT_CONFIGURED":
+                    skipped = True
+                elif error is None:
+                    accepted += 1
+                else:
+                    errors.append(error)
+                    if error == "FCM_TOKEN_UNREGISTERED":
+                        invalid_devices.append((device.id, device.token))
+            except Exception:
+                # Isolate provider failures per device so one broken request cannot
+                # prevent attempts to later recipients. Persist only the bounded
+                # category; provider exception text can contain secrets or tokens.
+                logger.warning(
+                    "PostgreSQL push target failed for notification id=%s",
+                    notification.id,
+                )
+                errors.append("FCM_DISPATCH_FAILED")
+    finally:
+        heartbeat.stop()
+
+    if heartbeat.lost:
+        # A newer claim may already be delivering. Do not overwrite it or send
+        # to additional devices; the current claim will recover through its lease.
+        return notification.id
 
     if accepted:
         outcome_status = "SENT"

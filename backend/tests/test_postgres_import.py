@@ -1028,6 +1028,37 @@ def test_import_preserves_user_and_session_security_audits(tmp_path, postgres_im
     ]
 
 
+def test_plan_resolves_auth_audit_by_event_domain_when_ids_collide(tmp_path):
+    path = tmp_path / "snapshot_with_cross_entity_id_collision.sqlite3"
+    _snapshot(path)
+    now = datetime.now(timezone.utc).isoformat()
+    user = {
+        "id": "a1", "email": "collision@example.test", "password_hash": "hash",
+        "password_salt": "salt", "workspace_id": "ws1",
+        "created_at": now, "updated_at": now,
+    }
+    event = {
+        "id": "audit-colliding-user-role", "event_type": "auth.role_updated",
+        "actor": "owner@example.test", "entity_id": "a1", "workspace_id": "ws1",
+        "details": {"target_user_id": "a1", "new_role": "REVIEWER"}, "created_at": now,
+    }
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            [
+                ("user", "a1", json.dumps(user)),
+                ("audit_event", event["id"], json.dumps(event)),
+            ],
+        )
+    os.chmod(path, 0o600)
+
+    _plan, selected, _digest = build_plan(path)
+
+    imported = selected["audit_event"][event["id"]]
+    assert imported["_import_entity_type"] == "user"
+    assert imported["entity_id"] == "a1"
+
+
 def test_import_preserves_workspace_scoped_audit_event_idempotently(
     tmp_path, postgres_import_dsn
 ):

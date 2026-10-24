@@ -229,6 +229,58 @@ class PostgresNotificationOutboxRepository:
                 raise RuntimeError("Notification claim changed during its locked outcome update")
             return updated
 
+    def renew_claim(
+        self,
+        *,
+        notification_id: str,
+        expected_attempts: int,
+        now: datetime | None = None,
+        lease_seconds: int,
+    ) -> Notification | None:
+        """Extend only the still-live claim for this exact delivery attempt."""
+        if not notification_id:
+            raise ValueError("Notification claim renewal requires an ID")
+        if expected_attempts < 1:
+            raise ValueError("Expected attempts must be positive")
+        if lease_seconds < 1:
+            raise ValueError("Lease duration must be positive")
+        current_time = now or now_utc()
+        if current_time.utcoffset() is None:
+            raise ValueError("Notification claim time must be timezone-aware")
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload, notification_id, workspace_id, user_id, approval_id, "
+                "task_id, entity_type, status, attempts, next_attempt_at, lease_expires_at "
+                "FROM notifications WHERE notification_id=%s AND status='SENDING' "
+                "AND attempts=%s AND lease_expires_at > %s FOR UPDATE",
+                (notification_id, expected_attempts, current_time),
+            ).fetchone()
+            if row is None:
+                return None
+            notification = Notification.model_validate(row[0])
+            self._validate_row(notification, row)
+            renewed = notification.model_copy(
+                update={
+                    "push_lease_expires_at": current_time + timedelta(seconds=lease_seconds)
+                }
+            )
+            update = conn.execute(
+                "UPDATE notifications SET lease_expires_at=%s, payload=%s "
+                "WHERE notification_id=%s AND status='SENDING' AND attempts=%s "
+                "AND lease_expires_at > %s",
+                (
+                    renewed.push_lease_expires_at,
+                    Jsonb(renewed.model_dump(mode="json")),
+                    notification_id,
+                    expected_attempts,
+                    current_time,
+                ),
+            )
+            if update.rowcount != 1:
+                raise RuntimeError("Notification claim changed during lease renewal")
+            return renewed
+
     def list_device_targets(self, notification: Notification) -> list[DeviceRegistration]:
         """Return enabled-user devices in exactly the notification's workspace."""
         if notification.workspace_id is None:

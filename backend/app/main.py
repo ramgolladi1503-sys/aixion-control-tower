@@ -1057,6 +1057,8 @@ def list_work_orders(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[WorkOrder]:
     workspace_id = _workspace_id_for_route(user, http_request)
+    if not workspace_id:
+        raise HTTPException(status_code=403, detail="Workspace membership is required")
     work_orders = [
         item
         for item in _work_order_repository_for_route(http_request).list_for_workspace(

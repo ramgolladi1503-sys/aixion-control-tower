@@ -123,6 +123,29 @@ def test_idea_and_work_order_http_flow_uses_postgres_only(postgres_idea_work_ord
     assert {event.id for event in store.audit_events} == before_audits
 
 
+def test_work_order_listing_requires_workspace_before_repository_access(
+    postgres_idea_work_order_runtime, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect, _workspace, _project = postgres_idea_work_order_runtime
+    unscoped_reviewer = AuthUser(
+        id=f"reviewer_{uuid.uuid4().hex}",
+        email="unscoped-reviewer@example.test",
+        display_name="Unscoped reviewer",
+        role=UserRole.REVIEWER,
+        workspace_id=None,
+    )
+    monkeypatch.setitem(
+        main.app.dependency_overrides, require_reviewer, lambda: unscoped_reviewer
+    )
+    before_orders = dict(store.work_orders)
+
+    response = TestClient(main.app).get("/work-orders")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Workspace membership is required"}
+    assert store.work_orders == before_orders
+
+
 def test_work_order_cannot_link_an_idea_from_another_workspace(postgres_idea_work_order_runtime) -> None:
     connect, workspace, project = postgres_idea_work_order_runtime
     other_id = f"workspace_other_{uuid.uuid4().hex}"

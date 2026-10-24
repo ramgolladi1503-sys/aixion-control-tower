@@ -15,11 +15,11 @@ from test_postgres_notification_outbox import _insert_device, _persisted_notific
 pytest_plugins = ("test_postgres_notification_outbox",)
 
 
-def test_expired_multidevice_dispatch_lease_fences_stale_worker_outcome(
+def test_live_multidevice_dispatch_renews_lease_and_fences_second_worker(
     outbox_repository,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reclaimed claim remains authoritative after an older fan-out unblocks."""
+    """A live provider fan-out cannot be reclaimed while its claim heartbeat works."""
     repository, connect = outbox_repository
     workspace, _, notification = _seed_notification(connect, user_id="lease-owner")
     with connect() as conn:
@@ -64,13 +64,14 @@ def test_expired_multidevice_dispatch_lease_fences_stale_worker_outcome(
             )
             assert first_sender_entered.wait(timeout=5), "first worker never reached sender"
 
-            # The first worker is blocked in provider I/O. Waiting beyond the one-second
-            # lease lets a second dispatcher reclaim attempt 2 from PostgreSQL.
+            # The first worker is blocked in provider I/O beyond the initial lease.
+            # Its PostgreSQL heartbeat must keep another process from reclaiming it.
             time.sleep(1.1)
-            assert dispatch_one_postgres_push(repository, sender=second_sender) == notification.id
-            reclaimed = _persisted_notification(connect, notification.id)
-            assert reclaimed.push_status == "SENT"
-            assert reclaimed.push_attempts == 2
+            assert dispatch_one_postgres_push(repository, sender=second_sender) is None
+            live = _persisted_notification(connect, notification.id)
+            assert live.push_status == "SENDING"
+            assert live.push_attempts == 1
+            assert live.push_lease_expires_at is not None
 
             release_first_sender.set()
             assert first_attempt.result(timeout=10) == notification.id
@@ -79,17 +80,13 @@ def test_expired_multidevice_dispatch_lease_fences_stale_worker_outcome(
 
     final = _persisted_notification(connect, notification.id)
     assert final.push_status == "SENT"
-    assert final.push_attempts == 2
+    assert final.push_attempts == 1
     assert final.push_error is None
     assert final.push_lease_expires_at is None
-    # At-least-once delivery is expected: the reclaimed worker may duplicate sends
-    # while the stale worker is still blocked, but its outcome cannot replace attempt 2.
     assert Counter(first_delivery_tokens) == Counter(
         {"device-token-a": 1, "device-token-b": 1}
     )
-    assert Counter(second_delivery_tokens) == Counter(
-        {"device-token-a": 1, "device-token-b": 1}
-    )
+    assert second_delivery_tokens == []
 
 
 def test_outbox_claim_recovers_after_worker_restart_before_outcome_persistence(
