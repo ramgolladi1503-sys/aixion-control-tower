@@ -3215,6 +3215,35 @@ def test_postgres_runtime_reads_durable_scorecards_without_sqlite_projection(
     ]
 
 
+def test_postgres_trust_reporting_does_not_fall_back_when_runtime_is_missing(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, _connect, _workspace_id, _approval_id, request, user, _payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    state = request.app.state
+    state.postgres_runtime = None
+    state.postgres_repositories = None
+    monkeypatch.setattr(
+        "app.trust_routes.get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.build_reliability_scorecards",
+        lambda *_args, **_kwargs: pytest.fail("scorecards used process-local state"),
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.build_exception_queue",
+        lambda *_args, **_kwargs: pytest.fail("exceptions used process-local state"),
+    )
+
+    for endpoint in (list_scorecards, list_exceptions):
+        with pytest.raises(HTTPException) as unavailable:
+            endpoint(user=user, request=request)
+        assert unavailable.value.status_code == 503
+
+
 def test_postgres_exception_queue_reads_workspace_scoped_durable_actions(
     trust_repository,
     monkeypatch: pytest.MonkeyPatch,

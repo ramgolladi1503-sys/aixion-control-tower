@@ -58,19 +58,19 @@ private fun ConnectorPrerequisitesPanel() {
         Text("Before you connect", color = palette.ink, style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            "On your Mac, open the project where Antigravity or Codex runs. Keep the Mac and that same agent session running while an approval is waiting.",
+            "Open the project on the Mac where your agent runs. Keep that Mac and the same agent session running while an approval is pending.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            "Choose a provider below, then create a connector for that project. The setup token appears once; treat it like a password. Follow the setup steps to configure approval forwarding inside the same agent and project workspace.",
+            "Choose a provider below and follow its project setup steps. The connector token appears once; save it like a password.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            "Keep the Mac and configured Control Tower API reachable while the request is waiting. The phone can return a decision only to a running agent session; it cannot wake a sleeping Mac or restart an agent. This screen cannot confirm that setup was installed.",
+            "The Mac, agent session, and Control Tower API must stay reachable for a decision to return. The phone cannot wake or restart the Mac, and this screen cannot confirm hook installation.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )

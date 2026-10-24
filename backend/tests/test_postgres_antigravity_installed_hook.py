@@ -913,6 +913,27 @@ def test_installed_antigravity_expired_invocation_lease_rejects_reviewer_decisio
             )
         assert decision.status_code == 409, decision.text
 
+        # A provider restart may replay the same callback. The durable pending
+        # approval must not let a new hook process reclaim an invocation whose
+        # liveness lease has expired.
+        hook_process = subprocess.Popen(
+            argv,
+            cwd=workspace,
+            env=child_environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert hook_process.stdin is not None
+        hook_process.stdin.write(json.dumps(payload))
+        hook_process.stdin.close()
+        hook_process.stdin = None
+        stdout, stderr = hook_process.communicate(timeout=25)
+        assert hook_process.returncode == 0, stderr
+        assert json.loads(stdout)["decision"] == "deny"
+        hook_process = None
+
         with connect() as connection:
             approval_after = connection.execute(
                 "SELECT status,payload FROM approval_requests WHERE approval_id=%s",

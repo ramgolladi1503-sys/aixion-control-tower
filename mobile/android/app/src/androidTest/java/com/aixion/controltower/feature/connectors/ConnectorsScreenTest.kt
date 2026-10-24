@@ -23,13 +23,17 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Set up a project").assertExists()
         composeRule.onNodeWithText("Connect your coding agent").assertExists()
         composeRule.onNodeWithText("Before you connect").assertExists()
-        composeRule.onNodeWithText("On your Mac, open the project where Antigravity or Codex runs", substring = true)
+        composeRule.onNodeWithText(
+            "Open the project on the Mac where your agent runs. Keep that Mac and the same agent session running while an approval is pending."
+        )
             .assertExists()
-        composeRule.onNodeWithText("The setup token appears once; treat it like a password.", substring = true)
+        composeRule.onNodeWithText(
+            "Choose a provider below and follow its project setup steps. The connector token appears once; save it like a password."
+        )
             .assertExists()
-        composeRule.onNodeWithText("Keep the Mac and configured Control Tower API reachable", substring = true)
-            .assertExists()
-        composeRule.onNodeWithText("This screen cannot confirm that setup was installed.", substring = true)
+        composeRule.onNodeWithText(
+            "The Mac, agent session, and Control Tower API must stay reachable for a decision to return. The phone cannot wake or restart the Mac, and this screen cannot confirm hook installation."
+        )
             .assertExists()
         composeRule.onAllNodesWithText("CONNECT ONCE").assertCountEquals(0)
         composeRule.onNodeWithText("Choose a provider").assertExists()

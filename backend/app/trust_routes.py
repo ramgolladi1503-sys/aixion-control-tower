@@ -184,6 +184,46 @@ def _postgres_trust_runtime(request: Request | None):
     return _postgres_attestation_runtime(request)
 
 
+def _postgres_reporting_bundle(request: Request | None):
+    """Select the complete durable reporting bundle or fail closed.
+
+    Reporting may use the local projection only when PostgreSQL auth and every
+    PostgreSQL app-state binding are absent. In particular, a selected
+    PostgreSQL profile with a missing runtime must never expose stale process
+    maps as if they were authoritative.
+    """
+    state = getattr(getattr(request, "app", None), "state", None)
+    runtime = getattr(state, "postgres_runtime", None)
+    repositories = getattr(state, "postgres_repositories", None)
+    postgres_selected = (
+        get_settings().postgres_auth_enabled
+        or runtime is not None
+        or repositories is not None
+    )
+    if not postgres_selected:
+        return None
+    try:
+        selected = application_repositories_for_request(request)
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Trust reporting requires the complete app-bound PostgreSQL runtime",
+        ) from error
+    if (
+        runtime is None
+        or selected is not repositories
+        or getattr(runtime, "repositories", None) is not selected
+        or getattr(state, "trust_repository", None) is not selected.trust
+        or getattr(state, "agent_task_repository", None) is not selected.agent_tasks
+        or getattr(state, "agent_run_repository", None) is not selected.agent_runs
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Trust reporting requires the complete app-bound PostgreSQL runtime",
+        )
+    return runtime, selected
+
+
 def _postgres_action_runtime(request: Request | None):
     runtime = _postgres_trust_runtime(request)
     if runtime is None or request is None:
@@ -1099,24 +1139,9 @@ def list_scorecards(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentReliabilityScorecard]:
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
-        runtime = getattr(request.app.state, "postgres_runtime", None)
-        repositories = getattr(request.app.state, "postgres_repositories", None)
-        if (
-            runtime is None
-            or repositories is None
-            or getattr(runtime, "repositories", None) is not repositories
-            or getattr(request.app.state, "trust_repository", None)
-            is not getattr(repositories, "trust", None)
-            or getattr(request.app.state, "agent_task_repository", None)
-            is not getattr(repositories, "agent_tasks", None)
-            or getattr(request.app.state, "agent_run_repository", None)
-            is not getattr(repositories, "agent_runs", None)
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Trust scorecards require the complete app-bound PostgreSQL runtime",
-            )
+    reporting_bundle = _postgres_reporting_bundle(request)
+    if reporting_bundle is not None:
+        runtime, repositories = reporting_bundle
         workspace_id = workspace_id_for_request(user, request)
         if not workspace_id:
             raise HTTPException(
@@ -1146,21 +1171,9 @@ def list_exceptions(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> list[ExceptionQueueItem]:
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
-        runtime = _postgres_attestation_runtime(request)
-        repositories = getattr(request.app.state, "postgres_repositories", None)
-        if (
-            runtime is None
-            or getattr(runtime, "repositories", None) is not repositories
-            or getattr(request.app.state, "agent_task_repository", None)
-            is not getattr(repositories, "agent_tasks", None)
-            or getattr(request.app.state, "agent_run_repository", None)
-            is not getattr(repositories, "agent_runs", None)
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Trust exception queue requires the complete app-bound PostgreSQL runtime",
-            )
+    reporting_bundle = _postgres_reporting_bundle(request)
+    if reporting_bundle is not None:
+        runtime, repositories = reporting_bundle
         workspace_id = workspace_id_for_request(user, request)
         if not workspace_id:
             raise HTTPException(

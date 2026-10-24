@@ -130,7 +130,6 @@ def test_installed_codex_permission_request_uses_postgres_for_exact_decision_and
             "--config",
             str(config_path),
         ]
-
         session_id = f"codex-installed-session-{uuid.uuid4().hex}"
         event = {
             "hook_event_name": "PermissionRequest",
@@ -341,6 +340,7 @@ def test_installed_codex_callback_without_documented_call_id_cannot_reuse_approv
             "--config",
             str(config_path),
         ]
+        command_argv = shlex.split(command)
         event = {
             "hook_event_name": "PermissionRequest",
             "session_id": f"documented-codex-session-{uuid.uuid4().hex}",
@@ -371,9 +371,7 @@ def test_installed_codex_callback_without_documented_call_id_cannot_reuse_approv
 
         def start_callback() -> subprocess.Popen[str]:
             child = subprocess.Popen(
-                command,
-                shell=True,
-                executable="/bin/sh",
+                command_argv,
                 cwd=workspace_path,
                 env=child_environment,
                 stdin=subprocess.PIPE,
