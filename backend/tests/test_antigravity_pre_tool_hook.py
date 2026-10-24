@@ -319,6 +319,48 @@ def test_read_only_tool_with_non_secret_path_still_passes_through(tool_name: str
     request.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "tool_name,args",
+    [
+        ("view_file", {}),
+        ("view_file", {"path": "/workspace/.env"}),
+        ("view_file", {"AbsolutePath": "/workspace/src/main.py", "path": "/workspace/.env"}),
+        ("view_file", {"AbsolutePath": "/workspace/src/main.py", "absolute_path": None}),
+        ("list_dir", {"DirectoryPath": "  "}),
+        ("find_by_name", {"SearchDirectory": 42, "Pattern": "*.txt"}),
+        ("grep_search", {"SearchPath": None, "Query": "hello"}),
+    ],
+)
+def test_read_only_file_tool_with_missing_or_invalid_documented_path_requires_mobile_decision(
+    tool_name: str, args: dict
+) -> None:
+    calls: list[str] = []
+    created_body: dict = {}
+
+    def request(
+        method: str,
+        _url: str,
+        _agent_id: str,
+        _token: str,
+        body: dict | None = None,
+        **_kwargs: object,
+    ) -> dict:
+        nonlocal created_body
+        calls.append(method)
+        if method == "POST":
+            created_body = body or {}
+            return {**_approved_record(created_body), "status": "PENDING_REVIEW"}
+        return {**_approved_record(created_body), "status": "DENIED"}
+
+    with patch.object(hook, "_request", side_effect=request):
+        result = _call_hook({"toolCall": {"name": tool_name, "args": args}}, ENV)
+
+    assert calls == ["POST", "GET"]
+    assert result["decision"] == "deny"
+    assert "DENIED" in result["reason"]
+    assert json.loads(created_body["files"][0]["diff"]) == args
+
+
 def test_unknown_tool_requires_mobile_approval_then_allows_exact_snapshot() -> None:
     created_body: dict = {}
 

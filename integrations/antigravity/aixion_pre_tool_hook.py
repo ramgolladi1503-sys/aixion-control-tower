@@ -51,6 +51,12 @@ READ_ONLY_TOOLS = frozenset({
     "search_web", "read_url_content", "list_permissions",
 })
 READ_PATH_ARGUMENTS = frozenset({"absolutepath", "directorypath", "searchdirectory", "searchpath"})
+READ_ONLY_PATH_ARGUMENTS = {
+    "view_file": "absolutepath",
+    "list_dir": "directorypath",
+    "find_by_name": "searchdirectory",
+    "grep_search": "searchpath",
+}
 SAFE_ENV_EXAMPLES = frozenset({".env.example", ".env.sample", ".env.template", ".env.dist"})
 SENSITIVE_PATH_COMPONENT = re.compile(
     r"^(?:\.env(?:$|[._-].*)|\.ssh|\.aws|\.azure|\.gnupg|\.netrc|\.npmrc|\.pypirc|"
@@ -244,6 +250,28 @@ def _has_sensitive_path(args: Any) -> bool:
             if SENSITIVE_PATH_COMPONENT.fullmatch(candidate):
                 return True
     return False
+
+
+def _has_documented_read_path(tool_name: str, args: Any) -> bool:
+    """Require a known, non-empty path before bypassing approval for file reads."""
+    expected_key = READ_ONLY_PATH_ARGUMENTS.get(tool_name)
+    if expected_key is None:
+        return True
+    if not isinstance(args, dict):
+        return False
+    has_documented_path = False
+    documented_path_count = 0
+    for key, value in args.items():
+        normalized_key = re.sub(r"[^a-z]", "", str(key).lower())
+        if normalized_key == expected_key:
+            documented_path_count += 1
+            if documented_path_count > 1 or not isinstance(value, str) or not value.strip():
+                return False
+            has_documented_path = True
+            continue
+        if re.search(r"(?:path|directory|folder|file|root|location)", normalized_key):
+            return False
+    return has_documented_path
 
 
 def _request(
@@ -677,7 +705,11 @@ def _run(
         raise GateError("Tool arguments are not JSON-compatible")
     if _has_sensitive_key(args) or _has_sensitive_value(args):
         return _decision("deny", "Tool arguments contain a secret-like field; redact it before requesting approval")
-    if tool_name in READ_ONLY_TOOLS and not _has_sensitive_path(args):
+    if (
+        tool_name in READ_ONLY_TOOLS
+        and _has_documented_read_path(tool_name, args)
+        and not _has_sensitive_path(args)
+    ):
         return _decision("allow", "Read-only tool left to Antigravity policy")
 
     try:

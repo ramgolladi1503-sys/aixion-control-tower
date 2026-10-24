@@ -241,7 +241,7 @@ fun ApprovalDetailContent(
             ) {
                 if (hasExactToolRequest) {
                     item {
-                        ExactToolRequestHeader()
+                        ExactToolRequestHeader(approval)
                     }
                     items(approval.files) { file -> DiffBlock(file = file) }
                     item {
@@ -495,7 +495,7 @@ internal fun shortSafeApprovalId(raw: String): String {
 }
 
 @Composable
-private fun ExactToolRequestHeader() {
+private fun ExactToolRequestHeader(approval: ApprovalSummary) {
     val palette = LocalTowerPalette.current
     Column(
         modifier = Modifier
@@ -511,12 +511,26 @@ private fun ExactToolRequestHeader() {
             lineHeight = 24.sp
         )
         Text(
+            text = "Provider: ${approvalProviderName(approval.sourceProvider)} · Project: ${approval.projectName.ifBlank { "Not provided" }}",
+            modifier = Modifier.testTag("approval-exact-tool-context"),
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text(
             text = "Review the tool name and arguments below before deciding.",
             color = palette.inkMuted,
             fontSize = 14.sp,
             lineHeight = 20.sp
         )
     }
+}
+
+private fun approvalProviderName(provider: String): String = when {
+    provider.equals("ANTIGRAVITY", ignoreCase = true) -> "Antigravity"
+    provider.equals("CODEX", ignoreCase = true) -> "Codex"
+    provider.equals("OTHER", ignoreCase = true) -> "Other"
+    provider.equals("MANUAL", ignoreCase = true) -> "Manual"
+    else -> provider.ifBlank { "Unknown" }
 }
 
 @Composable
