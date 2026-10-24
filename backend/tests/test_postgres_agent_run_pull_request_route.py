@@ -146,6 +146,7 @@ def make_request(provider: FakeProvider, repository: FakeIntentRepository) -> Po
         id=run.approval_request_id, workspace_id=run.workspace_id,
         project_id=run.project_id, status=ApprovalStatus.APPROVED,
         title="Reviewed change",
+        approved_payload_hash="sha256:" + "c" * 64,
     )
     lease = SimpleNamespace(
         id=run.capability_lease_id, workspace_id=run.workspace_id,
