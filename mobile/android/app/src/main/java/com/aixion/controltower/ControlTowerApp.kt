@@ -1,6 +1,5 @@
 package com.aixion.controltower
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -121,12 +120,6 @@ fun ControlTowerApp(
                 launchSingleTop = true
                 popUpTo(0) { inclusive = true }
             }
-        }
-
-        BackHandler(
-            enabled = authState.authenticated && authState.sessionChecked && currentRoute == Route.Home.value
-        ) {
-            requestLogoutConfirmation()
         }
 
         LogoutConfirmationDialog(
