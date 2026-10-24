@@ -29,6 +29,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
@@ -53,6 +54,7 @@ import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
+import com.aixion.controltower.core.ui.theme.TowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
@@ -356,14 +358,9 @@ internal fun AuthFormContent(
 @Composable
 internal fun AuthFeedbackMessage(message: String, severity: AuthMessageSeverity) {
     val palette = LocalTowerPalette.current
-    val color = when (severity) {
-        AuthMessageSeverity.INFO -> palette.brand
-        AuthMessageSeverity.WARNING -> palette.caution
-        AuthMessageSeverity.ERROR -> palette.danger
-    }
     Text(
         text = message,
-        color = color,
+        color = authFeedbackColor(severity, palette),
         style = MaterialTheme.typography.bodyMedium,
         modifier = Modifier.semantics {
             liveRegion = LiveRegionMode.Polite
@@ -371,6 +368,13 @@ internal fun AuthFeedbackMessage(message: String, severity: AuthMessageSeverity)
         }
     )
 }
+
+internal fun authFeedbackColor(severity: AuthMessageSeverity, palette: TowerPalette): Color =
+    when (severity) {
+        AuthMessageSeverity.INFO -> palette.info
+        AuthMessageSeverity.WARNING -> palette.caution
+        AuthMessageSeverity.ERROR -> palette.danger
+    }
 
 /** Only debug variants may render a verification code returned for local development. */
 internal fun developmentVerificationCodeForDisplay(
