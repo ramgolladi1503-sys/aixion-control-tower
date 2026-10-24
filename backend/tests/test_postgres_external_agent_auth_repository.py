@@ -141,6 +141,57 @@ def _registration_audit_event(agent: ExternalAgent) -> AuditEvent:
     )
 
 
+def test_sqlite_external_agent_listing_is_workspace_scoped_and_requires_credentials(
+    tmp_path,
+) -> None:
+    database = tmp_path / "sqlite-agent-listing.sqlite3"
+
+    def connect() -> sqlite3.Connection:
+        return sqlite3.connect(database, timeout=10)
+
+    with connect() as connection:
+        run_migrations(connection)
+
+    repository = SQLiteExternalAgentAuthRepository(connect)
+    in_scope, in_scope_credential, _ = _agent_and_credential(
+        "workspace-listing-a", "owner-a"
+    )
+    out_of_scope, out_of_scope_credential, _ = _agent_and_credential(
+        "workspace-listing-b", "owner-b"
+    )
+    with connect() as connection:
+        connection.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            (
+                ("external_agent", in_scope.id, in_scope.model_dump_json()),
+                (
+                    "external_agent_credential",
+                    in_scope.id,
+                    in_scope_credential.model_dump_json(),
+                ),
+                ("external_agent", out_of_scope.id, out_of_scope.model_dump_json()),
+                (
+                    "external_agent_credential",
+                    out_of_scope.id,
+                    out_of_scope_credential.model_dump_json(),
+                ),
+            ),
+        )
+
+    listed = repository.list_for_workspace("workspace-listing-a")
+    assert [(agent.id, credential.agent_id) for agent, credential in listed] == [
+        (in_scope.id, in_scope.id)
+    ]
+
+    with connect() as connection:
+        connection.execute(
+            "DELETE FROM kv_store WHERE entity_type=? AND entity_id=?",
+            ("external_agent_credential", in_scope.id),
+        )
+    with pytest.raises(ValueError, match="missing its credential record"):
+        repository.list_for_workspace("workspace-listing-a")
+
+
 def test_stale_external_agent_token_revoke_maps_to_conflict() -> None:
     agent, credential, _ = _agent_and_credential("workspace-a", "owner-a")
 

@@ -57,6 +57,38 @@ class SQLiteExternalAgentAuthRepository:
     def __init__(self, connect: Callable[[], sqlite3.Connection]) -> None:
         self._connect = connect
 
+    def list_for_workspace(
+        self, workspace_id: str
+    ) -> list[tuple[ExternalAgent, AgentCredentialRecord]]:
+        """Return only complete agent/credential pairs owned by one workspace."""
+        if not workspace_id:
+            raise ValueError("External-agent listing requires a workspace")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT a.entity_id,a.payload,c.entity_id,c.payload "
+                "FROM kv_store AS a LEFT JOIN kv_store AS c "
+                "ON c.entity_type=? AND c.entity_id=a.entity_id "
+                "WHERE a.entity_type=? "
+                "AND json_extract(a.payload,'$.workspace_id')=? "
+                "ORDER BY a.entity_id",
+                ("external_agent_credential", "external_agent", workspace_id),
+            ).fetchall()
+
+        result: list[tuple[ExternalAgent, AgentCredentialRecord]] = []
+        for agent_id, agent_payload, credential_id, credential_payload in rows:
+            if credential_payload is None or credential_id != agent_id:
+                raise ValueError("External agent is missing its credential record")
+            agent = ExternalAgent.model_validate_json(agent_payload)
+            credential = AgentCredentialRecord.model_validate_json(credential_payload)
+            if (
+                agent.id != agent_id
+                or agent.workspace_id != workspace_id
+                or credential.agent_id != agent.id
+            ):
+                raise ValueError("External-agent listing crossed workspace scope")
+            result.append((agent, credential))
+        return result
+
     def authenticate_and_consume(
         self,
         *,
