@@ -196,7 +196,7 @@ internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
-            Text("Set up an agent")
+            Text("Manage connections")
         }
     }
 }
