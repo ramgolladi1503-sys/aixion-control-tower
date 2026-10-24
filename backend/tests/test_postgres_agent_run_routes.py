@@ -465,12 +465,13 @@ def test_postgres_agent_run_validation_fails_closed_without_audit_repository(
         workspace_runner=runner,
     )
 
+    audit_events_before = [event.model_copy(deep=True) for event in store.audit_events]
     result = executor(run, step, 10)
 
     assert result.success is False
     assert "runtime-bound audit repository" in result.reason
     assert runner.called is False
-    assert store.audit_events == []
+    assert store.audit_events == audit_events_before
 
 
 def test_postgres_agent_run_http_routes_create_read_and_scope_durable_records(
