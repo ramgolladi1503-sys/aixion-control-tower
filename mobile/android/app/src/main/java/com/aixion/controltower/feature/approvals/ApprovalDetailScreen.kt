@@ -394,7 +394,9 @@ fun ApprovalDetailContent(
 
             }
 
-            if (canDecide || decisionInFlight || decisionNeedsReconciliation) {
+            if (canDecide || decisionInFlight || decisionNeedsReconciliation ||
+                isBlocked || hasUnsupportedData || decisionBlockReason != null
+            ) {
                 DecisionPanel(
                     canApprove = canApprove,
                     exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
@@ -403,6 +405,7 @@ fun ApprovalDetailContent(
                     canDecide = canDecide,
                     isBlocked = isBlocked,
                     hasUnsupportedData = hasUnsupportedData,
+                    decisionBlockReason = decisionBlockReason,
                     decisionInFlight = decisionInFlight,
                     decisionNeedsReconciliation = decisionNeedsReconciliation,
                     onReconcileDecision = onReconcileDecision,
@@ -429,7 +432,11 @@ fun ApprovalDetailContent(
                         .fillMaxWidth()
                         .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.sm)
                         .testTag("approval-decision-panel"),
-                    compactLayout = compactViewport
+                    compactLayout = compactViewport,
+                    showDisabledActions = compactViewport && (
+                        isBlocked || hasUnsupportedData || decisionBlockReason != null ||
+                            decisionNeedsReconciliation
+                        )
                 )
             }
         }
@@ -964,6 +971,7 @@ private fun DecisionPanel(
     canDecide: Boolean,
     isBlocked: Boolean,
     hasUnsupportedData: Boolean,
+    decisionBlockReason: String?,
     decisionInFlight: Boolean,
     decisionNeedsReconciliation: Boolean,
     onReconcileDecision: () -> Unit,
@@ -975,7 +983,8 @@ private fun DecisionPanel(
     onReject: () -> Unit,
     onReviewFullRequest: () -> Unit,
     modifier: Modifier = Modifier,
-    compactLayout: Boolean = false
+    compactLayout: Boolean = false,
+    showDisabledActions: Boolean = false
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
@@ -1050,6 +1059,9 @@ private fun DecisionPanel(
             text = when {
                 compactLayout && decisionNeedsReconciliation -> "Check server status."
                 compactLayout && decisionInFlight -> "Recording decision…"
+                compactLayout && hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
+                compactLayout && isBlocked -> "This request is blocked by policy. No decision can be recorded from mobile."
+                compactLayout && decisionBlockReason != null -> decisionBlockReason
                 compactLayout && exactToolRequestNeedsReview -> "Review request first."
                 compactLayout && fullDiffReviewNeedsReview -> "Review full diff first."
                 compactLayout && canApprove -> "Ready for decision."
@@ -1069,8 +1081,8 @@ private fun DecisionPanel(
                 .semantics { liveRegion = LiveRegionMode.Polite },
             color = if (canApprove) palette.inkMuted else palette.caution,
             style = if (compactLayout) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge,
-            maxLines = if (compactLayout) 1 else Int.MAX_VALUE,
-            overflow = TextOverflow.Ellipsis
+            maxLines = Int.MAX_VALUE,
+            overflow = TextOverflow.Clip
         )
         Spacer(modifier = Modifier.height(if (compactLayout) TowerSpacing.xs else TowerSpacing.lg))
         if (decisionNeedsReconciliation) {
@@ -1081,7 +1093,7 @@ private fun DecisionPanel(
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Check server status") }
         }
-        if (canDecide) {
+        if (canDecide || showDisabledActions) {
             Spacer(modifier = Modifier.height(if (compactLayout) TowerSpacing.xs else TowerSpacing.md))
             Column(
                 verticalArrangement = Arrangement.spacedBy(

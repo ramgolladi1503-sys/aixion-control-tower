@@ -33,6 +33,8 @@ from .connector_simulator import ConnectorSimulationRequest, ConnectorSimulation
 from .connector_templates import ConnectorTemplate, ConnectorTemplateList, connector_templates, get_connector_template
 from .connector_webhook import ConnectorWebhookResponse, handle_connector_webhook
 from .application_repository_access import (
+    agent_task_repository_for_request,
+    application_repositories_for_request,
     approval_decision_repository_for_request,
     connector_repository_for_request,
     project_repository_for_request,
@@ -406,8 +408,39 @@ def simulate_connector_webhook_route(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSimulationResponse:
     bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    if bound is None:
+        # Keep the existing explicitly local/demo compatibility path. When a
+        # connector repository is app-bound, simulation must use the same
+        # request-bound project/task/membership authorities as live webhooks.
+        return simulate_connector_webhook(
+            _get_connector_or_404(connector_id, user), payload
+        )
+
+    try:
+        task_repository = agent_task_repository_for_request(http_request)
+        project_repository = project_repository_for_request(http_request)
+        membership_repository = workspace_membership_repository_for_request(http_request)
+        if get_settings().postgres_auth_enabled:
+            repositories = application_repositories_for_request(http_request)
+            if (
+                repositories.agent_tasks is not task_repository
+                or repositories.projects is not project_repository
+                or repositories.workspace_membership is not membership_repository
+            ):
+                raise RuntimeError("Connector simulation repositories do not share one runtime")
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Connector simulation requires the request-bound connector, task, project, "
+            "and workspace repositories",
+        ) from error
+
     return simulate_connector_webhook(
-        bound if bound is not None else _get_connector_or_404(connector_id, user), payload
+        bound,
+        payload,
+        project_repository=project_repository,
+        task_repository=task_repository,
+        workspace_memberships=membership_repository,
     )
 
 

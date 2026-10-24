@@ -4,6 +4,8 @@ import importlib.util
 import hashlib
 import io
 import json
+import socket
+import struct
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -769,6 +771,113 @@ def test_run_reconnects_after_ambiguous_decision_read_then_consumes_once(
     assert decision_reads == 2
     assert calls.count("POST consume") == 1
     assert clock.sleeps == [hook.POLL_INTERVAL_SECONDS]
+
+
+@pytest.mark.parametrize(
+    ("consume_response", "expected_decision"),
+    [("valid", "auto_approve"), ("partial", "deny"), ("malformed", "deny")],
+)
+def test_loopback_decision_socket_close_retries_poll_and_never_retries_consume(
+    monkeypatch: pytest.MonkeyPatch,
+    consume_response: str,
+    expected_decision: str,
+) -> None:
+    """Exercise real transport failures at decision and consume boundaries."""
+    monkeypatch.setattr(hook.time, "sleep", lambda _seconds: None)
+    created: dict[str, object] = {}
+    decision_reads = 0
+    consume_posts = 0
+
+    class ProtocolHandler(BaseHTTPRequestHandler):
+        def _send_json(self, value: dict[str, object]) -> None:
+            body = json.dumps(value, separators=(",", ":")).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self) -> None:
+            nonlocal decision_reads
+            if self.path == "/health":
+                self._send_json({"status": "ok"})
+                return
+            if self.path.startswith("/agents/identity?"):
+                self._send_json({
+                    "agent_id": "agent-123",
+                    "provider": "ANTIGRAVITY",
+                    "project_id": "project-456",
+                })
+                return
+            if self.path.endswith("/decision"):
+                decision_reads += 1
+                if decision_reads == 1:
+                    # Simulate a real peer reset after accepting the GET but
+                    # before sending an HTTP status or body.
+                    self.connection.setsockopt(
+                        socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+                    )
+                    self.connection.close()
+                    return
+                approved = {**created, "status": "APPROVED"}
+                approved["approved_payload_hash"] = hook._payload_hash(approved)
+                self._send_json(approved)
+                return
+            self.send_error(404)
+
+        def do_POST(self) -> None:
+            nonlocal consume_posts
+            length = int(self.headers.get("Content-Length", "0"))
+            request_body = self.rfile.read(length) if length else b""
+            if self.path == "/agents/approvals":
+                created.update(_approval_from_request(json.loads(request_body)))
+                self._send_json(created)
+                return
+            if self.path.endswith("/consume"):
+                consume_posts += 1
+                if consume_response == "valid":
+                    self._send_json({"consumed": True})
+                elif consume_response == "partial":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "24")
+                    self.end_headers()
+                    self.wfile.write(b'{"consumed":')
+                    self.wfile.flush()
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                else:
+                    body = b'{"consumed":true,}'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                return
+            if self.path.endswith("/delivery-failure"):
+                self._send_json({"recorded": True})
+                return
+            self.send_error(404)
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ProtocolHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    environment = _test_environment()
+    environment["AIXION_API_BASE_URL"] = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = hook.run(_hook_payload(), environment)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+
+    assert result["decision"] == expected_decision
+    assert decision_reads == 2
+    assert consume_posts == 1
 
 
 def test_run_honors_retry_after_only_until_host_deadline(

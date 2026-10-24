@@ -582,6 +582,68 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun blockedCompactFooterWrapsReasonAndKeepsDisabledActionsAndIdentityVisible() {
+        val request = approval(ApprovalStatus.BLOCKED).copy(
+            title = "Run protected production command",
+            sourceProvider = "ANTIGRAVITY",
+            risk = RiskLevel.BLOCKED
+        )
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(360.dp).height(420.dp).testTag("approval-blocked-compact-viewport")) {
+                    ApprovalDetailContent(request, null, {}, {}, {})
+                }
+            }
+        }
+
+        val reason = composeRule.onNodeWithTag("approval-decision-status")
+        reason.assertTextContains("This request is blocked by policy. No decision can be recorded from mobile.")
+        reason.assertIsDisplayed()
+        assertTrue(
+            "Blocked reason must wrap instead of being ellipsized at large text scale",
+            reason.fetchSemanticsNode().boundsInRoot.height >= 48f
+        )
+        composeRule.onNodeWithTag("approval-decision-identity").assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-decision-identity-provider")
+            .assertTextContains("ANTIGRAVITY").assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-decision-identity-request-id")
+            .assertTextContains("Request ail-test").assertIsDisplayed()
+        composeRule.onNodeWithText("Deny").assertIsNotEnabled().assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled().assertIsDisplayed()
+    }
+
+    @Test
+    fun expiredCompactFooterWrapsReasonAndKeepsDisabledActionsAndIdentityVisible() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            title = "Run protected production command",
+            sourceProvider = "ANTIGRAVITY",
+            expiresAt = "2000-01-01T00:00:00Z"
+        )
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(360.dp).height(420.dp).testTag("approval-expired-compact-viewport")) {
+                    ApprovalDetailContent(request, null, {}, {}, {})
+                }
+            }
+        }
+
+        val reason = composeRule.onNodeWithTag("approval-decision-status")
+        reason.assertTextContains("This request has expired. Refresh the inbox before deciding.")
+        reason.assertIsDisplayed()
+        assertTrue(
+            "Expired reason must wrap instead of being ellipsized at large text scale",
+            reason.fetchSemanticsNode().boundsInRoot.height >= 48f
+        )
+        composeRule.onNodeWithTag("approval-decision-identity").assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-decision-identity-provider")
+            .assertTextContains("ANTIGRAVITY").assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-decision-identity-request-id")
+            .assertTextContains("Request ail-test").assertIsDisplayed()
+        composeRule.onNodeWithText("Deny").assertIsNotEnabled().assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled().assertIsDisplayed()
+    }
+
+    @Test
     fun compactExactToolPanelJumpsToTheFullCommandBeforeDecision() {
         val request = approval(ApprovalStatus.REQUESTED).copy(
             id = "approval-command-987654321",

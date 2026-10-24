@@ -7,9 +7,12 @@ from pydantic import BaseModel, Field
 from .connector_models import AgentConnector, ConnectorStatus
 from .connector_schema_mapper import ConnectorSchemaMapperConfig, normalize_connector_payload
 from .connector_webhook import ConnectorWebhookPayload
+from .agent_task_repository import AgentTaskRepository
 from .models import AgentAction
+from .project_repository import ProjectRepository
 from .store import store
 from .workspace_access import connector_scope_is_consistent
+from .workspace_membership_repository import WorkspaceMembershipRepository
 
 
 class ConnectorSimulationRequest(BaseModel):
@@ -62,15 +65,24 @@ def _scope_errors(connector: AgentConnector, payload: ConnectorWebhookPayload) -
     return errors
 
 
-def _simulate_create_task(connector: AgentConnector, payload: ConnectorWebhookPayload) -> tuple[dict[str, Any] | None, list[str], bool]:
+def _simulate_create_task(
+    connector: AgentConnector,
+    payload: ConnectorWebhookPayload,
+    *,
+    project_repository: ProjectRepository | None = None,
+) -> tuple[dict[str, Any] | None, list[str], bool]:
     errors: list[str] = []
     if not _allowed_action(connector, AgentAction.CREATE_AGENT_TASK):
         errors.append("Connector is not allowed to perform CREATE_AGENT_TASK.")
     if not payload.project_id:
         errors.append("project_id is required for CREATE_AGENT_TASK.")
-    elif payload.project_id not in store.projects:
+    elif (project := (
+        project_repository.get(payload.project_id)
+        if project_repository is not None
+        else store.projects.get(payload.project_id)
+    )) is None:
         errors.append("Project not found.")
-    elif connector.workspace_id is not None and store.projects[payload.project_id].workspace_id != connector.workspace_id:
+    elif connector.workspace_id is not None and project.workspace_id != connector.workspace_id:
         errors.append("Project not found.")
     if not payload.title or not payload.goal:
         errors.append("title and goal are required for CREATE_AGENT_TASK.")
@@ -100,14 +112,23 @@ def _simulate_create_task(connector: AgentConnector, payload: ConnectorWebhookPa
     return preview, [], True
 
 
-def _simulate_append_event(connector: AgentConnector, payload: ConnectorWebhookPayload) -> tuple[dict[str, Any] | None, list[str], bool]:
+def _simulate_append_event(
+    connector: AgentConnector,
+    payload: ConnectorWebhookPayload,
+    *,
+    task_repository: AgentTaskRepository | None = None,
+) -> tuple[dict[str, Any] | None, list[str], bool]:
     errors: list[str] = []
     if not _allowed_action(connector, AgentAction.APPEND_AGENT_TASK_EVENT):
         errors.append("Connector is not allowed to perform APPEND_AGENT_TASK_EVENT.")
     if not payload.task_id:
         errors.append("task_id is required for APPEND_AGENT_TASK_EVENT.")
         return None, errors, False
-    task = store.agent_tasks.get(payload.task_id)
+    task = (
+        task_repository.get(payload.task_id)
+        if task_repository is not None
+        else store.agent_tasks.get(payload.task_id)
+    )
     if not task:
         errors.append("Agent task not found.")
         return None, errors, False
@@ -137,10 +158,23 @@ def _simulate_append_event(connector: AgentConnector, payload: ConnectorWebhookP
     return preview, [], True
 
 
-def simulate_connector_webhook(connector: AgentConnector, request: ConnectorSimulationRequest) -> ConnectorSimulationResponse:
+def simulate_connector_webhook(
+    connector: AgentConnector,
+    request: ConnectorSimulationRequest,
+    *,
+    project_repository: ProjectRepository | None = None,
+    task_repository: AgentTaskRepository | None = None,
+    workspace_memberships: WorkspaceMembershipRepository | None = None,
+) -> ConnectorSimulationResponse:
+    if (project_repository is None) != (task_repository is None) or (
+        project_repository is None
+    ) != (workspace_memberships is None):
+        raise ValueError("Connector simulation requires a complete repository bundle")
     errors: list[str] = []
     warnings: list[str] = []
-    if not connector_scope_is_consistent(connector):
+    if not connector_scope_is_consistent(
+        connector, projects=project_repository, memberships=workspace_memberships
+    ):
         return ConnectorSimulationResponse(
             accepted=False,
             connector_id=connector.id,
@@ -169,10 +203,14 @@ def simulate_connector_webhook(connector: AgentConnector, request: ConnectorSimu
     event_preview: dict[str, Any] | None = None
     scope_ready = False
     if payload.action == AgentAction.CREATE_AGENT_TASK:
-        task_preview, action_errors, scope_ready = _simulate_create_task(connector, payload)
+        task_preview, action_errors, scope_ready = _simulate_create_task(
+            connector, payload, project_repository=project_repository
+        )
         errors.extend(action_errors)
     elif payload.action == AgentAction.APPEND_AGENT_TASK_EVENT:
-        event_preview, action_errors, scope_ready = _simulate_append_event(connector, payload)
+        event_preview, action_errors, scope_ready = _simulate_append_event(
+            connector, payload, task_repository=task_repository
+        )
         errors.extend(action_errors)
     else:
         errors.append(f"Connector simulator does not support action: {payload.action.value}")

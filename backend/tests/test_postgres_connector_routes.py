@@ -21,6 +21,7 @@ from app import main
 import app.application_repository_access as repository_access
 import app.connector_routes as connector_routes
 from app.application_repositories import ApplicationRepositories
+from app.agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from app.auth import require_owner
 from app.connector_models import AgentConnector
 from app.connector_repository import PostgresConnectorRepository
@@ -529,6 +530,131 @@ def test_connector_credentials_and_status_transitions_commit_to_postgres(
     ]
     assert set(store.agent_connectors) == before_connectors
     assert {event.id for event in store.audit_events} == before_audits
+
+
+def test_connector_simulation_reads_only_from_request_bound_postgres_repositories(
+    postgres_connector_route_runtime,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    repositories = main.app.state.postgres_repositories
+    project = Project(
+        name="PostgreSQL-only simulation project",
+        description="Must not require a SQLite projection",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    repositories.projects.create(
+        project=project,
+        audit_event=AuditEvent(
+            event_type="project.created",
+            entity_id=project.id,
+            workspace_id=workspace.id,
+            actor=user.email,
+            details={"name": project.name, "mode": project.mode},
+        ),
+    )
+    client = TestClient(main.app)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": "PostgreSQL-only simulator",
+            "provider_label": "ANTIGRAVITY",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK", "APPEND_AGENT_TASK_EVENT"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    assert client.post(f"/connectors/{connector_id}/secret/issue").status_code == 200
+
+    task = AgentTask(
+        provider=AgentProvider.OTHER,
+        project_id=project.id,
+        workspace_id=workspace.id,
+        title="PostgreSQL-only task",
+        goal="Prove simulation reads the app-bound task repository.",
+        repository="ramgolladi1503-sys/aixion-control-tower",
+        status=AgentTaskStatus.PLANNING,
+        metadata={"connector_id": connector_id},
+    )
+    repositories.agent_tasks.create(
+        task=task,
+        event=AgentTaskEvent(
+            task_id=task.id,
+            event_type=AgentTaskEventType.TASK_CREATED,
+            actor=f"connector:{connector_id}",
+        ),
+        audit=AuditEvent(
+            event_type="connector.webhook_task_created",
+            entity_id=task.id,
+            workspace_id=workspace.id,
+            actor=f"connector:{connector_id}",
+            details={"connector_id": connector_id},
+        ),
+    )
+
+    before_local_connectors = set(store.agent_connectors)
+    before_local_audits = {event.id for event in store.audit_events}
+    assert project.id not in store.projects
+    assert task.id not in store.agent_tasks
+
+    create_preview = client.post(
+        f"/connectors/{connector_id}/simulate",
+        json={
+            "sample_payload": {
+                "action": "CREATE_AGENT_TASK",
+                "project_id": project.id,
+                "title": "Preview from PostgreSQL",
+                "goal": "Use the PostgreSQL project row.",
+            }
+        },
+    )
+    assert create_preview.status_code == 200, create_preview.text
+    assert create_preview.json()["accepted"] is True
+    assert create_preview.json()["task_preview"]["project_id"] == project.id
+
+    append_preview = client.post(
+        f"/connectors/{connector_id}/simulate",
+        json={
+            "sample_payload": {
+                "action": "APPEND_AGENT_TASK_EVENT",
+                "task_id": task.id,
+                "event_type": "PLAN_RECEIVED",
+                "message": "Preview from PostgreSQL",
+                "status": "PLANNING",
+            }
+        },
+    )
+    assert append_preview.status_code == 200, append_preview.text
+    assert append_preview.json()["accepted"] is True
+    assert append_preview.json()["event_preview"]["task_id"] == task.id
+    assert set(store.agent_connectors) == before_local_connectors
+    assert {event.id for event in store.audit_events} == before_local_audits
+    assert project.id not in store.projects
+    assert task.id not in store.agent_tasks
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE task_id=%s", (task.id,)
+        ).fetchone()[0] == 1
+
+
+def test_connector_simulation_fails_closed_for_mismatched_postgres_bundle(
+    postgres_connector_route_runtime,
+) -> None:
+    connect, _workspace, _user = postgres_connector_route_runtime
+    client = TestClient(main.app)
+    created = client.post("/connectors", json={"name": "Bound connector"})
+    assert created.status_code == 200, created.text
+    other_repositories = ApplicationRepositories.from_connector(connect)
+    main.app.state.postgres_runtime = SimpleNamespace(repositories=other_repositories)
+
+    response = client.post(
+        f"/connectors/{created.json()['id']}/simulate",
+        json={"sample_payload": {"action": "CREATE_AGENT_TASK"}},
+    )
+
+    assert response.status_code == 503
+    assert "unavailable or mismatched" in response.json()["detail"]
 
 
 def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
