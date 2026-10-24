@@ -203,6 +203,176 @@ def test_installed_antigravity_command_uses_postgres_for_phone_decision(
         _stop_postgres_approval_http_api(server)
 
 
+def test_installed_antigravity_command_expires_without_phone_decision(
+    tmp_path: Path,
+    postgres_approval_route_runtime,
+) -> None:
+    """A missing phone decision expires durably and denies the exact invocation."""
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    connect, workspace_record, project, reviewer, _repositories, agent, agent_token, schema = (
+        postgres_approval_route_runtime
+    )
+    server = _start_postgres_approval_http_api(
+        dsn=dsn,
+        schema=schema,
+        reviewer=reviewer,
+    )
+    process: subprocess.Popen[str] | None = None
+    try:
+        api_base_url = server[2]
+        home = tmp_path / "timeout installed hook home"
+        workspace = tmp_path / "timeout installed hook workspace"
+        workspace.mkdir(mode=0o700)
+
+        config_path, hooks_path = setup_workspace.install_workspace(
+            workspace,
+            api_base_url=api_base_url,
+            agent_id=agent.id,
+            project_id=project.id,
+            home=home,
+            hook_script=HOOK_PATH,
+            python=sys.executable,
+        )
+        hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+        command = hooks[setup_workspace.HOOK_NAME]["PreToolUse"][0]["hooks"][0][
+            "command"
+        ]
+        assert shlex.split(command) == [
+            sys.executable,
+            str(HOOK_PATH.resolve()),
+            "--config",
+            str(config_path),
+        ]
+
+        session_id = f"postgres-installed-hook-timeout-{time.time_ns()}"
+        payload = {
+            "conversationId": session_id,
+            "stepIdx": 29,
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "echo installed-hook-postgres-timeout"},
+            },
+        }
+        child_environment = {
+            key: value
+            for key in ("PATH", "HOME", "TMPDIR", "SYSTEMROOT", "WINDIR")
+            if (value := os.environ.get(key))
+        }
+        child_environment.update(
+            {
+                "HOME": str(home),
+                "AIXION_AGENT_TOKEN": agent_token,
+                "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+                "AIXION_APPROVAL_TIMEOUT_SECONDS": "1",
+            }
+        )
+
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            executable="/bin/sh",
+            cwd=workspace,
+            env=child_environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(payload))
+        process.stdin.close()
+        process.stdin = None
+
+        approval_row: tuple[str, str, str] | None = None
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(
+                    "Installed Antigravity hook exited before creating its "
+                    f"PostgreSQL approval (exit={process.returncode}, "
+                    f"stdout={stdout!r}, stderr={stderr!r})"
+                )
+            with connect() as connection:
+                rows = connection.execute(
+                    "SELECT approval_id,source_invocation_id,status "
+                    "FROM approval_requests WHERE workspace_id=%s "
+                    "AND source_agent_id=%s AND payload->>'source_session_id'=%s",
+                    (workspace_record.id, agent.id, session_id),
+                ).fetchall()
+            assert len(rows) <= 1, "installed hook created duplicate approval rows"
+            if rows:
+                approval_row = rows[0]
+                break
+            time.sleep(0.05)
+
+        assert approval_row is not None, (
+            "Installed command did not create a PostgreSQL approval before timeout"
+        )
+        approval_id, invocation_id, initial_status = approval_row
+        assert invocation_id
+        assert initial_status == "PENDING_REVIEW"
+        assert process.poll() is None, "installed hook should wait for the phone decision"
+
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            pytest.fail(
+                "Installed Antigravity hook did not exit after its approval timeout "
+                f"(stdout={stdout!r}, stderr={stderr!r})"
+            )
+        assert process.returncode == 0, stderr
+        assert json.loads(stdout) == {
+            "decision": "deny",
+            "reason": "Approval timed out; the request expired and the tool call was denied",
+        }
+
+        with connect() as connection:
+            persisted_approval = connection.execute(
+                "SELECT approval_id,status,workspace_id,source_agent_id,source_invocation_id "
+                "FROM approval_requests WHERE approval_id=%s AND workspace_id=%s "
+                "AND source_agent_id=%s AND source_invocation_id=%s "
+                "AND payload->>'source_session_id'=%s",
+                (approval_id, workspace_record.id, agent.id, invocation_id, session_id),
+            ).fetchone()
+            expired_audits = connection.execute(
+                "SELECT COUNT(*) FROM audit_events "
+                "WHERE approval_id=%s AND event_type='approval.expired'",
+                (approval_id,),
+            ).fetchone()[0]
+            claimed_audits = connection.execute(
+                "SELECT COUNT(*) FROM audit_events "
+                "WHERE approval_id=%s AND event_type='approval.delivery_claimed'",
+                (approval_id,),
+            ).fetchone()[0]
+            delivery_claims = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0]
+
+        assert persisted_approval == (
+            approval_id,
+            "EXPIRED",
+            workspace_record.id,
+            agent.id,
+            invocation_id,
+        )
+        assert expired_audits == 1
+        assert claimed_audits == 0
+        assert delivery_claims == 0
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        _stop_postgres_approval_http_api(server)
+
+
 def test_installed_antigravity_command_keeps_live_invocation_across_postgres_api_restart(
     tmp_path: Path,
     postgres_approval_route_runtime,
