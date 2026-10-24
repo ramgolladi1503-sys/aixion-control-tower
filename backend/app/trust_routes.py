@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from .agent_auth import assert_agent_can, require_external_agent
 from .approval_decisions import approval_decision_repository
+from .approval_repository import SQLiteApprovalDecisionRepository
 from .application_repository_access import workspace_id_for_request
 from .application_repository_access import (
     external_agent_auth_repository_for_request,
@@ -74,10 +75,12 @@ from .trust_service import (
     revoke_capability_lease,
 )
 from .trust_crypto import issue_bearer_token
+from .workspace_membership_repository import SQLiteWorkspaceMembershipRepository
 from .postgres_trust_repository import (
     PostgresTrustRepositoryConflict,
     PostgresTrustRepositoryError,
 )
+from .settings import get_settings
 from .workspace_access import (
     approval_scope_is_consistent,
     approval_workspace_id,
@@ -119,6 +122,37 @@ def _postgres_attestation_runtime(request: Request | None):
     ):
         return None
     return runtime
+
+
+def _require_local_attestation_runtime(request: Request | None) -> None:
+    """Refuse SQLite attestation access when PostgreSQL is selected or partially bound."""
+    state = getattr(request.app, "state", None) if request is not None else None
+    selected_repository = any(
+        repository is not None and not isinstance(repository, sqlite_repository_type)
+        for repository, sqlite_repository_type in (
+            (
+                getattr(state, "approval_decision_repository", None),
+                SQLiteApprovalDecisionRepository,
+            ),
+            (
+                getattr(state, "workspace_membership_repository", None),
+                SQLiteWorkspaceMembershipRepository,
+            ),
+        )
+    ) or any(
+        getattr(state, name, None) is not None
+        for name in ("trust_repository", "trust_event_repository")
+    )
+    if (
+        get_settings().postgres_auth_enabled
+        or getattr(state, "postgres_runtime", None) is not None
+        or getattr(state, "postgres_repositories", None) is not None
+        or selected_repository
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL reviewer-attestation repository is unavailable",
+        )
 
 
 def _postgres_lease_runtime(request: Request | None):
@@ -231,6 +265,7 @@ def create_attestation(
                 trust_repository=repositories.trust,
                 trust_event_repository=repositories.trust_events,
             )
+        _require_local_attestation_runtime(request)
         workspace_id = workspace_id_for_user(user)
         _approval_for_user(payload.approval_request_id, workspace_id)
         return record_reviewer_attestation(payload, user=user)
@@ -257,6 +292,7 @@ def list_attestations(
                 approval_request_id=approval_request_id,
             )
 
+    _require_local_attestation_runtime(request)
     items = list(store.reviewer_attestations.values())
     workspace_id = workspace_id_for_user(user)
     if workspace_id is not None:

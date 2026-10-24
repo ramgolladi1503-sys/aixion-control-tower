@@ -12,6 +12,7 @@ from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.approval_integrity import compute_approval_payload_hash
 from app.main import app
 from app.models import (
+    AuthUser,
     AgentProvider,
     ApprovalRequest,
     ApprovalStatus,
@@ -19,8 +20,11 @@ from app.models import (
     Project,
     RiskAssessment,
     RiskLevel,
+    UserRole,
 )
 from app.store import store
+from app.trust_models import ReviewerAttestationCreate, ReviewerAttestationDecision
+from app.trust_routes import create_attestation, list_attestations
 
 client = TestClient(app)
 
@@ -99,6 +103,31 @@ def _create_lease(approval: ApprovalRequest) -> dict:
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_reviewer_attestation_create_and_list_keep_sqlite_local_behavior() -> None:
+    approval = _seed_approval()
+    reviewer = AuthUser(
+        id="reviewer-local",
+        email="reviewer-local@example.test",
+        display_name="Local reviewer",
+        role=UserRole.REVIEWER,
+    )
+    payload = ReviewerAttestationCreate(
+        approval_request_id=approval.id,
+        decision=ReviewerAttestationDecision.APPROVE,
+        reason="Reviewed the exact request.",
+    )
+
+    created = create_attestation(payload, user=reviewer, request=None)
+    listed = list_attestations(
+        approval_request_id=approval.id,
+        user=reviewer,
+        request=None,
+    )
+
+    assert created.id in store.reviewer_attestations
+    assert [item.id for item in listed] == [created.id]
 
 
 def test_lease_gateway_consumption_scorecard_and_flight_recorder_routes() -> None:

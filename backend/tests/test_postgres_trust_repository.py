@@ -57,12 +57,14 @@ from app.trust_routes import (
     consume_manual_action,
     consume_external_agent_action,
     create_lease,
+    create_attestation,
     decide_exact_action,
     evaluate_manual_action,
     get_lease,
     get_exact_action_decision,
     list_leases,
     list_flight_recorder_events,
+    list_attestations,
     list_exceptions,
     list_scorecards,
     verify_flight_recorder_chain,
@@ -90,6 +92,7 @@ from app.trust_models import (
     PolicyDecisionType,
     ProposedAction,
     ReviewerAttestation,
+    ReviewerAttestationCreate,
     ReviewerAttestationDecision,
     TrustEventType,
 )
@@ -2753,6 +2756,113 @@ def test_postgres_flight_recorder_routes_read_the_durable_workspace_ledger(
         list_flight_recorder_events(limit=500, user=user, request=request)
     assert partial_binding.value.status_code == 503
     request.app.state.trust_event_repository = bound_event_repository
+
+
+def test_postgres_attestation_list_reads_the_durable_workspace_repository(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, connect, workspace_id, approval_id, request, user, _payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    repositories = request.app.state.postgres_repositories
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT payload->>'approved_payload_hash' FROM approval_requests WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()
+        attestation = ReviewerAttestation(
+            approval_request_id=approval_id,
+            workspace_id=workspace_id,
+            approval_payload_hash=row[0],
+            reviewer_user_id=user.id,
+            reviewer_role=user.role,
+            decision=ReviewerAttestationDecision.APPROVE,
+            reason="Durable route fixture",
+            signature="test-signature",
+        )
+        with conn.transaction():
+            repositories.trust.insert_reviewer_attestation(conn, attestation)
+
+    listed = list_attestations(
+        approval_request_id=approval_id,
+        user=user,
+        request=request,
+    )
+
+    assert [item.id for item in listed] == [attestation.id]
+
+
+def test_postgres_attestation_routes_refuse_partial_binding_without_sqlite_fallback(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, _connect, _workspace_id, approval_id, request, user, _payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    request.app.state.trust_event_repository = object()
+    before = dict(store.reviewer_attestations)
+
+    with pytest.raises(HTTPException) as list_error:
+        list_attestations(
+            approval_request_id=approval_id,
+            user=user,
+            request=request,
+        )
+    with pytest.raises(HTTPException) as create_error:
+        create_attestation(
+            ReviewerAttestationCreate(
+                approval_request_id=approval_id,
+                decision=ReviewerAttestationDecision.APPROVE,
+            ),
+            user=user,
+            request=request,
+        )
+
+    assert list_error.value.status_code == 503
+    assert create_error.value.status_code == 503
+    assert store.reviewer_attestations == before
+
+
+def test_postgres_attestation_routes_refuse_single_partial_repository_binding(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, _connect, _workspace_id, approval_id, request, user, _payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    state = request.app.state
+    state.postgres_runtime = None
+    state.postgres_repositories = None
+    state.approval_decision_repository = object()
+    state.workspace_membership_repository = None
+    state.trust_repository = None
+    state.trust_event_repository = None
+    monkeypatch.setattr(
+        "app.trust_routes.get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=False),
+    )
+    before = dict(store.reviewer_attestations)
+
+    with pytest.raises(HTTPException) as list_error:
+        list_attestations(
+            approval_request_id=approval_id,
+            user=user,
+            request=request,
+        )
+    with pytest.raises(HTTPException) as create_error:
+        create_attestation(
+            ReviewerAttestationCreate(
+                approval_request_id=approval_id,
+                decision=ReviewerAttestationDecision.APPROVE,
+            ),
+            user=user,
+            request=request,
+        )
+
+    assert list_error.value.status_code == 503
+    assert create_error.value.status_code == 503
+    assert store.reviewer_attestations == before
 
 
 def test_postgres_runtime_reads_durable_scorecards_without_sqlite_projection(
