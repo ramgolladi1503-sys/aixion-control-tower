@@ -1057,16 +1057,18 @@ def list_work_orders(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[WorkOrder]:
     workspace_id = _workspace_id_for_route(user, http_request)
-    if not workspace_id:
+    repository = _work_order_repository_for_route(http_request)
+    if not workspace_id and (
+        not isinstance(repository, SQLiteWorkOrderRepository)
+        or get_settings().is_production
+    ):
         raise HTTPException(status_code=403, detail="Workspace membership is required")
     work_orders = [
         item
-        for item in _work_order_repository_for_route(http_request).list_for_workspace(
-            workspace_id
-        )
+        for item in repository.list_for_workspace(workspace_id)
         if (
             work_order_scope_is_consistent(item)
-            if isinstance(_work_order_repository_for_route(http_request), SQLiteWorkOrderRepository)
+            if isinstance(repository, SQLiteWorkOrderRepository)
             else item.workspace_id == workspace_id
         )
     ]
