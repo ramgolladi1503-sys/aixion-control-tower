@@ -1025,6 +1025,57 @@ def test_http_request_applies_capped_deadline_and_response_limit(
     assert observed[0][2]["X-Aixion-Approval-Protocol"] == "1"
 
 
+def test_overflowing_api_response_number_cannot_authorize_or_consume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    environment = {
+        **_codex_environment(),
+        "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "1",
+    }
+    calls: list[str] = []
+    created: dict = {}
+
+    def deadline_request(method, url, _headers, body, _timeout, *, max_response_bytes):
+        calls.append(f"{method} {url.rsplit('/', 1)[-1]}")
+        assert max_response_bytes == hook.MAX_RESPONSE_BYTES
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_codex_approval(json.loads(body)))
+            response_body = json.dumps(created, separators=(",", ":")).encode()
+        elif method == "GET" and url.endswith("/decision"):
+            approved = {
+                **created,
+                "status": "APPROVED",
+                "approved_payload_hash_version": 2,
+                "workspace_id": "workspace-1",
+                "risk": {"level": "HIGH", "score": float("inf")},
+            }
+            approved["approved_payload_hash"] = hook._hash(approved)
+            # Python accepts this valid JSON exponent as infinity. The Codex
+            # parser must reject it before the hook can verify and consume.
+            response_body = json.dumps(approved, separators=(",", ":")).replace(
+                "Infinity", "1e999"
+            ).encode()
+        elif method == "POST" and url.endswith("/expire"):
+            response_body = json.dumps(
+                {**created, "status": "EXPIRED"}, separators=(",", ":")
+            ).encode()
+        else:
+            pytest.fail(f"Unexpected provider request: {method} {url}")
+        return SimpleNamespace(status=200, headers={}, body=response_body)
+
+    monkeypatch.setattr(hook, "deadline_request", deadline_request)
+
+    result = hook.run(_codex_event(), environment)
+
+    assert result[0] == "deny"
+    assert "expire" in result[1].lower()
+    assert clock.now == 101
+    assert calls == ["POST approvals", "GET decision", "POST expire"]
+    assert not any(call.endswith("consume") for call in calls)
+
+
 @pytest.mark.parametrize("status", [201, 204])
 def test_heartbeat_request_requires_exact_http_200(
     monkeypatch: pytest.MonkeyPatch,

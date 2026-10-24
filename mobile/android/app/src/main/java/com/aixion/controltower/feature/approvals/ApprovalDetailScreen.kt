@@ -865,7 +865,7 @@ private fun DecisionPanel(
                     onClick = onReject,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 48.dp)
+                        .heightIn(min = 56.dp)
                         .semantics(mergeDescendants = true) {
                             contentDescription = "Deny request: $approvalTitle. Risk: $approvalRisk."
                         },
@@ -877,7 +877,7 @@ private fun DecisionPanel(
                     colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.onBrand),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 48.dp)
+                        .heightIn(min = 56.dp)
                         .semantics(mergeDescendants = true) {
                             contentDescription = "Approve request: $approvalTitle. Risk: $approvalRisk."
                         }

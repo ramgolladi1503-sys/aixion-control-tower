@@ -143,6 +143,14 @@ def _reject_nonstandard_json_constant(value: str) -> None:
     raise ValueError(f"Non-standard JSON constant: {value}")
 
 
+def _parse_finite_json_float(value: str) -> float:
+    """Reject valid JSON exponents that overflow Python's finite float range."""
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("JSON number is outside the finite range")
+    return parsed
+
+
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """Reject ambiguous JSON objects instead of silently keeping the last key."""
     result: dict[str, Any] = {}
@@ -341,6 +349,7 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
         try:
             result = json.loads(
                 raw,
+                parse_float=_parse_finite_json_float,
                 parse_constant=_reject_nonstandard_json_constant,
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
