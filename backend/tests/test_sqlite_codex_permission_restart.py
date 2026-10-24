@@ -510,6 +510,98 @@ def test_identified_codex_invocation_recovers_after_api_restart_and_consumes_onc
             _stop_api(api_process)
 
 
+def test_codex_hook_process_restart_reattaches_same_pending_provider_invocation(
+    tmp_path: Path,
+) -> None:
+    """A restarted hook rejoins the same pending Codex call and can consume once."""
+    db_path = tmp_path / "codex-pending-hook-process-restart.sqlite3"
+    db_path.parent.chmod(0o700)
+    port = _free_loopback_port()
+    api_process: subprocess.Popen[bytes] | None = None
+    interrupted_process: subprocess.Popen[str] | None = None
+    resumed_process: subprocess.Popen[str] | None = None
+    replay_process: subprocess.Popen[str] | None = None
+
+    try:
+        api_process, base_url = _start_api(db_path, port)
+        project_id, agent_id, token = _create_codex_agent(base_url)
+        environment = _hook_environment(base_url, project_id, agent_id, token)
+        event = _permission_event(tool_use_id="codex-stable-provider-tool-use-2026-01")
+
+        interrupted_process = _launch_hook(event, environment)
+        original = _wait_for_approval(
+            db_path, agent_id=agent_id, process=interrupted_process
+        )
+        assert original["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert original["source_provider"] == "CODEX"
+        assert original["source_invocation_id"]
+        assert interrupted_process.poll() is None
+
+        # Simulate a host-side hook process crash after the server has durably
+        # recorded the phone request but before the user decides it.
+        interrupted_process.kill()
+        interrupted_process.communicate(timeout=5)
+        interrupted_process = None
+
+        resumed_process = _launch_hook(event, environment)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            assert resumed_process.poll() is None, (
+                "restarted hook returned before the pending approval was decided"
+            )
+            approvals = _read_approvals(db_path, agent_id)
+            same_invocation = [
+                item
+                for item in approvals
+                if item.get("source_invocation_id") == original["source_invocation_id"]
+            ]
+            assert [item["id"] for item in same_invocation] == [original["id"]]
+            time.sleep(0.05)
+
+        assert _claim_count(db_path, original["id"]) == 0
+        assert _audit_count(db_path, original["id"], "approval.created_by_agent") == 1
+
+        decision = _decide(base_url, original["id"], "approve")
+        assert decision["status"] == "APPROVED"
+        resumed_decision, resumed_stderr = _finish_hook(resumed_process)
+        resumed_process = None
+        _assert_terminal_diagnostic(
+            resumed_stderr, approval_id=original["id"], decision="allow"
+        )
+        assert resumed_decision == {"behavior": "allow"}
+        assert _claim_count(db_path, original["id"]) == 1
+        assert _audit_count(db_path, original["id"], "approval.created_by_agent") == 1
+        assert _audit_count(db_path, original["id"], "approval.decision") == 1
+        assert _audit_count(db_path, original["id"], "approval.delivery_claimed") == 1
+
+        # A further replay of the provider-stable event cannot create another
+        # approval or produce a second allow/claim.
+        replay_process = _launch_hook(event, environment)
+        replay_decision, replay_stderr = _finish_hook(replay_process)
+        replay_process = None
+        _assert_terminal_diagnostic(
+            replay_stderr, approval_id=original["id"], decision="deny"
+        )
+        assert replay_decision.get("behavior") == "deny"
+        invocation_approvals = [
+            item
+            for item in _read_approvals(db_path, agent_id)
+            if item.get("source_invocation_id") == original["source_invocation_id"]
+        ]
+        assert [item["id"] for item in invocation_approvals] == [original["id"]]
+        assert _claim_count(db_path, original["id"]) == 1
+        assert _audit_count(db_path, original["id"], "approval.created_by_agent") == 1
+        assert _audit_count(db_path, original["id"], "approval.decision") == 1
+        assert _audit_count(db_path, original["id"], "approval.delivery_claimed") == 1
+    finally:
+        for process in (interrupted_process, resumed_process, replay_process):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)
+
+
 def test_codex_callback_without_tool_use_id_gets_new_identity_after_relaunch(
     tmp_path: Path,
 ) -> None:
