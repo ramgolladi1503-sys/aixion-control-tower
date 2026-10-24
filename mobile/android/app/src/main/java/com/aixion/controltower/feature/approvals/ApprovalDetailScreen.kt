@@ -417,6 +417,8 @@ fun ApprovalDetailContent(
                     approvalId = approval.id,
                     approvalProvider = approval.sourceProvider.ifBlank { approval.sourceLabel },
                     approvalRisk = approval.risk,
+                    expiresAt = approval.expiresAt,
+                    now = decisionClock,
                     onApprove = {
                         if (requiresRiskConfirmation) {
                             showRiskConfirmation = true
@@ -1012,6 +1014,8 @@ private fun DecisionPanel(
     approvalId: String,
     approvalProvider: String,
     approvalRisk: RiskLevel,
+    expiresAt: String?,
+    now: Instant,
     onApprove: () -> Unit,
     onReject: () -> Unit,
     onReviewFullRequest: () -> Unit,
@@ -1088,6 +1092,15 @@ private fun DecisionPanel(
             )
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
         }
+        Text(
+            text = ApprovalDecisionPolicy.expiryCountdownLabel(expiresAt, now),
+            color = if (ApprovalDecisionPolicy.expiryIsUrgent(expiresAt, now)) palette.caution else palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("approval-decision-expiry-countdown")
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
             text = when {
                 compactLayout && decisionNeedsReconciliation -> "Check server status."

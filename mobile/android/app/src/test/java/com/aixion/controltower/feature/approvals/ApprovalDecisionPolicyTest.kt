@@ -56,6 +56,32 @@ class ApprovalDecisionPolicyTest {
         )
     }
 
+    @Test
+    fun expiryCountdownUsesReadableUnitsAndExplicitUnavailableStates() {
+        assertEquals(
+            "Expires in about 2 minutes",
+            ApprovalDecisionPolicy.expiryCountdownLabel("2026-10-21T12:01:01Z", now)
+        )
+        assertEquals(
+            "Expires in less than a minute",
+            ApprovalDecisionPolicy.expiryCountdownLabel("2026-10-21T12:00:59Z", now)
+        )
+        assertEquals("Expired", ApprovalDecisionPolicy.expiryCountdownLabel("2026-10-21T12:00:00Z", now))
+        assertEquals("Expiry unavailable", ApprovalDecisionPolicy.expiryCountdownLabel(null, now))
+        assertEquals("Expiry unavailable", ApprovalDecisionPolicy.expiryCountdownLabel("invalid", now))
+    }
+
+    @Test
+    fun expiryCountdownUsesHourUnitsAndMarksLastFiveMinutesUrgent() {
+        assertEquals(
+            "Expires in about 2 hours",
+            ApprovalDecisionPolicy.expiryCountdownLabel("2026-10-21T13:01:00Z", now)
+        )
+        assertEquals(false, ApprovalDecisionPolicy.expiryIsUrgent("2026-10-21T12:06:00Z", now))
+        assertEquals(true, ApprovalDecisionPolicy.expiryIsUrgent("2026-10-21T12:05:00Z", now))
+        assertEquals(false, ApprovalDecisionPolicy.expiryIsUrgent("invalid", now))
+    }
+
     private fun approval() = ApprovalSummary(
         id = "approval-policy-test",
         projectName = "Test project",

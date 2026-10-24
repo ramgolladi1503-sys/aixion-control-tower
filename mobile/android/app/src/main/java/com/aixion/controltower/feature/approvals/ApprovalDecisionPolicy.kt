@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.approvals
 
 import com.aixion.controltower.core.model.ApprovalSummary
+import java.time.Duration
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.format.DateTimeParseException
@@ -15,6 +16,26 @@ internal object ApprovalDecisionPolicy {
             null
         }
     }
+
+    fun expiryCountdownLabel(value: String?, now: Instant): String {
+        val expiry = expiryInstant(value) ?: return "Expiry unavailable"
+        val secondsLeft = Duration.between(now, expiry).seconds
+        if (secondsLeft <= 0) return "Expired"
+        if (secondsLeft < 60) return "Expires in less than a minute"
+
+        val minutesLeft = (secondsLeft + 59) / 60
+        if (minutesLeft < 60) {
+            val unit = if (minutesLeft == 1L) "minute" else "minutes"
+            return "Expires in about $minutesLeft $unit"
+        }
+
+        val hoursLeft = (minutesLeft + 59) / 60
+        val unit = if (hoursLeft == 1L) "hour" else "hours"
+        return "Expires in about $hoursLeft $unit"
+    }
+
+    fun expiryIsUrgent(value: String?, now: Instant): Boolean =
+        expiryInstant(value)?.let { !it.isAfter(now.plusSeconds(5 * 60)) } ?: false
 
     fun blockReason(approval: ApprovalSummary, now: Instant): String? {
         val expiresAt = expiryInstant(approval.expiresAt)
