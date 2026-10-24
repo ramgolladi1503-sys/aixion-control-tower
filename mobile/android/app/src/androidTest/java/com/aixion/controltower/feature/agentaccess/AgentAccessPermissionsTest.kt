@@ -58,14 +58,14 @@ class AgentAccessPermissionsTest {
     }
 
     @Test
-    fun connectorSetupIsNeverPresentedAsAConfirmedLiveConnection() {
+    fun connectorStatusExplicitlySaysHostIsUnverified() {
         composeRule.setContent {
             ControlTowerTheme {
                 AgentAccessStatusBadge(isLoading = false)
             }
         }
 
-        composeRule.onNodeWithText("Connector setup").assertExists()
+        composeRule.onNodeWithText("Host status unverified").assertExists()
         composeRule.onNodeWithText("MAC AGENT ACCESS").assertDoesNotExist()
     }
 
@@ -78,7 +78,7 @@ class AgentAccessPermissionsTest {
         }
 
         composeRule.onNodeWithText("Syncing").assertExists()
-        composeRule.onNodeWithText("Connector setup").assertDoesNotExist()
+        composeRule.onNodeWithText("Host status unverified").assertDoesNotExist()
     }
 
     @Test
