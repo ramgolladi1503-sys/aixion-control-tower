@@ -88,6 +88,55 @@ def _rotate_in_process(
         outcomes.put("committed")
 
 
+def _authenticate_rotated_token_in_process(
+    dsn: str,
+    schema: str,
+    agent_id: str,
+    old_token: str,
+    replacement_token: str,
+    outcomes: Any,
+) -> None:
+    """Observe token rotation and audit effects from a fresh OS process."""
+    def connect() -> psycopg.Connection:
+        connection = psycopg.connect(dsn)
+        connection.execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(schema))
+        )
+        return connection
+
+    repository = PostgresExternalAgentAuthRepository(connect)
+    old_result = repository.authenticate_and_consume(
+        agent_id=agent_id,
+        token=old_token,
+        occurred_at=now_utc(),
+        window_seconds=60,
+        require_workspace=True,
+    )
+    replacement_result = repository.authenticate_and_consume(
+        agent_id=agent_id,
+        token=replacement_token,
+        occurred_at=now_utc() + timedelta(seconds=1),
+        window_seconds=60,
+        require_workspace=True,
+    )
+    outcomes.put(
+        {
+            "old_reason": old_result.reason,
+            "old_audit_type": (
+                old_result.audit_event.event_type
+                if old_result.audit_event is not None
+                else None
+            ),
+            "replacement_reason": replacement_result.reason,
+            "replacement_agent_id": (
+                replacement_result.agent.id
+                if replacement_result.agent is not None
+                else None
+            ),
+        }
+    )
+
+
 def test_concurrent_token_rotations_from_separate_processes_commit_once() -> None:
     dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
     if not dsn:
@@ -224,6 +273,153 @@ def test_concurrent_token_rotations_from_separate_processes_commit_once() -> Non
                 (agent.id,),
             ).fetchone()[0]
         assert audit_count == 1
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_committed_token_rotation_is_observed_by_fresh_process() -> None:
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not dsn:
+        pytest.skip(
+            "AIXION_TEST_POSTGRES_DSN is required for PostgreSQL integration tests"
+        )
+
+    schema = f"ct_agent_rotation_process_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    def connect() -> psycopg.Connection:
+        connection = psycopg.connect(dsn)
+        connection.execute(
+            sql.SQL("SET search_path TO {}").format(sql.Identifier(schema))
+        )
+        return connection
+
+    workspace_id = f"workspace_{uuid.uuid4().hex}"
+    owner = User(
+        id=f"user_{uuid.uuid4().hex}",
+        email=f"{uuid.uuid4().hex}@example.test",
+        display_name="Workspace owner",
+        role=UserRole.OWNER,
+        password_hash="test-hash",
+        password_salt="test-salt",
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    workspace = Workspace(
+        id=workspace_id,
+        name="Cross-process token rotation",
+        owner_user_id=owner.id,
+    )
+
+    try:
+        run_postgres_migrations(connect)
+        with connect() as connection:
+            connection.execute(
+                "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+                (workspace.id, Jsonb(workspace.model_dump(mode="json"))),
+            )
+            connection.execute(
+                "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,"
+                "email_verified,payload) VALUES(%s,%s,%s,%s,%s,FALSE,TRUE,%s)",
+                (
+                    owner.id,
+                    workspace.id,
+                    owner.email,
+                    owner.email.lower().strip(),
+                    owner.role.value,
+                    Jsonb(owner.model_dump(mode="json")),
+                ),
+            )
+
+        old_token = f"aixion_agent_{uuid.uuid4().hex}"
+        replacement_token = f"aixion_agent_{uuid.uuid4().hex}"
+        agent = ExternalAgent(
+            provider=AgentProvider.ANTIGRAVITY,
+            display_name="Cross-process rotation connector",
+            auth_type=AgentAuthType.API_KEY,
+            allowed_actions=[],
+            created_by_user_id=owner.id,
+            workspace_id=workspace_id,
+            secret_hash=hashlib.sha256(old_token.encode()).hexdigest(),
+        )
+        credential = AgentCredentialRecord(agent_id=agent.id, rate_limit_per_minute=60)
+        repository = PostgresExternalAgentAuthRepository(connect)
+        repository.create(
+            agent=agent,
+            credential=credential,
+            audit_event=AuditEvent(
+                event_type="agent.registered",
+                actor=owner.email,
+                entity_id=agent.id,
+                workspace_id=workspace_id,
+                details={},
+            ),
+        )
+
+        rotated_at = now_utc() + timedelta(seconds=1)
+        rotated_agent = agent.model_copy(
+            update={
+                "secret_hash": hashlib.sha256(replacement_token.encode()).hexdigest(),
+                "updated_at": rotated_at,
+            }
+        )
+        rotated_credential = credential.model_copy(
+            update={"token_rotated_at": rotated_at, "updated_at": rotated_at}
+        )
+        repository.update(
+            agent=rotated_agent,
+            credential=rotated_credential,
+            audit_event=AuditEvent(
+                event_type="agent.token_rotated",
+                actor=owner.email,
+                entity_id=agent.id,
+                workspace_id=workspace_id,
+                details={},
+                created_at=rotated_at,
+            ),
+            expected_agent=agent,
+            expected_credential=credential,
+        )
+
+        context = multiprocessing.get_context("spawn")
+        outcomes = context.Queue()
+        process = context.Process(
+            target=_authenticate_rotated_token_in_process,
+            args=(dsn, schema, agent.id, old_token, replacement_token, outcomes),
+        )
+        process.start()
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+            pytest.fail("Fresh token-authentication process did not finish before timeout.")
+        assert process.exitcode == 0
+        observed = outcomes.get(timeout=5)
+        assert observed == {
+            "old_reason": "invalid_token",
+            "old_audit_type": "agent.auth_failed",
+            "replacement_reason": None,
+            "replacement_agent_id": agent.id,
+        }
+
+        current = repository.get(agent.id)
+        assert current is not None
+        assert current[0].secret_hash == hashlib.sha256(replacement_token.encode()).hexdigest()
+        assert current[1].failed_auth_count == 1
+        with connect() as connection:
+            audit_rows = connection.execute(
+                "SELECT event_type,details FROM audit_events WHERE entity_id=%s "
+                "ORDER BY created_at",
+                (agent.id,),
+            ).fetchall()
+        assert [row[0] for row in audit_rows] == [
+            "agent.registered",
+            "agent.token_rotated",
+            "agent.auth_failed",
+        ]
+        assert audit_rows[-1][1]["reason"] == "invalid_token"
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))

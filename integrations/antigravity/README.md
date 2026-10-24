@@ -156,8 +156,8 @@ Antigravity hook to call `http://127.0.0.1:${API_PORT}` and build the Android
 debug app with that same API URL. Both clients must use the same backend
 instance and database for the phone decision to unblock the pending hook call.
 The prepared local E2E API in the current PR workspace uses port `8004`; use
-`API_PORT=8004` when continuing that run. The value `8003` below is only a
-generic example, not a second service to start.
+`API_PORT=8004` when continuing that run. Do not start a second service for the
+USB mapping.
 
 With USB debugging authorized, run the following in one terminal session. Set
 `API_PORT` to the verified isolated backend port (`8004` for the prepared local
@@ -165,7 +165,7 @@ E2E runtime) and `ANDROID_SERIAL` to the connected device serial:
 
 ```sh
 adb devices -l
-API_PORT=8003 # replace with the verified isolated backend's port
+API_PORT=8004 # prepared isolated E2E API; change only if the backend uses another port
 ANDROID_SERIAL="<serial shown above>"
 export API_PORT ANDROID_SERIAL
 adb -s "$ANDROID_SERIAL" reverse "tcp:${API_PORT}" "tcp:${API_PORT}"
@@ -181,7 +181,7 @@ the Antigravity hook. Keep the backend bound to loopback; this setup does not
 expose the selected port to the LAN. Remove the mapping when finished:
 
 ```sh
-API_PORT=8003 # set to the same verified backend port above
+API_PORT=8004 # must match the backend port and USB reverse mapping above
 ANDROID_SERIAL="<serial shown above>"
 adb -s "$ANDROID_SERIAL" reverse --remove "tcp:${API_PORT}"
 ```
