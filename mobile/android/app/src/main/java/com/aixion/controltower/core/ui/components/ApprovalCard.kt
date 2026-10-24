@@ -102,7 +102,16 @@ fun ApprovalCard(
                 fontSize = MaterialTheme.typography.labelLarge.fontSize,
                 uppercase = false
             )
-            StatusBadge(label = "${approval.files.size} files", color = palette.inkMuted, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
+            StatusBadge(
+                label = when {
+                    approval.hasExactToolRequestPayload -> "Tool request"
+                    approval.files.size == 1 -> "1 file"
+                    else -> "${approval.files.size} files"
+                },
+                color = palette.inkMuted,
+                fontSize = MaterialTheme.typography.labelLarge.fontSize,
+                uppercase = false
+            )
         }
         if (onClick != null) {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))

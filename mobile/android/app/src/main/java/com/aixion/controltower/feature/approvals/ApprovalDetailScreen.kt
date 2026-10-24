@@ -216,7 +216,7 @@ fun ApprovalDetailContent(
         approval.status in setOf(ApprovalStatus.REQUESTED, ApprovalStatus.PENDING_REVIEW) &&
         !isBlocked && !hasUnsupportedData && decisionBlockReason == null
     val hasRequiredActions = approval.requiredActions.isNotEmpty()
-    val hasExactToolRequest = approval.hasExactToolRequestPayload()
+    val hasExactToolRequest = approval.hasExactToolRequestPayload
     // Acknowledgement applies to the entire reviewed snapshot, including provider and
     // invocation identity. If the backend rebinds an approval to another invocation,
     // the reviewer must inspect the request context again before approving.
@@ -747,14 +747,6 @@ private fun FullDiffReviewAcknowledgement(
             lineHeight = 20.sp
         )
     }
-}
-
-internal fun ApprovalSummary.hasExactToolRequestPayload(): Boolean = files.any { file ->
-    file.changeType.equals("tool_call", ignoreCase = true) ||
-        file.changeType.equals("mcp_tool_call", ignoreCase = true) ||
-        file.path.startsWith("mcp://", ignoreCase = true) ||
-        file.path.startsWith("antigravity://tool/", ignoreCase = true) ||
-        file.path.startsWith("codex://tool/", ignoreCase = true)
 }
 
 internal fun requiresExplicitRiskConfirmation(risk: RiskLevel): Boolean =

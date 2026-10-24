@@ -113,6 +113,16 @@ data class ApprovalSummary(
         get() = files.any { file ->
             file.path.startsWith("mcp://") || file.changeType == "mcp_tool_call"
         }
+
+    /** True when this approval contains an exact agent/MCP tool invocation payload. */
+    val hasExactToolRequestPayload: Boolean
+        get() = files.any { file ->
+            file.changeType.equals("tool_call", ignoreCase = true) ||
+                file.changeType.equals("mcp_tool_call", ignoreCase = true) ||
+                file.path.startsWith("mcp://", ignoreCase = true) ||
+                file.path.startsWith("antigravity://tool/", ignoreCase = true) ||
+                file.path.startsWith("codex://tool/", ignoreCase = true)
+        }
 }
 
 /** An immutable reviewer decision event. It is intentionally separate from mutable approval status. */

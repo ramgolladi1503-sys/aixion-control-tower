@@ -12,6 +12,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import org.junit.Assert.assertTrue
@@ -177,5 +178,66 @@ class ApprovalCardPreviewTest {
             "Approval cards should explain their action to TalkBack",
             semantics[SemanticsActions.OnClick].label == "Review this approval request"
         )
+    }
+
+    @Test
+    fun cardLabelsToolInvocationsSeparatelyFromSingularAndPluralFileChanges() {
+        val baseApproval = ApprovalSummary(
+            id = "approval_payload_label",
+            projectName = "Project",
+            title = "Review requested work",
+            summary = "Review the pending request.",
+            agentName = "Antigravity",
+            targetBranch = "main",
+            status = ApprovalStatus.REQUESTED,
+            risk = RiskLevel.LOW,
+            files = emptyList(),
+            requiredActions = emptyList(),
+            testPlan = emptyList(),
+            rollbackPlan = "Revert"
+        )
+
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalCard(
+                    approval = baseApproval.copy(
+                        files = listOf(
+                            FileChangeSummary(
+                                path = "antigravity://tool/run_command",
+                                changeType = "tool_call",
+                                diff = "{\"command\":\"git status\"}",
+                                risk = RiskLevel.LOW
+                            )
+                        )
+                    )
+                )
+            }
+        }
+        composeRule.onNodeWithText("Tool request").assertExists()
+
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalCard(
+                    approval = baseApproval.copy(
+                        files = listOf(FileChangeSummary("README.md", "modify", "", RiskLevel.LOW))
+                    )
+                )
+            }
+        }
+        composeRule.onNodeWithText("1 file").assertExists()
+
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalCard(
+                    approval = baseApproval.copy(
+                        files = listOf(
+                            FileChangeSummary("README.md", "modify", "", RiskLevel.LOW),
+                            FileChangeSummary("src/Main.kt", "modify", "", RiskLevel.LOW)
+                        )
+                    )
+                )
+            }
+        }
+        composeRule.onNodeWithText("2 files").assertExists()
     }
 }
