@@ -971,6 +971,92 @@ def test_import_preserves_workspace_scoped_agent_task_and_run_audits(tmp_path, p
         assert row[6]["details"] == row[5]
 
 
+def test_import_preserves_user_and_session_security_audits(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot_with_auth_audits.sqlite3"
+    _snapshot(path)
+    now = datetime.now(timezone.utc).isoformat()
+    events = [
+        {
+            "id": "audit-user-role", "event_type": "auth.role_updated",
+            "actor": "owner@example.test", "entity_id": "u1", "workspace_id": "ws1",
+            "details": {"target_user_id": "u1", "new_role": "REVIEWER"}, "created_at": now,
+        },
+        {
+            "id": "audit-user-deletion", "event_type": "auth.account_deletion_requested",
+            "actor": "owner@example.test", "entity_id": "u1", "workspace_id": "ws1",
+            "details": {"target_user_id": "u1", "status": "RECEIVED"}, "created_at": now,
+        },
+        {
+            "id": "audit-user-sessions", "event_type": "auth.sessions_revoked",
+            "actor": "owner@example.test", "entity_id": "u1", "workspace_id": "ws1",
+            "details": {"target_user_id": "u1", "revoked_sessions_count": 1}, "created_at": now,
+        },
+        {
+            "id": "audit-session-logout", "event_type": "auth.session_revoked",
+            "actor": "owner@example.test", "entity_id": "s1", "workspace_id": "ws1",
+            "details": {"session_id": "s1", "reason": "user_logout"}, "created_at": now,
+        },
+    ]
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            [("audit_event", event["id"], json.dumps(event)) for event in events],
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+
+    assert plan["planned_counts"]["audit_event"] == 12
+    assert selected["audit_event"]["audit-user-role"]["_import_entity_type"] == "user"
+    assert selected["audit_event"]["audit-user-deletion"]["_import_entity_type"] == "user"
+    assert selected["audit_event"]["audit-user-sessions"]["_import_entity_type"] == "user"
+    assert selected["audit_event"]["audit-session-logout"]["_import_entity_type"] == "auth_session"
+
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        persisted = conn.execute(
+            "SELECT event_id,workspace_id,entity_type,entity_id,event_type "
+            "FROM audit_events WHERE event_id LIKE 'audit-user-%' OR event_id='audit-session-logout' "
+            "ORDER BY event_id"
+        ).fetchall()
+    assert [(row[0], row[1], row[2], row[3], row[4]) for row in persisted] == [
+        ("audit-session-logout", "ws1", "auth_session", "s1", "auth.session_revoked"),
+        ("audit-user-deletion", "ws1", "user", "u1", "auth.account_deletion_requested"),
+        ("audit-user-role", "ws1", "user", "u1", "auth.role_updated"),
+        ("audit-user-sessions", "ws1", "user", "u1", "auth.sessions_revoked"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "entity_id"),
+    [
+        ("auth.role_updated", "u1"),
+        ("auth.session_revoked", "s1"),
+    ],
+)
+def test_import_rejects_auth_audit_outside_parent_workspace(
+    tmp_path, event_type, entity_id
+):
+    path = tmp_path / f"snapshot_{event_type.replace('.', '_')}.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-auth-cross-workspace", "event_type": event_type,
+        "actor": "owner@example.test", "entity_id": entity_id,
+        "workspace_id": "foreign-workspace", "details": {},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    with pytest.raises(ImportBlocked):
+        build_plan(path)
+
+
 @pytest.mark.parametrize(
     ("event_type", "entity_id", "entity_type"),
     [

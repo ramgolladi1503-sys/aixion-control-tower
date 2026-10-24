@@ -972,6 +972,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     supported_audits: dict[str, dict[str, Any]] = {}
     for event_id, payload in records.get("audit_event", {}).items():
         entity_id = payload.get("entity_id")
+        event_type = payload.get("event_type")
         if entity_id in approvals:
             parent = approvals[entity_id]
             entity_type = "approval_request"
@@ -995,6 +996,22 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         elif entity_id in selected.get("invite", {}):
             parent = selected["invite"][entity_id]
             entity_type = "invite"
+        elif entity_id in sessions and event_type == "auth.session_revoked":
+            session = sessions[entity_id]
+            user = users.get(session.get("user_id"))
+            if not user or user.get("workspace_id") != payload.get("workspace_id"):
+                raise ImportBlocked(
+                    f"audit_event/{event_id} references a missing or mismatched session owner"
+                )
+            parent = {**session, "workspace_id": user.get("workspace_id")}
+            entity_type = "auth_session"
+        elif entity_id in users and event_type in {
+            "auth.account_deletion_requested",
+            "auth.role_updated",
+            "auth.sessions_revoked",
+        }:
+            parent = users[entity_id]
+            entity_type = "user"
         elif entity_id in mcp_servers:
             parent = mcp_servers[entity_id]
             entity_type = "mcp_child_server"
