@@ -138,7 +138,9 @@ internal fun AccountInfoPanel(
             color = palette.ink,
             style = MaterialTheme.typography.bodyLarge
         )
-        state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
+        state.message?.let { message ->
+            AuthFeedbackMessage(message, state.messageSeverity)
+        }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         OutlinedButton(onClick = onLogout, enabled = !state.loading, modifier = Modifier.fillMaxWidth()) {
             Text("Logout")
@@ -299,13 +301,8 @@ internal fun AuthFormContent(
                 }
             }
 
-            state.message?.let {
-                Text(
-                    text = it,
-                    color = palette.brand,
-                    fontSize = 14.sp,
-                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
-                )
+            state.message?.let { message ->
+                AuthFeedbackMessage(message, state.messageSeverity)
             }
 
             if (verificationStarted) {
@@ -353,6 +350,25 @@ internal fun AuthFormContent(
             }
         }
     }
+}
+
+@Composable
+internal fun AuthFeedbackMessage(message: String, severity: AuthMessageSeverity) {
+    val palette = LocalTowerPalette.current
+    val color = when (severity) {
+        AuthMessageSeverity.INFO -> palette.brand
+        AuthMessageSeverity.WARNING -> palette.caution
+        AuthMessageSeverity.ERROR -> palette.danger
+    }
+    Text(
+        text = message,
+        color = color,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.semantics {
+            liveRegion = LiveRegionMode.Polite
+            stateDescription = severity.accessibilityLabel
+        }
+    )
 }
 
 /** Only debug variants may render a verification code returned for local development. */

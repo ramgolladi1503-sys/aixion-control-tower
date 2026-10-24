@@ -5,11 +5,15 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.Modifier
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsProperties
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Rule
@@ -86,5 +90,29 @@ class AuthFormContentTest {
             assertEquals("Visibility toggles preserve the field value", "entered-secret", state.value.password)
             assertFalse("Visibility toggles do not emit password edits", passwordChanged)
         }
+    }
+
+    @Test
+    fun loginFailureIsAnnouncedAsErrorInsteadOfNeutralStatus() {
+        val message = "Login failed: Check your email and password."
+        composeRule.setContent {
+            AuthFormContent(
+                state = AuthUiState(
+                    message = message,
+                    messageSeverity = AuthMessageSeverity.ERROR
+                ),
+                onEmailChange = {},
+                onPasswordChange = {},
+                onVerificationCodeChange = {},
+                onLogin = {},
+                onRegister = {},
+                onVerify = {},
+                onResendVerification = {}
+            )
+        }
+
+        composeRule.onNodeWithText(message).assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Error"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
     }
 }

@@ -11,6 +11,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+enum class AuthMessageSeverity(val accessibilityLabel: String) {
+    INFO("Information"),
+    WARNING("Warning"),
+    ERROR("Error")
+}
+
 data class AuthUiState(
     val email: String = "",
     val password: String = "",
@@ -25,7 +31,8 @@ data class AuthUiState(
     val emailVerified: Boolean = false,
     val devVerificationCode: String? = null,
     val userLabel: String? = null,
-    val message: String? = null
+    val message: String? = null,
+    val messageSeverity: AuthMessageSeverity = AuthMessageSeverity.INFO
 )
 
 class AuthViewModel(application: Application) : AndroidViewModel(application) {
@@ -68,7 +75,12 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun login() {
         val current = _state.value
         viewModelScope.launch {
-            _state.value = current.copy(loading = true, sessionChecked = false, message = null)
+            _state.value = current.copy(
+                loading = true,
+                sessionChecked = false,
+                message = null,
+                messageSeverity = AuthMessageSeverity.INFO
+            )
             runCatching {
                 repository.login(current.email, current.password)
             }.onSuccess { label ->
@@ -79,7 +91,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     verificationRequired = false,
                     emailVerified = true,
                     userLabel = label,
-                    message = "Logged in."
+                    message = "Logged in.",
+                    messageSeverity = AuthMessageSeverity.INFO
                 )
                 syncPushRegistration()
             }.onFailure { error ->
@@ -88,7 +101,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     authenticated = false,
                     sessionChecked = true,
                     userLabel = null,
-                    message = "Login failed: ${AuthFailure.operatorMessage(error)}"
+                    message = "Login failed: ${AuthFailure.operatorMessage(error)}",
+                    messageSeverity = AuthMessageSeverity.ERROR
                 )
             }
         }
@@ -97,7 +111,12 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun register() {
         val current = _state.value
         viewModelScope.launch {
-            _state.value = current.copy(loading = true, sessionChecked = true, message = null)
+            _state.value = current.copy(
+                loading = true,
+                sessionChecked = true,
+                message = null,
+                messageSeverity = AuthMessageSeverity.INFO
+            )
             runCatching {
                 repository.register(current.email, current.password, current.displayName, current.inviteCode)
             }.onSuccess { response ->
@@ -111,7 +130,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     userLabel = listOf(response.user.display_name, response.user.email, response.user.role)
                         .filter { it.isNotBlank() }
                         .joinToString(" • "),
-                    message = response.message
+                    message = response.message,
+                    messageSeverity = AuthMessageSeverity.INFO
                 )
             }.onFailure { error ->
                 _state.value = _state.value.copy(
@@ -119,7 +139,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     authenticated = false,
                     sessionChecked = true,
                     userLabel = null,
-                    message = "Registration failed: ${AuthFailure.operatorMessage(error)}"
+                    message = "Registration failed: ${AuthFailure.operatorMessage(error)}",
+                    messageSeverity = AuthMessageSeverity.ERROR
                 )
             }
         }
@@ -128,7 +149,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun verifyEmail() {
         val current = _state.value
         viewModelScope.launch {
-            _state.value = current.copy(loading = true, message = null)
+            _state.value = current.copy(loading = true, message = null, messageSeverity = AuthMessageSeverity.INFO)
             runCatching {
                 repository.verifyEmail(current.email, current.verificationCode)
             }.onSuccess { response ->
@@ -137,12 +158,14 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     verificationRequired = !response.verified,
                     emailVerified = response.user.email_verified,
                     devVerificationCode = null,
-                    message = response.message
+                    message = response.message,
+                    messageSeverity = AuthMessageSeverity.INFO
                 )
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     loading = false,
-                    message = "Verification failed: ${AuthFailure.operatorMessage(error)}"
+                    message = "Verification failed: ${AuthFailure.operatorMessage(error)}",
+                    messageSeverity = AuthMessageSeverity.ERROR
                 )
             }
         }
@@ -151,7 +174,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun resendVerification() {
         val current = _state.value
         viewModelScope.launch {
-            _state.value = current.copy(loading = true, message = null)
+            _state.value = current.copy(loading = true, message = null, messageSeverity = AuthMessageSeverity.INFO)
             runCatching {
                 repository.resendVerification(current.email)
             }.onSuccess { response ->
@@ -160,12 +183,14 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     verificationRequired = response.verification_required,
                     emailVerified = response.user.email_verified,
                     devVerificationCode = response.dev_verification_code,
-                    message = response.message
+                    message = response.message,
+                    messageSeverity = AuthMessageSeverity.INFO
                 )
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     loading = false,
-                    message = "Resend failed: ${AuthFailure.operatorMessage(error)}"
+                    message = "Resend failed: ${AuthFailure.operatorMessage(error)}",
+                    messageSeverity = AuthMessageSeverity.ERROR
                 )
             }
         }
@@ -174,18 +199,20 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     fun requestPrivacyAccountRemoval() {
         val current = _state.value
         viewModelScope.launch {
-            _state.value = current.copy(loading = true, message = null)
+            _state.value = current.copy(loading = true, message = null, messageSeverity = AuthMessageSeverity.INFO)
             runCatching {
                 repository.requestPrivacyAccountRemoval(current.privacyRemovalReason)
             }.onSuccess { response ->
                 _state.value = AuthUiState(
                     sessionChecked = true,
-                    message = "${response.message} Sign in again only if support reactivates access."
+                    message = "${response.message} Sign in again only if support reactivates access.",
+                    messageSeverity = AuthMessageSeverity.INFO
                 )
             }.onFailure { error ->
                 _state.value = _state.value.copy(
                     loading = false,
-                    message = "Privacy request failed: ${AuthFailure.operatorMessage(error)}"
+                    message = "Privacy request failed: ${AuthFailure.operatorMessage(error)}",
+                    messageSeverity = AuthMessageSeverity.ERROR
                 )
             }
         }
@@ -202,7 +229,13 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         viewModelScope.launch {
-            _state.value = _state.value.copy(loading = true, authenticated = false, sessionChecked = false, message = "Verifying saved session...")
+            _state.value = _state.value.copy(
+                loading = true,
+                authenticated = false,
+                sessionChecked = false,
+                message = "Verifying saved session...",
+                messageSeverity = AuthMessageSeverity.INFO
+            )
             runCatching {
                 repository.currentUserLabel()
             }.onSuccess { label ->
@@ -212,7 +245,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     sessionChecked = true,
                     emailVerified = true,
                     userLabel = label,
-                    message = "Session verified."
+                    message = "Session verified.",
+                    messageSeverity = AuthMessageSeverity.INFO
                 )
                 syncPushRegistration()
             }.onFailure { error ->
@@ -222,7 +256,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     authenticated = false,
                     sessionChecked = true,
                     userLabel = null,
-                    message = AuthFailure.operatorMessage(error)
+                    message = AuthFailure.operatorMessage(error),
+                    messageSeverity = AuthMessageSeverity.ERROR
                 )
             }
         }
@@ -230,7 +265,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
 
     fun logout() {
         if (_state.value.loading) return
-        _state.value = _state.value.copy(loading = true, message = "Signing out…")
+        _state.value = _state.value.copy(loading = true, message = "Signing out…", messageSeverity = AuthMessageSeverity.INFO)
         viewModelScope.launch {
             val deviceCleanupSucceeded = try {
                 repository.logout()
@@ -245,7 +280,8 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     "Logged out. This device was removed from approval alerts and its server session was revoked."
                 } else {
                     "Logged out locally. Server sign-out or approval-alert cleanup could not be confirmed."
-                }
+                },
+                messageSeverity = if (deviceCleanupSucceeded) AuthMessageSeverity.INFO else AuthMessageSeverity.WARNING
             )
         }
     }
