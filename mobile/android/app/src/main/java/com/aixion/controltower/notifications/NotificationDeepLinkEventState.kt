@@ -10,9 +10,10 @@ data class NotificationDeepLinkEvent(
     val link: NotificationDeepLink?
 )
 
-/** Keeps the latest tap until the authenticated app has handled it exactly once. */
+/** Keeps notification taps in order until the authenticated app handles each once. */
 class NotificationDeepLinkEventState {
     private var nextId = 0L
+    private val pending = ArrayDeque<NotificationDeepLinkEvent>()
     var lastRecordedLink: NotificationDeepLink? = null
         private set
     var current by mutableStateOf(NotificationDeepLinkEvent(id = nextId, link = null))
@@ -21,7 +22,8 @@ class NotificationDeepLinkEventState {
     fun record(link: NotificationDeepLink) {
         nextId += 1
         lastRecordedLink = link
-        current = NotificationDeepLinkEvent(id = nextId, link = link)
+        pending.addLast(NotificationDeepLinkEvent(id = nextId, link = link))
+        publishNext()
     }
 
     fun restore(
@@ -31,12 +33,36 @@ class NotificationDeepLinkEventState {
     ) {
         nextId = eventId.coerceAtLeast(0L)
         this.lastRecordedLink = lastRecordedLink
-        current = NotificationDeepLinkEvent(id = nextId, link = link)
+        pending.clear()
+        if (link != null) pending.addLast(NotificationDeepLinkEvent(id = nextId, link = link))
+        publishNext()
     }
+
+    /** Restore all deferred taps in order after activity recreation. */
+    fun restorePending(
+        events: List<NotificationDeepLinkEvent>,
+        lastRecordedLink: NotificationDeepLink?,
+        eventId: Long = 0L
+    ) {
+        pending.clear()
+        events.forEach { event ->
+            if (event.link != null && event.id >= 0L) pending.addLast(event)
+        }
+        nextId = maxOf(eventId.coerceAtLeast(0L), pending.maxOfOrNull { it.id } ?: 0L)
+        this.lastRecordedLink = lastRecordedLink
+        publishNext()
+    }
+
+    fun pendingEvents(): List<NotificationDeepLinkEvent> = pending.toList()
 
     fun consume(eventId: Long) {
         if (current.id == eventId && current.link != null) {
-            current = current.copy(link = null)
+            pending.removeFirst()
+            publishNext()
         }
+    }
+
+    private fun publishNext() {
+        current = pending.firstOrNull() ?: NotificationDeepLinkEvent(id = nextId, link = null)
     }
 }

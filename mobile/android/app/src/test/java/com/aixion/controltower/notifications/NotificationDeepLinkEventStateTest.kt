@@ -6,7 +6,7 @@ import org.junit.Test
 
 class NotificationDeepLinkEventStateTest {
     @Test
-    fun repeatedTapWithSamePayloadGetsANewEventAndCanBeConsumed() {
+    fun repeatedTapWithSamePayloadIsQueuedAsASeparateEvent() {
         val state = NotificationDeepLinkEventState()
         val link = NotificationDeepLink.ApprovalRequest("approval_123", "notification_456")
 
@@ -15,20 +15,25 @@ class NotificationDeepLinkEventStateTest {
         state.record(link)
         val second = state.current
 
-        assertEquals(link, second.link)
-        assertEquals(first.id + 1, second.id)
-        state.consume(second.id)
+        assertEquals(first, second)
+        assertEquals(2, state.pendingEvents().size)
+        state.consume(first.id)
+        assertEquals(link, state.current.link)
+        assertEquals(first.id + 1, state.current.id)
+        state.consume(state.current.id)
         assertNull(state.current.link)
     }
 
     @Test
-    fun staleConsumeCannotClearANewerNotificationTap() {
+    fun repeatedStaleConsumeCannotClearTheNextQueuedNotificationTap() {
         val state = NotificationDeepLinkEventState()
         state.record(NotificationDeepLink.ApprovalRequest("first_123"))
         val staleEventId = state.current.id
         val latest = NotificationDeepLink.ApprovalRequest("second_456")
         state.record(latest)
 
+        state.consume(staleEventId)
+        assertEquals(latest, state.current.link)
         state.consume(staleEventId)
 
         assertEquals(latest, state.current.link)
@@ -69,5 +74,40 @@ class NotificationDeepLinkEventStateTest {
 
         assertEquals(8L, state.current.id)
         assertEquals(link, state.current.link)
+    }
+
+    @Test
+    fun queuedTapsSurviveActivityStateRestorationInOrder() {
+        val first = NotificationDeepLink.ApprovalRequest("approval_first", "notification_first")
+        val second = NotificationDeepLink.ApprovalRequest("approval_second", "notification_second")
+        val original = NotificationDeepLinkEventState().apply {
+            record(first)
+            record(second)
+        }
+        val restored = NotificationDeepLinkEventState()
+        restored.restorePending(
+            events = original.pendingEvents(),
+            lastRecordedLink = second,
+            eventId = original.current.id
+        )
+
+        assertEquals(first, restored.current.link)
+        restored.consume(restored.current.id)
+        assertEquals(second, restored.current.link)
+        restored.consume(restored.current.id)
+        assertNull(restored.current.link)
+    }
+
+    @Test
+    fun invalidRestoredPayloadIsNotAddedToPendingQueue() {
+        val state = NotificationDeepLinkEventState()
+        state.restorePending(
+            events = listOf(NotificationDeepLinkEvent(1L, null)),
+            lastRecordedLink = null,
+            eventId = 1L
+        )
+
+        assertNull(state.current.link)
+        assertEquals(0, state.pendingEvents().size)
     }
 }
