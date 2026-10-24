@@ -31,6 +31,9 @@ MAX_ARGUMENTS_BYTES = 48 * 1024
 MAX_CONFIG_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_WAIT_SECONDS = 15 * 60
+SUPPORTED_PERMISSION_MODES = frozenset({
+    "default", "acceptEdits", "plan", "dontAsk", "bypassPermissions",
+})
 MAX_REQUEST_TIMEOUT_SECONDS = 10.0
 EXPIRY_CLEANUP_TIMEOUT_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 2
@@ -583,6 +586,12 @@ def _run(
     env = os.environ if environ is None else environ
     if event.get("hook_event_name") != "PermissionRequest":
         raise GateError("Only PermissionRequest events are supported")
+    permission_mode = event.get("permission_mode")
+    if (
+        not isinstance(permission_mode, str)
+        or permission_mode not in SUPPORTED_PERMISSION_MODES
+    ):
+        raise GateError("Codex permission request has an unsupported permission mode")
     tool_name = event.get("tool_name")
     args = event.get("tool_input")
     if not isinstance(tool_name, str) or not tool_name.strip() or not isinstance(args, (dict, list, str, int, float, bool, type(None))):
@@ -620,7 +629,10 @@ def _run(
     body = {
         "project_id": config["project_id"],
         "title": f"Codex permission: {tool_name[:120]}",
-        "summary": "Review the exact Codex tool request before this paused invocation continues.",
+        "summary": (
+            f"Codex permission mode: {permission_mode}. Review the exact tool request "
+            "and arguments before this paused invocation continues."
+        ),
         "agent_name": "Codex",
         "target_branch": "current-workspace",
         "files": [{"path": f"codex://tool/{safe_tool}", "change_type": "tool_call",

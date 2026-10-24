@@ -236,6 +236,7 @@ def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
     decision = json.loads(captured.out)["hookSpecificOutput"]["decision"]
     if outcome == "approved":
         assert decision == {"behavior": "allow"}
+        assert created["summary"].startswith("Codex permission mode: default.")
         assert [method for method, _url, _body in calls] == ["POST", "GET", "POST"]
         assert calls[-1][1] == (
             f"{_codex_environment()['AIXION_API_BASE_URL']}"
@@ -247,6 +248,32 @@ def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
         assert [method for method, _url, _body in calls] == ["POST", "GET"]
         assert not any(url.endswith("/consume") for _method, url, _body in calls)
     assert captured.out.endswith("\n")
+
+
+@pytest.mark.parametrize("permission_mode", [None, "futureMode", {"mode": "default"}])
+def test_unknown_codex_permission_mode_denies_before_creating_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    permission_mode: object,
+) -> None:
+    event = _codex_event()
+    event["permission_mode"] = permission_mode
+    monkeypatch.setattr(
+        hook.sys,
+        "stdin",
+        SimpleNamespace(buffer=io.BytesIO(json.dumps(event).encode("utf-8"))),
+    )
+
+    def unexpected_request(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("unsupported permission context must not create an approval")
+
+    monkeypatch.setattr(hook, "_request", unexpected_request)
+
+    assert hook.main([]) == 0
+
+    decision = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["decision"]
+    assert decision["behavior"] == "deny"
+    assert "GateError" in decision["message"]
 
 
 def test_invocation_identity_is_stable_when_codex_provides_tool_use_id() -> None:
@@ -280,6 +307,7 @@ def test_invocation_identity_rejects_malformed_present_tool_use_id() -> None:
 def _codex_event() -> dict:
     return {
         "hook_event_name": "PermissionRequest",
+        "permission_mode": "default",
         "session_id": "session-1",
         "turn_id": "turn-2",
         "tool_use_id": "call-3",
