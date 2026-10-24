@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from app.main import app
+from app import audit_routes
 from app.models import (
     ApprovalRequest,
     ApprovalStatus,
@@ -36,6 +38,7 @@ from app.recovery_routes import (
     export_recovery_snapshot,
 )
 from app import recovery_routes
+from app.settings import get_settings
 from app.store import store
 
 client = TestClient(app)
@@ -99,6 +102,34 @@ def test_recovery_export_returns_safe_operational_snapshot() -> None:
     assert body["excluded_sensitive_collections"] == EXCLUDED_SENSITIVE_COLLECTIONS
     assert "users" not in body["entities"]
     assert "sessions" not in body["entities"]
+
+
+def test_recovery_export_redacts_nested_and_list_audit_secrets() -> None:
+    _seed_recovery_data()
+    event = store.audit_events[-1]
+    store.audit_events[-1] = event.model_copy(
+        update={
+            "details": {
+                "lease_token": "raw-lease-token",
+                "nested": [
+                    {"authorization": "Bearer raw", "password": "raw-password"},
+                    {"safe": "visible", "project_id": "project-safe"},
+                ],
+            }
+        }
+    )
+    store.persist()
+
+    response = client.get("/audit/recovery/export")
+
+    assert response.status_code == 200
+    details = response.json()["entities"]["audit_events"][0]["details"]
+    assert details["lease_token"] == "[REDACTED]"
+    assert details["nested"][0] == {
+        "authorization": "[REDACTED]",
+        "password": "[REDACTED]",
+    }
+    assert details["nested"][1] == {"safe": "visible", "project_id": "project-safe"}
 
 
 def test_direct_recovery_export_fails_closed_when_postgres_auth_is_enabled(
@@ -201,6 +232,72 @@ def test_direct_recovery_export_fails_closed_when_postgres_repository_bundle_is_
         app.state.postgres_repositories = None
         if previous_repositories is not None:
             app.state.postgres_repositories = previous_repositories
+
+
+def test_audit_recovery_alias_uses_authoritative_postgres_snapshot(monkeypatch) -> None:
+    workspace = Workspace(id="workspace-pg-recovery", name="PG recovery", owner_user_id="user-pg-recovery")
+    persisted_user = User(
+        id="user-pg-recovery",
+        email="pg-recovery@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        password_hash="hash",
+        password_salt="salt",
+        workspace_id=workspace.id,
+    )
+    actor = AuthUser(
+        id=persisted_user.id,
+        email=persisted_user.email,
+        display_name=persisted_user.display_name,
+        role=persisted_user.role,
+        workspace_id=workspace.id,
+    )
+
+    class RecoveryRepository:
+        def read_snapshot(self, entity_types, **kwargs):
+            assert kwargs["workspace_id"] == workspace.id
+            assert kwargs["membership_user_id"] == persisted_user.id
+            return (
+                {name: [] for name in entity_types},
+                [("pg_0001", "baseline", "2026-01-01T00:00:00Z")],
+                [],
+                {
+                    "user": [(persisted_user.id, persisted_user.model_dump_json())],
+                    "workspace": [(workspace.id, workspace.model_dump_json())],
+                },
+            )
+
+    recovery_repository = RecoveryRepository()
+    repositories = SimpleNamespace(recovery_snapshots=recovery_repository)
+    runtime = SimpleNamespace(
+        repositories=repositories,
+        recovery_snapshots=recovery_repository,
+        verify_schema=lambda: SimpleNamespace(ready=True),
+    )
+    request = Request(
+        {
+            "type": "http",
+            "app": SimpleNamespace(
+                state=SimpleNamespace(
+                    postgres_runtime=runtime,
+                    postgres_repositories=repositories,
+                )
+            ),
+        }
+    )
+    settings = replace(get_settings(), auth_enabled=True, postgres_auth_enabled=True)
+    monkeypatch.setattr(recovery_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(audit_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        recovery_routes.recovery_snapshot_repository,
+        "read_snapshot",
+        lambda *args, **kwargs: pytest.fail("SQLite recovery fallback was used"),
+    )
+
+    snapshot = audit_routes.export_recovery(request=request, _=actor)
+
+    assert snapshot.format_version == RECOVERY_FORMAT_VERSION
+    assert snapshot.entities == {name: [] for name in recovery_routes.SAFE_ENTITY_MODELS}
 
 
 def test_recovery_export_includes_durable_approval_missing_from_compatibility_cache() -> None:

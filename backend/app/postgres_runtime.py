@@ -22,6 +22,7 @@ from .postgres_external_agent_auth_repository import (
     PostgresExternalAgentAuthRepository,
 )
 from .project_repository import PostgresProjectRepository
+from .recovery_repository import PostgresRecoverySnapshotRepository
 from .settings import Settings, get_settings
 from .workspace_membership_repository import PostgresWorkspaceMembershipRepository
 from .work_order_repository import PostgresWorkOrderRepository
@@ -211,6 +212,10 @@ class PostgresRuntime:
     @property
     def work_orders(self) -> PostgresWorkOrderRepository:
         return PostgresWorkOrderRepository(self.connect)
+
+    @property
+    def recovery_snapshots(self) -> PostgresRecoverySnapshotRepository:
+        return self._repositories.recovery_snapshots
 
     @property
     def repositories(self) -> ApplicationRepositories:

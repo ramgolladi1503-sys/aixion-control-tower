@@ -14,7 +14,11 @@ from .models import AuthUser, UserRole, now_utc
 from .postgres_database import POSTGRES_MIGRATIONS
 from .postgres_runtime import PostgresRuntime
 from .postgres_trust_event_repository import PostgresTrustEventRepository
-from .recovery_routes import RECOVERY_FORMAT_VERSION, export_recovery_snapshot
+from .recovery_routes import (
+    RECOVERY_FORMAT_VERSION,
+    SAFE_ENTITY_STORAGE_TYPES,
+    export_recovery_snapshot,
+)
 from .settings import get_settings
 from .store import store
 from .trust_flight_recorder import verify_flight_recorder
@@ -267,7 +271,8 @@ def build_runtime_readiness(
     recovery_snapshot_available = False
 
     postgres_schema_status = None
-    if settings.postgres_runtime_probe_enabled or settings.postgres_auth_enabled:
+    postgres_is_authoritative = settings.postgres_auth_enabled or settings.is_production
+    if settings.postgres_runtime_probe_enabled or postgres_is_authoritative:
         postgres_probe_status = "not_ready"
         if postgres_runtime is None:
             errors.append(
@@ -289,10 +294,10 @@ def build_runtime_readiness(
             except Exception:
                 errors.append("PostgreSQL runtime probe failed.")
 
-    if settings.postgres_auth_enabled:
+    if postgres_is_authoritative:
         # PostgreSQL-auth mode must not report SQLite migration/recovery state
-        # as if it belonged to the selected account database. Recovery export
-        # has no PostgreSQL repository yet, so keep it explicitly unavailable.
+        # as if it belonged to the selected account database. Readiness below
+        # probes the bound PostgreSQL recovery repository directly.
         expected_migration_ids = sorted(
             migration.migration_id for migration in POSTGRES_MIGRATIONS
         )
@@ -314,8 +319,36 @@ def build_runtime_readiness(
                 errors.append("PostgreSQL migration ledger contains unknown migrations.")
             if getattr(postgres_schema_status, "mismatched_migration_ids", ()):
                 errors.append("PostgreSQL migration checksums do not match this build.")
-        # Recovery export remains unavailable until an authoritative
-        # PostgreSQL recovery repository is implemented.
+        if postgres_schema_status is not None and postgres_schema_status.ready:
+            try:
+                postgres_repositories = getattr(
+                    application_state, "postgres_repositories", None
+                )
+                runtime_repositories = getattr(postgres_runtime, "repositories", None)
+                if (
+                    postgres_repositories is None
+                    or runtime_repositories is not postgres_repositories
+                ):
+                    raise RuntimeError(
+                        "PostgreSQL readiness repository bundle is unavailable or mismatched"
+                    )
+                recovery_repository = getattr(
+                    postgres_repositories, "recovery_snapshots", None
+                )
+                if (
+                    recovery_repository is None
+                    or getattr(postgres_runtime, "recovery_snapshots", None)
+                    is not recovery_repository
+                ):
+                    raise RuntimeError("PostgreSQL recovery repository is unavailable")
+                recovery_repository.read_snapshot(
+                    SAFE_ENTITY_STORAGE_TYPES,
+                    scope_entity_type="agent_task",
+                    workspace_id="__ops_recovery_readiness_probe__",
+                )
+                recovery_snapshot_available = True
+            except Exception:
+                errors.append("PostgreSQL recovery snapshot readiness check failed.")
     else:
         try:
             applied_migrations = store.applied_migrations()

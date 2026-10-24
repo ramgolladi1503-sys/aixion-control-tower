@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -245,6 +246,78 @@ def test_readiness_reports_postgres_auth_as_mixed_and_not_ready(monkeypatch) -> 
     assert readiness.active_capability_leases == 0
     assert readiness.active_capability_leases_available is False
     assert any("persistence is mixed" in error for error in readiness.errors)
+
+
+def test_postgres_recovery_readiness_uses_bound_snapshot_repository(monkeypatch) -> None:
+    recovery_calls: list[dict[str, object]] = []
+
+    class RecoveryRepository:
+        def read_snapshot(self, entity_types, **kwargs):
+            recovery_calls.append(kwargs)
+            return ({name: [] for name in entity_types}, [], [], {"user": [], "workspace": []})
+
+    recovery_repository = RecoveryRepository()
+    repositories = SimpleNamespace(recovery_snapshots=recovery_repository)
+
+    class Runtime:
+        def __init__(self) -> None:
+            self.repositories = repositories
+            self.recovery_snapshots = recovery_repository
+
+        def probe(self):
+            expected_ids = tuple(
+                migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+            )
+            schema = SimpleNamespace(
+                ready=True,
+                applied_migration_ids=expected_ids,
+                missing_migration_ids=(),
+                unknown_migration_ids=(),
+                mismatched_migration_ids=(),
+            )
+            return SimpleNamespace(
+                ready=True,
+                schema=schema,
+                pool_size=2,
+                pool_available=2,
+                pool_waiting=0,
+            )
+
+    settings = replace(
+        get_settings(),
+        auth_enabled=True,
+        postgres_auth_enabled=True,
+        postgres_runtime_probe_enabled=True,
+        postgres_auth_rate_limits_enabled=True,
+        email_dispatch_enabled=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        store,
+        "applied_migrations",
+        lambda: pytest.fail("PostgreSQL readiness read the SQLite migration ledger"),
+    )
+    monkeypatch.setattr(
+        ops_routes,
+        "export_recovery_snapshot",
+        lambda *args, **kwargs: pytest.fail("PostgreSQL readiness used the SQLite snapshot route"),
+    )
+    application_state = SimpleNamespace(postgres_repositories=repositories)
+
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=application_state,
+    )
+
+    assert readiness.db_reachable is True
+    assert readiness.migrations_applied is True
+    assert readiness.recovery_snapshot_available is True
+    assert recovery_calls == [
+        {
+            "scope_entity_type": "agent_task",
+            "workspace_id": "__ops_recovery_readiness_probe__",
+        }
+    ]
 
 
 def test_readiness_reports_bound_repository_identity_without_claiming_full_readiness(

@@ -259,10 +259,12 @@ def test_audit_and_recovery_reads_fail_closed_when_postgres_auth_is_selected_wit
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app import audit_routes, main
+    from app import recovery_routes
     from app.recovery_routes import recovery_snapshot_repository
 
     settings = SimpleNamespace(postgres_auth_enabled=True)
     monkeypatch.setattr(audit_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(recovery_routes, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(app.state, "postgres_runtime", None, raising=False)
 
@@ -286,4 +288,6 @@ def test_audit_and_recovery_reads_fail_closed_when_postgres_auth_is_selected_wit
     ]
 
     assert [response.status_code for response in responses] == [503] * len(responses)
-    assert all("unified audit writer" in response.json()["detail"] for response in responses)
+    assert all("unified audit writer" in response.json()["detail"] for response in responses[:4])
+    assert "authoritative recovery repository" in responses[4].json()["detail"]
+    assert "unified audit writer" in responses[5].json()["detail"]

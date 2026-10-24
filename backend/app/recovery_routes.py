@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from .agent_task_models import AgentTask
+from .audit_redaction import redact_audit_event
 from .auth import require_owner
 from .settings import get_settings
 from .models import (
@@ -265,7 +266,12 @@ def _safe_entities(
 ) -> dict[str, list[dict[str, Any]]]:
     entities = _workspace_entities(workspace_id, records, task_records)
     return {
-        entity_name: [item.model_dump(mode="json") for item in items]
+        entity_name: [
+            (redact_audit_event(item) if isinstance(item, AuditEvent) else item).model_dump(
+                mode="json"
+            )
+            for item in items
+        ]
         for entity_name, items in entities.items()
     }
 
@@ -439,15 +445,79 @@ def export_recovery_snapshot(
     user: AuthUser = Depends(require_owner),
     request: Request = None,  # type: ignore[assignment]
 ) -> RecoverySnapshot:
-    _require_sqlite_recovery_runtime(request)
-    # Read all rows and migration metadata from one SQLite read transaction.
-    # In-memory maps can lag repository transactions and are not snapshot authority.
-    records, migration_rows, task_records, membership_records = recovery_snapshot_repository.read_snapshot(
-        SAFE_ENTITY_STORAGE_TYPES,
-        scope_entity_type="agent_task",
-        membership_user_id=user.id,
-        membership_workspace_id=user.workspace_id,
-    )
+    settings = get_settings()
+    use_postgres = settings.postgres_auth_enabled or getattr(settings, "is_production", False)
+    if use_postgres:
+        app = getattr(request, "app", None)
+        state = getattr(app, "state", None)
+        runtime = getattr(state, "postgres_runtime", None)
+        repositories = getattr(state, "postgres_repositories", None)
+        if (
+            runtime is None
+            or repositories is None
+            or getattr(runtime, "repositories", None) is not repositories
+            or user.workspace_id is None
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Recovery exports are unavailable while PostgreSQL is configured "
+                    "without an authoritative recovery repository."
+                ),
+            )
+        try:
+            schema_status = runtime.verify_schema()
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Recovery exports are unavailable while PostgreSQL is configured "
+                    "without an authoritative recovery repository."
+                ),
+            ) from None
+        if not getattr(schema_status, "ready", False):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Recovery exports are unavailable while PostgreSQL is configured "
+                    "without an authoritative recovery repository."
+                ),
+            )
+        repository = getattr(repositories, "recovery_snapshots", None)
+        if repository is None or getattr(runtime, "recovery_snapshots", None) is not repository:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Recovery exports are unavailable while PostgreSQL is configured "
+                    "without an authoritative recovery repository."
+                ),
+            )
+        try:
+            records, migration_rows, task_records, membership_records = repository.read_snapshot(
+                SAFE_ENTITY_STORAGE_TYPES,
+                scope_entity_type="agent_task",
+                workspace_id=user.workspace_id,
+                membership_user_id=user.id,
+                membership_workspace_id=user.workspace_id,
+            )
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Recovery exports are unavailable while PostgreSQL is configured "
+                    "without an authoritative recovery repository."
+                ),
+            ) from None
+    else:
+        _require_sqlite_recovery_runtime(request)
+        # Local/test mode reads all rows and migration metadata from one SQLite
+        # transaction. In-memory maps are not snapshot authority.
+        records, migration_rows, task_records, membership_records = recovery_snapshot_repository.read_snapshot(
+            SAFE_ENTITY_STORAGE_TYPES,
+            scope_entity_type="agent_task",
+            membership_user_id=user.id,
+            membership_workspace_id=user.workspace_id,
+        )
     stored_users = membership_records["user"]
     if stored_users:
         user_id, user_payload = stored_users[0]

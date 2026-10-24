@@ -28,6 +28,7 @@ from .postgres_agent_run_branch import PostgresAgentRunBranchIntentRepository
 from .postgres_agent_run_apply_changes import PostgresAgentRunApplyChangeIntentRepository
 from .postgres_agent_run_validation import PostgresAgentRunValidationIntentRepository
 from .postgres_agent_run_pull_request import PostgresAgentRunPullRequestIntentRepository
+from .recovery_repository import PostgresRecoverySnapshotRepository
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class ApplicationRepositories:
     agent_run_apply_change_intents: PostgresAgentRunApplyChangeIntentRepository
     agent_run_validation_intents: PostgresAgentRunValidationIntentRepository
     agent_run_pull_request_intents: PostgresAgentRunPullRequestIntentRepository
+    recovery_snapshots: PostgresRecoverySnapshotRepository
 
     @classmethod
     def from_connector(
@@ -102,4 +104,5 @@ class ApplicationRepositories:
             agent_run_pull_request_intents=PostgresAgentRunPullRequestIntentRepository(
                 connect, trust_repository=trust, trust_event_repository=trust_events
             ),
+            recovery_snapshots=PostgresRecoverySnapshotRepository(connect),
         )

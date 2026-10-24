@@ -12,6 +12,7 @@ from .application_repository_access import (
     workspace_id_for_request,
 )
 from .audit_repository import AuditEventRepository, SQLiteAuditEventRepository
+from .audit_redaction import redact_audit_event
 from .models import AuditEvent, AuthUser, now_utc
 from .recovery_routes import (
     RecoverySnapshot,
@@ -31,16 +32,6 @@ OwnerDependency = Depends(require_owner)
 
 AUDIT_EXPORT_MAX_LIMIT = 1_000
 AUDIT_RETENTION_POLICY_VERSION = "aixion-audit-retention-v1"
-REDACTED_DETAIL_VALUE = "[REDACTED]"
-SENSITIVE_DETAIL_KEY_MARKERS = (
-    "password",
-    "secret",
-    "token",
-    "apikey",
-    "authorization",
-    "credential",
-    "serverkey",
-)
 _local_audit_repository = SQLiteAuditEventRepository(store._connect)
 
 
@@ -65,33 +56,6 @@ class AuditExportResponse(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
     retention_policy: AuditRetentionPolicy = Field(default_factory=AuditRetentionPolicy)
     events: list[AuditEvent] = Field(default_factory=list)
-
-
-def _normalize_detail_key(key: str) -> str:
-    return key.strip().lower().replace("_", "").replace("-", "")
-
-
-def _is_sensitive_detail_key(key: str) -> bool:
-    normalized = _normalize_detail_key(key)
-    return any(marker in normalized for marker in SENSITIVE_DETAIL_KEY_MARKERS)
-
-
-def _redact_details(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            if _is_sensitive_detail_key(str(key)):
-                redacted[str(key)] = REDACTED_DETAIL_VALUE
-            else:
-                redacted[str(key)] = _redact_details(item)
-        return redacted
-    if isinstance(value, list):
-        return [_redact_details(item) for item in value]
-    return value
-
-
-def redact_audit_event(event: AuditEvent) -> AuditEvent:
-    return event.model_copy(update={"details": _redact_details(event.details)})
 
 
 def _audit_repository_for_route(request: Request | None) -> AuditEventRepository:
@@ -281,8 +245,10 @@ def get_audit_event(
 
 @router.get("/recovery/export", response_model=RecoverySnapshot)
 def export_recovery(request: Request, _: AuthUser = OwnerDependency) -> RecoverySnapshot:
+    if get_settings().postgres_auth_enabled or get_settings().is_production:
+        return export_recovery_snapshot(_, request=request)
     _require_authoritative_audit_runtime(request)
-    return export_recovery_snapshot(_)
+    return export_recovery_snapshot(_, request=request)
 
 
 @router.post("/recovery/validate", response_model=RecoveryValidationResponse)
