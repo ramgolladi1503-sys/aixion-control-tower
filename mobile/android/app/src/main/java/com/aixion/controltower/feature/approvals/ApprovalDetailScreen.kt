@@ -235,9 +235,9 @@ fun ApprovalDetailContent(
             .fillMaxSize()
             .background(palette.canvas)
     ) {
-        // Keep the decision controls pinned in normal portrait layouts. In landscape,
-        // split-screen, or other short viewports, put them in the review scroll surface
-        // so large text cannot push the controls outside the visible window.
+        // Keep decision controls outside the request scroll surface at every height.
+        // The compact panel below reduces supporting copy so it remains usable in
+        // landscape, split-screen, and large-text configurations.
         val compactViewport = maxHeight < 500.dp
         Column(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
@@ -382,39 +382,9 @@ fun ApprovalDetailContent(
                     }
                 }
 
-                if (compactViewport && (canDecide || decisionInFlight || decisionNeedsReconciliation)) {
-                    item {
-                        DecisionPanel(
-                            canApprove = canApprove,
-                            exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
-                            fullDiffReviewNeedsReview = requiresFullDiffReview && (!fullDiffOpened || !fullDiffReviewed),
-                            fullDiffOpened = fullDiffOpened,
-                            canDecide = canDecide,
-                            isBlocked = isBlocked,
-                            hasUnsupportedData = hasUnsupportedData,
-                            decisionInFlight = decisionInFlight,
-                            decisionNeedsReconciliation = decisionNeedsReconciliation,
-                            onReconcileDecision = onReconcileDecision,
-                            approvalTitle = approval.title,
-                            approvalRisk = approval.risk.name.lowercase().replace('_', ' '),
-                            onApprove = {
-                                if (requiresRiskConfirmation) {
-                                    showRiskConfirmation = true
-                                } else {
-                                    onApprove()
-                                }
-                            },
-                            onReject = onReject,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("approval-decision-panel")
-                        )
-                    }
-                }
-
             }
 
-            if (!compactViewport && (canDecide || decisionInFlight || decisionNeedsReconciliation)) {
+            if (canDecide || decisionInFlight || decisionNeedsReconciliation) {
                 DecisionPanel(
                     canApprove = canApprove,
                     exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
@@ -439,7 +409,8 @@ fun ApprovalDetailContent(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.sm)
-                        .testTag("approval-decision-panel")
+                        .testTag("approval-decision-panel"),
+                    compactLayout = compactViewport
                 )
             }
         }
@@ -897,18 +868,26 @@ private fun DecisionPanel(
     approvalRisk: String,
     onApprove: () -> Unit,
     onReject: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    compactLayout: Boolean = false
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
-        Text(
-            text = "Decision Gate",
-            color = palette.ink,
-            style = MaterialTheme.typography.titleMedium
-        )
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        if (!compactLayout) {
+            Text(
+                text = "Decision Gate",
+                color = palette.ink,
+                style = MaterialTheme.typography.titleMedium
+            )
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        }
         Text(
             text = when {
+                compactLayout && decisionNeedsReconciliation -> "Check the server before retrying."
+                compactLayout && decisionInFlight -> "Recording decision…"
+                compactLayout && exactToolRequestNeedsReview -> "Review the exact request above to enable approval."
+                compactLayout && fullDiffReviewNeedsReview -> "Review the full diff above to enable approval."
+                compactLayout && canApprove -> "Review complete. Choose an action."
                 hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
                 decisionNeedsReconciliation -> "The previous decision may have reached the server, but its response was lost. Check server status before trying again."
                 decisionInFlight -> "Sending the decision and waiting for the server."
@@ -924,9 +903,9 @@ private fun DecisionPanel(
                 .testTag("approval-decision-status")
                 .semantics { liveRegion = LiveRegionMode.Polite },
             color = if (canApprove) palette.inkMuted else palette.caution,
-            style = MaterialTheme.typography.bodyLarge
+            style = if (compactLayout) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.lg))
+        Spacer(modifier = Modifier.height(if (compactLayout) TowerSpacing.xs else TowerSpacing.lg))
         if (decisionNeedsReconciliation) {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
             OutlinedButton(

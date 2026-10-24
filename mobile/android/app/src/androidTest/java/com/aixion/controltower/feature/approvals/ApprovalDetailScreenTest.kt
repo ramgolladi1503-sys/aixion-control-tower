@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.Density
@@ -532,22 +533,34 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
-    fun decisionActionsRemainReachableInShortLargeTextViewport() {
+    fun decisionActionsStayVisibleWithoutScrollingInShortLargeTextViewport() {
+        val viewportHeight = 320f
         composeRule.setContent {
             CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
-                Box(modifier = Modifier.width(360.dp).height(320.dp)) {
+                Box(modifier = Modifier.width(360.dp).height(viewportHeight.dp).testTag("approval-short-viewport")) {
                     ApprovalDetailContent(approval(ApprovalStatus.REQUESTED), null, {}, {}, {})
                 }
             }
         }
 
-        composeRule.onNodeWithTag("approval-detail-list")
-            .performScrollToNode(hasText("Deny"))
         composeRule.onNodeWithText("Deny").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-detail-list")
-            .performScrollToNode(hasText("Approve request"))
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-decision-panel").assertExists()
+        val viewport = composeRule.onNodeWithTag("approval-short-viewport").fetchSemanticsNode().boundsInRoot
+        val panel = composeRule.onNodeWithTag("approval-decision-panel").fetchSemanticsNode().boundsInRoot
+        val deny = composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot
+        val approve = composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot
+
+        assertTrue("Decision panel should stay inside the short viewport", panel.top >= viewport.top && panel.bottom <= viewport.bottom)
+        assertTrue("Deny action should stay inside the short viewport", deny.top >= viewport.top && deny.bottom <= viewport.bottom)
+        assertTrue("Approve action should stay inside the short viewport", approve.top >= viewport.top && approve.bottom <= viewport.bottom)
+
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Rollback Plan"))
+        composeRule.onNodeWithText("Rollback Plan").assertIsDisplayed()
+        composeRule.onNodeWithText("Deny").assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+        assertEquals(deny.top, composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot.top)
+        assertEquals(approve.top, composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot.top)
     }
 
     @Test

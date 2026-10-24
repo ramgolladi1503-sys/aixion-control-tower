@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from threading import Event
 from typing import Any
@@ -8,9 +9,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main, postgres_notification_dispatcher
+from app.postgres_notification_dispatcher import dispatch_one_postgres_push
+from app.postgres_runtime import PostgresRuntime
+from app.settings import get_settings
 from app.store import store
+from scripts import run_postgres_push_dispatch_once
+from test_postgres_notification_outbox import _insert_device, _seed_notification
 
-pytest_plugins = ("test_postgres_lifespan_approval_inbox",)
+pytest_plugins = (
+    "test_postgres_lifespan_approval_inbox",
+    "test_postgres_notification_outbox",
+)
 
 
 def _approval_payload(project_id: str) -> dict[str, Any]:
@@ -259,3 +268,95 @@ def test_lifespan_notification_insert_failure_rolls_back_and_sends_nothing(
         assert sender_calls == []
     release_dispatch.set()
 
+
+def test_scheduled_push_entrypoint_dispatches_postgres_outbox_once(
+    outbox_repository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduled entrypoint uses the real runtime and durable outbox claim."""
+    _repository, connect = outbox_repository
+    dsn = os.environ["AIXION_TEST_POSTGRES_DSN"]
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_DSN", dsn + " sslmode=verify-full")
+    monkeypatch.setenv("AIXION_FCM_PROJECT_ID", "aixion-test-project")
+    monkeypatch.setenv("AIXION_OUTBOX_DISPATCH_MODE", "scheduled")
+    monkeypatch.setenv("AIXION_PUSH_DISPATCH_ENABLED", "true")
+    monkeypatch.delenv("AIXION_DB_PATH", raising=False)
+
+    push_user_id = f"scheduled-push-user-{os.urandom(8).hex()}"
+    workspace, _approval, notification = _seed_notification(connect, user_id=push_user_id)
+    token = f"scheduled-push-token-{push_user_id}"
+    with connect() as connection:
+        _insert_device(connection, workspace, push_user_id, token)
+
+    settings = get_settings()
+    monkeypatch.setattr(postgres_notification_dispatcher, "get_settings", lambda: settings)
+    sender_calls: list[dict[str, object]] = []
+
+    def fake_sender(**kwargs: object) -> None:
+        sender_calls.append(kwargs)
+
+    runtime_instances: list[PostgresRuntime] = []
+    closed_runtimes: list[PostgresRuntime] = []
+    original_close = PostgresRuntime.close
+
+    def create_runtime() -> PostgresRuntime:
+        runtime = PostgresRuntime.from_environment(connector=lambda *_args, **_kwargs: connect())
+        runtime_instances.append(runtime)
+        return runtime
+
+    def tracked_close(runtime: PostgresRuntime) -> None:
+        original_close(runtime)
+        closed_runtimes.append(runtime)
+
+    monkeypatch.setattr(PostgresRuntime, "close", tracked_close)
+
+    def dispatch(repository) -> str | None:
+        return dispatch_one_postgres_push(repository, sender=fake_sender)
+
+    assert (
+        run_postgres_push_dispatch_once.run_once(
+            runtime_factory=create_runtime,
+            dispatcher=dispatch,
+        )
+        is True
+    )
+
+    assert len(runtime_instances) == 1
+    first_runtime = runtime_instances[0]
+    assert first_runtime.profile == "production"
+    assert first_runtime.probe().ready
+    assert closed_runtimes == [first_runtime]
+    assert sender_calls == [
+        {
+            "token": token,
+            "title": notification.title,
+            "body": notification.body,
+            "data": {
+                "notification_id": notification.id,
+                "entity_type": "approval_request",
+                "entity_id": notification.approval_request_id or notification.entity_id,
+            },
+        }
+    ]
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT status,attempts FROM notifications WHERE notification_id=%s",
+            (notification.id,),
+        ).fetchone() == ("SENT", 1)
+
+    assert (
+        run_postgres_push_dispatch_once.run_once(
+            runtime_factory=create_runtime,
+            dispatcher=dispatch,
+        )
+        is False
+    )
+    assert len(runtime_instances) == 2
+    assert closed_runtimes == runtime_instances
+    assert len(sender_calls) == 1
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT status,attempts FROM notifications WHERE notification_id=%s",
+            (notification.id,),
+        ).fetchone() == ("SENT", 1)
