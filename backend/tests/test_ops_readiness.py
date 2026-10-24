@@ -86,6 +86,24 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     assert "AIXION_METRICS_TOKEN" not in str(body)
 
 
+def test_sqlite_readiness_verifies_the_local_flight_recorder(monkeypatch) -> None:
+    called = []
+    expected = ops_routes.FlightRecorderVerification(valid=True, event_count=3)
+    settings = replace(get_settings(), postgres_auth_enabled=False)
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        ops_routes,
+        "verify_flight_recorder",
+        lambda: called.append(True) or expected,
+    )
+
+    readiness = build_runtime_readiness(application_state=app.state)
+
+    assert called == [True]
+    assert readiness.flight_recorder_valid is True
+    assert readiness.flight_recorder_event_count == 3
+
+
 def test_readiness_reports_metrics_configuration_without_secret_value(monkeypatch) -> None:
     token = "test-only-prometheus-token-with-more-than-32-bytes"
     monkeypatch.setenv("AIXION_METRICS_TOKEN", token)

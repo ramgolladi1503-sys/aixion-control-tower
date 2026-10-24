@@ -7,16 +7,18 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from .auth import require_maintainer
+from .application_repositories import ApplicationRepositories
 from .database_migrations import known_migration_ids
 from .external_agent_readiness import ExternalAgentReadinessResponse, build_external_agent_readiness
 from .models import AuthUser, UserRole, now_utc
-from .postgres_runtime import PostgresRuntime
 from .postgres_database import POSTGRES_MIGRATIONS
+from .postgres_runtime import PostgresRuntime
+from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .recovery_routes import RECOVERY_FORMAT_VERSION, export_recovery_snapshot
 from .settings import get_settings
 from .store import store
 from .trust_flight_recorder import verify_flight_recorder
-from .trust_models import CapabilityLeaseStatus
+from .trust_models import CapabilityLeaseStatus, FlightRecorderVerification
 
 router = APIRouter(prefix="/ops", tags=["operations"])
 MaintainerDependency = Depends(require_maintainer)
@@ -116,6 +118,45 @@ def _is_sqlite_repository(repository: object) -> bool:
         base.__name__.startswith("SQLite")
         for base in type(repository).__mro__
     )
+
+
+def _verify_readiness_flight_recorder(
+    *, postgres_runtime: PostgresRuntime | None, application_state: object | None
+) -> FlightRecorderVerification:
+    """Verify the ledger selected by the active application persistence mode."""
+    settings = get_settings()
+    if not settings.postgres_auth_enabled:
+        return verify_flight_recorder()
+
+    repositories = getattr(application_state, "postgres_repositories", None)
+    runtime_repositories = getattr(postgres_runtime, "repositories", None)
+    repository = getattr(application_state, "trust_event_repository", None)
+    expected_repository = getattr(repositories, "trust_events", None)
+    if (
+        postgres_runtime is None
+        or not isinstance(repositories, ApplicationRepositories)
+        or runtime_repositories is not repositories
+        or expected_repository is not repository
+        or not isinstance(expected_repository, PostgresTrustEventRepository)
+    ):
+        return FlightRecorderVerification(
+            valid=False,
+            event_count=0,
+            reason="PostgreSQL trust event ledger is unavailable.",
+        )
+
+    try:
+        with postgres_runtime.connect() as connection:
+            with connection.transaction():
+                return expected_repository.verify_in_transaction(connection)
+    except Exception:
+        # Readiness must not mistake an unavailable or malformed selected ledger
+        # for a healthy process-local projection.
+        return FlightRecorderVerification(
+            valid=False,
+            event_count=0,
+            reason="PostgreSQL trust event ledger could not be verified.",
+        )
 
 
 def _application_repository_bindings(
@@ -296,7 +337,10 @@ def build_runtime_readiness(
             except Exception as exc:  # pragma: no cover - defensive operational check
                 errors.append(f"Recovery snapshot readiness check failed: {exc}")
 
-    flight = verify_flight_recorder()
+    flight = _verify_readiness_flight_recorder(
+        postgres_runtime=postgres_runtime,
+        application_state=application_state,
+    )
     if not flight.valid:
         errors.append(
             "Trust flight recorder failed hash-chain verification: " + flight.reason
