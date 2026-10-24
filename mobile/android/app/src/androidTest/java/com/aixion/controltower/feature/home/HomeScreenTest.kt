@@ -76,7 +76,7 @@ class HomeScreenTest {
     }
 
     @Test
-    fun connectionPanelRoutesToManagementWithoutClaimingConnectionStatus() {
+    fun connectionPanelOffersConnectActionWithoutClaimingConnectionStatus() {
         var opened = false
         composeRule.setContent {
             HomeAgentConnectionPanel(onOpenConnect = { opened = true })
@@ -89,7 +89,8 @@ class HomeScreenTest {
         composeRule.onAllNodesWithText("manage the computers", substring = true).assertCountEquals(0)
         composeRule.onAllNodesWithText("Connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Online").assertCountEquals(0)
-        composeRule.onNodeWithText("Manage connections").performClick()
+        composeRule.onNodeWithText("Connect an agent").assertExists().performClick()
+        composeRule.onAllNodesWithText("Manage connections").assertCountEquals(0)
         composeRule.onAllNodesWithText("Set up an agent").assertCountEquals(0)
         composeRule.runOnIdle { assertTrue(opened) }
     }

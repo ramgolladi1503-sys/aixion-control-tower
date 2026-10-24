@@ -23,6 +23,41 @@ class TowerPaletteContrastTest {
         }
     }
 
+    @Test
+    fun semanticTextTokensMeetWcagAaAcrossEveryThemeSurface() {
+        listOf(LightTowerPalette, DarkTowerPalette).forEach { palette ->
+            val surfaces = listOf(
+                "canvas" to palette.canvas,
+                "surface" to palette.surface,
+                "raised surface" to palette.surfaceRaised,
+                "subtle surface" to palette.surfaceSubtle
+            )
+            val bodyAndSupportingText = listOf(
+                "body text" to palette.ink,
+                "muted text" to palette.inkMuted,
+                "disabled text" to palette.inkDisabled
+            )
+            val semanticLabels = listOf(
+                "brand text" to palette.brand,
+                "positive text" to palette.positive,
+                "caution text" to palette.caution,
+                "danger text" to palette.danger,
+                "info text" to palette.info
+            )
+
+            bodyAndSupportingText.forEach { (label, foreground) ->
+                surfaces.forEach { (surfaceName, background) ->
+                    assertAaContrast("$label on $surfaceName", foreground, background)
+                }
+            }
+            semanticLabels.forEach { (label, foreground) ->
+                surfaces.forEach { (surfaceName, background) ->
+                    assertAaContrast("$label on $surfaceName", foreground, background)
+                }
+            }
+        }
+    }
+
     private fun assertAaContrast(label: String, foreground: Color, background: Color) {
         val ratio = contrastRatio(foreground, background)
         assertTrue("$label contrast should meet WCAG AA (4.5:1), got ${"%.2f".format(ratio)}", ratio >= 4.5)

@@ -29,7 +29,7 @@ internal val LightTowerPalette = TowerPalette(
     ink = Color(0xFF20241F),
     inkMuted = Color(0xFF596057),
     // Keep disabled labels readable while pairing them with a state label/icon.
-    inkDisabled = Color(0xFF656B61),
+    inkDisabled = Color(0xFF646A60),
     line = Color(0xFFD4D5CC),
     brand = Color(0xFF53664D),
     onBrand = Color(0xFFFFFFFF),
