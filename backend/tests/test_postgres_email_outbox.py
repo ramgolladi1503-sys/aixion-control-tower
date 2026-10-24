@@ -337,3 +337,64 @@ def test_postgres_dispatch_terminal_failure_erases_payload(
             (identifier,),
         ).fetchone()
     assert row == ("DEAD", 1, b"", "DELIVERY_RUNTIMEERROR")
+
+
+def test_postgres_dispatch_recovers_claim_after_worker_restart(
+    email_outbox: tuple[PostgresEmailOutboxRepository, Callable[[], Connection]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh lifespan worker can recover a claim left by a crashed process."""
+    repository, connect = email_outbox
+    monkeypatch.setenv("AIXION_EMAIL_OUTBOX_KEY", "12" * 32)
+    monkeypatch.setattr(
+        "app.email_delivery.get_settings",
+        lambda: SimpleNamespace(
+            email_max_attempts=3,
+            email_lease_seconds=30,
+            email_retry_base_seconds=2,
+            email_retry_max_seconds=20,
+        ),
+    )
+    identifier, encrypted, _ = prepare_verification_email(
+        recipient="restart@example.test", code="restart-code"
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO auth_email_outbox(outbox_id,recipient,encrypted_code,status,attempts,created_at,"
+            "next_attempt_at) VALUES(%s,%s,%s,'PENDING',0,%s,%s)",
+            (identifier, "restart@example.test", encrypted, now_utc(), now_utc()),
+        )
+
+    crashed_worker_claim = _claim(repository, now=now_utc(), lease_seconds=30)
+    assert crashed_worker_claim is not None
+    assert crashed_worker_claim.outbox_id == identifier
+
+    # Model process death after commit: there is no sender call and no outcome
+    # write. Advance the durable lease deadline, then create the same repository
+    # type the next application lifespan obtains from PostgresRuntime.
+    expired_at = now_utc() - timedelta(seconds=1)
+    with connect() as conn:
+        conn.execute(
+            "UPDATE auth_email_outbox SET lease_expires_at=%s WHERE outbox_id=%s",
+            (expired_at, identifier),
+        )
+    restarted_worker_repository = PostgresEmailOutboxRepository(connect)
+    sent: list[tuple[str, str]] = []
+
+    assert dispatch_one_due_email_postgres(
+        repository=restarted_worker_repository,
+        sender=lambda recipient, code: sent.append((recipient, code)),
+    ) is True
+    assert sent == [("restart@example.test", "restart-code")]
+    assert repository.mark_sent(crashed_worker_claim, now=now_utc()) is False
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT status,attempts,encrypted_code,sent_at,lease_expires_at "
+            "FROM auth_email_outbox WHERE outbox_id=%s",
+            (identifier,),
+        ).fetchone()
+    assert row[0] == "SENT"
+    assert row[1] == 2
+    assert row[2] == b""
+    assert row[3] is not None
+    assert row[4] is None
