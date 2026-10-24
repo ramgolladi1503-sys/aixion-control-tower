@@ -437,6 +437,7 @@ def create_agent_approval(
         ),
         entity_type="approval_request",
         entity_id=request.id,
+        approval_request_id=request.id,
         workspace_id=request.workspace_id,
     )
     def resolve_invocation_retry() -> ApprovalRequest | None:

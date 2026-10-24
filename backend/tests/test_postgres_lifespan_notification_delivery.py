@@ -113,7 +113,7 @@ def test_lifespan_approval_notification_is_dispatched_from_postgres_outbox(
         notification = notification_row[0]
         assert notification.entity_type == "approval_request"
         assert notification.entity_id == approval["id"]
-        assert notification.approval_request_id is None
+        assert notification.approval_request_id == approval["id"]
         assert notification.workspace_id == workspace.id
         assert notification.push_status == "PENDING"
 
