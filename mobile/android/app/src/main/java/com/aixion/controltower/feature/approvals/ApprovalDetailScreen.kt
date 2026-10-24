@@ -661,6 +661,10 @@ private fun ExactToolRequestHeader(approval: ApprovalSummary) {
             fontWeight = FontWeight.SemiBold,
             lineHeight = 24.sp
         )
+        SourceBadge(
+            approval = approval,
+            modifier = Modifier.testTag("approval-detail-source-trust")
+        )
         Text(
             text = "Provider: ${approvalProviderName(approval.sourceProvider)} · Project: ${approval.projectName.ifBlank { "Not provided" }}",
             modifier = Modifier.testTag("approval-exact-tool-context"),
@@ -824,6 +828,12 @@ private fun ApprovalHeroPanel(
                     fontSize = 14.sp,
                     uppercase = false
                 )
+                if (showDecisionContext) {
+                    SourceBadge(
+                        approval = approval,
+                        modifier = Modifier.testTag("approval-detail-source-trust")
+                    )
+                }
                 if (showDecisionContext) {
                     RiskBadge(approval.risk, readable = true)
                 }

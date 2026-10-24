@@ -470,6 +470,37 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun exactToolReviewSurfacesUnverifiedSourceBeforeShowingTheDecisionPayload() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            sourceProvider = "ANTIGRAVITY",
+            verifiedSource = false,
+            files = listOf(
+                FileChangeSummary(
+                    "antigravity://tool/run_command",
+                    "tool_call",
+                    "{\"command\":\"git status --short\"}",
+                    RiskLevel.LOW
+                )
+            )
+        )
+        composeRule.setContent {
+            Box(modifier = Modifier.width(320.dp).height(620.dp)) {
+                ApprovalDetailContent(request, null, {}, {}, {})
+            }
+        }
+
+        val sourceTrust = composeRule.onNodeWithTag("approval-detail-source-trust")
+        val exactActionPath = composeRule.onNodeWithText("antigravity://tool/run_command")
+        sourceTrust.assertIsDisplayed()
+        composeRule.onNodeWithText("Unverified: ANTIGRAVITY").assertIsDisplayed()
+        assertTrue(
+            "Source trust should be presented before the exact tool path",
+            sourceTrust.fetchSemanticsNode().boundsInRoot.top <
+                exactActionPath.fetchSemanticsNode().boundsInRoot.top
+        )
+    }
+
+    @Test
     fun highRiskToolConfirmationShowsExactToolAndArguments() {
         val request = approval(ApprovalStatus.REQUESTED).copy(
             title = "Codex permission: shell",
