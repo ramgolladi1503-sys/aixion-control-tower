@@ -112,6 +112,9 @@ jobs:
       - name: Run Android JVM tests
         run: ./gradlew testDebugUnitTest
 
+      - name: Compile Android instrumentation tests
+        run: ./gradlew compileDebugAndroidTestKotlin
+
       - name: Build Android debug APK
         run: ./gradlew assembleDebug
 
