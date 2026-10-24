@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from .agent_task_repository import PostgresAgentTaskRepository
 from .auth import require_owner
@@ -112,6 +112,11 @@ def _to_public(connector: AgentConnector) -> ConnectorPublic:
 
 
 def _get_connector_or_404(connector_id: str, user: AuthUser | None = None) -> AgentConnector:
+    if get_settings().postgres_auth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL connector repository requires an app-bound request",
+        )
     connector = store.agent_connectors.get(connector_id)
     if not connector or not connector_scope_is_consistent(connector):
         raise HTTPException(status_code=404, detail="Connector not found")

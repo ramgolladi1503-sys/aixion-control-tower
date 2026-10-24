@@ -170,6 +170,28 @@ def test_connector_management_fails_closed_without_or_with_mismatched_postgres_b
         repository_access.connector_repository_for_request(request)
 
 
+def test_connector_mutation_without_request_context_does_not_fall_back_to_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        connector_routes,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    connector = AgentConnector(name="Must remain unchanged")
+    monkeypatch.setitem(store.agent_connectors, connector.id, connector)
+    before_audits = {event.id for event in store.audit_events}
+
+    with pytest.raises(HTTPException) as error:
+        connector_routes.disable_connector(connector.id, user=None)
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "PostgreSQL connector repository requires an app-bound request"
+    assert store.agent_connectors[connector.id] is connector
+    assert connector.status.value == "ENABLED"
+    assert {event.id for event in store.audit_events} == before_audits
+
+
 def test_connector_route_rejects_repository_bundle_from_another_runtime_without_mutation(
     postgres_connector_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
