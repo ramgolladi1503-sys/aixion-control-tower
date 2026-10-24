@@ -482,7 +482,7 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
-    fun emptyInboxOmitsDangerBadgeWhenNoRequestsAreBlocked() {
+    fun caughtUpInboxExplainsConnectedAgentsAndOffersConnectionManagement() {
         var connectRequested = false
         composeRule.setContent {
             ApprovalInboxContent(
@@ -494,8 +494,11 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithText("Status blocked 0").assertCountEquals(0)
         composeRule.onAllNodesWithText("0 pending").assertCountEquals(0)
         composeRule.onAllNodesWithText("Needs review 0").assertCountEquals(0)
-        composeRule.onNodeWithText("No requests need review").assertExists()
-        composeRule.onNodeWithText("Connect an agent").performClick()
+        composeRule.onNodeWithText("You’re all caught up").assertExists()
+        composeRule.onNodeWithText(
+            "Pending requests from your connected agents will appear here when they need your decision."
+        ).assertExists()
+        composeRule.onNodeWithText("Manage agent connections").performClick()
         assertEquals(true, connectRequested)
     }
 

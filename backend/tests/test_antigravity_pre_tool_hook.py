@@ -571,6 +571,15 @@ def test_sensitive_tool_without_step_identity_is_denied_before_network() -> None
     request.assert_not_called()
 
 
+@pytest.mark.parametrize("expires_at", ["not-a-timestamp", "2000-01-01T00:00:00Z", "2099-01-01T00:00:00"])
+def test_antigravity_heartbeat_rejects_invalid_or_expired_lease_timestamp(expires_at: str) -> None:
+    assert hook._lease_expiry_is_current(expires_at) is False
+
+
+def test_antigravity_heartbeat_accepts_future_utc_lease_timestamp() -> None:
+    assert hook._lease_expiry_is_current("2099-01-01T00:00:00Z") is True
+
+
 def test_denied_mobile_decision_blocks_tool() -> None:
     def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         if method == "POST":

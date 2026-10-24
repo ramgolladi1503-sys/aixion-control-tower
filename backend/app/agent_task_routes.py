@@ -22,7 +22,11 @@ from .agent_task_models import (
     AgentTaskStatus,
 )
 from .agent_task_repository import AgentTaskRepositoryConflict
-from .agent_task_repository import AgentTaskRepository, SQLiteAgentTaskRepository
+from .agent_task_repository import (
+    AgentTaskRepository,
+    PostgresAgentTaskRepository,
+    SQLiteAgentTaskRepository,
+)
 from .agent_task_notifications import (
     build_agent_task_worker_status_notification,
     notify_agent_task_approval_decision,
@@ -219,6 +223,13 @@ def propagate_approval_decision_to_agent_task(
     approval_repository: ApprovalDecisionRepository | None = None,
     run_repository: AgentRunRepository | None = None,
 ) -> AgentTask | None:
+    if committed is None and isinstance(task_repository, PostgresAgentTaskRepository):
+        # PostgreSQL approval decisions must propagate only from the atomic
+        # repository commit result. Falling through to the legacy store map
+        # would let process-local task state become authoritative.
+        raise ApprovalDecisionConflict(
+            "PostgreSQL AgentTask approval propagation requires its committed transaction result."
+        )
     if committed is not None:
         # The repository transaction is authoritative. PostgreSQL-backed route
         # paths intentionally do not require a process-local task projection.

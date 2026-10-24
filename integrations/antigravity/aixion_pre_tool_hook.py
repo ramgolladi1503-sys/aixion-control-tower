@@ -114,6 +114,19 @@ def _short_correlation_id(source_invocation_id: str) -> str:
     return hashlib.sha256(source_invocation_id.encode("utf-8")).hexdigest()[:16]
 
 
+def _lease_expiry_is_current(value: Any) -> bool:
+    """Reject malformed, timezone-less, or already-expired lease responses."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        return False
+    return expires_at > datetime.now(timezone.utc)
+
+
 def _validated_diagnostic_approval_id(value: Any) -> str | None:
     if isinstance(value, str) and DIAGNOSTIC_APPROVAL_ID.fullmatch(value):
         return value
@@ -428,8 +441,7 @@ def _refresh_invocation_lease_if_due(
         or heartbeat.get("live") is not True
         or not isinstance(heartbeat.get("heartbeat_at"), str)
         or not heartbeat["heartbeat_at"]
-        or not isinstance(heartbeat.get("expires_at"), str)
-        or not heartbeat["expires_at"]
+        or not _lease_expiry_is_current(heartbeat.get("expires_at"))
     ):
         return next_heartbeat_at, False
     return time.monotonic() + INVOCATION_HEARTBEAT_INTERVAL_SECONDS, True

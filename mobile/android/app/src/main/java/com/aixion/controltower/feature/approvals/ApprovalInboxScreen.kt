@@ -388,18 +388,18 @@ fun ApprovalInboxContent(
             item {
                 TowerPanel(elevated = true) {
                     Text(
-                        text = "No requests need review",
+                        text = "You’re all caught up",
                         color = palette.ink,
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        text = "New requests will appear here when an agent needs your decision.",
+                        text = "Pending requests from your connected agents will appear here when they need your decision.",
                         color = palette.inkMuted,
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
-                    Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
-                        Text("Connect an agent")
+                    TextButton(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
+                        Text("Manage agent connections")
                     }
                 }
             }

@@ -600,6 +600,15 @@ def test_malformed_present_tool_use_id_denies_before_network(monkeypatch) -> Non
     assert "stable session, turn, or tool-call identity" in reason
 
 
+@pytest.mark.parametrize("expires_at", ["not-a-timestamp", "2000-01-01T00:00:00Z", "2099-01-01T00:00:00"])
+def test_codex_heartbeat_rejects_invalid_or_expired_lease_timestamp(expires_at: str) -> None:
+    assert hook._lease_expiry_is_current(expires_at) is False
+
+
+def test_codex_heartbeat_accepts_future_utc_lease_timestamp() -> None:
+    assert hook._lease_expiry_is_current("2099-01-01T00:00:00Z") is True
+
+
 def test_duplicate_approval_delivery_claim_denies_codex_request(monkeypatch) -> None:
     created_body: dict = {}
 

@@ -15,7 +15,13 @@ from psycopg.types.json import Jsonb
 from app import approval_recovery, main
 from app.approval_decisions import agent_task_repository as sqlite_agent_task_repository
 from app.agent_task_models import AgentTaskStatus
-from app.agent_task_routes import MaintainerDependency, ReviewerDependency
+from app.agent_task_repository import PostgresAgentTaskRepository
+from app.agent_task_routes import (
+    MaintainerDependency,
+    ReviewerDependency,
+    propagate_approval_decision_to_agent_task,
+)
+from app.approval_repository import ApprovalDecisionConflict
 from app.approval_recovery import reconcile_linked_approval_tasks
 from app.approval_integrity import compute_approval_payload_hash
 from app.application_repositories import ApplicationRepositories
@@ -24,6 +30,27 @@ from app.postgres_database import run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
 from app.settings import get_settings
 from app.store import store
+
+
+def test_postgres_approval_propagation_fails_closed_without_commit_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ProcessLocalTaskMap:
+        def values(self):
+            raise AssertionError("PostgreSQL approval propagation read process-local tasks")
+
+    monkeypatch.setattr(store, "agent_tasks", ProcessLocalTaskMap())
+    repository = PostgresAgentTaskRepository(
+        lambda: pytest.fail("PostgreSQL repository must not be queried without commit result")
+    )
+
+    with pytest.raises(ApprovalDecisionConflict, match="committed transaction result"):
+        propagate_approval_decision_to_agent_task(
+            approval_request=object(),  # type: ignore[arg-type]
+            previous_status=ApprovalStatus.REQUESTED,
+            actor="owner@example.test",
+            task_repository=repository,
+        )
 
 
 @pytest.fixture
