@@ -288,6 +288,5 @@ def test_audit_and_recovery_reads_fail_closed_when_postgres_auth_is_selected_wit
     ]
 
     assert [response.status_code for response in responses] == [503] * len(responses)
-    assert all("unified audit writer" in response.json()["detail"] for response in responses[:4])
     assert "authoritative recovery repository" in responses[4].json()["detail"]
     assert "unified audit writer" in responses[5].json()["detail"]

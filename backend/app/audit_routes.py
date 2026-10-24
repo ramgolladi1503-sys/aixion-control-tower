@@ -58,11 +58,29 @@ class AuditExportResponse(BaseModel):
     events: list[AuditEvent] = Field(default_factory=list)
 
 
-def _audit_repository_for_route(request: Request | None) -> AuditEventRepository:
+def _audit_repository_for_route(
+    request: Request | None, *, allow_postgres_reads: bool = False
+) -> AuditEventRepository:
     if request is None:
         return _local_audit_repository
+    if get_settings().postgres_auth_enabled:
+        if not allow_postgres_reads:
+            _require_authoritative_audit_runtime(request)
+        try:
+            return audit_event_repository_for_request(request)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL audit repository runtime is unavailable or mismatched.",
+            ) from exc
     _require_authoritative_audit_runtime(request)
-    return audit_event_repository_for_request(request)
+    try:
+        return audit_event_repository_for_request(request)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Application audit-event repository is unavailable.",
+        ) from exc
 
 
 def _require_authoritative_audit_runtime(request: Request) -> None:
@@ -81,9 +99,23 @@ def _require_authoritative_audit_runtime(request: Request) -> None:
 
 
 def _workspace_for_route(user: AuthUser, request: Request | None) -> str | None:
-    if request is None:
-        return workspace_id_for_user(user)
-    return workspace_id_for_request(user, request)
+    try:
+        workspace_id = (
+            workspace_id_for_user(user)
+            if request is None
+            else workspace_id_for_request(user, request)
+        )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Audit workspace runtime is unavailable or mismatched.",
+        ) from exc
+    if request is not None and get_settings().postgres_auth_enabled and not workspace_id:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL audit reads require a verified workspace.",
+        )
+    return workspace_id
 
 
 def _filter_audit_events(
@@ -164,7 +196,7 @@ def query_audit_events(
     user: AuthUser = ReviewerDependency,
 ) -> list[AuditEvent]:
     events = _filter_audit_events(
-        _audit_repository_for_route(request),
+        _audit_repository_for_route(request, allow_postgres_reads=True),
         limit=limit,
         workspace_id=_workspace_for_route(user, request),
         event_type=event_type,
@@ -190,7 +222,7 @@ def export_audit_events(
     user: AuthUser = MaintainerDependency,
 ) -> AuditExportResponse:
     events = _filter_audit_events(
-        _audit_repository_for_route(request),
+        _audit_repository_for_route(request, allow_postgres_reads=True),
         limit=limit + 1,
         workspace_id=_workspace_for_route(user, request),
         event_type=event_type,
@@ -231,7 +263,7 @@ def get_audit_event(
     user: AuthUser = ReviewerDependency,
 ) -> AuditEvent:
     workspace_id = _workspace_for_route(user, request)
-    repository = _audit_repository_for_route(request)
+    repository = _audit_repository_for_route(request, allow_postgres_reads=True)
     if workspace_id is None and not isinstance(repository, SQLiteAuditEventRepository):
         raise HTTPException(status_code=404, detail="Audit event not found")
     event = repository.get_for_workspace(

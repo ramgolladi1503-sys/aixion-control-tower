@@ -4,6 +4,7 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from datetime import timedelta
 
 import psycopg
 import pytest
@@ -11,9 +12,9 @@ from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from app import application_repository_access, main
+from app import application_repository_access, audit_routes, main
 from app.auth import require_maintainer, require_reviewer
-from app.models import AuditEvent, AuthUser, User, UserRole, Workspace
+from app.models import AuditEvent, AuthUser, User, UserRole, Workspace, now_utc
 from app.postgres_database import run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
 from app.settings import get_settings
@@ -89,6 +90,7 @@ def postgres_audit_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[
         assert membership.user.workspace_id == workspace.id
         assert membership.resolved_workspace_exists
         monkeypatch.setattr(main, "get_settings", lambda: settings)
+        monkeypatch.setattr(audit_routes, "get_settings", lambda: settings)
         monkeypatch.setattr(
             application_repository_access, "get_settings", lambda: settings
         )
@@ -246,3 +248,111 @@ def test_legacy_audit_requires_verified_postgres_workspace_membership(
     response = TestClient(main.app).get("/audit")
 
     assert response.status_code == 403
+
+
+def test_postgres_audit_list_export_and_detail_are_workspace_scoped_filtered_and_redacted(
+    postgres_audit_route_runtime,
+) -> None:
+    connect, workspace, user, _runtime = postgres_audit_route_runtime
+    timestamp = now_utc()
+    newest = AuditEvent(
+        workspace_id=workspace.id,
+        event_type="approval.decision",
+        entity_id="approval-private",
+        actor=user.email,
+        details={"decision": "approve", "nested": {"api_secret": "never-return"}},
+        created_at=timestamp,
+    )
+    older = AuditEvent(
+        workspace_id=workspace.id,
+        event_type="approval.created",
+        entity_id="approval-private",
+        actor=user.email,
+        details={"decision": "pending"},
+        created_at=timestamp - timedelta(minutes=1),
+    )
+    foreign = AuditEvent(
+        workspace_id=f"workspace_foreign_{uuid.uuid4().hex}",
+        event_type="approval.decision",
+        entity_id="approval-private",
+        actor=user.email,
+        details={"decision": "deny", "api_secret": "foreign-secret"},
+        created_at=timestamp + timedelta(minutes=1),
+    )
+    foreign_workspace = Workspace(
+        id=foreign.workspace_id, name="Foreign", owner_user_id=f"owner_{uuid.uuid4().hex}"
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+            (foreign_workspace.id, Jsonb(foreign_workspace.model_dump(mode="json"))),
+        )
+    _insert_audit_events(connect, newest, older, foreign)
+
+    client = TestClient(main.app)
+    listed = client.get(
+        "/audit/events",
+        params={"event_type": "approval.decision", "entity_id": "approval-private", "limit": 1},
+    )
+    exported = client.get(
+        "/audit/export",
+        params={"entity_id": "approval-private", "limit": 1},
+    )
+    detail = client.get(f"/audit/events/{newest.id}")
+    foreign_detail = client.get(f"/audit/events/{foreign.id}")
+
+    assert listed.status_code == 200, listed.text
+    assert [row["id"] for row in listed.json()] == [newest.id]
+    assert listed.json()[0]["details"]["nested"]["api_secret"] == "[REDACTED]"
+    assert exported.status_code == 200, exported.text
+    assert exported.json()["count"] == 1
+    assert exported.json()["truncated"] is True
+    assert exported.json()["events"][0]["id"] == newest.id
+    assert exported.json()["events"][0]["details"]["nested"]["api_secret"] == "[REDACTED]"
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["details"]["nested"]["api_secret"] == "[REDACTED]"
+    assert foreign_detail.status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/audit/events", "/audit/export", "/audit/events/missing"])
+@pytest.mark.parametrize("runtime_state", ["missing", "mismatched"])
+def test_postgres_audit_reads_fail_closed_without_matching_lifespan_bundle(
+    postgres_audit_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    runtime_state: str,
+) -> None:
+    _connect, _workspace, _user, runtime = postgres_audit_route_runtime
+    if runtime_state == "missing":
+        monkeypatch.setattr(main.app.state, "postgres_runtime", None)
+    else:
+        mismatched = PostgresRuntime(
+            _dsn="unused",
+            profile="test",
+            _connector=lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(main.app.state, "postgres_repositories", mismatched.repositories)
+
+    response = TestClient(main.app).get(path)
+
+    assert response.status_code == 503, response.text
+    assert runtime.repositories is not None
+
+
+def test_postgres_audit_recovery_export_remains_blocked(
+    postgres_audit_route_runtime,
+) -> None:
+    response = TestClient(main.app).get("/audit/recovery/export")
+
+    assert response.status_code == 503
+
+
+def test_postgres_audit_read_fails_closed_without_workspace(
+    postgres_audit_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audit_routes, "workspace_id_for_request", lambda *_args: None)
+
+    response = TestClient(main.app).get("/audit/events")
+
+    assert response.status_code == 503
