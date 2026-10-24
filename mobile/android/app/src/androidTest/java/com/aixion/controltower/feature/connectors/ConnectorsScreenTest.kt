@@ -1,5 +1,10 @@
 package com.aixion.controltower.feature.connectors
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
@@ -8,7 +13,10 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -101,5 +109,27 @@ class ConnectorsScreenTest {
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("FIRST SUPPORTED").assertCountEquals(0)
+    }
+
+    @Test
+    fun setupGuidanceWrapsAtLargeFontScaleOnNarrowScreen() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    ConnectorsContent()
+                }
+            }
+        }
+
+        val heading = composeRule.onNodeWithText("Connect your coding agent")
+        heading.assertExists()
+        composeRule.runOnIdle {
+            val bounds = heading.fetchSemanticsNode().boundsInRoot
+            assertTrue("Connect heading must remain within the narrow viewport", bounds.right <= 240f)
+            assertTrue("Connect heading must wrap at large font scale", bounds.height > 48f)
+        }
+
+        composeRule.onNodeWithText("Choose a provider").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Local E2E on prior revision").performScrollTo().assertIsDisplayed()
     }
 }
