@@ -6,9 +6,12 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
+from app import agent_task_routes
+from app.agent_task_models import AgentProvider, AgentTask, AgentTaskRequestedAction
 from app.main import app
-from app.models import Project
+from app.models import ApprovalRequestCreate, AuthUser, Project, UserRole, WorkOrder
 from app.store import store
+from app.work_order_repository import PostgresWorkOrderRepository
 
 client = TestClient(app)
 
@@ -155,3 +158,75 @@ def test_create_agent_task_resolves_project_after_compatibility_cache_clear() ->
 
     assert response.status_code == 200, response.text
     assert response.json()["project_id"] == project.id
+
+
+def test_postgres_task_approval_rejects_missing_work_order_workspace_without_sqlite_fallback(
+    monkeypatch,
+) -> None:
+    project = Project(id="project_pg_scope", name="PG project", workspace_id="workspace_pg_scope")
+    work_order = WorkOrder(
+        id="work_order_pg_scope",
+        project_id=project.id,
+        workspace_id=None,
+        goal="Legacy or malformed row must fail closed",
+    )
+    task = AgentTask(
+        provider=AgentProvider.ANTIGRAVITY,
+        project_id=project.id,
+        title="Task",
+        goal="Create approval",
+        requested_action=AgentTaskRequestedAction.CREATE_APPROVAL,
+        workspace_id=project.workspace_id,
+    )
+    actor = AuthUser(
+        id="owner_pg_scope",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id=project.workspace_id,
+    )
+    work_orders = PostgresWorkOrderRepository(lambda: None)  # type: ignore[arg-type]
+    work_orders.get = lambda _work_order_id: work_order  # type: ignore[method-assign]
+
+    class _ApprovalRepository:
+        def create_for_agent_task(self, **_kwargs):
+            raise AssertionError("invalid PostgreSQL WorkOrder must be rejected before approval commit")
+
+    class _Projects:
+        def get(self, _project_id: str):
+            return project
+
+    monkeypatch.setattr(agent_task_routes, "_task_repository_for_route", lambda _request: object())
+    monkeypatch.setattr(agent_task_routes, "_approval_repository_for_route", lambda _request: _ApprovalRepository())
+    monkeypatch.setattr(agent_task_routes, "_project_repository_for_route", lambda _request: _Projects())
+    monkeypatch.setattr(agent_task_routes, "work_order_repository_for_request", lambda _request: work_orders)
+    monkeypatch.setattr(agent_task_routes, "workspace_id_for_request", lambda _user, _request: project.workspace_id)
+    monkeypatch.setattr(agent_task_routes, "_task_for_user", lambda *_args, **_kwargs: task)
+    monkeypatch.setattr(
+        agent_task_routes,
+        "project_workspace_id",
+        lambda _project_id: (_ for _ in ()).throw(
+            AssertionError("PostgreSQL scope must not read the SQLite compatibility project store")
+        ),
+    )
+
+    from fastapi import HTTPException
+
+    try:
+        agent_task_routes.create_agent_task_approval(
+            task.id,
+            ApprovalRequestCreate(
+                project_id=project.id,
+                work_order_id=work_order.id,
+                title="Approve task",
+                summary="Validate scoped persistence",
+                target_branch="main",
+                files=[],
+            ),
+            user=actor,
+            http_request=object(),  # type: ignore[arg-type]
+        )
+    except HTTPException as error:
+        assert error.status_code == 404
+    else:
+        raise AssertionError("PostgreSQL WorkOrder without a workspace must be rejected")

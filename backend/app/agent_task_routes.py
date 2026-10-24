@@ -73,6 +73,7 @@ from .workspace_access import (
     project_workspace_id,
     workspace_id_for_user,
 )
+from .work_order_repository import PostgresWorkOrderRepository
 
 router = APIRouter(prefix="/agent/tasks", tags=["agent-tasks"])
 ReviewerDependency = Depends(require_reviewer)
@@ -746,11 +747,27 @@ def create_agent_task_approval(
         )
     if payload.work_order_id:
         work_order = work_order_repository.get(payload.work_order_id)
+        if isinstance(work_order_repository, PostgresWorkOrderRepository):
+            # A PostgreSQL row is authoritative for its workspace. Do not fill
+            # a missing indexed workspace from the module-level compatibility
+            # project repository, which may still be SQLite.
+            work_order_workspace_matches = bool(
+                work_order
+                and work_order.workspace_id
+                and work_order.workspace_id == project.workspace_id
+            )
+        else:
+            # Preserve the legacy local adapter's compatibility with older
+            # WorkOrders whose payload omitted workspace_id.
+            work_order_workspace_matches = bool(
+                work_order
+                and (work_order.workspace_id or project_workspace_id(work_order.project_id))
+                == project.workspace_id
+            )
         if (
             work_order is None
             or work_order.project_id != project.id
-            or (work_order.workspace_id or project_workspace_id(work_order.project_id))
-            != project.workspace_id
+            or not work_order_workspace_matches
         ):
             raise HTTPException(status_code=404, detail="Work order not found")
 

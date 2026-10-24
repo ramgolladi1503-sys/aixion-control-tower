@@ -478,6 +478,7 @@ fun ApprovalDetailContent(
                     Text(
                         buildString {
                             append("Provider: ${approval.sourceProvider.ifBlank { "Unknown" }}\n")
+                            append("Source verification: ${if (approval.verifiedSource) "Verified" else "Not verified"}\n")
                             append("Request ID: ${shortSafeApprovalId(approval.id)}\n")
                             append("Invocation ID: ${approval.sourceInvocationId?.let(::shortSafeApprovalId) ?: "Not provided"}\n")
                             append("Target: ${approval.projectName.ifBlank { "Not provided" }} · ${approval.targetBranch.ifBlank { "Not provided" }}\n")

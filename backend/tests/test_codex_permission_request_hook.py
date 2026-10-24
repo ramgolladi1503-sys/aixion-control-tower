@@ -832,6 +832,47 @@ def test_error_response_from_hook_is_explicit_codex_deny(monkeypatch, capsys) ->
     assert output["hookSpecificOutput"]["decision"]["behavior"] == "deny"
 
 
+def test_cli_phone_approval_emits_documented_allow_only_after_consume(
+    monkeypatch, capsys
+) -> None:
+    """Exercise the actual CLI output contract, not only the internal decision tuple."""
+    calls: list[str] = []
+    created: dict = {}
+
+    def request(method, _url, _config, _token, body=None, **_kwargs):
+        calls.append(method)
+        if method == "POST" and len(calls) == 1:
+            created.update(_record(body or {}))
+            return dict(created)
+        if method == "GET":
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._hash(approved)
+            return approved
+        if method == "POST":
+            return {**created, "status": "APPROVED", "consumed": True}
+        raise AssertionError(f"unexpected request method: {method}")
+
+    monkeypatch.setattr(hook, "_read_input", _event)
+    monkeypatch.setattr(hook, "_request", request)
+    monkeypatch.setattr(sys, "argv", ["codex-hook"])
+    for key, value in ENV.items():
+        monkeypatch.setenv(key, value)
+
+    assert hook.main([]) == 0
+
+    captured = capsys.readouterr()
+    output_lines = captured.out.splitlines()
+    assert len(output_lines) == 1
+    output = json.loads(output_lines[0])
+    assert output == {
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {"behavior": "allow"},
+        }
+    }
+    assert calls == ["POST", "GET", "POST"]
+
+
 def test_process_environment_token_requires_explicit_opt_in() -> None:
     with pytest.raises(hook.GateError, match="Environment agent tokens are disabled"):
         hook._agent_token({"AIXION_AGENT_TOKEN": "test-token"}, {})
