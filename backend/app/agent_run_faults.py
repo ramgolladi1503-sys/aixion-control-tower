@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .agent_run_models import AgentRunFaultConfig, AgentRunFaultKind, AgentRunStepType
+from .settings import get_settings
 from .store import store
 
 
@@ -12,6 +13,10 @@ class InjectedAgentRunFault(RuntimeError):
 
 
 def matching_fault(run_id: str, step_type: AgentRunStepType) -> AgentRunFaultConfig | None:
+    # Fault injection is a local/test diagnostic facility. Never let stale or
+    # accidentally persisted test configuration alter a production run.
+    if get_settings().is_production:
+        return None
     candidates = [
         fault
         for fault in store.agent_run_faults.values()

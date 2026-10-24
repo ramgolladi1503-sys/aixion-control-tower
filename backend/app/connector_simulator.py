@@ -9,6 +9,7 @@ from .connector_schema_mapper import ConnectorSchemaMapperConfig, normalize_conn
 from .connector_webhook import ConnectorWebhookPayload
 from .models import AgentAction
 from .store import store
+from .workspace_access import connector_scope_is_consistent
 
 
 class ConnectorSimulationRequest(BaseModel):
@@ -69,6 +70,8 @@ def _simulate_create_task(connector: AgentConnector, payload: ConnectorWebhookPa
         errors.append("project_id is required for CREATE_AGENT_TASK.")
     elif payload.project_id not in store.projects:
         errors.append("Project not found.")
+    elif connector.workspace_id is not None and store.projects[payload.project_id].workspace_id != connector.workspace_id:
+        errors.append("Project not found.")
     if not payload.title or not payload.goal:
         errors.append("title and goal are required for CREATE_AGENT_TASK.")
     errors.extend(_scope_errors(connector, payload))
@@ -108,6 +111,8 @@ def _simulate_append_event(connector: AgentConnector, payload: ConnectorWebhookP
     if not task:
         errors.append("Agent task not found.")
         return None, errors, False
+    if connector.workspace_id is not None and task.workspace_id != connector.workspace_id:
+        errors.append("Agent task not found.")
     if task.external_agent_id != connector.id and task.metadata.get("connector_id") != connector.id:
         errors.append("Connector is not allowed for this task.")
     if task.project_id and connector.allowed_project_ids and task.project_id not in connector.allowed_project_ids:
@@ -135,6 +140,14 @@ def _simulate_append_event(connector: AgentConnector, payload: ConnectorWebhookP
 def simulate_connector_webhook(connector: AgentConnector, request: ConnectorSimulationRequest) -> ConnectorSimulationResponse:
     errors: list[str] = []
     warnings: list[str] = []
+    if not connector_scope_is_consistent(connector):
+        return ConnectorSimulationResponse(
+            accepted=False,
+            connector_id=connector.id,
+            auth_ready=False,
+            scope_ready=False,
+            errors=["Connector ownership scope is inconsistent."],
+        )
     auth_ready, auth_warnings = _auth_warnings(connector, validate_secret_configured=request.validate_secret_configured)
     warnings.extend(auth_warnings)
 

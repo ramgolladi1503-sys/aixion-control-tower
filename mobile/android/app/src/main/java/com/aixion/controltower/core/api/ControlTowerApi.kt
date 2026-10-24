@@ -4,6 +4,7 @@ import com.aixion.controltower.core.api.dto.AccountDeletionInfoDto
 import com.aixion.controltower.core.api.dto.AccountDeletionRequestDto
 import com.aixion.controltower.core.api.dto.AccountDeletionResponseDto
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryResponseDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.AuthResponseDto
 import com.aixion.controltower.core.api.dto.AuthUserDto
@@ -30,6 +31,12 @@ import com.aixion.controltower.core.api.dto.LoginRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.api.dto.MCPPendingHealthDto
 import com.aixion.controltower.core.api.dto.MCPPendingRequestDto
+import com.aixion.controltower.core.api.dto.DeviceRegistrationDto
+import com.aixion.controltower.core.api.dto.DeviceRegistrationRequestDto
+import com.aixion.controltower.core.api.dto.AgentCreateRequestDto
+import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
+import com.aixion.controltower.core.api.dto.AgentRegistrationResponseDto
+import com.aixion.controltower.core.api.dto.ExternalAgentDto
 import com.aixion.controltower.core.api.dto.PendingRetryRequestDto
 import com.aixion.controltower.core.api.dto.ProjectCreateDto
 import com.aixion.controltower.core.api.dto.ProjectDto
@@ -46,6 +53,7 @@ import com.aixion.controltower.core.api.dto.VerifyEmailResponseDto
 import com.aixion.controltower.core.api.dto.WorkOrderCreateDto
 import com.aixion.controltower.core.api.dto.WorkOrderDto
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.PATCH
 import retrofit2.http.POST
@@ -69,8 +77,17 @@ interface ControlTowerApi {
     @POST("auth/login")
     suspend fun login(@Body payload: LoginRequestDto): AuthResponseDto
 
+    @POST("auth/logout")
+    suspend fun logout()
+
     @GET("auth/me")
     suspend fun me(): AuthUserDto
+
+    @POST("notifications/devices")
+    suspend fun registerNotificationDevice(@Body payload: DeviceRegistrationRequestDto): DeviceRegistrationDto
+
+    @DELETE("notifications/devices/{deviceId}")
+    suspend fun unregisterNotificationDevice(@Path("deviceId") deviceId: String)
 
     @GET("auth/account-deletion-info")
     suspend fun accountDeletionInfo(): AccountDeletionInfoDto
@@ -108,6 +125,21 @@ interface ControlTowerApi {
     @POST("projects")
     suspend fun createProject(@Body payload: ProjectCreateDto): ProjectDto
 
+    @GET("agents")
+    suspend fun listExternalAgents(): List<ExternalAgentDto>
+
+    @POST("agents")
+    suspend fun createExternalAgent(@Body payload: AgentCreateRequestDto): AgentRegistrationResponseDto
+
+    @GET("agents/{agentId}/credentials")
+    suspend fun getExternalAgentCredentials(@Path("agentId") agentId: String): AgentCredentialStatusDto
+
+    @POST("agents/{agentId}/token/rotate")
+    suspend fun rotateExternalAgentToken(@Path("agentId") agentId: String): AgentRegistrationResponseDto
+
+    @POST("agents/{agentId}/token/revoke")
+    suspend fun revokeExternalAgentToken(@Path("agentId") agentId: String): ExternalAgentDto
+
     @GET("ideas")
     suspend fun listIdeas(): List<IdeaDto>
 
@@ -122,6 +154,12 @@ interface ControlTowerApi {
 
     @GET("approvals")
     suspend fun listApprovals(): List<ApprovalRequestDto>
+
+    @GET("approvals/history")
+    suspend fun listApprovalHistory(
+        @Query("limit") limit: Int = 50,
+        @Query("cursor") cursor: String? = null
+    ): ApprovalHistoryResponseDto
 
     @GET("approvals/{approvalId}")
     suspend fun getApproval(@Path("approvalId") approvalId: String): ApprovalRequestDto

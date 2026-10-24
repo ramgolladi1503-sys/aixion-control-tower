@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
 from app.connector_credentials import verify_connector_secret
+from app.approval_decisions import approval_decision_repository
 from app.main import app
-from app.models import Project
+from app.models import (
+    ApprovalRequest,
+    ApprovalStatus,
+    AgentProvider,
+    Project,
+    RiskAssessment,
+    RiskLevel,
+    Workspace,
+    now_utc,
+)
 from app.store import store
 
 client = TestClient(app)
@@ -88,34 +99,116 @@ def test_connector_credential_status_reflects_rotation_and_revocation() -> None:
     assert any(event.event_type == "connector.secret_revoked" for event in store.audit_events)
 
 
-def test_connector_health_success_updates_usage_and_health() -> None:
+def test_manual_connector_health_success_cannot_assert_liveness_or_clear_auth_error() -> None:
     project = _project()
     connector = _connector(project.id)
+    before = store.agent_connectors[connector["id"]].model_copy(deep=True)
+    audit_ids = {event.id for event in store.audit_events}
 
-    response = client.post(f"/connectors/{connector['id']}/health/success")
+    for outcome in ("success", "failure"):
+        response = client.post(f"/connectors/{connector['id']}/health/{outcome}")
+        assert response.status_code == 409
+        assert "authenticated connector traffic" in response.json()["detail"]
+    after = store.agent_connectors[connector["id"]]
+    assert after == before
+    assert before.last_used_at is None
+    assert after.last_used_at is None
+    assert {event.id for event in store.audit_events} == audit_ids
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["health_status"] == "HEALTHY"
-    assert body["last_used_at"] is not None
-    assert body["last_health_check_at"] is not None
-    assert body["last_error"] in {None, ""}
-    assert any(event.event_type == "connector.health_success" for event in store.audit_events)
+
+def _seed_invocation_lease(connector_id: str, project_id: str, invocation_id: str) -> str:
+    connector = store.agent_connectors[connector_id]
+    now = now_utc()
+    approval = ApprovalRequest(
+        id=f"approval_{invocation_id}",
+        project_id=project_id,
+        title="Invocation liveness test",
+        summary="Scoped liveness fixture",
+        agent_name=connector.name,
+        target_branch="test",
+        files=[],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.PENDING_REVIEW,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=connector.id,
+        source_agent_name=connector.name,
+        source_invocation_id=invocation_id,
+        workspace_id=connector.workspace_id,
+        verified_source=True,
+        expires_at=now + timedelta(minutes=5),
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES('approval_request',?,?)",
+            (approval.id, approval.model_dump_json()),
+        )
+        conn.execute(
+            "INSERT INTO approval_invocation_leases "
+            "(approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                approval.id,
+                connector.workspace_id,
+                connector.id,
+                invocation_id,
+                now.isoformat(),
+                (now + timedelta(seconds=60)).isoformat(),
+            ),
+        )
+    return approval.id
 
 
-def test_connector_health_failure_increments_failures_and_records_reason() -> None:
+def test_connector_credentials_reports_only_exact_live_invocation_lease() -> None:
     project = _project()
     connector = _connector(project.id)
+    workspace = Workspace(name="Connector invocation status", owner_user_id="dev_user")
+    store.workspaces[workspace.id] = workspace
+    store.projects[project.id].workspace_id = workspace.id
+    store.agent_connectors[connector["id"]].workspace_id = workspace.id
+    store.persist()
+    invocation_id = "antigravity:v1:credential-status"
+    approval_id = _seed_invocation_lease(connector["id"], project.id, invocation_id)
 
-    response = client.post(f"/connectors/{connector['id']}/health/failure", json={"note": "bad signature"})
+    live = client.get(
+        f"/connectors/{connector['id']}/credentials",
+        params={"source_invocation_id": invocation_id},
+    )
+    assert live.status_code == 200, live.text
+    assert live.json()["source_invocation_id"] == invocation_id
+    assert live.json()["invocation_live"] is True
+    assert live.json()["invocation_expires_at"]
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["health_status"] == "DEGRADED"
-    assert body["failed_auth_count"] == 1
-    assert body["last_error"] == "bad signature"
-    assert body["last_health_check_at"] is not None
-    assert any(event.event_type == "connector.health_failure" for event in store.audit_events)
+    wrong_invocation = client.get(
+        f"/connectors/{connector['id']}/credentials",
+        params={"source_invocation_id": "another-invocation"},
+    )
+    assert wrong_invocation.status_code == 200
+    assert wrong_invocation.json()["invocation_live"] is False
+    assert wrong_invocation.json()["invocation_heartbeat_at"] is None
+    assert approval_decision_repository.get_live_invocation_lease(
+        workspace_id="another-workspace",
+        source_agent_id=connector["id"],
+        source_invocation_id=invocation_id,
+    ) is None
+    assert approval_decision_repository.get_live_invocation_lease(
+        workspace_id=store.agent_connectors[connector["id"]].workspace_id,
+        source_agent_id="another-connector",
+        source_invocation_id=invocation_id,
+    ) is None
+
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET expires_at=? WHERE approval_id=?",
+            ((now_utc() - timedelta(seconds=1)).isoformat(), approval_id),
+        )
+    expired = client.get(
+        f"/connectors/{connector['id']}/credentials",
+        params={"source_invocation_id": invocation_id},
+    )
+    assert expired.status_code == 200
+    assert expired.json()["invocation_live"] is False
+    assert expired.json()["health_status"] == "UNKNOWN"
+    assert expired.json()["last_used_at"] is None
 
 
 def test_public_connector_response_never_exposes_secret_material() -> None:

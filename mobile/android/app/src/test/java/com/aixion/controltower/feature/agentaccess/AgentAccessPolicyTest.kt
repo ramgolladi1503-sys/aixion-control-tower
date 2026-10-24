@@ -1,0 +1,204 @@
+package com.aixion.controltower.feature.agentaccess
+
+import com.aixion.controltower.core.api.dto.AgentCreateRequestDto
+import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
+import com.aixion.controltower.core.api.dto.ExternalAgentDto
+import com.aixion.controltower.core.api.dto.ANTIGRAVITY_APPROVAL_ACTIONS
+import com.aixion.controltower.core.api.dto.isExpectedApprovalConnectorAgent
+import com.aixion.controltower.core.api.dto.isExpectedAntigravityApprovalAgent
+import com.aixion.controltower.core.api.dto.webhookNativeSessionLimitation
+import com.aixion.controltower.data.repository.AgentAccessSummary
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class AgentAccessPolicyTest {
+    @Test
+    fun newAntigravityCredentialIsBoundToOneProjectAndApprovalOnlyActions() {
+        val request = AgentCreateRequestDto(
+            display_name = "Antigravity test Mac",
+            allowed_project_ids = listOf("project-1")
+        )
+
+        assertEquals("ANTIGRAVITY", request.provider)
+        assertEquals("API_KEY", request.auth_type)
+        assertEquals(listOf("project-1"), request.allowed_project_ids)
+        assertEquals(
+            listOf(
+                "CREATE_APPROVAL",
+                "READ_APPROVAL_DECISION",
+                "CONSUME_APPROVAL_DECISION",
+                "REPORT_APPROVAL_DELIVERY_FAILURE",
+                "EXPIRE_OWN_APPROVAL"
+            ),
+            request.allowed_actions
+        )
+        assertEquals(ANTIGRAVITY_APPROVAL_ACTIONS, request.allowed_actions)
+        assertFalse(request.allowed_actions.contains("EXECUTE_GITHUB"))
+        assertFalse(request.allowed_actions.contains("APPROVE"))
+    }
+
+    @Test
+    fun codexConnectorRequestUsesTheSameLeastPrivilegeApprovalScope() {
+        val request = AgentCreateRequestDto(
+            provider = "CODEX",
+            display_name = "Codex test Mac",
+            allowed_project_ids = listOf("project-1")
+        )
+
+        assertEquals("CODEX", request.provider)
+        assertEquals("API_KEY", request.auth_type)
+        assertEquals(listOf("project-1"), request.allowed_project_ids)
+        assertEquals(ANTIGRAVITY_APPROVAL_ACTIONS.toSet(), request.allowed_actions.toSet())
+        assertFalse(request.allowed_actions.contains("EXECUTE_GITHUB"))
+        assertFalse(request.allowed_actions.contains("APPROVE"))
+    }
+
+    @Test
+    fun missingCredentialStatusRemainsUnknownInsteadOfShowingEnabledAsActive() {
+        val summary = AgentAccessSummary(
+            agent = ExternalAgentDto(
+                id = "agent-1",
+                provider = "ANTIGRAVITY",
+                display_name = "Mac",
+                auth_type = "API_KEY",
+                enabled = true
+            ),
+            credential = null
+        )
+
+        assertEquals("UNKNOWN", summary.credentialState)
+    }
+
+    @Test
+    fun credentialActivityIsNotPresentedAsProofOfALiveConnection() {
+        val activeWithoutUse = AgentCredentialStatusDto(
+            agent_id = "agent-1",
+            auth_type = "API_KEY",
+            credential_state = "ACTIVE",
+            token_present = true
+        )
+        assertEquals("No authenticated activity recorded", authenticatedActivityLabel(activeWithoutUse))
+
+        val recentlyUsed = activeWithoutUse.copy(last_used_at = "2026-10-22T10:30:00Z")
+        assertEquals(
+            "Last authenticated API activity: 2026-10-22T10:30:00Z (not a live connection check)",
+            authenticatedActivityLabel(recentlyUsed)
+        )
+    }
+
+    @Test
+    fun missingOrUnavailableCredentialActivityDoesNotClaimConnection() {
+        assertEquals("Activity status unavailable", authenticatedActivityLabel(null))
+        val revoked = AgentCredentialStatusDto(
+            agent_id = "agent-1",
+            auth_type = "API_KEY",
+            credential_state = "REVOKED",
+            token_present = false,
+            last_used_at = "2026-10-22T10:30:00Z"
+        )
+        assertEquals("No active token; activity is unavailable", authenticatedActivityLabel(revoked))
+    }
+
+    @Test
+    fun codexWebhookIsNotDescribedAsNativePermissionIntegration() {
+        assertEquals(
+            "Webhook task intake only: this does not connect to Codex Desktop permission prompts or resume a paused native Codex session.",
+            webhookNativeSessionLimitation("CODEX", "WEBHOOK")
+        )
+        assertEquals(
+            "Webhook task intake only: this does not intercept or resume a native agent session.",
+            webhookNativeSessionLimitation("ANTIGRAVITY", "WEBHOOK")
+        )
+        assertEquals(null, webhookNativeSessionLimitation("CODEX", "GPT_ACTIONS"))
+    }
+
+    @Test
+    fun onlyExactAntigravityProjectAndActionScopeIsAccepted() {
+        val agent = ExternalAgentDto(
+            id = "agent-1", provider = "ANTIGRAVITY", display_name = "Mac", auth_type = "API_KEY",
+            allowed_project_ids = listOf("project-1"), allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS
+        )
+        assertEquals(true, isExpectedAntigravityApprovalAgent(agent, "project-1"))
+        assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(allowed_project_ids = listOf("project-1", "project-2")), "project-1"))
+        assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS + "EXECUTE_GITHUB"), "project-1"))
+        assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS.dropLast(1)), "project-1"))
+        assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS + "APPROVE"), "project-1"))
+        assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS.dropLast(1) + "CREATE_APPROVAL"), "project-1"))
+        assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(provider = "CODEX"), "project-1"))
+        assertFalse(isExpectedAntigravityApprovalAgent(agent.copy(auth_type = "OAUTH"), "project-1"))
+    }
+
+    @Test
+    fun approvalConnectorValidationRequiresSelectedProviderAndExactProjectScope() {
+        val codexAgent = ExternalAgentDto(
+            id = "codex-agent-1",
+            provider = "CODEX",
+            display_name = "Codex on Mac",
+            auth_type = "API_KEY",
+            allowed_project_ids = listOf("project-1"),
+            allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS
+        )
+
+        assertEquals(true, isExpectedApprovalConnectorAgent(codexAgent, "project-1", "CODEX"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent, "project-2", "CODEX"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent, "project-1", "ANTIGRAVITY"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent.copy(enabled = false), "project-1", "CODEX"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent.copy(allowed_actions = ANTIGRAVITY_APPROVAL_ACTIONS + "APPROVE"), "project-1", "CODEX"))
+        assertFalse(isExpectedApprovalConnectorAgent(codexAgent, "project-1", "OTHER"))
+    }
+
+    @Test
+    fun setupPathAndApiValidationFailClosedAndNormalizeSafeInputs() {
+        assertNull(normalizeWorkspacePath("relative/project"))
+        assertNull(normalizeWorkspacePath("/"))
+        assertNull(normalizeWorkspacePath(" /Users/test/project"))
+        assertNull(normalizeWorkspacePath("/Users/test/Project\nInjected"))
+        assertEquals(
+            "/Users/test/project",
+            normalizeWorkspacePath("/Users/test/./folder/../project")
+        )
+
+        assertFalse(isMacCompatibleApiBaseUrl("http://10.0.2.2:8000/"))
+        assertFalse(isMacCompatibleApiBaseUrl("http://192.168.1.20:8000/"))
+        assertFalse(isMacCompatibleApiBaseUrl("https://user:pass@api.example.test/"))
+        assertFalse(isMacCompatibleApiBaseUrl("https://api.example.test/?token=secret"))
+        assertFalse(isMacCompatibleApiBaseUrl("https://api.example.test:65536/"))
+        assertTrue(isMacCompatibleApiBaseUrl("https://api.example.test/"))
+        assertTrue(isMacCompatibleApiBaseUrl("http://127.0.0.1:8000/"))
+    }
+
+    @Test
+    fun setupCommandUsesConfiguredSafeEndpointAndNeverIncludesSecret() {
+        val command = hookInstallCommand(
+            provider = "CODEX",
+            workspacePath = "/Users/test/Projects/it's a project",
+            agentId = "agent-example",
+            projectId = "project-example",
+            apiBaseUrl = "https://api.example.test/"
+        )
+
+        assertEquals(
+            "python3 'integrations/codex/setup_workspace.py' \\\n" +
+                "  --workspace '/Users/test/Projects/it'\\''s a project' \\\n" +
+                "  --api-base-url 'https://api.example.test' \\\n" +
+                "  --agent-id 'agent-example' \\\n" +
+                "  --project-id 'project-example'",
+            command
+        )
+        assertFalse(command.orEmpty().contains("one-time-secret"))
+        assertFalse(command.orEmpty().contains("/ABSOLUTE/PATH"))
+        assertFalse(command.orEmpty().contains("CONTROL-TOWER-URL"))
+        assertNull(
+            hookInstallCommand(
+                provider = "CODEX",
+                workspacePath = "/Users/test/project",
+                agentId = "agent-example",
+                projectId = "project-example",
+                apiBaseUrl = "http://10.0.2.2:8000/"
+            )
+        )
+    }
+}

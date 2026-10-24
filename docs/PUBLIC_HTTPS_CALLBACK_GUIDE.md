@@ -70,9 +70,10 @@ Required:
 public HTTPS backend
 AIXION_PROFILE=production
 AIXION_AUTH_ENABLED=true
-AIXION_DB_PATH configured to a non-demo DB path
+AIXION_POSTGRES_DSN configured through a secret manager with sslmode=verify-full
 GITHUB_TOKEN configured if GitHub execution features are enabled
-FCM_SERVER_KEY configured if push notifications are expected
+AIXION_FCM_PROJECT_ID configured if push notifications are expected
+Google Application Default Credentials configured for the backend runtime
 stable domain name
 valid TLS certificate
 log retention
@@ -80,12 +81,18 @@ audit retention
 backup/recovery plan
 ```
 
-The current backend startup validation already treats these production variables as required:
+The production configuration requires a PostgreSQL DSN and rejects the
+SQLite-only `AIXION_DB_PATH`. A DSN does not activate PostgreSQL for the
+application: production startup remains blocked while HTTP routes and
+background workers use the SQLite-backed store. Do not point a public domain or
+real traffic at this build.
+
+The key storage configuration is:
 
 ```text
-AIXION_DB_PATH
+AIXION_POSTGRES_DSN
 GITHUB_TOKEN
-FCM_SERVER_KEY
+AIXION_FCM_PROJECT_ID
 ```
 
 ## Environment checklist
@@ -112,16 +119,17 @@ push status is SENT, SKIPPED, NO_DEVICE, or FAILED with readable reason
 ```text
 AIXION_PROFILE=production
 AIXION_AUTH_ENABLED=true
-AIXION_DB_PATH=/safe/persistent/path/aixion.sqlite3
+AIXION_POSTGRES_DSN=<secret-managed PostgreSQL DSN with sslmode=verify-full>
 GITHUB_TOKEN=<configured>
-FCM_SERVER_KEY=<configured>
+AIXION_FCM_PROJECT_ID=<Firebase project ID>
+GOOGLE_APPLICATION_CREDENTIALS=<protected service-account JSON path, or workload identity>
 HTTPS domain configured
 CORS/reverse proxy policy reviewed
 rate limits configured at proxy/platform
 logs available
 backups available
 runtime readiness endpoint checked
-no demo/test DB file is used
+no SQLite path is configured; the full PostgreSQL application runtime and release gates are not yet complete
 ```
 
 ## GPT Actions setup
@@ -201,7 +209,7 @@ Current expected push statuses:
 ```text
 PENDING  -> notification created before dispatch result
 NO_DEVICE -> no registered device matched notification target
-SKIPPED -> FCM_SERVER_KEY missing
+SKIPPED -> AIXION_FCM_PROJECT_ID missing
 FAILED -> FCM/API/network error
 SENT -> FCM accepted the send request
 ```

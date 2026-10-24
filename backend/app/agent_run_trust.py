@@ -10,6 +10,7 @@ from .agent_run_models import (
     AgentRunStepType,
 )
 from .agent_run_state_machine import transition_run, transition_step
+from .approval_decisions import approval_decision_repository
 from .models import now_utc
 from .settings import get_settings
 from .store import store
@@ -72,7 +73,7 @@ def _append_run_event(
 
 def _validate_lease_for_run(run: AgentRun, lease: CapabilityLease) -> None:
     task = store.agent_tasks.get(run.task_id)
-    approval = store.approval_requests.get(run.approval_request_id or "")
+    approval = approval_decision_repository.get(run.approval_request_id or "")
     refresh_lease_status(lease)
     reasons: list[str] = []
     if task is None:
@@ -186,7 +187,7 @@ def _step_actions(
     timeout_seconds: int,
 ) -> list[ProposedAction]:
     task = store.agent_tasks.get(run.task_id)
-    approval = store.approval_requests.get(run.approval_request_id or "")
+    approval = approval_decision_repository.get(run.approval_request_id or "")
     if task is None or approval is None:
         raise AgentRunTrustConflict(
             "Run trust evaluation requires task and approval truth."

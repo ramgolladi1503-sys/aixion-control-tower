@@ -1,13 +1,13 @@
 package com.aixion.controltower.feature.connectors
 
-import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import com.aixion.controltower.core.api.dto.ConnectorCreateDto
-import com.aixion.controltower.core.api.dto.ConnectorDto
-import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperDto
-import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
+import androidx.compose.ui.test.performScrollTo
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -17,135 +17,72 @@ class ConnectorsScreenTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun rendersConnectorConsoleTemplateCredentialAndActions() {
-        composeRule.setContent {
-            ConnectorsContent(
-                state = ConnectorsUiState(
-                    loading = false,
-                    connectors = listOf(connector(secretConfigured = true)),
-                    templates = listOf(template()),
-                    selectedTemplateId = "openclaw",
-                    apiBaseUrl = "https://aixion.example.com",
-                    lastSecret = "aixion-secret-once",
-                    preview = "accepted=true, auth=true, scope=true"
-                )
-            )
-        }
+    fun showsSimpleNativeProviderSetupAndDoesNotExposeWebhookTaskIntake() {
+        composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("Connectors").assertExists()
-        composeRule.onNodeWithText("Bring-your-own-agent control from phone.").assertExists()
-        composeRule.onNodeWithText("Templates").assertExists()
-        composeRule.onNodeWithText("✓ OpenClaw").assertExists()
-        composeRule.onNodeWithText("OpenClaw connector").assertExists()
-        composeRule.onNodeWithText("Credential set").assertExists()
-        composeRule.onNodeWithText("https://aixion.example.com/connectors/connector_1/webhook").assertExists()
-        composeRule.onNodeWithText("One-time connector credential").assertExists()
-        composeRule.onNodeWithText("aixion-secret-once").assertExists()
-        composeRule.onNodeWithText("accepted=true, auth=true, scope=true").assertExists()
+        composeRule.onNodeWithText("Set up a project").assertExists()
+        composeRule.onNodeWithText("Connect your coding agent").assertExists()
+        composeRule.onAllNodesWithText("CONNECT ONCE").assertCountEquals(0)
+        composeRule.onNodeWithText("Choose a provider").assertExists()
+        composeRule.onNodeWithText("Antigravity").assertExists()
+        composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Set up Antigravity").assertExists()
+        composeRule.onNodeWithText(
+            "Approved and resumed the same local Antigravity invocation on a phone. Hosted and off-LAN delivery are not verified."
+        ).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Set up Codex").performScrollTo().assertExists()
+        composeRule.onNodeWithText(
+            "Codex Desktop approval interception and same-session phone resume are not verified."
+        ).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Local phone flow verified").assertExists()
+        composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
+        composeRule.onNodeWithText("Not verified for native sessions").performScrollTo().assertExists()
+        composeRule.onNodeWithText("When an approval is needed").performScrollTo().assertExists()
+
+        composeRule.onAllNodesWithText("Other integrations and webhooks").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Webhook task intake").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Choose a webhook integration").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Create connection").assertCountEquals(0)
     }
 
     @Test
-    fun connectorActionsCallExpectedCallbacks() {
-        val calls = mutableListOf<String>()
-        val connector = connector(secretConfigured = true)
+    fun approvalFlowExplainsReviewAndSameSessionRequirement() {
+        val explanation =
+            "The request appears here. Review the exact action and approve or deny it. " +
+                "Keep the computer and agent session running so the same task can continue."
+        composeRule.setContent { ConnectorsContent() }
 
-        composeRule.setContent {
-            ConnectorsContent(
-                state = ConnectorsUiState(
-                    loading = false,
-                    connectors = listOf(connector),
-                    templates = listOf(template()),
-                    selectedTemplateId = "openclaw",
-                    apiBaseUrl = "https://aixion.example.com"
-                ),
-                onCopy = { label, _ -> calls.add("copy:$label") },
-                onToggle = { calls.add("toggle:${it.id}") },
-                onIssueSecret = { calls.add("secret:${it.id}") },
-                onRevokeSecret = { calls.add("revoke:${it.id}") },
-                onApplyMapper = { calls.add("mapper:${it.id}") },
-                onPreviewMapper = { calls.add("preview:${it.id}") }
-            )
-        }
-
-        composeRule.onNodeWithText("Copy webhook").performClick()
-        composeRule.onNodeWithText("Disable").performClick()
-        composeRule.onNodeWithText("Rotate credential").performClick()
-        composeRule.onNodeWithText("Revoke credential").assertIsEnabled().performClick()
-        composeRule.onNodeWithText("Apply mapper").assertIsEnabled().performClick()
-        composeRule.onNodeWithText("Test selected template payload").assertIsEnabled().performClick()
-
-        assertEquals(
-            listOf(
-                "copy:Webhook URL",
-                "toggle:connector_1",
-                "secret:connector_1",
-                "revoke:connector_1",
-                "mapper:connector_1",
-                "preview:connector_1"
-            ),
-            calls
-        )
+        composeRule.onNodeWithText(explanation, useUnmergedTree = true)
+            .performScrollTo()
+            .assertExists()
+            .assertTextEquals(explanation)
+            .assertIsDisplayed()
     }
 
     @Test
-    fun rendersErrorAndLoadingStates() {
+    fun providerSetupActionsOpenTheMatchingPlatformSetup() {
+        val navigationRequests = mutableListOf<String>()
         composeRule.setContent {
-            ConnectorsContent(
-                state = ConnectorsUiState(
-                    loading = true,
-                    error = "Failed to load connectors"
-                )
-            )
+            ConnectorsContent(onOpenAgentAccess = { navigationRequests += it })
         }
 
-        composeRule.onNodeWithText("Loading connector console...").assertExists()
-        composeRule.onNodeWithText("Failed to load connectors").assertExists()
-        composeRule.onNodeWithText("Create connector from selected template").assertExists()
+        composeRule.onNodeWithText("Set up Antigravity").performScrollTo().performClick()
+        composeRule.onNodeWithText("Set up Codex").performScrollTo().performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(listOf("ANTIGRAVITY", "CODEX"), navigationRequests)
+        }
     }
-}
 
-private fun connector(secretConfigured: Boolean): ConnectorDto {
-    return ConnectorDto(
-        id = "connector_1",
-        name = "OpenClaw connector",
-        connector_type = "WEBHOOK",
-        provider_label = "OPENCLAW",
-        auth_type = "HMAC",
-        status = "ENABLED",
-        health_status = "HEALTHY",
-        allowed_project_ids = listOf("project_1"),
-        allowed_repositories = listOf("ramgolladi1503-sys/aixion-control-tower"),
-        allowed_actions = listOf("CREATE_AGENT_TASK"),
-        secret_configured = secretConfigured,
-        failed_auth_count = 0,
-    )
-}
+    @Test
+    fun providerReadinessStatesAreDistinctAndDoNotClaimLiveConnection() {
+        composeRule.setContent { ConnectorsContent() }
 
-private fun template(): ConnectorTemplateDto {
-    return ConnectorTemplateDto(
-        id = "openclaw",
-        display_name = "OpenClaw",
-        description = "OpenClaw task webhook preset",
-        provider_label = "OPENCLAW",
-        connector_type = "WEBHOOK",
-        auth_type = "HMAC",
-        connector_defaults = ConnectorCreateDto(
-            name = "OpenClaw connector",
-            connector_type = "WEBHOOK",
-            provider_label = "OPENCLAW",
-            auth_type = "HMAC",
-            allowed_project_ids = listOf("project_1"),
-            allowed_repositories = listOf("ramgolladi1503-sys/aixion-control-tower"),
-            allowed_actions = listOf("CREATE_AGENT_TASK")
-        ),
-        mapper = ConnectorSchemaMapperDto(
-            enabled = true,
-            default_action = "CREATE_AGENT_TASK",
-            field_paths = mapOf("title" to "task.title"),
-            defaults = mapOf("requested_action" to "CREATE_APPROVAL")
-        ),
-        sample_payload = mapOf("task" to mapOf("title" to "Fix tests")),
-        setup_notes = listOf("Paste webhook URL into OpenClaw."),
-        tags = listOf("webhook")
-    )
+        composeRule.onNodeWithText("Local phone flow verified").assertExists()
+        composeRule.onNodeWithText("Not verified for native sessions").assertExists()
+        composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Connected").assertCountEquals(0)
+        composeRule.onAllNodesWithText("FIRST SUPPORTED").assertCountEquals(0)
+    }
 }

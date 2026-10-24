@@ -14,7 +14,8 @@ Backend URL mode: LAN / tunnel / production
 Backend URL:
 AIXION_PROFILE:
 AIXION_AUTH_ENABLED:
-FCM_SERVER_KEY configured: yes/no
+AIXION_FCM_PROJECT_ID configured: yes/no
+ADC credential source available: yes/no (never record credential values)
 ```
 
 ## Device metadata

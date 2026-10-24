@@ -1,0 +1,1128 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
+import psycopg
+import pytest
+from psycopg import sql
+
+from app.agent_run_models import (
+    AgentRun, AgentRunEvent, AgentRunEventType, AgentRunStatus, AgentRunStep,
+    AgentRunStepType,
+)
+from app.email_delivery import _decrypt_code, _encrypt_code
+from app.approval_integrity import compute_approval_payload_hash
+from app.models import ApprovalRequest, ApprovalStatus, RiskLevel, UserRole
+from app.trust_action_authorization import action_payload_hash, authorization_signature_payload
+from app.trust_action_authorization_models import (
+    ActionAuthorization,
+    ActionAuthorizationDecision,
+)
+from app.trust_crypto import sha256_hex, sign_payload
+from app.trust_models import (
+    ActionConsumption,
+    CapabilityActionType,
+    CapabilityLease,
+    CapabilityLeaseMode,
+    CapabilityLeaseStatus,
+    CapabilityScope,
+    CredentialGrant,
+    CredentialGrantType,
+    PolicyDecision,
+    PolicyDecisionType,
+    ProposedAction,
+    ReviewerAttestation,
+    ReviewerAttestationDecision,
+    TrustEvent,
+    TrustEventType,
+)
+from app.trust_policy import lease_receipt_payload
+from app.postgres_trust_event_repository import PostgresTrustEventRepository
+from scripts.import_approval_slice_to_postgres import (
+    ImportBlocked,
+    _target_is_remote,
+    apply_import,
+    build_plan,
+)
+
+
+@pytest.fixture(autouse=True)
+def _email_outbox_test_key(monkeypatch):
+    monkeypatch.setenv("AIXION_EMAIL_OUTBOX_KEY", "11" * 32)
+
+
+def _snapshot(
+    path,
+    *,
+    include_omitted=True,
+    include_trust=False,
+    include_delivery_state=False,
+    include_rate_limits=False,
+):
+    now = datetime.now(timezone.utc).isoformat()
+    workspace = {"id": "ws1", "name": "Account", "owner_user_id": "u1", "created_at": now}
+    project = {"id": "p1", "name": "Project", "workspace_id": "ws1", "created_at": now}
+    approval = {
+        "id": "a1", "project_id": "p1", "title": "Review", "summary": "Inspect change",
+        "work_order_id": "w1", "target_branch": "main", "files": [], "risk": {"level": "LOW"},
+        # Approved native invocations need an explicit durable delivery claim
+        # before a cutover plan may proceed. Keep the generic fixture terminal;
+        # the delivery-state fixtures below exercise the approved/consumed case.
+        "status": "APPROVED" if include_delivery_state else "DENIED",
+        "workspace_id": "ws1", "source_provider": "ANTIGRAVITY",
+        "source_agent_id": "agent1", "source_invocation_id": "inv1",
+        "created_at": now, "updated_at": now,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+    }
+    rows = [
+        ("workspace", "ws1", workspace),
+        ("user", "u1", {"id": "u1", "email": "owner@example.test", "password_hash": "hash", "password_salt": "salt", "workspace_id": "ws1", "created_at": now, "updated_at": now}),
+        ("invite", "invite1", {
+            "id": "invite1", "email": "reviewer@example.test", "role": "REVIEWER",
+            "token_hash": "b" * 64, "status": "PENDING",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+            "created_by_user_id": "u1", "workspace_id": "ws1",
+            "created_at": now, "updated_at": now,
+        }),
+        ("project", "p1", project),
+        ("agent_connector", "connector1", {
+            "id": "connector1", "name": "Antigravity local connector",
+            "connector_type": "LOCAL_BRIDGE", "provider_label": "ANTIGRAVITY",
+            "auth_type": "BEARER", "status": "ENABLED", "health_status": "UNKNOWN",
+            "allowed_project_ids": ["p1"], "allowed_repositories": [],
+            "allowed_actions": ["CREATE_AGENT_TASK"], "rate_limit_per_minute": 60,
+            "secret_ref": "connector_secret_ref1", "config": {"secret_hash": "a" * 64},
+            "created_by_user_id": "u1", "workspace_id": "ws1",
+            "created_at": now, "updated_at": now,
+        }),
+        ("external_agent", "agent1", {
+            "id": "agent1", "provider": "ANTIGRAVITY", "display_name": "Test agent",
+            "auth_type": "API_KEY", "allowed_project_ids": ["p1"],
+            "allowed_actions": ["CREATE_APPROVAL"], "created_by_user_id": "u1",
+            "workspace_id": "ws1", "enabled": True, "created_at": now, "updated_at": now,
+        }),
+        ("external_agent_credential", "credential1", {
+            "id": "credential1", "agent_id": "agent1", "created_at": now,
+            "updated_at": now,
+        }),
+        ("approval_request", "a1", approval),
+        ("agent_task", "t1", {
+            "id": "t1", "provider": "ANTIGRAVITY", "project_id": "p1",
+            "title": "Agent task", "goal": "Wait for an approval decision",
+            "workspace_id": "ws1", "approval_request_id": "a1", "external_agent_id": "agent1",
+            "created_by_user_id": "u1",
+            "status": "WAITING_FOR_APPROVAL", "created_at": now, "updated_at": now,
+        }),
+        ("agent_task_event", "te1", {
+            "id": "te1", "task_id": "t1", "event_type": "APPROVAL_CREATED",
+            "actor": "system", "message": "Approval request created.",
+            "created_at": now,
+        }),
+        ("audit_event", "ev1", {
+            "id": "ev1", "event_type": "approval.created", "actor": "system",
+            "entity_id": "a1", "workspace_id": "ws1", "details": {}, "created_at": now,
+        }),
+        ("audit_event", "ev2", {
+            "id": "ev2", "event_type": "agent.registered", "actor": "owner@example.test",
+            "entity_id": "agent1", "workspace_id": "ws1", "details": {}, "created_at": now,
+        }),
+        ("audit_event", "ev3", {
+            "id": "ev3", "event_type": "work_order.created", "actor": "owner@example.test",
+            "entity_id": "w1", "workspace_id": "ws1", "details": {}, "created_at": now,
+        }),
+        ("audit_event", "ev4", {
+            "id": "ev4", "event_type": "idea.created", "actor": "owner@example.test",
+            "entity_id": "i1", "workspace_id": "ws1", "details": {}, "created_at": now,
+        }),
+        ("audit_event", "ev5", {
+            "id": "ev5", "event_type": "connector.secret_revoked", "actor": "owner@example.test",
+            "entity_id": "connector1", "workspace_id": "ws1", "details": {}, "created_at": now,
+        }),
+        ("audit_event", "ev6", {
+            "id": "ev6", "event_type": "auth.invite_created", "actor": "owner@example.test",
+            "entity_id": "invite1", "workspace_id": "ws1", "details": {}, "created_at": now,
+        }),
+        ("audit_event", "ev7", {
+            "id": "ev7", "event_type": "mcp.child_server.created", "actor": "owner@example.test",
+            "entity_id": "mcp1", "workspace_id": "ws1", "details": {}, "created_at": now,
+        }),
+        ("audit_event", "ev8", {
+            "id": "ev8", "event_type": "test_run.created", "actor": "owner@example.test",
+            "entity_id": "test1", "workspace_id": "ws1", "details": {}, "created_at": now,
+        }),
+        ("notification", "n1", {
+            "id": "n1", "title": "Approval requested", "body": "Review approval a1",
+            "entity_type": "approval_request", "entity_id": "a1", "workspace_id": "ws1",
+            "status": "UNREAD", "push_status": "PENDING", "created_at": now,
+        }),
+        ("notification", "n2", {
+            "id": "n2", "title": "Agent task update", "body": "Task completed",
+            "entity_type": "agent_task", "entity_id": "t1", "workspace_id": "ws1",
+            "user_id": "u1", "status": "UNREAD", "push_status": "PENDING", "created_at": now,
+        }),
+        ("notification", "n3", {
+            "id": "n3", "title": "Project event", "body": "Unsupported legacy event",
+            "entity_type": "project", "entity_id": "p1", "workspace_id": "ws1",
+            "status": "UNREAD", "push_status": "PENDING", "created_at": now,
+        }),
+        ("device_registration", "d1", {
+            "id": "d1", "user_id": "u1", "workspace_id": "ws1", "platform": "android",
+            "token": "test-device-token", "created_at": now, "updated_at": now,
+        }),
+        ("idea", "i1", {
+            "id": "i1", "project_id": "p1", "title": "Approval flow",
+            "raw_text": "Make the approval review durable", "workspace_id": "ws1",
+            "created_at": now,
+        }),
+        ("work_order", "w1", {
+            "id": "w1", "project_id": "p1", "idea_id": "i1",
+            "goal": "Persist approval flow", "source_agent_id": "agent1",
+            "workspace_id": "ws1", "created_at": now,
+        }),
+        ("mcp_child_server", "mcp1", {
+            "id": "mcp1", "project_id": "p1", "name": "Unmigrated MCP server",
+            "transport": "test", "endpoint": "local://test", "enabled": True,
+            "tools": [], "workspace_id": "ws1", "created_at": now, "updated_at": now,
+        }),
+        ("mcp_pending_request", "mcp_pending1", {
+            "id": "mcp_pending1", "project_id": "p1", "workspace_id": "ws1",
+            "approval_request_id": "a1", "server_name": "Local test server",
+            "tool_name": "run_tests", "arguments": {"suite": "approval"},
+            "requested_by": "mcp-client", "status": "WAITING_FOR_APPROVAL",
+            "attempts": 0, "max_attempts": 3, "created_at": now, "updated_at": now,
+        }),
+        ("test_run", "test1", {
+            "id": "test1", "approval_request_id": "a1", "project_id": "p1", "command": "pytest",
+            "status": "PASSED", "output_summary": "ok", "created_at": now,
+        }),
+    ]
+    if include_omitted:
+        rows.append(("session", "s1", {"id": "s1", "user_id": "u1", "token_hash": "hash", "created_at": now, "expires_at": now}))
+    if include_trust:
+        approved = ApprovalRequest.model_validate({
+            **approval,
+            "status": ApprovalStatus.APPROVED,
+            "approved_payload_hash_version": 2,
+        })
+        approved.approved_payload_hash = compute_approval_payload_hash(approved)
+        for index, (kind, entity_id, payload) in enumerate(rows):
+            if kind == "approval_request" and entity_id == "a1":
+                rows[index] = (kind, entity_id, approved.model_dump(mode="json"))
+                break
+
+        run = AgentRun(
+            id="run1", task_id="t1", workspace_id="ws1", approval_request_id="a1",
+            project_id="p1", status=AgentRunStatus.SUCCEEDED,
+        )
+        step = AgentRunStep(
+            id="step1", run_id=run.id, task_id="t1", sequence=0,
+            step_type=AgentRunStepType.VALIDATE_SCOPE,
+            idempotency_key="import-step-1",
+        )
+        run_event = AgentRunEvent(
+            id="run-event1", run_id=run.id, task_id="t1", step_id=step.id,
+            correlation_id="import-correlation-1", event_type=AgentRunEventType.RUN_CREATED,
+        )
+        lease = CapabilityLease(
+            id="lease1", approval_request_id="a1", workspace_id="ws1",
+            approved_payload_hash=approved.approved_payload_hash, mode=CapabilityLeaseMode.BOUNDED,
+            scope=CapabilityScope(
+                repository="owner/repo", branch="feature/import-test",
+                allowed_actions=[CapabilityActionType.RUN_COMMAND], max_runtime_seconds=60,
+                max_cost_usd=1.0,
+            ),
+            issued_by_user_id="u1", status=CapabilityLeaseStatus.CONSUMED,
+            expires_at=datetime.fromisoformat(now) + timedelta(minutes=5),
+            receipt_nonce="nonce-import", receipt_signature="pending",
+            consumed_runtime_seconds=2, consumed_cost_usd=0.2,
+        )
+        action = ProposedAction(
+            id="action1", lease_id=lease.id, run_id=run.id, task_id="t1", project_id="p1",
+            workspace_id="ws1", action_type=CapabilityActionType.RUN_COMMAND,
+            command="git status",
+        )
+        request_decision = PolicyDecision(
+            id="decision-request", proposed_action_id=action.id, lease_id=lease.id,
+            decision=PolicyDecisionType.REQUIRE_APPROVAL, risk_level=RiskLevel.MEDIUM,
+        )
+        allow_decision = PolicyDecision(
+            id="decision-allow", proposed_action_id=action.id, lease_id=lease.id,
+            decision=PolicyDecisionType.ALLOW, risk_level=RiskLevel.MEDIUM,
+            evaluated_policy_version="trust-policy-v1+human-decision",
+        )
+        authorization = ActionAuthorization(
+            id="authorization1", action_id=action.id, workspace_id="ws1",
+            action_payload_hash=action_payload_hash(action),
+            policy_decision_id=request_decision.id, reviewer_user_id="u1",
+            reviewer_role=UserRole.OWNER, decision=ActionAuthorizationDecision.ALLOW,
+            reason="Approved for import", signature="pending",
+        )
+        authorization.signature = sign_payload(authorization_signature_payload(authorization))
+        attestation = ReviewerAttestation(
+            id="attestation1", approval_request_id="a1", workspace_id="ws1",
+            approval_payload_hash=approved.approved_payload_hash, reviewer_user_id="u1",
+            reviewer_role=UserRole.OWNER, decision=ReviewerAttestationDecision.APPROVE,
+            reason="Reviewed", signature="pending",
+        )
+        attestation_material = {
+            "approval_request_id": attestation.approval_request_id,
+            "approval_payload_hash": attestation.approval_payload_hash,
+            "reviewer_user_id": attestation.reviewer_user_id,
+            "reviewer_role": attestation.reviewer_role,
+            "decision": attestation.decision,
+            "reason": attestation.reason,
+        }
+        attestation.signature = sign_payload(attestation_material)
+        grant = CredentialGrant(
+            id="grant1", lease_id=lease.id, workspace_id="ws1",
+            grant_type=CredentialGrantType.INTERNAL_CAPABILITY_TOKEN,
+            audience="agent-runner", subject="agent1",
+            expires_at=datetime.fromisoformat(now) + timedelta(minutes=5),
+            token_hash="a" * 64,
+        )
+        consumption = ActionConsumption(actual_runtime_seconds=2, actual_cost_usd=0.2)
+        event = TrustEvent(
+            id="trust_event1", sequence=1, event_type=TrustEventType.ACTION_CONSUMED,
+            entity_type="proposed_action", entity_id=action.id, workspace_id="ws1",
+            actor="agent:agent1", payload={"effective_policy_decision_id": allow_decision.id},
+            event_hash="pending",
+        )
+        event.event_hash = sha256_hex({
+            "sequence": event.sequence,
+            "event_type": event.event_type,
+            "entity_type": event.entity_type,
+            "entity_id": event.entity_id,
+            "actor": event.actor,
+            "correlation_id": event.correlation_id,
+            "payload": event.payload,
+            "previous_hash": event.previous_hash,
+            "created_at": event.created_at,
+        })
+        lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
+        rows.extend([
+            ("agent_run", run.id, run.model_dump(mode="json")),
+            ("agent_run_step", step.id, step.model_dump(mode="json")),
+            ("agent_run_event", run_event.id, run_event.model_dump(mode="json")),
+            ("capability_lease", lease.id, lease.model_dump(mode="json")),
+            ("reviewer_attestation", attestation.id, attestation.model_dump(mode="json")),
+            ("proposed_action", action.id, action.model_dump(mode="json")),
+            ("policy_decision", request_decision.id, request_decision.model_dump(mode="json")),
+            ("policy_decision", allow_decision.id, allow_decision.model_dump(mode="json")),
+            ("action_authorization", authorization.id, authorization.model_dump(mode="json")),
+            ("action_consumption", action.id, consumption.model_dump(mode="json")),
+            ("credential_grant", grant.id, grant.model_dump(mode="json")),
+            ("trust_event", event.id, event.model_dump(mode="json")),
+        ])
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE kv_store (entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(entity_type,entity_id))")
+        conn.execute("CREATE TABLE schema_migrations (migration_id TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO schema_migrations VALUES ('0001_baseline_kv_store','baseline',?)", (now,))
+        conn.execute(
+            "CREATE TABLE auth_rate_limit_buckets (bucket_hash TEXT NOT NULL, "
+            "window_start INTEGER NOT NULL, request_count INTEGER NOT NULL CHECK(request_count >= 0), "
+            "PRIMARY KEY(bucket_hash,window_start))"
+        )
+        conn.execute(
+            "CREATE TABLE approval_delivery_claims (approval_id TEXT PRIMARY KEY, "
+            "workspace_id TEXT NOT NULL, source_agent_id TEXT NOT NULL, "
+            "source_invocation_id TEXT NOT NULL, claimed_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE approval_delivery_failures (approval_id TEXT PRIMARY KEY, "
+            "workspace_id TEXT NOT NULL, source_agent_id TEXT NOT NULL, "
+            "source_invocation_id TEXT NOT NULL, reason_code TEXT NOT NULL, reported_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE approval_invocation_leases (approval_id TEXT PRIMARY KEY, "
+            "workspace_id TEXT NOT NULL, source_agent_id TEXT NOT NULL, "
+            "source_invocation_id TEXT NOT NULL, heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL, "
+            "UNIQUE(workspace_id,source_agent_id,source_invocation_id))"
+        )
+        conn.execute(
+            "INSERT INTO approval_invocation_leases VALUES (?,?,?,?,?,?)",
+            ("a1", "ws1", "agent1", "inv1", "2000-01-01T00:00:00+00:00", "2000-01-01T00:05:00+00:00"),
+        )
+        conn.execute(
+            "CREATE TABLE auth_email_outbox (id TEXT PRIMARY KEY, recipient TEXT NOT NULL, "
+            "encrypted_code BLOB NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL, "
+            "created_at TEXT NOT NULL, next_attempt_at TEXT NOT NULL, lease_expires_at TEXT, "
+            "sent_at TEXT, last_error TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO auth_email_outbox VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [
+                ("email_pending", "pending@example.test",
+                 _encrypt_code(outbox_id="email_pending", recipient="pending@example.test", code="test-code"), "PENDING", 0,
+                 now, now, None, None, None),
+                ("email_dead", "dead@example.test", b"x" * 35, "DEAD", 3,
+                 now, now, None, None, "DELIVERY_RETRIES_EXHAUSTED"),
+            ],
+        )
+        conn.executemany("INSERT INTO kv_store VALUES (?,?,?)", [(t, i, json.dumps(p)) for t, i, p in rows])
+        if include_rate_limits:
+            conn.execute(
+                "INSERT INTO auth_rate_limit_buckets VALUES (?,?,?)",
+                ("c" * 64, 1_800_000_000, 3),
+            )
+        if include_trust:
+            conn.executemany(
+                "INSERT INTO approval_delivery_claims VALUES (?,?,?,?,?)",
+                [("a1", "ws1", "agent1", "inv1", now)],
+            )
+            conn.executemany(
+                "INSERT INTO kv_store VALUES (?,?,?)",
+                [
+                    ("audit_event", "delivery-claimed", json.dumps({
+                        "id": "delivery-claimed", "event_type": "approval.delivery_claimed",
+                        "actor": "agent:agent1", "entity_id": "a1", "workspace_id": "ws1",
+                        "details": {"source_agent_id": "agent1", "source_invocation_id": "inv1"},
+                        "created_at": now,
+                    })),
+                ],
+            )
+        if include_delivery_state:
+            if not include_trust:
+                raise ValueError("delivery-state snapshots require an approved trust fixture")
+            conn.executemany(
+                "INSERT INTO approval_delivery_failures VALUES (?,?,?,?,?,?)",
+                [("a1", "ws1", "agent1", "inv1", "CLAIM_RESPONSE_AMBIGUOUS", now)],
+            )
+            conn.executemany(
+                "INSERT INTO kv_store VALUES (?,?,?)",
+                [
+                    ("audit_event", "delivery-failed", json.dumps({
+                        "id": "delivery-failed", "event_type": "approval.delivery_failed",
+                        "actor": "agent:agent1", "entity_id": "a1", "workspace_id": "ws1",
+                        "details": {
+                            "source_agent_id": "agent1", "source_invocation_id": "inv1",
+                            "reason_code": "CLAIM_RESPONSE_AMBIGUOUS",
+                        },
+                        "created_at": now,
+                    })),
+                ],
+            )
+    os.chmod(path, 0o600)
+
+
+def _set_approval_status(path, status):
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id='a1'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["status"] = status
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id='a1'",
+            (json.dumps(payload),),
+        )
+
+
+def _trust_event_payload():
+    event = TrustEvent(
+        sequence=1,
+        event_type=TrustEventType.ACTION_ALLOWED,
+        entity_type="approval_request",
+        entity_id="a1",
+        workspace_id="ws1",
+        actor="reviewer@example.test",
+        payload={"decision": "ALLOW"},
+        event_hash="pending",
+    )
+    event.event_hash = sha256_hex({
+        "sequence": event.sequence,
+        "event_type": event.event_type,
+        "entity_type": event.entity_type,
+        "entity_id": event.entity_id,
+        "actor": event.actor,
+        "correlation_id": event.correlation_id,
+        "payload": event.payload,
+        "previous_hash": event.previous_hash,
+        "created_at": event.created_at,
+    })
+    return event.model_dump(mode="json")
+
+
+@pytest.fixture
+def postgres_import_dsn():
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN")
+    if not dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL importer tests")
+    schema = f"ct_import_{os.urandom(8).hex()}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    isolated_dsn = psycopg.conninfo.make_conninfo(
+        dsn, options=f"-c search_path={schema}"
+    )
+    try:
+        yield isolated_dsn
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    before = path.read_bytes()
+
+    plan, selected, digest = build_plan(path)
+
+    assert path.read_bytes() == before
+    assert plan["status"] == "DRY_RUN_VALIDATED"
+    assert plan["migration_authorized"] is False
+    assert plan["snapshot_certified"] is False
+    assert plan["partial"] is True
+    assert plan["omitted_counts"]["notification"] == 1
+    assert plan["planned_counts"]["approval_request"] == 1
+    assert plan["planned_counts"]["user"] == 1
+    assert plan["planned_counts"]["invite"] == 1
+    assert plan["planned_counts"]["session"] == 1
+    assert plan["planned_counts"]["external_agent"] == 1
+    assert plan["planned_counts"]["approval_invocation_lease"] == 1
+    assert plan["planned_counts"]["agent_connector"] == 1
+    assert plan["planned_counts"]["mcp_child_server"] == 1
+    assert plan["planned_counts"]["mcp_pending_request"] == 1
+    assert plan["planned_counts"]["external_agent_credential"] == 1
+    assert plan["planned_counts"]["device_registration"] == 1
+    assert plan["planned_counts"]["idea"] == 1
+    assert plan["planned_counts"]["work_order"] == 1
+    assert plan["planned_counts"]["test_run"] == 1
+    assert plan["planned_counts"]["agent_task_event"] == 1
+    assert plan["planned_counts"]["auth_email_outbox"] == 2
+    assert plan["sanitized_terminal_email_ciphertext_count"] == 1
+    assert len(digest) == 64
+    assert selected["approval_request"]["a1"]["workspace_id"] == "ws1"
+    assert plan["planned_counts"]["notification"] == 2
+    assert selected["notification"]["n2"]["entity_type"] == "agent_task"
+    assert plan["invocation_drain"] == {
+        "status": "CLEAR",
+        "lease_table_present": True,
+        "pending_native_invocation_count": 0,
+        "approval_id_sha256": [],
+        "approved_unconsumed_invocation_count": 0,
+        "approved_unconsumed_approval_id_sha256": [],
+    }
+
+
+def test_plan_blocks_approved_unconsumed_native_invocation_with_live_lease(tmp_path, monkeypatch):
+    path = tmp_path / "live_approved_native_snapshot.sqlite3"
+    _snapshot(path)
+    _set_approval_status(path, "APPROVED")
+    heartbeat = datetime.now(timezone.utc)
+    expiry = heartbeat + timedelta(minutes=5)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET heartbeat_at=?,expires_at=? WHERE approval_id='a1'",
+            (heartbeat.isoformat(), expiry.isoformat()),
+        )
+
+    def unexpected_target_connection(*_args, **_kwargs):
+        pytest.fail("live-invocation drain barrier must run before opening a PostgreSQL target")
+
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.psycopg.connect",
+        unexpected_target_connection,
+    )
+    with pytest.raises(ImportBlocked, match="1 approved but unconsumed native invocation") as exc_info:
+        build_plan(path)
+    assert hashlib.sha256(b"a1").hexdigest() in str(exc_info.value)
+
+
+@pytest.mark.parametrize("lease_state", ["missing_row", "expired"])
+def test_plan_blocks_approved_unconsumed_invocation_without_valid_lease(tmp_path, lease_state):
+    path = tmp_path / f"approved_unconsumed_{lease_state}.sqlite3"
+    _snapshot(path)
+    _set_approval_status(path, "APPROVED")
+    with sqlite3.connect(path) as conn:
+        if lease_state == "missing_row":
+            conn.execute("DELETE FROM approval_invocation_leases WHERE approval_id='a1'")
+        else:
+            expired = datetime.now(timezone.utc) - timedelta(minutes=10)
+            expired_lease = expired + timedelta(minutes=1)
+            conn.execute(
+                "UPDATE approval_invocation_leases SET heartbeat_at=?,expires_at=? WHERE approval_id='a1'",
+                (expired.isoformat(), expired_lease.isoformat()),
+            )
+    with pytest.raises(ImportBlocked, match="approved but unconsumed native invocation"):
+        build_plan(path)
+
+
+def test_plan_blocks_approved_unconsumed_invocation_when_lease_schema_is_missing(tmp_path):
+    path = tmp_path / "missing_invocation_lease_schema.sqlite3"
+    _snapshot(path)
+    _set_approval_status(path, "APPROVED")
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE approval_invocation_leases")
+    with pytest.raises(ImportBlocked, match="approved but unconsumed native invocation"):
+        build_plan(path)
+
+
+def test_plan_rejects_invocation_lease_scope_and_time_mismatch(tmp_path):
+    path = tmp_path / "invalid_invocation_lease_snapshot.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET source_invocation_id='wrong-invocation' "
+            "WHERE approval_id='a1'"
+        )
+    with pytest.raises(ImportBlocked, match="does not match its approval and agent scope"):
+        build_plan(path)
+
+    invalid_time_path = tmp_path / "invalid_invocation_lease_time.sqlite3"
+    _snapshot(invalid_time_path)
+    with sqlite3.connect(invalid_time_path) as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET expires_at='1999-01-01T00:00:00+00:00' "
+            "WHERE approval_id='a1'"
+        )
+    with pytest.raises(ImportBlocked, match="invalid lease time bounds"):
+        build_plan(invalid_time_path)
+
+
+@pytest.mark.parametrize("status", ["REQUESTED", "PENDING_REVIEW"])
+def test_plan_blocks_pending_native_invocation_approvals_with_safe_summary(
+    tmp_path,
+    monkeypatch,
+    status,
+):
+    path = tmp_path / "pending_native_snapshot.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id='a1'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload.update(
+            {
+                "status": status,
+                "title": "SECRET_APPROVAL_TITLE",
+                "summary": "SECRET_ACTION_PAYLOAD",
+                "source_invocation_id": "SECRET_INVOCATION_ID",
+            }
+        )
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id='a1'",
+            (json.dumps(payload),),
+        )
+
+    def unexpected_target_connection(*_args, **_kwargs):
+        pytest.fail("drain barrier must run before opening a PostgreSQL target")
+
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.psycopg.connect",
+        unexpected_target_connection,
+    )
+
+    with pytest.raises(ImportBlocked, match="1 pending native invocation approval") as exc_info:
+        build_plan(path)
+
+    reason = str(exc_info.value)
+    assert hashlib.sha256(b"a1").hexdigest() in reason
+    assert "SECRET_APPROVAL_TITLE" not in reason
+    assert "SECRET_ACTION_PAYLOAD" not in reason
+    assert "SECRET_INVOCATION_ID" not in reason
+    assert "a1" not in reason
+
+
+def test_delivery_state_is_included_and_requires_matching_invocation_audit(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False, include_trust=True, include_delivery_state=True)
+
+    plan, selected, digest = build_plan(path)
+
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12"
+    assert plan["planned_counts"]["approval_delivery_claim"] == 1
+    assert plan["planned_counts"]["approval_delivery_failure"] == 1
+    assert plan["planned_counts"]["approval_invocation_lease"] == 1
+    assert selected["approval_delivery_claim"]["a1"]["source_invocation_id"] == "inv1"
+    assert selected["approval_delivery_failure"]["a1"]["reason_code"] == "CLAIM_RESPONSE_AMBIGUOUS"
+    assert len(digest) == 64
+
+
+def test_delivery_state_import_preserves_at_most_once_claim_and_failure(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False, include_trust=True, include_delivery_state=True)
+    plan, selected, digest = build_plan(path)
+
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        claim = conn.execute(
+            "SELECT workspace_id,source_agent_id,source_invocation_id "
+            "FROM approval_delivery_claims WHERE approval_id='a1'"
+        ).fetchone()
+        failure = conn.execute(
+            "SELECT workspace_id,source_agent_id,source_invocation_id,reason_code "
+            "FROM approval_delivery_failures WHERE approval_id='a1'"
+        ).fetchone()
+        assert claim == ("ws1", "agent1", "inv1")
+        assert failure == ("ws1", "agent1", "inv1", "CLAIM_RESPONSE_AMBIGUOUS")
+        lease = conn.execute(
+            "SELECT workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
+            "FROM approval_invocation_leases WHERE approval_id='a1'"
+        ).fetchone()
+        assert lease[:3] == ("ws1", "agent1", "inv1")
+        assert lease[3].isoformat() == "2000-01-01T00:00:00+00:00"
+        assert lease[4].isoformat() == "2000-01-01T00:05:00+00:00"
+
+
+def test_plan_blocks_delivery_claim_with_mismatched_source_invocation(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False, include_trust=True, include_delivery_state=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE approval_delivery_claims SET source_invocation_id='other-invocation' "
+            "WHERE approval_id='a1'"
+        )
+
+    with pytest.raises(ImportBlocked, match="does not match its approved invocation"):
+        build_plan(path)
+
+
+def test_auth_rate_limit_buckets_are_preserved_and_malformed_rows_block(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_rate_limits=True)
+    plan, selected, digest = build_plan(path)
+
+    assert plan["planned_counts"]["auth_rate_limit_bucket"] == 1
+    assert selected["auth_rate_limit_bucket"]["c" * 64 + ":1800000000"]["request_count"] == 3
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    with psycopg.connect(postgres_import_dsn) as conn:
+        assert conn.execute(
+            "SELECT bucket_hash,window_start,request_count FROM auth_rate_limit_buckets"
+        ).fetchone() == ("c" * 64, 1_800_000_000, 3)
+
+    invalid_path = tmp_path / "invalid-snapshot.sqlite3"
+    _snapshot(invalid_path)
+    with sqlite3.connect(invalid_path) as conn:
+        conn.execute("INSERT INTO auth_rate_limit_buckets VALUES (?,?,?)", ("NOT-A-DIGEST", 10, 1))
+    with pytest.raises(ImportBlocked, match="invalid bucket digest"):
+        build_plan(invalid_path)
+
+
+def test_plan_refuses_task_notification_with_missing_parent(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='notification' AND entity_id='n2'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["entity_id"] = "missing-task"
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='notification' AND entity_id='n2'",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(ImportBlocked, match="notification/n2 references an unimported AgentTask"):
+        build_plan(path)
+
+
+def test_plan_rejects_group_readable_source(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    os.chmod(path, 0o640)
+
+    with pytest.raises(ImportBlocked, match="owner-only"):
+        build_plan(path)
+
+
+def test_plan_rejects_wal_sidecar(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    (tmp_path / "snapshot.sqlite3-wal").write_bytes(b"not a valid snapshot")
+
+    with pytest.raises(ImportBlocked, match="sidecar"):
+        build_plan(path)
+
+
+def test_plan_rejects_malformed_active_email_ciphertext(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE auth_email_outbox SET encrypted_code=? WHERE id='email_pending'",
+            (b"too-short",),
+        )
+
+    with pytest.raises(ImportBlocked, match="malformed active ciphertext"):
+        build_plan(path)
+
+
+def test_plan_refuses_approval_without_explicit_workspace(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute("SELECT payload FROM kv_store WHERE entity_type='approval_request'").fetchone()
+        payload = json.loads(row[0])
+        payload.pop("workspace_id")
+        conn.execute("UPDATE kv_store SET payload=? WHERE entity_type='approval_request'", (json.dumps(payload),))
+
+    with pytest.raises(ImportBlocked, match="explicit workspace_id"):
+        build_plan(path)
+
+
+def test_plan_refuses_agent_task_event_with_missing_parent(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    with sqlite3.connect(path) as conn:
+        payload = json.loads(conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='agent_task_event'"
+        ).fetchone()[0])
+        payload["task_id"] = "missing-task"
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='agent_task_event'",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(ImportBlocked, match="structural audit did not pass"):
+        build_plan(path)
+
+
+def test_plan_refuses_agent_run_event_with_mismatched_step(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False, include_trust=True)
+    with sqlite3.connect(path) as conn:
+        payload = json.loads(conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='agent_run_event'"
+        ).fetchone()[0])
+        payload["step_id"] = "missing-step"
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='agent_run_event'",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(ImportBlocked, match="agent_run_event.*missing or mismatched step"):
+        build_plan(path)
+
+
+def test_plan_refuses_mcp_pending_request_with_inconsistent_lease(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    with sqlite3.connect(path) as conn:
+        payload = json.loads(conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='mcp_pending_request'"
+        ).fetchone()[0])
+        payload["lease_owner"] = "worker-1"
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='mcp_pending_request'",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(ImportBlocked, match="inconsistent forwarding lease state"):
+        build_plan(path)
+
+
+def test_plan_blocks_tampered_legacy_trust_history(tmp_path):
+    path = tmp_path / "tampered_trust.sqlite3"
+    _snapshot(path, include_omitted=False)
+    event = _trust_event_payload()
+    event["payload"]["decision"] = "BLOCK"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store VALUES (?,?,?)",
+            ("trust_event", event["id"], json.dumps(event)),
+        )
+
+    with pytest.raises(ImportBlocked, match="structural audit did not pass"):
+        build_plan(path)
+
+
+def test_plan_reports_workspace_scope_derived_from_exact_project(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        for entity_type in ("idea", "work_order"):
+            raw = conn.execute(
+                "SELECT payload FROM kv_store WHERE entity_type=?", (entity_type,)
+            ).fetchone()[0]
+            payload = json.loads(raw)
+            payload.pop("workspace_id")
+            conn.execute(
+                "UPDATE kv_store SET payload=? WHERE entity_type=?",
+                (json.dumps(payload), entity_type),
+            )
+
+    plan, selected, _ = build_plan(path)
+
+    assert plan["derived_workspace_scope_counts"] == {"idea": 1, "work_order": 1}
+    assert selected["idea"]["i1"]["workspace_id"] == "ws1"
+    assert selected["work_order"]["w1"]["workspace_id"] == "ws1"
+
+
+@pytest.mark.parametrize(
+    ("dsn", "expected"),
+    [
+        ("host=/tmp/pg-socket dbname=aixion_test", False),
+        ("host=localhost dbname=aixion_test", False),
+        ("host=10.0.0.8 dbname=aixion_staging", True),
+        ("hostaddr=10.0.0.8 dbname=aixion_staging", True),
+        ("host=localhost,10.0.0.8 dbname=aixion_staging", True),
+    ],
+)
+def test_target_remote_detection_includes_hostaddr_and_multi_host(dsn, expected):
+    assert _target_is_remote(dsn) is expected
+
+
+def test_apply_import_and_retry_are_transactional_and_idempotent(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    plan, selected, digest = build_plan(path)
+
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM users").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM invites").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM auth_email_outbox").fetchone()[0] == 2
+        pending_ciphertext = conn.execute(
+            "SELECT encrypted_code FROM auth_email_outbox WHERE outbox_id='email_pending'"
+        ).fetchone()[0]
+        terminal_ciphertext = conn.execute(
+            "SELECT encrypted_code FROM auth_email_outbox WHERE outbox_id='email_dead'"
+        ).fetchone()[0]
+        assert bytes(pending_ciphertext) == selected["auth_email_outbox"]["email_pending"]["encrypted_code"]
+        assert bytes(terminal_ciphertext) == b""
+        assert _decrypt_code(
+            outbox_id="email_pending",
+            recipient="pending@example.test",
+            encrypted=bytes(pending_ciphertext),
+        ) == "test-code"
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM agent_connectors").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM mcp_child_servers").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM test_runs").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM external_agents").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM external_agent_credentials").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM device_registrations").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM projects").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM agent_tasks").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM agent_task_events").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM ideas").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM work_orders").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM audit_events").fetchone()[0] == 8
+        assert conn.execute("SELECT count(*) FROM notifications").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT task_id FROM notifications WHERE notification_id='n2'"
+        ).fetchone()[0] == "t1"
+        assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 1
+
+
+def test_apply_import_rejects_email_key_mismatch_before_schema_changes(
+    tmp_path, postgres_import_dsn, monkeypatch
+):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    plan, selected, digest = build_plan(path)
+    monkeypatch.setenv("AIXION_EMAIL_OUTBOX_KEY", "22" * 32)
+
+    with pytest.raises(ImportBlocked, match="could not be authenticated"):
+        apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        migration_table_count = conn.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_schema=current_schema() AND table_name='schema_migrations'"
+        ).fetchone()[0]
+    assert migration_table_count == 0
+
+
+def test_import_preserves_trust_state_signatures_and_hash_chain(tmp_path, postgres_import_dsn):
+    path = tmp_path / "approval_and_trust.sqlite3"
+    _snapshot(path, include_omitted=False, include_trust=True)
+    plan, selected, digest = build_plan(path)
+
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12"
+    assert plan["planned_counts"]["agent_run"] == 1
+    assert plan["planned_counts"]["agent_run_step"] == 1
+    assert plan["planned_counts"]["agent_run_event"] == 1
+    assert plan["planned_counts"]["capability_lease"] == 1
+    assert plan["planned_counts"]["reviewer_attestation"] == 1
+    assert plan["planned_counts"]["proposed_action"] == 1
+    assert plan["planned_counts"]["policy_decision"] == 2
+    assert plan["planned_counts"]["action_authorization"] == 1
+    assert plan["planned_counts"]["action_consumption"] == 1
+    assert plan["planned_counts"]["credential_grant"] == 1
+    assert plan["planned_counts"]["trust_event"] == 1
+
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        for table in (
+            "agent_runs", "capability_leases", "reviewer_attestations", "proposed_actions",
+            "agent_task_events", "agent_run_steps", "agent_run_events",
+            "agent_connectors", "invites", "mcp_child_servers", "mcp_pending_requests",
+            "policy_decisions", "action_authorizations", "action_consumptions",
+            "credential_grants", "trust_events",
+        ):
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 1 or (
+                table == "policy_decisions"
+                and conn.execute("SELECT count(*) FROM policy_decisions").fetchone()[0] == 2
+            ), table
+        event = conn.execute(
+            "SELECT event_id,sequence,event_hash,payload FROM trust_events"
+        ).fetchone()
+        head = conn.execute(
+            "SELECT sequence,event_hash FROM trust_event_heads WHERE singleton=TRUE"
+        ).fetchone()
+        consumption = conn.execute(
+            "SELECT payload->'consumption' FROM action_consumptions WHERE action_id='action1'"
+        ).fetchone()[0]
+        assert event[0:3] == ("trust_event1", 1, selected["trust_event"]["trust_event1"]["event_hash"])
+        assert head == (1, event[2])
+        assert consumption["actual_runtime_seconds"] == 2
+        assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 1
+    verification = PostgresTrustEventRepository(
+        lambda: psycopg.connect(postgres_import_dsn)
+    ).verify()
+    assert verification.valid is True
+    assert verification.event_count == 1
+
+
+def test_partial_import_refuses_preexisting_omitted_domain_data(
+    tmp_path,
+    postgres_import_dsn,
+):
+    path = tmp_path / "partial_snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    plan, selected, digest = build_plan(path)
+    from app.postgres_database import run_postgres_migrations
+
+    run_postgres_migrations(lambda: psycopg.connect(postgres_import_dsn))
+    with psycopg.connect(postgres_import_dsn) as conn:
+        # Even though this importer has an MCP slice, it must not create a
+        # mixed-authority schema beside any pre-existing application records.
+        created_at = datetime.now(timezone.utc)
+        updated_at = datetime.now(timezone.utc)
+        conn.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+            ("unrelated", psycopg.types.json.Jsonb({"id": "unrelated", "name": "Other", "owner_user_id": "owner", "created_at": datetime.now(timezone.utc).isoformat()})),
+        )
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            ("unrelated-project", "unrelated", psycopg.types.json.Jsonb({"id": "unrelated-project", "workspace_id": "unrelated"})),
+        )
+        conn.execute(
+            "INSERT INTO mcp_child_servers(server_id,project_id,workspace_id,name,enabled,created_at,updated_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                "mcp-existing", "unrelated-project", "unrelated", "existing", True,
+                created_at, updated_at,
+                psycopg.types.json.Jsonb({
+                    "id": "mcp-existing", "project_id": "unrelated-project",
+                    "workspace_id": "unrelated", "name": "existing", "enabled": True,
+                    "created_at": created_at.isoformat(),
+                    "updated_at": updated_at.isoformat(),
+                }),
+            ),
+        )
+
+    with pytest.raises(ImportBlocked, match="partial import requires a pristine schema"):
+        apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        assert conn.execute("SELECT count(*) FROM mcp_child_servers").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 0
+
+
+def test_plan_refuses_invalid_trust_authorization_signature(tmp_path):
+    path = tmp_path / "invalid_trust_signature.sqlite3"
+    _snapshot(path, include_omitted=False, include_trust=True)
+    with sqlite3.connect(path) as conn:
+        raw = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='action_authorization'"
+        ).fetchone()[0]
+        payload = json.loads(raw)
+        payload["signature"] = "invalid-signature"
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='action_authorization'",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(ImportBlocked, match="signature or action hash is invalid"):
+        build_plan(path)
+
+
+def test_plan_refuses_consumption_without_matching_trust_event(tmp_path):
+    path = tmp_path / "orphaned_trust_consumption.sqlite3"
+    _snapshot(path, include_omitted=False, include_trust=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DELETE FROM kv_store WHERE entity_type='trust_event'")
+
+    with pytest.raises(ImportBlocked, match="exactly one matching verified trust event"):
+        build_plan(path)
+
+
+def test_idempotent_retry_rejects_same_count_target_content_drift(
+    tmp_path,
+    postgres_import_dsn,
+):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    plan, selected, digest = build_plan(path)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        conn.execute(
+            "UPDATE projects SET payload=jsonb_set(payload,'{name}','\"Tampered\"') "
+            "WHERE project_id='p1'"
+        )
+        assert conn.execute("SELECT count(*) FROM projects").fetchone()[0] == 1
+
+    with pytest.raises(ImportBlocked, match="target project payloads changed"):
+        apply_import(postgres_import_dsn, digest, plan, selected)
+
+
+def test_idempotent_retry_rejects_invocation_lease_drift(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    plan, selected, digest = build_plan(path)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    with psycopg.connect(postgres_import_dsn) as conn:
+        conn.execute(
+            "UPDATE approval_invocation_leases SET source_invocation_id='tampered' "
+            "WHERE approval_id='a1'"
+        )
+    with pytest.raises(ImportBlocked, match="target approval_invocation_lease payloads changed"):
+        apply_import(postgres_import_dsn, digest, plan, selected)
+
+
+def test_apply_import_rolls_back_rows_when_a_parent_constraint_fails(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    plan, selected, digest = build_plan(path)
+    selected["project"]["p1"]["workspace_id"] = "missing-workspace"
+
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM projects").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 0
+
+
+def test_apply_import_rolls_back_when_invocation_lease_scope_fails(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    plan, selected, digest = build_plan(path)
+    selected["approval_invocation_lease"]["a1"]["workspace_id"] = "missing-workspace"
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        apply_import(postgres_import_dsn, digest, plan, selected)
+    with psycopg.connect(postgres_import_dsn) as conn:
+        assert conn.execute("SELECT count(*) FROM workspaces").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM approval_invocation_leases").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 0

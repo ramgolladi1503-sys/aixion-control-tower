@@ -53,10 +53,10 @@
     },
     {
       "type": "timeseries",
-      "title": "Step Duration",
+      "title": "Average Step Duration",
       "id": 6,
       "gridPos": {"h": 9, "w": 12, "x": 12, "y": 6},
-      "targets": [{"expr": "aixion_agent_run_step_duration_seconds", "legendFormat": "{{step_type}}", "refId": "A"}],
+      "targets": [{"expr": "aixion_agent_run_step_duration_seconds_sum / clamp_min(aixion_agent_run_step_duration_seconds_count, 1)", "legendFormat": "{{step_type}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
     }

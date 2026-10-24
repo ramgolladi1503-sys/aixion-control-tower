@@ -12,6 +12,7 @@ os.environ.setdefault(
 import pytest
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.approval_integrity import compute_approval_payload_hash
 from app.models import (
     AgentProvider,
     ApprovalRequest,
@@ -44,6 +45,7 @@ from app.trust_service import (
     evaluate_gateway_action,
     issue_capability_lease,
 )
+from app.workspace_access import capability_lease_scope_is_consistent
 
 
 def setup_function() -> None:
@@ -83,8 +85,8 @@ def _authorized_action() -> tuple[ProposedAction, str]:
         status=ApprovalStatus.APPROVED,
         created_by_user_id="creator",
         approved_by_user_id="approval-reviewer",
-        approved_payload_hash="sealed-exact-action-payload",
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
@@ -97,6 +99,7 @@ def _authorized_action() -> tuple[ProposedAction, str]:
         status=AgentTaskStatus.APPROVED,
     )
     store.agent_tasks[task.id] = task
+    store.persist()
     lease = issue_capability_lease(
         CapabilityLeaseCreate(
             approval_request_id=approval.id,
@@ -154,6 +157,15 @@ def test_signed_exact_action_can_be_consumed() -> None:
         )
         == consumption
     )
+
+
+def test_capability_lease_scope_uses_durable_approval_without_cache() -> None:
+    action, _ = _authorized_action()
+    lease = store.capability_leases[action.lease_id]
+    approval_id = lease.approval_request_id
+    store.approval_requests.pop(approval_id)
+
+    assert capability_lease_scope_is_consistent(lease) is True
 
 
 def test_action_payload_tampering_invalidates_human_allow() -> None:

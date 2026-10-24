@@ -121,6 +121,7 @@ class CapabilityLeaseCreate(BaseModel):
 class CapabilityLease(BaseModel):
     id: str = Field(default_factory=lambda: new_id("lease"))
     approval_request_id: str
+    workspace_id: str | None = None
     approved_payload_hash: str
     agent_id: str | None = None
     provider: AgentProvider = AgentProvider.OTHER
@@ -183,6 +184,7 @@ class ReviewerAttestationCreate(BaseModel):
 class ReviewerAttestation(BaseModel):
     id: str = Field(default_factory=lambda: new_id("attestation"))
     approval_request_id: str
+    workspace_id: str | None = None
     approval_payload_hash: str
     reviewer_user_id: str
     reviewer_role: UserRole
@@ -200,6 +202,7 @@ class ProposedAction(BaseModel):
     run_id: str | None = None
     task_id: str | None = None
     project_id: str | None = None
+    workspace_id: str | None = None
     action_type: CapabilityActionType
     repository: str | None = None
     branch: str | None = None
@@ -267,6 +270,7 @@ class TrustEvent(BaseModel):
     event_type: TrustEventType
     entity_type: str
     entity_id: str
+    workspace_id: str | None = None
     actor: str
     correlation_id: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -291,6 +295,7 @@ class CredentialGrantType(StrEnum):
 class CredentialGrant(BaseModel):
     id: str = Field(default_factory=lambda: new_id("credential_grant"))
     lease_id: str
+    workspace_id: str | None = None
     grant_type: CredentialGrantType
     audience: str
     subject: str

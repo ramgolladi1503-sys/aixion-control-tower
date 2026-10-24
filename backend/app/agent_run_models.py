@@ -105,6 +105,7 @@ class AgentRunCapabilityLeaseRequest(BaseModel):
 class AgentRun(BaseModel):
     id: str = Field(default_factory=lambda: new_id("agent_run"))
     task_id: str
+    workspace_id: str | None = None
     approval_request_id: str | None = None
     capability_lease_id: str | None = None
     project_id: str | None = None

@@ -7,6 +7,7 @@ from app.mcp_gateway import (
     FORWARDED_AFTER_APPROVAL,
     MCP_PENDING_DEAD_LETTERED,
     MCP_PENDING_FORWARD_FAILED,
+    MCP_PENDING_FORWARD_OUTCOME_UNKNOWN,
     MCPGatewayApprovalDecisionLayer,
     MCPGatewayToolCall,
 )
@@ -136,7 +137,7 @@ def test_active_pending_lease_blocks_duplicate_resolve_without_forwarding() -> N
     assert pending.lease_owner == "other-worker"
 
 
-def test_expired_pending_lease_can_be_recovered_and_forwarded() -> None:
+def test_expired_pending_lease_fails_closed_without_replay() -> None:
     child, gateway = _gateway()
     initial = gateway.submit_tool_call(_mutating_call())
     assert initial.approval_request_id is not None
@@ -150,11 +151,14 @@ def test_expired_pending_lease_can_be_recovered_and_forwarded() -> None:
 
     resolved = gateway.resolve_after_side_channel_decision(initial.approval_request_id)
 
-    assert resolved.forwarded is True
-    assert len(child.received_tool_calls) == 1
-    assert pending.status == MCPPendingStatus.FORWARDED
+    assert resolved.forwarded is False
+    assert "unknown child-server outcome" in resolved.reason
+    assert child.received_tool_calls == []
+    assert pending.status == MCPPendingStatus.DEAD_LETTER
+    assert pending.last_error == MCP_PENDING_FORWARD_OUTCOME_UNKNOWN
     assert pending.lease_owner is None
     assert pending.lease_expires_at is None
+    assert sum(event.event_type == "mcp.forward_outcome_unknown" for event in store.audit_events) == 1
 
 
 def test_failed_forwarding_releases_lease_and_keeps_pending_for_retry() -> None:

@@ -20,6 +20,7 @@ class OpsRepositoryTest {
         assertEquals("Ready", readiness.readinessLabel)
         assertEquals("production", readiness.profile)
         assertTrue(readiness.authEnabled)
+        assertEquals("postgresql", readiness.databaseBackend)
         assertTrue(readiness.dbReachable)
         assertTrue(readiness.migrationsApplied)
         assertTrue(readiness.recoverySnapshotAvailable)
@@ -51,6 +52,7 @@ private class SuccessOpsApi : OpsApi {
             generated_at = "2026-05-14T00:00:00Z",
             profile = "production",
             auth_enabled = true,
+            database_backend = "postgresql",
             db_reachable = true,
             migrations_applied = true,
             expected_migration_ids = listOf("0001_baseline_kv_store", "0002_future"),

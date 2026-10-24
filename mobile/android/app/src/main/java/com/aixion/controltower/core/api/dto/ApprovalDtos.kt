@@ -30,7 +30,9 @@ data class ApprovalRequestDto(
     val source_agent_id: String? = null,
     val source_agent_name: String? = null,
     val source_session_id: String? = null,
+    val source_invocation_id: String? = null,
     val source_task_url: String? = null,
+    val expires_at: String? = null,
     val created_by_user_id: String? = null,
     val verified_source: Boolean = false
 ) {

@@ -1,8 +1,8 @@
 # Backend Database Migrations
 
-Aixion Control Tower now has a small migration/versioning foundation for the backend SQLite store.
+Aixion Control Tower has versioned migration runners for its local SQLite store and PostgreSQL schema. These runners do not mean the application has completed its PostgreSQL persistence cutover.
 
-This is not PostgreSQL. It is not production backup/restore. It is the minimum disciplined layer needed before deployment and secrets work.
+The production profile still fails closed while application routes and workers use SQLite-backed process state. Do not point production traffic at this build.
 
 ## Current storage model
 
@@ -91,24 +91,19 @@ unknown newer migration fails safely
 migration metadata persists
 ```
 
-## What this does not solve
+## What the SQLite runner does not solve
 
-This PR does not add:
+The SQLite store and its migrations do not provide:
 
-```text
-PostgreSQL
-Alembic
-cloud database provisioning
-backup and restore process
-deployment secrets
-encrypted database storage
-row-level schema normalization
-production migration rollback tooling
-```
+- PostgreSQL application authority or route/worker cutover
+- cloud database provisioning
+- a verified backup/restore process
+- deployment secret management
+- production migration rollback tooling
 
-Those are later production-readiness steps.
+Those are separate production-readiness steps.
 
-## How to add the next migration
+## How to add the next SQLite migration
 
 1. Add a new `Migration(...)` entry in `backend/app/database_migrations.py`.
 2. Use a monotonic id, for example:
@@ -121,6 +116,65 @@ Those are later production-readiness steps.
 4. Add focused tests for fresh and upgraded databases.
 5. Update this document and `docs/RELEASE_VALIDATION.md`.
 
+## PostgreSQL migration runner
+
+PostgreSQL schema migrations are defined in `backend/app/postgres_database.py`. The runner acquires a transaction-scoped advisory lock, verifies stored migration checksums, applies pending migrations in order, and records each migration in `schema_migrations` within the same transaction. Unknown newer migrations and changed historical definitions fail closed. The runner applies schema changes only; it does not import or move application data.
+
+The current PostgreSQL migration set includes `pg_0010_workspace_scoped_connectors`, which adds the `agent_connectors` table. It stores provider metadata, workspace/creator identity, status, timestamps, and the validated connector payload. Workspace and creator foreign keys enforce account scope; connector allowed-project membership is checked by `PostgresConnectorRepository`. Connector writes and their audit event commit in the same transaction. This adapter is registered in the lifespan repository bundle, but HTTP connector routes still use SQLite, so this migration does not complete or enable application cutover.
+
+The API does **not** run PostgreSQL migrations automatically at startup. Use the operator CLI from the repository root or `backend/` with `AIXION_POSTGRES_DSN` provided through the environment or a secret manager. The DSN is never accepted as a command-line argument or printed.
+
+Read-only check (default mode):
+
+```bash
+cd backend
+AIXION_PROFILE=test \
+  AIXION_POSTGRES_DSN='host=/path/to/socket port=5432 dbname=aixion_staging user=aixion_migrator' \
+  python scripts/migrate_postgres.py --check
+```
+
+The check prints applied, missing, unknown, or checksum-mismatched migration IDs. It returns exit code `0` only when the complete expected schema is ready; an empty or inconsistent schema returns `2` and is not modified.
+
+Explicit local apply:
+
+```bash
+cd backend
+AIXION_PROFILE=test \
+  AIXION_POSTGRES_DSN='host=/path/to/socket port=5432 dbname=aixion_test user=aixion_migrator' \
+  python scripts/migrate_postgres.py --apply \
+    --expected-database aixion_test --expected-schema public
+```
+
+For a separately authorized remote staging database, use a DSN with `sslmode=verify-full`, repeat the exact configured database name, and add `--allow-remote`:
+
+```bash
+cd backend
+AIXION_PROFILE=production \
+  AIXION_POSTGRES_DSN='postgresql://USER:PASSWORD@HOST:5432/aixion_staging?sslmode=verify-full' \
+  python scripts/migrate_postgres.py --apply \
+    --expected-database aixion_staging --expected-schema public --allow-remote
+```
+
+The DSN example is a placeholder. Do not put credentials in shell history; inject the value from a protected environment or secret manager. `--apply` is required for any schema mutation, `--expected-database` and `--expected-schema` must exactly match the live PostgreSQL connection, and remote connections require both full TLS verification and the explicit `--allow-remote` flag. Cloud SQL socket paths are treated as remote targets. No cloud target is authorized by this documentation.
+
+Before applying to any shared database, take and verify an independent backup, review the migration set and lock/statement timeouts, and schedule a maintenance window if the migration may lock active tables. PostgreSQL migrations are forward-only; do not delete migration-ledger rows or run ad-hoc reverse DDL to roll back an application release. Use a reviewed forward repair migration or restore a verified backup to a separate recovery target. The current application is not certified for a production migration or deployment.
+
+The runner is covered by `backend/tests/test_postgres_runtime.py`, including check-only behavior on an empty schema, wrong-database refusal before DDL, remote-target and TLS controls, migration application, and idempotent reapplication. Run it with the isolated local PostgreSQL test service:
+
+```bash
+cd backend
+AIXION_TEST_POSTGRES_DSN='host=/tmp/aixion-ct-pg.<instance>/socket port=55432 dbname=postgres user=<local-user>' \
+  python -m pytest tests/test_postgres_runtime.py -q
+```
+
+Connector repository, workspace-scope, audit-atomicity, optimistic-update, and runtime bundle coverage:
+
+```bash
+cd backend
+AIXION_TEST_POSTGRES_DSN='host=/tmp/aixion-ct-pg.<instance>/socket port=55432 dbname=postgres user=<local-user>' \
+  python -m pytest tests/test_postgres_connector_repository.py tests/test_postgres_runtime.py -q
+```
+
 ## Brutal truth
 
-Before this, the SQLite store was persistent but not versioned. That is fine for a demo but sloppy for any real product path. This foundation gives the backend a safe upgrade spine without pretending the storage layer is production-grade yet.
+The schema migration runner is now explicit and checksum-verified, but migration safety does not establish application PostgreSQL authority, backup/restore readiness, or production readiness.

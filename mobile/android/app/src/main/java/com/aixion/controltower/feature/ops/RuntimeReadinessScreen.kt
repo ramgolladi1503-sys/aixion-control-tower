@@ -73,11 +73,18 @@ fun RuntimeReadinessScreen(viewModel: RuntimeReadinessViewModel = viewModel()) {
             }
             item { RuntimeStatusCard("Profile", readiness.profile, healthy = true) }
             item { RuntimeStatusCard("Auth enabled", readiness.authEnabled.toString(), readiness.authEnabled) }
+            item {
+                RuntimeStatusCard(
+                    "Database backend",
+                    readiness.databaseBackend,
+                    healthy = readiness.databaseBackend == "postgresql" || readiness.profile != "production"
+                )
+            }
             item { RuntimeStatusCard("Database reachable", readiness.dbReachable.toString(), readiness.dbReachable) }
             item { RuntimeStatusCard("Migrations applied", readiness.migrationsApplied.toString(), readiness.migrationsApplied) }
             item { RuntimeStatusCard("Recovery snapshot available", readiness.recoverySnapshotAvailable.toString(), readiness.recoverySnapshotAvailable) }
             item { RuntimeStatusCard("GitHub token configured", readiness.githubTokenConfigured.toString(), readiness.githubTokenConfigured) }
-            item { RuntimeStatusCard("FCM server key configured", readiness.fcmServerKeyConfigured.toString(), readiness.fcmServerKeyConfigured) }
+            item { RuntimeStatusCard("FCM project configured", readiness.fcmServerKeyConfigured.toString(), readiness.fcmServerKeyConfigured) }
             if (readiness.missingMigrationIds.isNotEmpty()) {
                 item { TextBlock("Missing migrations", readiness.missingMigrationIds.joinToString("\n"), RiskCritical) }
             }

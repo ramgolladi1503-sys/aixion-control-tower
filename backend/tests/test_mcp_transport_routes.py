@@ -2,20 +2,33 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
+from types import SimpleNamespace
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app import mcp_transport_routes
 from app.mcp_gateway_routes import (
     child_received_count_for_server_for_test,
     child_received_count_for_test,
     reset_gateway_runtime_for_test,
 )
-from app.models import MCPPendingStatus
+from app.mcp_gateway import MCPGatewayDecision
+from app.models import (
+    ApprovalStatus,
+    AuthUser,
+    MCPChildServer,
+    MCPToolDefinition,
+    MCPPendingStatus,
+    UserRole,
+    now_utc,
+)
 from app.store import store
 
 client = TestClient(app)
@@ -58,6 +71,263 @@ def _start_recording_jsonrpc_child_server() -> tuple[HTTPServer, str]:
     thread.start()
     host, port = server.server_address
     return server, f"http://{host}:{port}/mcp"
+
+
+def _postgres_transport_unit_case(monkeypatch, *, final_status: ApprovalStatus | None):
+    workspace_id = "workspace-unit"
+    project_id = "project-unit"
+    server = MCPChildServer(
+        id="server-unit",
+        project_id=project_id,
+        workspace_id=workspace_id,
+        name="registered-unit",
+        tools=[MCPToolDefinition(name="mutate", mutating=True)],
+    )
+    approval = SimpleNamespace(
+        id="approval-unit",
+        status=ApprovalStatus.REQUESTED,
+        workspace_id=workspace_id,
+        created_at=now_utc(),
+        expires_at=now_utc() + timedelta(minutes=10),
+        files=[SimpleNamespace(new_content=json.dumps({
+            "target_server_id": server.id,
+            "target_server_revision": server.updated_at.isoformat(),
+        }))],
+    )
+
+    class ApprovalRepository:
+        def get(self, approval_id):
+            assert approval_id == approval.id
+            return approval
+
+    approval_repository = ApprovalRepository()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_repositories=SimpleNamespace(mcp_pending_requests=object())
+            )
+        )
+    )
+    user = AuthUser(
+        id="user-unit",
+        email="reviewer@example.test",
+        display_name="Reviewer",
+        role=UserRole.OWNER,
+        workspace_id=workspace_id,
+    )
+    submitted: list[object] = []
+    resolved: list[str] = []
+
+    def submit(**kwargs):
+        submitted.append(kwargs)
+        return MCPGatewayDecision(
+            forwarded=False,
+            approval_required=True,
+            approval_request_id=approval.id,
+            status=ApprovalStatus.REQUESTED,
+        )
+
+    async def sleep(_seconds):
+        if final_status is not None:
+            approval.status = final_status
+
+    monkeypatch.setattr(mcp_transport_routes, "_postgres_mcp_submission", submit)
+    monkeypatch.setattr(
+        mcp_transport_routes,
+        "approval_decision_repository_for_request",
+        lambda _request: approval_repository,
+    )
+    monkeypatch.setattr(
+        mcp_transport_routes,
+        "workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    monkeypatch.setattr(
+        mcp_transport_routes,
+        "get_settings",
+        lambda: SimpleNamespace(agent_approval_ttl_seconds=600),
+    )
+    monkeypatch.setattr(mcp_transport_routes.anyio, "sleep", sleep)
+    monkeypatch.setattr(
+        mcp_transport_routes,
+        "_resolve_postgres_gateway_request",
+        lambda **kwargs: (
+            resolved.append(kwargs["approval_request_id"])
+            or MCPGatewayDecision(
+                forwarded=True,
+                approval_required=True,
+                approval_request_id=approval.id,
+                status=ApprovalStatus.APPROVED,
+                result={"ok": True},
+            )
+        ),
+    )
+    return server, approval, request, user, submitted, resolved
+
+
+def test_postgres_transport_wait_for_approval_then_use_durable_resolver(monkeypatch) -> None:
+    server, approval, request, user, submitted, resolved = _postgres_transport_unit_case(
+        monkeypatch,
+        final_status=ApprovalStatus.APPROVED,
+    )
+
+    response = asyncio.run(mcp_transport_routes._postgres_mcp_tool_call(
+        project_id=server.project_id,
+        payload=mcp_transport_routes.MCPJsonRpcRequest(
+            id="request-1",
+            method="tools/call",
+            params={
+                "name": "mutate",
+                "server_name": server.name,
+                "arguments": {},
+                "session_id": "session-1",
+            },
+        ),
+        user=user,
+        request=request,
+        registered_servers=[server],
+    ))
+
+    assert response.result["structuredContent"]["forwarded"] is True
+    assert submitted[0]["idempotency_key"] == f"{server.project_id}:session-1:request-1"
+    assert resolved == [approval.id]
+
+
+def test_postgres_pending_transport_yields_event_loop(monkeypatch) -> None:
+    server, approval, request, user, _submitted, resolved = _postgres_transport_unit_case(
+        monkeypatch,
+        final_status=None,
+    )
+    loop_progress: list[bool] = []
+
+    async def exercise() -> None:
+        sleeping = asyncio.Event()
+
+        async def yielding_sleep(_seconds: float) -> None:
+            sleeping.set()
+            await asyncio.sleep(0)
+            approval.status = ApprovalStatus.APPROVED
+
+        monkeypatch.setattr(mcp_transport_routes.anyio, "sleep", yielding_sleep)
+        call = asyncio.create_task(
+            mcp_transport_routes._postgres_mcp_tool_call(
+                project_id=server.project_id,
+                payload=mcp_transport_routes.MCPJsonRpcRequest(
+                    id="request-loop-progress",
+                    method="tools/call",
+                    params={"name": "mutate", "server_name": server.name, "arguments": {}},
+                ),
+                user=user,
+                request=request,
+                registered_servers=[server],
+            )
+        )
+
+        async def observe_pending_wait() -> None:
+            await asyncio.wait_for(sleeping.wait(), timeout=1)
+            assert not call.done(), "pending tools/call returned before approval changed"
+            loop_progress.append(True)
+
+        await asyncio.wait_for(observe_pending_wait(), timeout=1)
+        loop_progress.append(True)
+        response = await call
+        assert response.result["structuredContent"]["forwarded"] is True
+
+    asyncio.run(exercise())
+
+    assert loop_progress == [True, True]
+    assert resolved == ["approval-unit"]
+
+
+def test_postgres_transport_denial_returns_tool_error_without_resolver(monkeypatch) -> None:
+    server, approval, request, user, _submitted, resolved = _postgres_transport_unit_case(
+        monkeypatch,
+        final_status=ApprovalStatus.DENIED,
+    )
+
+    response = asyncio.run(mcp_transport_routes._postgres_mcp_tool_call(
+        project_id=server.project_id,
+        payload=mcp_transport_routes.MCPJsonRpcRequest(
+            id="request-denied",
+            method="tools/call",
+            params={"name": "mutate", "server_name": server.name, "arguments": {}},
+        ),
+        user=user,
+        request=request,
+        registered_servers=[server],
+    ))
+
+    assert response.result["isError"] is True
+    assert response.result["structuredContent"]["forwarded"] is False
+    assert response.result["structuredContent"]["status"] == ApprovalStatus.DENIED
+    assert resolved == []
+
+
+def test_postgres_transport_timeout_expires_approval_and_never_resolves(monkeypatch) -> None:
+    server, approval, request, user, _submitted, resolved = _postgres_transport_unit_case(
+        monkeypatch,
+        final_status=None,
+    )
+    monotonic_values = iter((100.0, 701.0))
+    monkeypatch.setattr(
+        mcp_transport_routes,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values, 701.0)),
+    )
+
+    def expire(_approval, **kwargs):
+        assert kwargs["force"] is True
+        approval.status = ApprovalStatus.EXPIRED
+        return True
+
+    monkeypatch.setattr(mcp_transport_routes, "expire_approval", expire)
+    response = asyncio.run(mcp_transport_routes._postgres_mcp_tool_call(
+        project_id=server.project_id,
+        payload=mcp_transport_routes.MCPJsonRpcRequest(
+            id="request-timeout",
+            method="tools/call",
+            params={"name": "mutate", "server_name": server.name, "arguments": {}},
+        ),
+        user=user,
+        request=request,
+        registered_servers=[server],
+    ))
+
+    assert response.result["isError"] is True
+    assert response.result["structuredContent"]["status"] == ApprovalStatus.EXPIRED
+    assert resolved == []
+
+
+def test_postgres_transport_persists_due_expiry_without_forwarding(monkeypatch) -> None:
+    server, approval, request, user, _submitted, resolved = _postgres_transport_unit_case(
+        monkeypatch,
+        final_status=None,
+    )
+    approval.expires_at = now_utc() - timedelta(seconds=1)
+    expiry_calls = []
+
+    def expire(_approval, **_kwargs):
+        expiry_calls.append(True)
+        approval.status = ApprovalStatus.EXPIRED
+        return True
+
+    monkeypatch.setattr(mcp_transport_routes, "expire_approval", expire)
+    response = asyncio.run(mcp_transport_routes._postgres_mcp_tool_call(
+        project_id=server.project_id,
+        payload=mcp_transport_routes.MCPJsonRpcRequest(
+            id="request-expired",
+            method="tools/call",
+            params={"name": "mutate", "server_name": server.name, "arguments": {}},
+        ),
+        user=user,
+        request=request,
+        registered_servers=[server],
+    ))
+
+    assert response.result["isError"] is True
+    assert response.result["structuredContent"]["status"] == ApprovalStatus.EXPIRED
+    assert len(expiry_calls) == 1
+    assert resolved == []
 
 
 def setup_function() -> None:
@@ -530,3 +800,21 @@ def test_mcp_jsonrpc_returns_404_for_unknown_project() -> None:
     )
 
     assert response.status_code == 404
+
+
+def test_mcp_jsonrpc_fails_closed_when_app_store_is_not_sqlite(monkeypatch) -> None:
+    monkeypatch.setattr(app.state, "mcp_child_server_repository", object())
+    project_id = _create_project()
+    before_pending_ids = set(store.mcp_pending_requests)
+    before_received = child_received_count_for_test()
+
+    response = _jsonrpc(
+        project_id,
+        "tools/call",
+        {"name": "update_config", "arguments": {"key": "demo", "value": "must-not-run"}, "mutating": True},
+    )
+
+    assert response.status_code == 503
+    assert "durable runtime" in response.json()["detail"]
+    assert set(store.mcp_pending_requests) == before_pending_ids
+    assert child_received_count_for_test() == before_received

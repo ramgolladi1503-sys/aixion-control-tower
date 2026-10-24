@@ -27,6 +27,7 @@ from .store import store
 FORWARDED_AFTER_APPROVAL = "FORWARDED_AFTER_APPROVAL"
 MCP_PENDING_FORWARD_FAILED = "MCP_PENDING_FORWARD_FAILED"
 MCP_PENDING_DEAD_LETTERED = "MCP_PENDING_DEAD_LETTERED"
+MCP_PENDING_FORWARD_OUTCOME_UNKNOWN = "FORWARD_OUTCOME_UNKNOWN"
 MCP_MUTATING_TOOL_NAMES = {"write_file", "edit_file", "apply_patch", "github_create_pr"}
 FINAL_PENDING_STATUSES = {
     MCPPendingStatus.FORWARDED,
@@ -123,11 +124,15 @@ class MCPGatewayApprovalDecisionLayer:
                     status=approval.status if approval else None,
                     reason=f"MCP pending request is already leased by {pending.lease_owner}.",
                 )
-            pending.status = MCPPendingStatus.WAITING_FOR_APPROVAL
-            pending.lease_owner = None
-            pending.lease_expires_at = None
-            pending.updated_at = now_utc()
-            store.persist()
+            self._mark_forward_outcome_unknown(pending)
+            self._pending_calls.pop(approval_request_id, None)
+            return MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval_request_id,
+                status=approval.status if approval else None,
+                reason="MCP forwarding lease expired with an unknown child-server outcome; request was not replayed.",
+            )
 
         if not approval:
             self._mark_pending_status(approval_request_id, MCPPendingStatus.ORPHANED)
@@ -209,6 +214,7 @@ class MCPGatewayApprovalDecisionLayer:
     @staticmethod
     def approve_for_test(approval_request_id: str, *, actor: str = "side-channel-test") -> ApprovalRequest:
         approval = store.approval_requests[approval_request_id]
+        approval.approved_payload_hash_version = 2
         approval.approved_payload_hash = compute_approval_payload_hash(approval)
         approval.approved_at = now_utc()
         approval.approved_by_user_id = actor
@@ -241,6 +247,7 @@ class MCPGatewayApprovalDecisionLayer:
     def _create_approval_request(self, call: MCPGatewayToolCall) -> ApprovalRequest:
         approval = ApprovalRequest(
             project_id=self.project_id,
+            workspace_id=store.projects[self.project_id].workspace_id,
             title=f"Approve MCP tool call: {call.tool_name}",
             summary=f"Gateway intercepted mutating MCP call for {call.server_name}.{call.tool_name}",
             agent_name="mcp-gateway",
@@ -257,6 +264,7 @@ class MCPGatewayApprovalDecisionLayer:
         )
         pending = MCPPendingRequest(
             project_id=self.project_id,
+            workspace_id=store.projects[self.project_id].workspace_id,
             approval_request_id=approval.id,
             server_name=call.server_name,
             tool_name=call.tool_name,
@@ -294,7 +302,7 @@ class MCPGatewayApprovalDecisionLayer:
     def _acquire_pending_lease(self, pending: MCPPendingRequest) -> bool:
         if pending.status == MCPPendingStatus.FORWARDING and pending.lease_expires_at and pending.lease_expires_at > now_utc():
             return False
-        if pending.status not in {MCPPendingStatus.WAITING_FOR_APPROVAL, MCPPendingStatus.FORWARDING}:
+        if pending.status != MCPPendingStatus.WAITING_FOR_APPROVAL:
             return False
         pending.status = MCPPendingStatus.FORWARDING
         pending.attempts += 1
@@ -303,6 +311,31 @@ class MCPGatewayApprovalDecisionLayer:
         pending.updated_at = now_utc()
         store.persist()
         return True
+
+    @staticmethod
+    def _mark_forward_outcome_unknown(pending: MCPPendingRequest) -> None:
+        pending.status = MCPPendingStatus.DEAD_LETTER
+        pending.last_error = MCP_PENDING_FORWARD_OUTCOME_UNKNOWN
+        pending.lease_owner = None
+        pending.lease_expires_at = None
+        pending.updated_at = now_utc()
+        store.audit_events.append(
+            AuditEvent(
+                event_type="mcp.forward_outcome_unknown",
+                actor="mcp-gateway",
+                entity_id=pending.approval_request_id,
+                workspace_id=pending.workspace_id,
+                details={
+                    "mcp_pending_request_id": pending.id,
+                    "project_id": pending.project_id,
+                    "server_name": pending.server_name,
+                    "tool_name": pending.tool_name,
+                    "attempts": pending.attempts,
+                    "reason": MCP_PENDING_FORWARD_OUTCOME_UNKNOWN,
+                },
+            )
+        )
+        store.persist()
 
     def _handle_forward_failure(self, approval: ApprovalRequest, call: MCPGatewayToolCall, result: dict[str, Any]) -> None:
         pending = self._pending_for_approval(approval.id)

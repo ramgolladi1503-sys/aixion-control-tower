@@ -6,7 +6,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.agent_worker_branch_plan import run_agent_worker_branch_plan_dry_run, validate_branch_plan
-from app.models import AgentProvider, Project
+from app.models import ApprovalRequest, ApprovalStatus, AgentProvider, Project, RiskAssessment, RiskLevel
 from app.store import store
 
 
@@ -20,8 +20,18 @@ def _approved_task(
     branch_preference: str | None = None,
     title: str = "Build worker branch planner",
 ) -> AgentTask:
-    project = Project(name="Branch Planner", description="demo")
+    project = Project(name="Branch Planner", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
+    approval = ApprovalRequest(
+        project_id=project.id,
+        title=f"{title} authorization",
+        summary="Approval required before worker claims this task.",
+        target_branch="feature/branch-planner",
+        files=[],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.APPROVED,
+    )
+    store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
         project_id=project.id,
@@ -30,7 +40,7 @@ def _approved_task(
         repository=repository,
         branch_preference=branch_preference,
         status=AgentTaskStatus.APPROVED,
-        approval_request_id="approval_branch_plan",
+        approval_request_id=approval.id,
     )
     store.agent_tasks[task.id] = task
     store.persist()

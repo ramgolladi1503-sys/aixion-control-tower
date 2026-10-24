@@ -57,7 +57,7 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Android tests | Android JVM tests pass | `cd mobile/android && ./gradlew testDebugUnitTest` |
 | Android session lifecycle | Expired/invalid sessions are classified and cleared | `AuthFailureTest` + Account manual check |
 | Android role visibility | Account screen shows current backend role after `/auth/me` | Manual Account check |
-| Android invite registration | Account screen supports invite code for non-bootstrap registration | Manual Account check |
+| Android account registration | Account screen supports independent owner signup and invite-based joining | Manual Account check |
 | Android owner session controls | Account screen lists sessions and can expire another user's access | Manual Account check |
 | Android work-order provenance | Work Orders show Manual User Source or Verified Agent Source | `docs/ANDROID_RELEASE_SMOKE_CHECKLIST.md` + `WorkOrderRepositoryTest` |
 | Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
@@ -67,7 +67,7 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Auth-enabled demo | Android `Acct` login/register/session verification works and protected screens load | `AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true` path below |
 | Owner role management | Owner can list users and promote/demote while last owner is protected | API/manual validation below |
 | Owner invite management | Owner can create/list/revoke invites and audit events exist | API/manual validation below |
-| Invite acceptance | Non-bootstrap registration requires matching pending invite code | API/manual validation below |
+| Invite acceptance | Joining an existing account requires a matching pending invite code | API/manual validation below |
 | Owner session management | Owner can list sessions and revoke another user's sessions | API/manual validation below |
 | Physical phone demo | Phone reaches backend over LAN | `./gradlew assembleDebug -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/` |
 | MCP approval path | Request waits, approval opens, phone approves, resolve forwards | Manual path below or runbook |
@@ -162,9 +162,8 @@ REVIEWER    inspect evidence and make approval decisions
 Registration rule:
 
 ```text
-first registered user -> OWNER without invite
-later registered users -> require matching pending invite code
-later user role -> invite role
+registration without invite -> new OWNER account and isolated workspace
+registration with invite -> invited role in the invite owner's workspace
 ```
 
 Session rule:
@@ -341,29 +340,29 @@ Validation steps:
 
 1. Open Android app.
 2. Open `Acct`.
-3. Register the first user with email, display name, and a password of at least 12 characters. Leave invite code blank.
-4. Confirm first user becomes OWNER and session becomes active.
-5. Create an invite as OWNER.
-6. Register a second user with the invited email, password, display name, and invite code.
-7. Confirm second user receives the invite role.
-8. Confirm Account shows the current backend role.
-9. Confirm owner role, invite, and access-management panels load.
-10. Tap `Verify session`.
-11. Confirm session verification succeeds.
-12. Open Home, Review, MCP Queue, Audit, and Acct.
-13. Confirm protected screens load after login.
-14. Clear saved session from `Acct`.
-15. Confirm protected requests fail until login/register again.
-16. Login again.
-17. Confirm protected screens work again.
+3. Register an owner account with email, display name, and a password of at least 12 characters. Leave invite code blank.
+4. Confirm the user becomes OWNER and session becomes active.
+5. Register a second owner account without an invite and confirm its workspace is distinct.
+6. From the first account, create an invite for a reviewer.
+7. Register that reviewer with the invited email, password, display name, and invite code.
+8. Confirm the reviewer receives the invite role and joins only the first account's workspace.
+9. Confirm Account shows the current backend role.
+10. Confirm owner role, invite, and access-management panels load.
+11. Tap `Verify session`.
+12. Confirm session verification succeeds.
+13. Open Home, Review, MCP Queue, Audit, and Acct.
+14. Confirm protected screens load after login.
+15. Clear saved session from `Acct`.
+16. Confirm protected requests fail until login/register again.
+17. Login again.
+18. Confirm protected screens work again.
 
 Expected behavior:
 
 ```text
 not logged in + auth enabled -> protected calls fail
-first registration with no users -> OWNER bootstrap
-later registration without invite code -> 403
-later registration with matching pending invite code -> success
+registration without invite -> OWNER in a new isolated workspace
+registration with matching pending invite code -> invited user joins invite owner's workspace
 logged in + valid token -> protected calls work
 invalid/expired token -> Account clears saved session and asks operator to log in again
 network/backend failure -> saved token is not automatically cleared
@@ -578,7 +577,7 @@ auth.sessions_revoked, when session management is exercised
 | Invite tests fail | Invite administration or acceptance regression | Fix before demo. |
 | Session tests fail | Session listing/revocation regression | Fix before demo. |
 | Invalid profile | `AIXION_PROFILE` typo | Use `local`, `demo`, `test`, or `production`. |
-| 403 on later registration | Missing invite code or email mismatch | Use the owner-issued invite code for that exact email. |
+| 403 on invite registration | Invite email mismatch or workspace authority failure | Use the owner-issued invite code for that exact email. |
 | 409 on invite registration | Invite is accepted, revoked, or expired | Create a fresh invite if appropriate. |
 | 409 on self session revoke | Correct owner safety guard | Revoke another user's sessions, not your own. |
 | Last owner demotion returns 409 | Correct safety guard | Create/promote another owner before demoting. |
@@ -616,7 +615,7 @@ Unless each claim has direct evidence.
 Safe claim after this checklist passes:
 
 ```text
-This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, first-pass role enforcement, owner-only role management, owner-only invite onboarding after bootstrap, owner-only access expiry, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
+This is a strong demo-grade MVP proving mobile-controlled MCP approval, Android account/session flow, isolated owner workspaces, invite-scoped team onboarding, first-pass role enforcement, owner-only role/session management, environment profile discipline, queue refresh, exactly-once forwarding, audit traceability, and Android debug/release-variant compilation.
 ```
 
 Unsafe claim:

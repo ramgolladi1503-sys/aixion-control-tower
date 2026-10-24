@@ -4,7 +4,11 @@ import com.aixion.controltower.core.api.ControlTowerApi
 import com.aixion.controltower.core.api.dto.AccountDeletionInfoDto
 import com.aixion.controltower.core.api.dto.AccountDeletionRequestDto
 import com.aixion.controltower.core.api.dto.AccountDeletionResponseDto
+import com.aixion.controltower.core.api.dto.AgentCreateRequestDto
+import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
+import com.aixion.controltower.core.api.dto.AgentRegistrationResponseDto
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryResponseDto
 import com.aixion.controltower.core.api.dto.AuditEventDto
 import com.aixion.controltower.core.api.dto.AuthResponseDto
 import com.aixion.controltower.core.api.dto.AuthUserDto
@@ -22,6 +26,9 @@ import com.aixion.controltower.core.api.dto.ConnectorSimulationResponseDto
 import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
 import com.aixion.controltower.core.api.dto.ConnectorTemplateListDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
+import com.aixion.controltower.core.api.dto.DeviceRegistrationDto
+import com.aixion.controltower.core.api.dto.DeviceRegistrationRequestDto
+import com.aixion.controltower.core.api.dto.ExternalAgentDto
 import com.aixion.controltower.core.api.dto.IdeaCreateDto
 import com.aixion.controltower.core.api.dto.IdeaDto
 import com.aixion.controltower.core.api.dto.InviteCreateRequestDto
@@ -53,7 +60,10 @@ open class BaseFakeControlTowerApi : ControlTowerApi {
     override suspend fun verifyEmail(payload: VerifyEmailRequestDto): VerifyEmailResponseDto = unsupported()
     override suspend fun resendVerification(payload: ResendVerificationRequestDto): RegistrationResponseDto = unsupported()
     override suspend fun login(payload: LoginRequestDto): AuthResponseDto = unsupported()
+    override suspend fun logout() = Unit
     override suspend fun me(): AuthUserDto = unsupported()
+    override suspend fun registerNotificationDevice(payload: DeviceRegistrationRequestDto): DeviceRegistrationDto = unsupported()
+    override suspend fun unregisterNotificationDevice(deviceId: String) = Unit
     override suspend fun accountDeletionInfo(): AccountDeletionInfoDto = AccountDeletionInfoDto(
         app = "Aixion Control Tower",
         status = "available",
@@ -72,11 +82,18 @@ open class BaseFakeControlTowerApi : ControlTowerApi {
     override suspend fun revokeUserSessions(userId: String): SessionRevokeResponseDto = unsupported()
     override suspend fun listProjects(): List<ProjectDto> = emptyList()
     override suspend fun createProject(payload: ProjectCreateDto): ProjectDto = unsupported()
+    override suspend fun listExternalAgents(): List<ExternalAgentDto> = emptyList()
+    override suspend fun createExternalAgent(payload: AgentCreateRequestDto): AgentRegistrationResponseDto = unsupported()
+    override suspend fun getExternalAgentCredentials(agentId: String): AgentCredentialStatusDto = unsupported()
+    override suspend fun rotateExternalAgentToken(agentId: String): AgentRegistrationResponseDto = unsupported()
+    override suspend fun revokeExternalAgentToken(agentId: String): ExternalAgentDto = unsupported()
     override suspend fun listIdeas(): List<IdeaDto> = emptyList()
     override suspend fun createIdea(payload: IdeaCreateDto): IdeaDto = unsupported()
     override suspend fun listWorkOrders(): List<WorkOrderDto> = emptyList()
     override suspend fun createWorkOrder(payload: WorkOrderCreateDto): WorkOrderDto = unsupported()
     override suspend fun listApprovals(): List<ApprovalRequestDto> = emptyList()
+    override suspend fun listApprovalHistory(limit: Int, cursor: String?): ApprovalHistoryResponseDto =
+        ApprovalHistoryResponseDto(limit = limit)
     override suspend fun getApproval(approvalId: String): ApprovalRequestDto = unsupported()
     override suspend fun decideApproval(approvalId: String, payload: DecisionRequestDto): ApprovalRequestDto = unsupported()
     override suspend fun listTestRuns(): List<TestRunDto> = emptyList()

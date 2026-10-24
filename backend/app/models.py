@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
@@ -81,6 +81,7 @@ class InviteStatus(StrEnum):
 
 
 class AgentProvider(StrEnum):
+    ANTIGRAVITY = "ANTIGRAVITY"
     CODEX = "CODEX"
     CHATGPT = "CHATGPT"
     CLAUDE = "CLAUDE"
@@ -102,6 +103,10 @@ class AgentAction(StrEnum):
     CREATE_AGENT_TASK = "CREATE_AGENT_TASK"
     APPEND_AGENT_TASK_EVENT = "APPEND_AGENT_TASK_EVENT"
     READ_AGENT_TASK = "READ_AGENT_TASK"
+    READ_APPROVAL_DECISION = "READ_APPROVAL_DECISION"
+    CONSUME_APPROVAL_DECISION = "CONSUME_APPROVAL_DECISION"
+    REPORT_APPROVAL_DELIVERY_FAILURE = "REPORT_APPROVAL_DELIVERY_FAILURE"
+    EXPIRE_OWN_APPROVAL = "EXPIRE_OWN_APPROVAL"
     EXECUTE_GITHUB = "EXECUTE_GITHUB"
 
 
@@ -112,6 +117,13 @@ class WorkOrderSourceType(StrEnum):
     MCP = "MCP"
 
 
+class Workspace(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("workspace"))
+    name: str
+    owner_user_id: str
+    created_at: datetime = Field(default_factory=now_utc)
+
+
 class User(BaseModel):
     id: str = Field(default_factory=lambda: new_id("user"))
     email: str
@@ -119,6 +131,7 @@ class User(BaseModel):
     role: UserRole = UserRole.OWNER
     password_hash: str
     password_salt: str
+    workspace_id: str | None = None
     disabled: bool = False
     email_verified: bool = False
     email_verification_hash: str | None = None
@@ -146,6 +159,7 @@ class Invite(BaseModel):
     status: InviteStatus = InviteStatus.PENDING
     expires_at: datetime
     created_by_user_id: str
+    workspace_id: str | None = None
     accepted_by_user_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
@@ -156,6 +170,7 @@ class AuthUser(BaseModel):
     email: str
     display_name: str
     role: UserRole
+    workspace_id: str | None = None
     email_verified: bool = False
 
 
@@ -178,6 +193,7 @@ class ExternalAgent(BaseModel):
     allowed_repositories: list[str] = Field(default_factory=list)
     allowed_actions: list[AgentAction] = Field(default_factory=list)
     created_by_user_id: str | None = None
+    workspace_id: str | None = None
     enabled: bool = True
     secret_hash: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
@@ -212,6 +228,8 @@ class ProjectCreate(BaseModel):
 
 class Project(ProjectCreate):
     id: str = Field(default_factory=lambda: new_id("project"))
+    workspace_id: str | None = None
+    created_by_user_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
 
 
@@ -234,6 +252,7 @@ class MCPChildServerCreate(BaseModel):
 
 class MCPChildServer(MCPChildServerCreate):
     id: str = Field(default_factory=lambda: new_id("mcp_server"))
+    workspace_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
@@ -246,6 +265,7 @@ class IdeaCreate(BaseModel):
 
 class Idea(IdeaCreate):
     id: str = Field(default_factory=lambda: new_id("idea"))
+    workspace_id: str | None = None
     created_at: datetime = Field(default_factory=now_utc)
 
 
@@ -275,6 +295,7 @@ class WorkOrder(WorkOrderCreate):
     source_task_id: str | None = None
     source_session_id: str | None = None
     created_by_user_id: str | None = None
+    workspace_id: str | None = None
     verified_source: bool = False
     created_at: datetime = Field(default_factory=now_utc)
 
@@ -305,6 +326,7 @@ class ApprovalRequestCreate(BaseModel):
     source_agent_id: str | None = None
     source_agent_name: str | None = None
     source_session_id: str | None = None
+    source_invocation_id: str | None = Field(default=None, min_length=1, max_length=256)
     source_task_url: str | None = None
 
 
@@ -323,12 +345,16 @@ class ApprovalRequest(ApprovalRequestCreate):
     source_agent_id: str | None = None
     source_agent_name: str | None = None
     source_session_id: str | None = None
+    source_invocation_id: str | None = Field(default=None, min_length=1, max_length=256)
     source_task_url: str | None = None
     created_by_user_id: str | None = None
+    workspace_id: str | None = None
     verified_source: bool = False
     approved_payload_hash: str | None = None
+    approved_payload_hash_version: Literal[1, 2] = 1
     approved_at: datetime | None = None
     approved_by_user_id: str | None = None
+    expires_at: datetime | None = None
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)
 
@@ -338,9 +364,80 @@ class ApprovalRequest(ApprovalRequestCreate):
         return AgentProvider.MANUAL if value is None else value
 
 
+class ApprovalHistoryRequestSnapshot(BaseModel):
+    """Immutable request fields displayed for a hash-verified decision record."""
+
+    id: str
+    project_id: str
+    work_order_id: str | None = None
+    title: str
+    summary: str
+    agent_name: str
+    target_branch: str
+    files: list[FileChange]
+    test_plan: list[str] = Field(default_factory=list)
+    rollback_plan: str = ""
+    source_provider: AgentProvider
+    source_agent_id: str | None = None
+    source_agent_name: str | None = None
+    source_session_id: str | None = None
+    source_invocation_id: str | None = None
+    source_task_url: str | None = None
+    risk: RiskAssessment
+
+    @classmethod
+    def from_approval(cls, approval: ApprovalRequest) -> ApprovalHistoryRequestSnapshot:
+        return cls(
+            id=approval.id,
+            project_id=approval.project_id,
+            work_order_id=approval.work_order_id,
+            title=approval.title,
+            summary=approval.summary,
+            agent_name=approval.agent_name,
+            target_branch=approval.target_branch,
+            files=approval.files,
+            test_plan=approval.test_plan,
+            rollback_plan=approval.rollback_plan,
+            source_provider=approval.source_provider,
+            source_agent_id=approval.source_agent_id,
+            source_agent_name=approval.source_agent_name,
+            source_session_id=approval.source_session_id,
+            source_invocation_id=approval.source_invocation_id,
+            source_task_url=approval.source_task_url,
+            risk=approval.risk,
+        )
+
+
+class ApprovalDecisionHistoryEntry(BaseModel):
+    audit_event_id: str
+    approval_id: str
+    decision: str
+    reason: str | None = None
+    decided_at: datetime
+    reviewer_label: str
+    delivery_status: Literal[
+        "NOT_CONFIRMED",
+        "NOT_APPLICABLE",
+        "AWAITING_DELIVERY",
+        "EXPIRED",
+        "CONSUMED",
+        "DELIVERY_UNCONFIRMED",
+    ] = "NOT_CONFIRMED"
+    request_snapshot_verified: bool
+    request_snapshot: ApprovalHistoryRequestSnapshot | None = None
+
+
+class ApprovalDecisionHistoryResponse(BaseModel):
+    events: list[ApprovalDecisionHistoryEntry] = Field(default_factory=list)
+    limit: int
+    has_more: bool
+    next_cursor: str | None = None
+
+
 class MCPPendingRequest(BaseModel):
     id: str = Field(default_factory=lambda: new_id("mcp_pending"))
     project_id: str
+    workspace_id: str | None = None
     approval_request_id: str
     server_name: str
     tool_name: str
@@ -390,16 +487,35 @@ class Notification(BaseModel):
     body: str
     entity_type: str
     entity_id: str
+    workspace_id: str | None = None
     user_id: str | None = None
+    approval_request_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+    )
     status: NotificationStatus = NotificationStatus.UNREAD
     push_status: str = "PENDING"
     push_error: str | None = None
+    push_attempts: int = Field(default=0, ge=0)
+    push_next_attempt_at: datetime | None = None
+    push_lease_expires_at: datetime | None = None
     created_at: datetime = Field(default_factory=now_utc)
+
+    @property
+    def push_entity_type(self) -> str:
+        return "approval_request" if self.approval_request_id else self.entity_type
+
+    @property
+    def push_entity_id(self) -> str:
+        return self.approval_request_id or self.entity_id
 
 
 class DeviceRegistration(BaseModel):
     id: str = Field(default_factory=lambda: new_id("device"))
     user_id: str | None = None
+    workspace_id: str | None = None
     platform: str = "android"
     token: str
     app_version: str = ""
@@ -412,5 +528,6 @@ class AuditEvent(BaseModel):
     event_type: str
     actor: str = "system"
     entity_id: str
+    workspace_id: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=now_utc)

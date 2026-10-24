@@ -12,7 +12,7 @@ from app.agent_worker_github_pr import GitHubPullRequestCreateResult
 from app.agent_worker_orchestrator import run_approved_agent_task_worker_flow
 from app.agent_worker_validation_runner import CommandExecutionResult
 from app.main import app
-from app.models import Project
+from app.models import Project, Workspace
 from app.store import store
 
 client = TestClient(app)
@@ -117,9 +117,21 @@ def setup_function() -> None:
 
 
 def _project() -> Project:
-    project = Project(name="Product Regression", description="approval-to-worker regression")
+    project = Project(
+        name="Product Regression",
+        description="approval-to-worker regression",
+        workspace_id="workspace-product-regression",
+    )
+    store.workspaces[project.workspace_id] = Workspace(
+        id=project.workspace_id,
+        name="Product Regression Workspace",
+        owner_user_id="dev_user",
+    )
+    # Keep the durable row aligned with the approval repository's parent checks.
     store.projects[project.id] = project
-    store.persist()
+    from app.main import persist
+
+    persist()
     return project
 
 

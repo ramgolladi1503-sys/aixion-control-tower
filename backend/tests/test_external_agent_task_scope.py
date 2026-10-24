@@ -7,6 +7,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.agent_task_models import AgentTaskStatus
+from app.approval_decisions import agent_task_repository
 from app.main import app
 from app.models import AgentAction, AgentAuthType, AgentProvider, ExternalAgent, Project
 from app.store import store
@@ -78,6 +79,10 @@ def test_external_agent_can_create_owned_agent_task_with_scoped_token() -> None:
     assert store.agent_tasks[task["id"]].external_agent_id == agent_id
     assert any(event.event_type == "TASK_CREATED" for event in store.agent_task_events.values())
     assert any(audit.event_type == "agent_task.created_by_agent" for audit in store.audit_events)
+    store.agent_tasks.clear()
+    store.agent_task_events.clear()
+    assert agent_task_repository.get(task["id"]) is not None
+    assert agent_task_repository.list_events(task["id"])
 
 
 def test_external_agent_can_read_own_task_and_events() -> None:
@@ -112,6 +117,10 @@ def test_external_agent_can_append_event_to_own_task() -> None:
     assert event["metadata"]["agent_id"] == agent_id
     assert store.agent_tasks[created["id"]].status == AgentTaskStatus.PLANNING
     assert any(audit.event_type == "agent_task.event_recorded_by_agent" for audit in store.audit_events)
+    store.agent_tasks.clear()
+    store.agent_task_events.clear()
+    assert agent_task_repository.get(created["id"]).status == AgentTaskStatus.PLANNING
+    assert agent_task_repository.list_events(created["id"])[-1].id == event["id"]
 
 
 def test_external_agent_requires_allowed_create_task_action() -> None:

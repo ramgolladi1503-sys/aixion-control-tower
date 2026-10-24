@@ -18,6 +18,19 @@ Do not claim signed release readiness until a real keystore-backed APK/AAB has b
 
 Do not claim Play Store readiness until signing, store metadata, privacy/compliance, production backend configuration, and physical-device release smoke testing are complete.
 
+## Android build JDK
+
+Use JDK 17 with the checked-in Gradle wrapper and Kotlin Gradle plugin. On macOS,
+select it explicitly when another JDK is the system default:
+
+```bash
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+
+The current Kotlin build-script toolchain fails under JDK 25. Do not interpret
+that toolchain error as an Android source or API URL failure.
+
 Privacy/data-safety drafts now live at:
 
 ```text
@@ -33,7 +46,7 @@ Release validation currently proves:
 
 1. The Android release variant compiles.
 2. Release-only build configuration does not break compilation.
-3. The same configured API base URL mechanism works for release builds.
+3. Release builds require an explicitly configured HTTPS API base URL.
 4. CI or local commands can catch Android release compile failures before merge.
 5. The build can optionally sign the release variant when valid local signing values are present.
 
@@ -59,6 +72,11 @@ cd mobile/android
 ./gradlew assembleDebug
 ```
 
+Debug builds use the separate application ID `com.aixion.controltower.debug`.
+This lets local and instrumentation builds coexist with the release-identity
+application without replacing its app data. Release builds keep the
+`com.aixion.controltower` application ID.
+
 Default backend URL:
 
 ```text
@@ -69,21 +87,21 @@ That is correct for Android emulator only.
 
 ## Local unsigned release variant build
 
-Use this to prove the release variant compiles without signing values:
+Use `https://aixionlab.com/` only to prove release compilation. It is the Aixion Lab website, not a Control Tower API endpoint; this build is not usable for connecting to a backend and must not be distributed:
 
 ```bash
 cd mobile/android
-./gradlew assembleRelease
+./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/
 ```
 
-For a release build pointed at a LAN backend:
-
-```bash
-cd mobile/android
-./gradlew assembleRelease -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/
-```
-
-The API base URL must end with `/` because Retrofit requires a trailing slash.
+Release API URLs must use HTTPS, include a dotted DNS host, and omit
+credentials, query, and fragment components. The build rejects localhost,
+local hostnames, IP literals, reserved `.test`/`.invalid` hosts, and the
+reserved `example.com`, `example.net`, and `example.org` domains. The URL must
+end with `/` because Retrofit requires a trailing slash. Use the actual HTTPS
+staging or production URL for an installable release artifact. This check
+validates URL syntax only; it does not verify domain ownership, DNS answers,
+TLS configuration, or service reachability.
 
 ## Local signed release build
 
@@ -118,9 +136,12 @@ ANDROID_KEY_PASSWORD=your-local-key-password
 Then build:
 
 ```bash
-./gradlew assembleRelease
-./gradlew bundleRelease
+./gradlew assembleRelease -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set an HTTPS API URL}"
+./gradlew bundleRelease -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set an HTTPS API URL}"
 ```
+
+Set `AIXION_RELEASE_API_URL` in the shell or CI secret/configuration. Do not
+use a LAN, loopback, or emulator URL for release builds.
 
 Expected outputs:
 
@@ -139,7 +160,8 @@ CI should run without signing secrets:
 cd mobile/android
 ./gradlew testDebugUnitTest
 ./gradlew assembleDebug
-./gradlew assembleRelease
+./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/
+./gradlew :app:verifyReleaseApiUrlGuard
 ```
 
 This means every PR must prove:
@@ -157,7 +179,7 @@ Hard truth: this is still not the same as a signed production release.
 After running without signing values:
 
 ```bash
-./gradlew assembleRelease
+./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/
 ```
 
 Expected output location is normally:
@@ -213,7 +235,7 @@ For Play Store, prefer Android App Bundle output:
 
 ```bash
 cd mobile/android
-./gradlew bundleRelease
+./gradlew bundleRelease -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set an HTTPS API URL}"
 ```
 
 Expected artifact:
@@ -239,7 +261,7 @@ The CI signing flow should support:
 
 1. Decode keystore from secret into a temporary file.
 2. Pass signing values through environment variables.
-3. Run `./gradlew bundleRelease`.
+3. Run `./gradlew bundleRelease -PAIXION_API_BASE_URL="$AIXION_RELEASE_API_URL"` with the real HTTPS URL.
 4. Upload the AAB as a workflow artifact.
 5. Never echo secrets.
 6. Never commit the keystore.
@@ -313,8 +335,9 @@ docs/PLAY_STORE_DATA_SAFETY_DRAFT.md
 
 - [ ] `./gradlew testDebugUnitTest` passes.
 - [ ] `./gradlew assembleDebug` passes.
-- [ ] `./gradlew assembleRelease` passes.
-- [ ] `./gradlew bundleRelease` passes with real signing values.
+- [ ] `./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/` passes as a compile-only check.
+- [ ] `./gradlew :app:verifyReleaseApiUrlGuard` passes all accepted/rejected URL cases.
+- [ ] `./gradlew bundleRelease -PAIXION_API_BASE_URL="$AIXION_RELEASE_API_URL"` passes with the real HTTPS URL and signing values.
 - [ ] Signed release APK or AAB is generated.
 - [ ] Signed artifact installs or upload-validates.
 - [ ] Version code is incremented.
@@ -401,6 +424,9 @@ bash scripts/run_demo_server.sh
 http://YOUR_LAN_IP:8000/health
 ```
 
+This HTTP/LAN path is for a debug APK only. Release builds reject HTTP and
+require a reachable HTTPS API URL.
+
 3. APK is built with:
 
 ```bash
@@ -486,6 +512,7 @@ Production mobile deployment is solved.
 | `assembleDebug` fails | Debug build broken | Fix before demo. |
 | `assembleRelease` fails | Release variant broken | Fix before claiming release readiness. |
 | `bundleRelease` fails | App Bundle release path or signing path is not ready | Fix before Play Store upload. |
+| Release build rejects API URL | URL is missing or is not valid HTTPS | Configure the intended HTTPS staging/production URL; never switch release traffic to HTTP. |
 | APK cannot reach backend | Wrong API URL or LAN/network issue | Prove `/health` from phone first. |
 | APK not installable | Likely unsigned/release signing issue | Use debug for demo or provide real signing values. |
 | Missing signing secrets | Expected until signing values exist | Do not claim signed release. |

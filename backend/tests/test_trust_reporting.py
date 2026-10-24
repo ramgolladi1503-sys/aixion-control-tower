@@ -7,6 +7,7 @@ os.environ.setdefault("AIXION_PROFILE", "test")
 os.environ.setdefault("AIXION_LEASE_SIGNING_KEY", "reporting-test-signing-key")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.approval_integrity import compute_approval_payload_hash
 from app.models import (
     AgentProvider,
     ApprovalRequest,
@@ -75,8 +76,8 @@ def _strict_action() -> ProposedAction:
         status=ApprovalStatus.APPROVED,
         created_by_user_id="creator",
         approved_by_user_id="reviewer",
-        approved_payload_hash="sealed-reporting-hash",
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
@@ -89,6 +90,7 @@ def _strict_action() -> ProposedAction:
         status=AgentTaskStatus.APPROVED,
     )
     store.agent_tasks[task.id] = task
+    store.persist()
     lease = issue_capability_lease(
         CapabilityLeaseCreate(
             approval_request_id=approval.id,

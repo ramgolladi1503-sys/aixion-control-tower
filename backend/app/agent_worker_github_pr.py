@@ -10,10 +10,16 @@ from typing import Any, Protocol
 import httpx
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
+from .agent_task_repository import AgentTaskRepository
 from .agent_worker_branch_plan import _planned_branch_for_task, validate_branch_plan
-from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
-from .models import ApprovalRequest, AuditEvent
-from .store import store
+from .agent_worker_claims import (
+    claim_agent_task_for_worker,
+    claim_first_approved_agent_task_for_worker,
+    commit_agent_task_worker_outcome,
+)
+from .approval_decisions import agent_task_repository, approval_decision_repository
+from .approval_repository import ApprovalDecisionRepository
+from .models import ApprovalRequest
 
 GITHUB_API_BASE_URL = "https://api.github.com"
 DEFAULT_BASE_BRANCH = "main"
@@ -131,36 +137,13 @@ class AgentWorkerGitHubPRResult:
         return payload
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _audit(event_type: str, entity_id: str, details: dict[str, Any], actor: str) -> AuditEvent:
-    event = AuditEvent(event_type=event_type, entity_id=entity_id, details=details, actor=actor)
-    store.audit_events.append(event)
-    return event
-
-
-def _release_task(task: AgentTask, lease_token: str | None, worker_id: str) -> None:
-    if lease_token and task.worker_lease_token != lease_token:
-        _audit(
-            "agent_worker.lease_release_skipped",
-            task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "current_lease_token": task.worker_lease_token},
-            actor=worker_id,
-        )
-        return
-    task.worker_lease_owner = None
-    task.worker_lease_expires_at = None
-    task.worker_lease_token = None
-    task.updated_at = _now()
-    _audit("agent_worker.task_released", task.id, {"worker_id": worker_id, "lease_token": lease_token}, actor=worker_id)
-
-
-def _linked_approval(task: AgentTask) -> ApprovalRequest | None:
+def _linked_approval(
+    task: AgentTask,
+    repository: ApprovalDecisionRepository | None = None,
+) -> ApprovalRequest | None:
     if not task.approval_request_id:
         return None
-    return store.approval_requests.get(task.approval_request_id)
+    return (repository or approval_decision_repository).get(task.approval_request_id)
 
 
 def _default_client() -> GitHubRestPullRequestClient:
@@ -201,20 +184,16 @@ def _append_pr_created_event(
     task: AgentTask,
     approval: ApprovalRequest | None,
     worker_id: str,
-    lease_token: str | None,
     pr: GitHubPullRequestCreateResult,
 ) -> AgentTaskEvent:
-    task.status = AgentTaskStatus.READY_FOR_PR
-    task.updated_at = _now()
     event = AgentTaskEvent(
         task_id=task.id,
         event_type=AgentTaskEventType.PR_CREATED,
         message="Worker opened a GitHub pull request for human review.",
-        status=task.status,
+        status=AgentTaskStatus.READY_FOR_PR,
         actor=worker_id,
         metadata={
             "worker_id": worker_id,
-            "lease_token": lease_token,
             "approval_request_id": approval.id if approval else task.approval_request_id,
             "repository": pr.repository,
             "head_branch": pr.head_branch,
@@ -226,7 +205,6 @@ def _append_pr_created_event(
             "operation_type": "github_pull_request_creation",
         },
     )
-    store.agent_task_events[event.id] = event
     return event
 
 
@@ -238,14 +216,23 @@ def run_agent_worker_github_pr_creation(
     lease_seconds: int = 300,
     base_branch: str = DEFAULT_BASE_BRANCH,
     client: GitHubPullRequestClient | None = None,
+    task_repository: AgentTaskRepository | None = None,
+    approval_repository: ApprovalDecisionRepository | None = None,
 ) -> AgentWorkerGitHubPRResult:
     if not task_id and not first_approved:
         return AgentWorkerGitHubPRResult(success=False, worker_id=worker_id, base_branch=base_branch, reason="Provide task_id or set first_approved=true.")
 
+    active_task_repository = task_repository or agent_task_repository
+    active_approval_repository = approval_repository or approval_decision_repository
     claim = (
-        claim_first_approved_agent_task_for_worker(worker_id=worker_id, lease_seconds=lease_seconds)
+        claim_first_approved_agent_task_for_worker(
+            worker_id=worker_id, lease_seconds=lease_seconds, repository=active_task_repository
+        )
         if first_approved and not task_id
-        else claim_agent_task_for_worker(task_id=str(task_id), worker_id=worker_id, lease_seconds=lease_seconds)
+        else claim_agent_task_for_worker(
+            task_id=str(task_id), worker_id=worker_id, lease_seconds=lease_seconds,
+            repository=active_task_repository,
+        )
     )
     if not claim.success or claim.task is None:
         return AgentWorkerGitHubPRResult(
@@ -260,13 +247,18 @@ def run_agent_worker_github_pr_creation(
 
     task = claim.task
     lease_token = claim.lease_token
-    approval = _linked_approval(task)
+    approval = _linked_approval(task, active_approval_repository)
     head_branch = _planned_branch_for_task(task)
     validation_error = validate_branch_plan(task)
     if validation_error:
-        _audit("agent_worker.github_pr_refused", task.id, {"worker_id": worker_id, "lease_token": lease_token, "reason": validation_error}, actor=worker_id)
-        _release_task(task, lease_token, worker_id)
-        store.persist()
+        try:
+            commit_agent_task_worker_outcome(
+                task, worker_id=worker_id, repository=active_task_repository,
+                audit_type="agent_worker.github_pr_refused",
+                details={"reason": validation_error},
+            )
+        except Exception as error:  # noqa: BLE001 - keep an uncommitted lease release visible.
+            validation_error = f"{validation_error} Durable worker outcome could not be committed: {error}"
         return AgentWorkerGitHubPRResult(
             success=False,
             task_id=task.id,
@@ -281,8 +273,8 @@ def run_agent_worker_github_pr_creation(
         )
 
     assert task.repository is not None
-    github = client or _default_client()
     try:
+        github = client or _default_client()
         if not github.branch_exists(task.repository, head_branch):
             raise RuntimeError(f"Head branch does not exist: {head_branch}")
         if github.open_pull_request_exists(task.repository, head_branch, base_branch):
@@ -295,21 +287,20 @@ def run_agent_worker_github_pr_creation(
             base_branch,
         )
     except Exception as error:  # noqa: BLE001 - return clean worker failure.
-        _audit(
-            "agent_worker.github_pr_failed",
-            task.id,
-            {
-                "worker_id": worker_id,
-                "lease_token": lease_token,
-                "repository": task.repository,
-                "head_branch": head_branch,
-                "base_branch": base_branch,
-                "reason": str(error),
-            },
-            actor=worker_id,
-        )
-        _release_task(task, lease_token, worker_id)
-        store.persist()
+        failure_reason = str(error)
+        try:
+            commit_agent_task_worker_outcome(
+                task, worker_id=worker_id, repository=active_task_repository,
+                audit_type="agent_worker.github_pr_failed",
+                details={
+                    "repository": task.repository,
+                    "head_branch": head_branch,
+                    "base_branch": base_branch,
+                    "reason": failure_reason,
+                },
+            )
+        except Exception as commit_error:  # noqa: BLE001 - keep ambiguous external outcomes visible.
+            failure_reason = f"{failure_reason} Durable worker outcome could not be committed: {commit_error}"
         return AgentWorkerGitHubPRResult(
             success=False,
             task_id=task.id,
@@ -320,27 +311,40 @@ def run_agent_worker_github_pr_creation(
             head_branch=head_branch,
             base_branch=base_branch,
             final_status=task.status,
-            reason=str(error),
+            reason=failure_reason,
         )
 
-    event = _append_pr_created_event(task, approval, worker_id, lease_token, pr)
-    _audit(
-        "agent_worker.github_pr_created",
-        task.id,
-        {
-            "worker_id": worker_id,
-            "lease_token": lease_token,
-            "approval_request_id": approval.id if approval else task.approval_request_id,
-            "repository": pr.repository,
-            "head_branch": pr.head_branch,
-            "base_branch": pr.base_branch,
-            "pull_request_number": pr.number,
-            "pull_request_url": pr.html_url,
-        },
-        actor=worker_id,
-    )
-    _release_task(task, lease_token, worker_id)
-    store.persist()
+    event = _append_pr_created_event(task, approval, worker_id, pr)
+    try:
+        committed_task = commit_agent_task_worker_outcome(
+            task, worker_id=worker_id, repository=active_task_repository,
+            audit_type="agent_worker.github_pr_created",
+            details={
+                "approval_request_id": approval.id if approval else task.approval_request_id,
+                "repository": pr.repository,
+                "head_branch": pr.head_branch,
+                "base_branch": pr.base_branch,
+                "pull_request_number": pr.number,
+                "pull_request_url": pr.html_url,
+            },
+            event=event,
+            updated_status=AgentTaskStatus.READY_FOR_PR,
+        )
+    except Exception as error:  # noqa: BLE001 - the PR may exist; never claim durable success.
+        return AgentWorkerGitHubPRResult(
+            success=False,
+            task_id=task.id,
+            approval_request_id=approval.id if approval else task.approval_request_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            repository=pr.repository,
+            head_branch=pr.head_branch,
+            base_branch=pr.base_branch,
+            pull_request_number=pr.number,
+            pull_request_url=pr.html_url,
+            final_status=task.status,
+            reason=f"PR creation may have succeeded, but its durable outcome could not be committed: {error}",
+        )
 
     return AgentWorkerGitHubPRResult(
         success=True,
@@ -354,7 +358,7 @@ def run_agent_worker_github_pr_creation(
         pull_request_number=pr.number,
         pull_request_url=pr.html_url,
         event_id=event.id,
-        final_status=task.status,
+        final_status=committed_task.status,
         reason="GitHub pull request opened for human review. No merge performed.",
     )
 

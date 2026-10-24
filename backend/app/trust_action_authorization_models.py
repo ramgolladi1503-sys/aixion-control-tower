@@ -21,6 +21,7 @@ class ActionAuthorizationCreate(BaseModel):
 class ActionAuthorization(BaseModel):
     id: str = Field(default_factory=lambda: new_id("action_authorization"))
     action_id: str
+    workspace_id: str | None = None
     action_payload_hash: str = ""
     policy_decision_id: str
     reviewer_user_id: str

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import pytest
 
 
@@ -6,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.auth import create_registration_response, create_user
 from app.store import store
 
 client = TestClient(app)
@@ -100,3 +102,54 @@ def test_verified_user_can_read_me_with_bearer_session() -> None:
     assert response.status_code == 200
     assert response.json()["email"] == "owner@example.com"
     assert response.json()["email_verified"] is True
+
+
+def test_production_registration_queues_encrypted_code_without_returning_it(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_EMAIL_DISPATCH_ENABLED", "true")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_HOST", "smtp.test.invalid")
+    monkeypatch.setenv("AIXION_EMAIL_FROM", "verify@test.invalid")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_USERNAME", "smtp-user")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_PASSWORD", "smtp-password")
+    monkeypatch.setenv("AIXION_EMAIL_OUTBOX_KEY", bytes(range(32)).hex())
+    user = create_user("owner@example.com", PASSWORD, email_verified=False)
+
+    response = create_registration_response(user)
+
+    assert response.dev_verification_code is None
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT recipient, encrypted_code, status FROM auth_email_outbox ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "owner@example.com"
+    assert b"123456" not in row[1]
+    assert row[2] == "PENDING"
+
+
+def test_outbox_insert_failure_rolls_back_verification_hash_and_memory(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_EMAIL_DISPATCH_ENABLED", "true")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_HOST", "smtp.test.invalid")
+    monkeypatch.setenv("AIXION_EMAIL_FROM", "verify@test.invalid")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_USERNAME", "smtp-user")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_PASSWORD", "smtp-password")
+    monkeypatch.setenv("AIXION_EMAIL_OUTBOX_KEY", bytes(range(32)).hex())
+    user = create_user("owner@example.com", PASSWORD, email_verified=False)
+
+    def reject_insert(*_args, **_kwargs) -> None:
+        raise RuntimeError("simulated outbox persistence failure")
+
+    monkeypatch.setattr("app.auth.insert_verification_email", reject_insert)
+    with pytest.raises(RuntimeError, match="simulated outbox persistence failure"):
+        create_registration_response(user)
+
+    assert store.users[user.id].email_verification_hash is None
+    with store._connect() as conn:
+        user_payload = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='user' AND entity_id=?",
+            (user.id,),
+        ).fetchone()[0]
+        queued = conn.execute("SELECT COUNT(*) FROM auth_email_outbox").fetchone()[0]
+    assert json.loads(user_payload)["email_verification_hash"] is None
+    assert queued == 0

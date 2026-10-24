@@ -131,7 +131,7 @@ def setup_function() -> None:
 
 
 def _project() -> Project:
-    project = Project(name="Worker Orchestrator", description="demo")
+    project = Project(name="Worker Orchestrator", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     return project
 
@@ -139,6 +139,7 @@ def _project() -> Project:
 def _approval(project: Project) -> ApprovalRequest:
     approval = ApprovalRequest(
         project_id=project.id,
+        workspace_id=project.workspace_id,
         title="Approved orchestrated worker output",
         summary="Run worker steps in order.",
         agent_name="orchestrator",
@@ -147,6 +148,7 @@ def _approval(project: Project) -> ApprovalRequest:
         test_plan=["python -m pytest"],
         rollback_plan="Close PR or revert branch.",
         risk=RiskAssessment(level=RiskLevel.LOW),
+        status="APPROVED",
     )
     store.approval_requests[approval.id] = approval
     return approval
@@ -156,6 +158,7 @@ def _approved_task(approval: ApprovalRequest) -> AgentTask:
     task = AgentTask(
         provider=AgentProvider.CODEX,
         project_id=approval.project_id,
+        workspace_id=approval.workspace_id,
         title="Run orchestrated worker",
         goal="Branch, apply files, validate, and open PR.",
         repository="ramgolladi1503-sys/aixion-control-tower",

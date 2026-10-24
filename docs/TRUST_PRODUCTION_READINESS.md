@@ -3,10 +3,11 @@
 ## Release classification
 
 ```text
-Target: production-hardened single-node release candidate
-Not claimed: multi-node HA or unrestricted autonomous execution
+Target: controlled single-node production candidate
+Current classification: NOT PRODUCTION READY; production startup remains blocked
+Not claimed: deployability, multi-node HA, or unrestricted autonomous execution
 Merge state: draft until every deterministic gate is green
-Deployment state: not certified until a real operator campaign succeeds
+Deployment state: blocked until the full PostgreSQL runtime and operator campaign succeed
 ```
 
 ## Mandatory repository gates
@@ -39,9 +40,10 @@ credential expiry and revocation tests
 AIXION_PROFILE=production
 AIXION_AUTH_ENABLED=true
 AIXION_TRUST_ENFORCEMENT=true
-AIXION_DB_PATH=<persistent path>
+AIXION_POSTGRES_DSN=<secret-managed PostgreSQL DSN with sslmode=verify-full>
 AIXION_LEASE_SIGNING_KEY=<secret-manager value>
-FCM_SERVER_KEY=<secret-manager value>
+AIXION_FCM_PROJECT_ID=<Firebase project ID>
+GOOGLE_APPLICATION_CREDENTIALS=<protected service-account JSON path, or workload identity>
 AIXION_OWNER_TOKEN=<short-lived owner session>
 ```
 
@@ -125,11 +127,14 @@ no sustained load/chaos certification
 no multi-region disaster recovery
 ```
 
-These do not prevent a controlled single-team pilot. They must remain visible in release notes and sales material.
+These block production deployment and a hosted pilot. Local or isolated staging
+use does not establish production readiness. Keep the limitations visible in
+release notes and sales material.
 
 ## Safe release statement
 
-After repository gates and the flagship campaign pass:
+Only after repository gates, the PostgreSQL application-store cutover, recovery
+certification, and the flagship campaign pass:
 
 > Aixion is a production-hardened single-node agent trust control plane for controlled pilot use, with signed capability leases, policy-enforced durable execution, exact human exceptions, short-lived internal credentials, evidence-backed reliability, and tamper-evident audit history.
 

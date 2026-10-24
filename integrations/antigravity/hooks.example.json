@@ -1,0 +1,16 @@
+{
+  "aixion-control-tower": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /ABSOLUTE/PATH/TO/aixion-control-tower/integrations/antigravity/aixion_pre_tool_hook.py",
+            "timeout": 960
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -77,6 +77,15 @@ data class ConnectorTemplateDto(
     val tags: List<String> = emptyList()
 )
 
+fun webhookNativeSessionLimitation(providerLabel: String, connectorType: String): String? {
+    if (!connectorType.equals("WEBHOOK", ignoreCase = true)) return null
+    return if (providerLabel.equals("CODEX", ignoreCase = true)) {
+        "Webhook task intake only: this does not connect to Codex Desktop permission prompts or resume a paused native Codex session."
+    } else {
+        "Webhook task intake only: this does not intercept or resume a native agent session."
+    }
+}
+
 data class ConnectorSchemaMapperDto(
     val enabled: Boolean = true,
     val default_action: String = "CREATE_AGENT_TASK",

@@ -52,6 +52,11 @@ data class ConnectorsUiState(
     }
 }
 
+internal fun preferredConnectorTemplateId(templates: List<ConnectorTemplateDto>): String? =
+    templates.firstOrNull { it.provider_label.equals("ANTIGRAVITY", ignoreCase = true) }?.id
+        ?: templates.firstOrNull { it.provider_label.equals("CODEX", ignoreCase = true) }?.id
+        ?: templates.firstOrNull()?.id
+
 class ConnectorsViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ConnectorRepository(ApiClient.create(application.applicationContext))
     private val _state = MutableStateFlow(ConnectorsUiState())
@@ -70,7 +75,7 @@ class ConnectorsViewModel(application: Application) : AndroidViewModel(applicati
                     loading = false,
                     connectors = connectors,
                     templates = templates,
-                    selectedTemplateId = _state.value.selectedTemplateId ?: templates.firstOrNull()?.id,
+                    selectedTemplateId = _state.value.selectedTemplateId ?: preferredConnectorTemplateId(templates),
                     error = ""
                 )
             }.onFailure { error ->

@@ -6,10 +6,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 
 object LogoutConfirmationCopy {
-    const val TITLE = "Do you wish to logout?"
-    const val MESSAGE = "Your local session will be cleared and you will return to login."
-    const val CONFIRM = "Yes"
-    const val DISMISS = "No"
+    const val TITLE = "Log out of Control Tower?"
+    const val MESSAGE = "You will need to sign in again to review approvals."
+    const val CONFIRM = "Log out"
+    const val DISMISS = "Stay signed in"
 }
 
 @Composable

@@ -11,13 +11,22 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
-from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
+from .agent_task_repository import (
+    AgentTaskRepository,
+    PostgresAgentTaskRepository,
+    SQLiteAgentTaskRepository,
+)
+from .agent_worker_claims import (
+    claim_agent_task_for_worker,
+    claim_first_approved_agent_task_for_worker,
+)
 from .agent_worker_validation_plan import (
     allowed_prefix_for_command,
     validate_validation_plan,
     validation_policy_metadata,
 )
 from .models import ApprovalRequest, AuditEvent
+from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
 from .store import store
 
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -34,6 +43,12 @@ class CommandExecutionResult:
     output_truncated: bool = False
     output_chars: int = 0
     allowed_prefix: str = "UNKNOWN"
+    stdout_sha256: str | None = None
+    stdout_bytes: int | None = None
+    stderr_sha256: str | None = None
+    stderr_bytes: int | None = None
+    stream_evidence_complete: bool = False
+    output_limit_exceeded: bool = False
 
     @property
     def passed(self) -> bool:
@@ -76,7 +91,11 @@ def _release_task(task: AgentTask, lease_token: str | None, worker_id: str) -> N
         _audit(
             "agent_worker.lease_release_skipped",
             task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "current_lease_token": task.worker_lease_token},
+            {
+                "worker_id": worker_id,
+                "lease_token": lease_token,
+                "current_lease_token": task.worker_lease_token,
+            },
             actor=worker_id,
         )
         return
@@ -84,7 +103,12 @@ def _release_task(task: AgentTask, lease_token: str | None, worker_id: str) -> N
     task.worker_lease_expires_at = None
     task.worker_lease_token = None
     task.updated_at = _now()
-    _audit("agent_worker.task_released", task.id, {"worker_id": worker_id, "lease_token": lease_token}, actor=worker_id)
+    _audit(
+        "agent_worker.task_released",
+        task.id,
+        {"worker_id": worker_id, "lease_token": lease_token},
+        actor=worker_id,
+    )
 
 
 def _linked_approval(task: AgentTask) -> ApprovalRequest | None:
@@ -150,7 +174,9 @@ def execute_validation_command(
             for part in [error.stdout, error.stderr]
             if part
         )
-        summary, truncated, output_chars = _summarize_output(output or f"Command timed out after {timeout_seconds}s.")
+        summary, truncated, output_chars = _summarize_output(
+            output or f"Command timed out after {timeout_seconds}s."
+        )
         return CommandExecutionResult(
             command=command,
             exit_code=124,
@@ -188,7 +214,9 @@ def _append_validation_event(
 ) -> AgentTaskEvent:
     task.status = status
     task.updated_at = _now()
-    normalized_results = [_normalize_result_artifact(result) for result in results] if results is not None else []
+    normalized_results = (
+        [_normalize_result_artifact(result) for result in results] if results is not None else []
+    )
     event = AgentTaskEvent(
         task_id=task.id,
         event_type=event_type,
@@ -199,16 +227,87 @@ def _append_validation_event(
             "worker_id": worker_id,
             "lease_token": lease_token,
             "approval_request_id": approval.id,
-            "command_count": len(normalized_results) if results is not None else len(approval.test_plan),
+            "command_count": len(normalized_results)
+            if results is not None
+            else len(approval.test_plan),
             "commands_executed": results is not None,
             "results": [asdict(result) for result in normalized_results],
-            "artifact_summary": _artifact_summary(normalized_results) if results is not None else {},
+            "artifact_summary": _artifact_summary(normalized_results)
+            if results is not None
+            else {},
             "validation_policy": validation_policy_metadata(),
             "runner_type": "validation_command_runner",
         },
     )
     store.agent_task_events[event.id] = event
     return event
+
+
+def _build_validation_event(
+    task: AgentTask,
+    approval: ApprovalRequest,
+    worker_id: str,
+    lease_token: str | None,
+    event_type: AgentTaskEventType,
+    status: AgentTaskStatus,
+    message: str,
+    results: list[CommandExecutionResult] | None = None,
+    *,
+    include_status: bool = True,
+) -> AgentTaskEvent:
+    normalized_results = (
+        [_normalize_result_artifact(result) for result in results] if results is not None else []
+    )
+    return AgentTaskEvent(
+        task_id=task.id,
+        event_type=event_type,
+        message=message,
+        status=status if include_status else None,
+        actor=worker_id,
+        metadata={
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "approval_request_id": approval.id,
+            "command_count": len(normalized_results)
+            if results is not None
+            else len(approval.test_plan),
+            "commands_executed": results is not None,
+            "results": [asdict(result) for result in normalized_results],
+            "artifact_summary": _artifact_summary(normalized_results)
+            if results is not None
+            else {},
+            "validation_policy": validation_policy_metadata(),
+            "runner_type": "validation_command_runner",
+        },
+    )
+
+
+def _commit_postgres_refusal(
+    *,
+    repository: PostgresAgentTaskRepository,
+    task: AgentTask,
+    worker_id: str,
+    reason: str,
+    lease_token: str | None,
+) -> None:
+    updated = task.model_copy(deep=True)
+    updated.worker_lease_owner = None
+    updated.worker_lease_expires_at = None
+    updated.worker_lease_token = None
+    updated.updated_at = _now()
+    audit = AuditEvent(
+        event_type="agent_worker.validation_run_refused",
+        entity_id=task.id,
+        workspace_id=task.workspace_id,
+        actor=worker_id,
+        details={
+            "worker_id": worker_id,
+            "lease_token": lease_token,
+            "reason": reason,
+            "validation_policy": validation_policy_metadata(),
+        },
+    )
+    repository.commit_worker_outcome(expected=task, updated=updated, event=None, audit=audit)
 
 
 def run_agent_worker_validation_commands(
@@ -220,6 +319,8 @@ def run_agent_worker_validation_commands(
     cwd: Path | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     executor: Callable[[str], CommandExecutionResult] | None = None,
+    task_repository: AgentTaskRepository | None = None,
+    approval_repository: ApprovalDecisionRepository | None = None,
 ) -> AgentWorkerValidationRunResult:
     if not task_id and not first_approved:
         return AgentWorkerValidationRunResult(
@@ -228,10 +329,33 @@ def run_agent_worker_validation_commands(
             reason="Provide task_id or set first_approved=true.",
         )
 
+    postgres_mode = isinstance(task_repository, PostgresAgentTaskRepository)
+    if postgres_mode != isinstance(approval_repository, PostgresApprovalDecisionRepository):
+        raise ValueError(
+            "PostgreSQL validation requires both PostgreSQL task and approval repositories."
+        )
+    if task_repository is not None and not isinstance(
+        task_repository, (PostgresAgentTaskRepository, SQLiteAgentTaskRepository)
+    ):
+        raise ValueError("Validation task repository is not supported.")
+    if (
+        approval_repository is not None
+        and not isinstance(approval_repository, (PostgresApprovalDecisionRepository,))
+        and postgres_mode
+    ):
+        raise ValueError("PostgreSQL validation requires a PostgreSQL approval repository.")
+
     claim = (
-        claim_first_approved_agent_task_for_worker(worker_id=worker_id, lease_seconds=lease_seconds)
+        claim_first_approved_agent_task_for_worker(
+            worker_id=worker_id, lease_seconds=lease_seconds, repository=task_repository
+        )
         if first_approved and not task_id
-        else claim_agent_task_for_worker(task_id=str(task_id), worker_id=worker_id, lease_seconds=lease_seconds)
+        else claim_agent_task_for_worker(
+            task_id=str(task_id),
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            repository=task_repository,
+        )
     )
     if not claim.success or claim.task is None:
         return AgentWorkerValidationRunResult(
@@ -245,17 +369,35 @@ def run_agent_worker_validation_commands(
 
     task = claim.task
     lease_token = claim.lease_token
-    approval = _linked_approval(task)
+    approval = (
+        approval_repository.get(task.approval_request_id or "")
+        if postgres_mode and isinstance(approval_repository, PostgresApprovalDecisionRepository)
+        else _linked_approval(task)
+    )
     validation_error = validate_validation_plan(approval)
     if validation_error:
-        _audit(
-            "agent_worker.validation_run_refused",
-            task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "reason": validation_error, "validation_policy": validation_policy_metadata()},
-            actor=worker_id,
-        )
-        _release_task(task, lease_token, worker_id)
-        store.persist()
+        if postgres_mode and isinstance(task_repository, PostgresAgentTaskRepository):
+            _commit_postgres_refusal(
+                repository=task_repository,
+                task=task,
+                worker_id=worker_id,
+                reason=validation_error,
+                lease_token=lease_token,
+            )
+        else:
+            _audit(
+                "agent_worker.validation_run_refused",
+                task.id,
+                {
+                    "worker_id": worker_id,
+                    "lease_token": lease_token,
+                    "reason": validation_error,
+                    "validation_policy": validation_policy_metadata(),
+                },
+                actor=worker_id,
+            )
+            _release_task(task, lease_token, worker_id)
+            store.persist()
         return AgentWorkerValidationRunResult(
             success=False,
             task_id=task.id,
@@ -268,60 +410,149 @@ def run_agent_worker_validation_commands(
 
     assert approval is not None
     run_cwd = cwd or Path.cwd()
-    started = _append_validation_event(
-        task,
-        approval,
-        worker_id,
-        lease_token,
-        AgentTaskEventType.TESTS_STARTED,
-        AgentTaskStatus.TESTING,
-        "Worker started allowlisted validation commands.",
-        results=None,
-    )
-    _audit(
-        "agent_worker.validation_run_started",
-        task.id,
-        {"worker_id": worker_id, "lease_token": lease_token, "approval_request_id": approval.id, "validation_policy": validation_policy_metadata()},
-        actor=worker_id,
-    )
+    if postgres_mode and isinstance(task_repository, PostgresAgentTaskRepository):
+        started = _build_validation_event(
+            task,
+            approval,
+            worker_id,
+            lease_token,
+            AgentTaskEventType.TESTS_STARTED,
+            AgentTaskStatus.TESTING,
+            "Worker started allowlisted validation commands.",
+            results=None,
+            include_status=False,
+        )
+        started_audit = AuditEvent(
+            event_type="agent_task.event_recorded",
+            entity_id=task.id,
+            workspace_id=task.workspace_id,
+            actor=worker_id,
+            details={
+                "event_id": started.id,
+                "status": None,
+                "message": started.message,
+                "notification_id": None,
+            },
+        )
+        started_updated = task.model_copy(deep=True)
+        started_updated.updated_at = _now()
+        task_repository.commit_event(
+            expected=task,
+            updated=started_updated,
+            event=started,
+            audit=started_audit,
+        )
+        task = started_updated
+    else:
+        started = _append_validation_event(
+            task,
+            approval,
+            worker_id,
+            lease_token,
+            AgentTaskEventType.TESTS_STARTED,
+            AgentTaskStatus.TESTING,
+            "Worker started allowlisted validation commands.",
+            results=None,
+        )
+        _audit(
+            "agent_worker.validation_run_started",
+            task.id,
+            {
+                "worker_id": worker_id,
+                "lease_token": lease_token,
+                "approval_request_id": approval.id,
+                "validation_policy": validation_policy_metadata(),
+            },
+            actor=worker_id,
+        )
 
     results: list[CommandExecutionResult] = []
     for command in approval.test_plan:
-        runner = executor or (lambda cmd: execute_validation_command(cmd, cwd=run_cwd, timeout_seconds=timeout_seconds))
+        runner = executor or (
+            lambda cmd: execute_validation_command(
+                cmd, cwd=run_cwd, timeout_seconds=timeout_seconds
+            )
+        )
         result = _normalize_result_artifact(runner(command))
         results.append(result)
         if not result.passed:
             break
 
-    all_passed = all(result.passed for result in results) and len(results) == len(approval.test_plan)
-    finished_event_type = AgentTaskEventType.TESTS_PASSED if all_passed else AgentTaskEventType.TESTS_FAILED
+    all_passed = all(result.passed for result in results) and len(results) == len(
+        approval.test_plan
+    )
+    finished_event_type = (
+        AgentTaskEventType.TESTS_PASSED if all_passed else AgentTaskEventType.TESTS_FAILED
+    )
     finished_status = AgentTaskStatus.APPROVED if all_passed else AgentTaskStatus.FAILED
-    finished_message = "Worker validation commands passed." if all_passed else "Worker validation commands failed."
-    finished = _append_validation_event(
-        task,
-        approval,
-        worker_id,
-        lease_token,
-        finished_event_type,
-        finished_status,
-        finished_message,
-        results=results,
+    finished_message = (
+        "Worker validation commands passed." if all_passed else "Worker validation commands failed."
     )
-    _audit(
-        "agent_worker.validation_run_completed",
-        task.id,
-        {
-            "worker_id": worker_id,
-            "lease_token": lease_token,
-            "approval_request_id": approval.id,
-            "passed": all_passed,
-            "command_count": len(results),
-            "artifact_summary": _artifact_summary(results),
-        },
-        actor=worker_id,
-    )
-    _release_task(task, lease_token, worker_id)
-    store.persist()
+    if postgres_mode and isinstance(task_repository, PostgresAgentTaskRepository):
+        finished = _build_validation_event(
+            task,
+            approval,
+            worker_id,
+            lease_token,
+            finished_event_type,
+            finished_status,
+            finished_message,
+            results=results,
+        )
+        updated_task = task.model_copy(deep=True)
+        updated_task.worker_lease_owner = None
+        updated_task.worker_lease_expires_at = None
+        updated_task.worker_lease_token = None
+        updated_task.status = finished_status
+        updated_task.updated_at = _now()
+        finished_audit = AuditEvent(
+            event_type="agent_worker.validation_run_completed",
+            entity_id=task.id,
+            workspace_id=task.workspace_id,
+            actor=worker_id,
+            details={
+                "event_id": finished.id,
+                "worker_id": worker_id,
+                "lease_token": lease_token,
+                "approval_request_id": approval.id,
+                "passed": all_passed,
+                "command_count": len(results),
+                "artifact_summary": _artifact_summary(results),
+            },
+        )
+        task_repository.commit_worker_outcome(
+            expected=task,
+            updated=updated_task,
+            event=finished,
+            audit=finished_audit,
+        )
+        task = updated_task
+    else:
+        finished = _append_validation_event(
+            task,
+            approval,
+            worker_id,
+            lease_token,
+            finished_event_type,
+            finished_status,
+            finished_message,
+            results=results,
+        )
+        _audit(
+            "agent_worker.validation_run_completed",
+            task.id,
+            {
+                "worker_id": worker_id,
+                "lease_token": lease_token,
+                "approval_request_id": approval.id,
+                "passed": all_passed,
+                "command_count": len(results),
+                "artifact_summary": _artifact_summary(results),
+            },
+            actor=worker_id,
+        )
+        _release_task(task, lease_token, worker_id)
+        store.persist()
 
     return AgentWorkerValidationRunResult(
         success=all_passed,
@@ -339,13 +570,27 @@ def run_agent_worker_validation_commands(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run allowlisted validation commands for an approved AgentTask.")
+    parser = argparse.ArgumentParser(
+        description="Run allowlisted validation commands for an approved AgentTask."
+    )
     parser.add_argument("--task-id", default=None, help="Specific AgentTask id to validate.")
-    parser.add_argument("--first-approved", action="store_true", help="Use the first approved task with a linked approval.")
-    parser.add_argument("--worker-id", default="agent-worker-validation-runner", help="Worker id written into task events.")
-    parser.add_argument("--lease-seconds", type=int, default=300, help="Claim lease duration in seconds.")
+    parser.add_argument(
+        "--first-approved",
+        action="store_true",
+        help="Use the first approved task with a linked approval.",
+    )
+    parser.add_argument(
+        "--worker-id",
+        default="agent-worker-validation-runner",
+        help="Worker id written into task events.",
+    )
+    parser.add_argument(
+        "--lease-seconds", type=int, default=300, help="Claim lease duration in seconds."
+    )
     parser.add_argument("--cwd", default=".", help="Working directory for command execution.")
-    parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="Timeout per command.")
+    parser.add_argument(
+        "--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="Timeout per command."
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON result.")
     return parser
 
