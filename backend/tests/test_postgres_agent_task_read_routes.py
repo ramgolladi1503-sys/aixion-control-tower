@@ -19,7 +19,7 @@ from app.agent_task_routes import MaintainerDependency, ReviewerDependency
 from app.approval_recovery import reconcile_linked_approval_tasks
 from app.approval_integrity import compute_approval_payload_hash
 from app.application_repositories import ApplicationRepositories
-from app.models import ApprovalRequest, ApprovalStatus, AuthUser, Project, User, UserRole, Workspace
+from app.models import ApprovalRequest, ApprovalStatus, AuthUser, Project, User, UserRole, Workspace, WorkOrder
 from app.postgres_database import run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
 from app.settings import get_settings
@@ -207,6 +207,67 @@ def test_postgres_task_linked_approval_does_not_project_to_sqlite(
     assert set(store.approval_requests) == before_approval_ids
     assert {event.id for event in store.audit_events} == before_audit_ids
     assert set(store.notifications) == before_notification_ids
+
+
+def test_postgres_task_approval_rejects_unscoped_work_order_without_sqlite_scope_fallback(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    client = TestClient(main.app)
+    task_response = client.post("/agent/tasks", json={
+        "provider": "MANUAL", "project_id": project.id,
+        "title": "Task with malformed linked order", "goal": "Fail closed on incomplete scope",
+        "requested_action": "CREATE_WORK_ORDER", "requires_approval": True,
+    })
+    assert task_response.status_code == 200, task_response.text
+    task = task_response.json()
+    work_order = WorkOrder(
+        project_id=project.id,
+        workspace_id=None,
+        goal="Malformed legacy row must not use SQLite to infer PostgreSQL scope",
+    )
+
+    # This corruption is confined to the fixture's disposable schema. The
+    # production migration enforces NOT NULL; dropping it here exercises the
+    # route's fail-closed behavior if legacy/manual corruption bypasses it.
+    with connect() as conn:
+        conn.execute("ALTER TABLE work_orders ALTER COLUMN workspace_id DROP NOT NULL")
+        conn.execute(
+            "INSERT INTO work_orders(work_order_id,project_id,workspace_id,idea_id,source_agent_id,created_at,payload) "
+            "VALUES(%s,%s,NULL,NULL,NULL,%s,%s)",
+            (work_order.id, project.id, work_order.created_at, Jsonb(work_order.model_dump(mode="json"))),
+        )
+
+    def fail_on_sqlite_project_read(_project_id: str):
+        raise AssertionError("PostgreSQL task approval consulted the SQLite compatibility project store")
+
+    monkeypatch.setattr("app.agent_task_routes.project_workspace_id", fail_on_sqlite_project_read)
+    before_approvals = set(store.approval_requests)
+    before_audits = {event.id for event in store.audit_events}
+    response = client.post(f"/agent/tasks/{task['id']}/approval", json={
+        "project_id": project.id,
+        "work_order_id": work_order.id,
+        "title": "Approval must reject malformed scope",
+        "summary": "A PostgreSQL scope error must not consult SQLite.",
+        "target_branch": "feature/approval-scope-test",
+        "files": [{"path": "src/scope.txt", "change_type": "modified", "diff": "-old\n+new"}],
+    })
+
+    assert response.status_code == 404, response.text
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM approval_requests WHERE work_order_id=%s", (work_order.id,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT approval_request_id,status FROM agent_tasks WHERE task_id=%s", (task["id"],)
+        ).fetchone() == (None, "RECEIVED")
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE task_id=%s", (task["id"],)
+        ).fetchone()[0] == 0
+    assert set(store.approval_requests) == before_approvals
+    assert {event.id for event in store.audit_events} == before_audits
+    client.close()
 
 
 def test_postgres_approval_decision_schedules_linked_run_in_postgres(
