@@ -478,6 +478,17 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         raise ImportBlocked("read-only structural audit did not pass; review its findings first")
     records = _read_records(path)
     selected = {key: value for key, value in records.items() if key in CORE_TYPES}
+    # kv_store has its own composite key in addition to the entity's payload
+    # identity. Refuse snapshots where those identities diverge: otherwise a
+    # later importer stage could validate a payload under one key and write it
+    # under another (or fail only after opening the PostgreSQL target).
+    for entity_type in ENTITY_TYPES:
+        for entity_id, payload in selected.get(entity_type, {}).items():
+            payload_id = payload.get("id")
+            if not isinstance(payload_id, str) or payload_id != entity_id:
+                raise ImportBlocked(
+                    f"{entity_type}/{entity_id} payload identity does not match its SQLite key"
+                )
     if records.get("approval_invocation_lease"):
         raise ImportBlocked(
             "approval_invocation_lease rows must come from the normalized SQLite lease table"

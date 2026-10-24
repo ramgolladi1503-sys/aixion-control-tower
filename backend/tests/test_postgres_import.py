@@ -508,6 +508,27 @@ def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
     }
 
 
+def test_plan_rejects_payload_identity_that_differs_from_sqlite_key(tmp_path):
+    path = tmp_path / "mismatched_identity.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id='a1'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["id"] = "different-approval-id"
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id='a1'",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(
+        ImportBlocked,
+        match="approval_request/a1 payload identity does not match its SQLite key",
+    ):
+        build_plan(path)
+
+
 def test_plan_blocks_approved_unconsumed_native_invocation_with_live_lease(tmp_path, monkeypatch):
     path = tmp_path / "live_approved_native_snapshot.sqlite3"
     _snapshot(path)
