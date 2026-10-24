@@ -31,6 +31,7 @@ MAX_ARGUMENTS_BYTES = 48 * 1024
 MAX_CONFIG_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_WAIT_SECONDS = 15 * 60
+MAX_PERMISSION_REASON_CHARS = 240
 SUPPORTED_PERMISSION_MODES = frozenset({
     "default", "acceptEdits", "plan", "dontAsk", "bypassPermissions",
 })
@@ -200,6 +201,21 @@ def _contains_sensitive(value: Any) -> bool:
     if isinstance(value, list):
         return any(_contains_sensitive(item) for item in value)
     return isinstance(value, str) and SENSITIVE_VALUE.search(value) is not None
+
+
+def _permission_reason(tool_input: Any) -> str | None:
+    """Return a short display-safe Codex reason without changing tool arguments."""
+    if not isinstance(tool_input, dict) or "description" not in tool_input:
+        return None
+    description = tool_input["description"]
+    if description is None:
+        return None
+    if not isinstance(description, str):
+        raise GateError("Codex permission reason must be a string or null")
+    normalized = " ".join(re.sub(r"[\x00-\x1f\x7f]+", " ", description).split())
+    if len(normalized) > MAX_PERMISSION_REASON_CHARS:
+        return normalized[:MAX_PERMISSION_REASON_CHARS - 1].rstrip() + "…"
+    return normalized or None
 
 
 def _validated_api_base(value: str) -> str:
@@ -606,6 +622,10 @@ def _run(
         raise GateError("Codex permission request arguments are not valid JSON") from exc
     if len(arg_bytes) > MAX_ARGUMENTS_BYTES:
         return "deny", "Tool arguments exceed the approval display limit"
+    try:
+        permission_reason = _permission_reason(args)
+    except GateError as exc:
+        return "deny", str(exc)
 
     # Validate the local wait budget before creating a server-side pending
     # request. Otherwise a bad setting denies the Codex callback but leaves a
@@ -629,10 +649,11 @@ def _run(
     body = {
         "project_id": config["project_id"],
         "title": f"Codex permission: {tool_name[:120]}",
-        "summary": (
-            f"Codex permission mode: {permission_mode}. Review the exact tool request "
-            "and arguments before this paused invocation continues."
-        ),
+        "summary": " ".join(part for part in (
+            f"Codex permission mode: {permission_mode}.",
+            f"Codex reason: {permission_reason}." if permission_reason else "",
+            "Review the exact tool request and arguments before this paused invocation continues.",
+        ) if part),
         "agent_name": "Codex",
         "target_branch": "current-workspace",
         "files": [{"path": f"codex://tool/{safe_tool}", "change_type": "tool_call",

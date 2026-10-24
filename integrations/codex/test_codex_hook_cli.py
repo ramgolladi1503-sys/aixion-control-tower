@@ -181,6 +181,7 @@ def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
     event["tool_input"] = {
         "command": "printf '%s\\n' 'same invocation'",
         "workdir": "/tmp/codex-project",
+        "description": "  Run this command\nfor the requested check.  ",
         "metadata": {"mode": "review", "attempt": 1},
     }
     monkeypatch.setattr(
@@ -237,6 +238,10 @@ def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
     if outcome == "approved":
         assert decision == {"behavior": "allow"}
         assert created["summary"].startswith("Codex permission mode: default.")
+        assert "Codex reason: Run this command for the requested check." in created["summary"]
+        assert created["files"][0]["diff"] == json.dumps(
+            event["tool_input"], sort_keys=True, separators=(",", ":")
+        )
         assert [method for method, _url, _body in calls] == ["POST", "GET", "POST"]
         assert calls[-1][1] == (
             f"{_codex_environment()['AIXION_API_BASE_URL']}"
@@ -274,6 +279,31 @@ def test_unknown_codex_permission_mode_denies_before_creating_approval(
     decision = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["decision"]
     assert decision["behavior"] == "deny"
     assert "GateError" in decision["message"]
+
+
+@pytest.mark.parametrize(
+    ("description", "expected"),
+    [
+        ("  Run\nthis command\twith care  ", "Run this command with care"),
+        (None, None),
+        (" \n\t ", None),
+    ],
+)
+def test_permission_reason_is_normalized_for_display_only(
+    description: object,
+    expected: str | None,
+) -> None:
+    assert hook._permission_reason({"description": description}) == expected
+
+
+def test_permission_reason_is_bounded_and_rejects_non_string_structure() -> None:
+    long_reason = "r" * (hook.MAX_PERMISSION_REASON_CHARS + 10)
+    bounded_reason = hook._permission_reason({"description": long_reason})
+    assert bounded_reason is not None
+    assert len(bounded_reason) == hook.MAX_PERMISSION_REASON_CHARS
+    assert bounded_reason.endswith("…")
+    with pytest.raises(hook.GateError, match="string or null"):
+        hook._permission_reason({"description": {"reason": "unexpected"}})
 
 
 def test_invocation_identity_is_stable_when_codex_provides_tool_use_id() -> None:
