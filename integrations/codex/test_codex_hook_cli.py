@@ -259,6 +259,44 @@ def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
     assert captured.out.endswith("\n")
 
 
+def test_codex_hook_denies_if_credentials_are_revoked_before_consume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval snapshot cannot bypass revocation at the claim boundary."""
+    created: dict = {}
+    calls: list[str] = []
+
+    def request(
+        method: str,
+        url: str,
+        _config: dict,
+        _token: str,
+        body: dict | None = None,
+        **_kwargs: object,
+    ) -> dict:
+        endpoint = url.rsplit("/", 1)[-1]
+        calls.append(endpoint)
+        if method == "POST" and endpoint == "approvals":
+            assert body is not None
+            created.update(_codex_approval(body))
+            return dict(created)
+        if method == "GET" and endpoint == "decision":
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._hash(approved)
+            return approved
+        if method == "POST" and endpoint == "consume":
+            # Simulate the credential being revoked after decision read but
+            # before the backend's atomic claim authorization check.
+            raise hook.GateError("HTTP 401: token revoked")
+        raise AssertionError(f"Unexpected request after revocation: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_codex_event(), _codex_environment())
+
+    assert result == ("deny", "Approval delivery could not be claimed safely")
+    assert calls == ["approvals", "decision", "consume"]
+
+
 @pytest.mark.parametrize("permission_mode", [None, "futureMode", {"mode": "default"}])
 def test_unknown_codex_permission_mode_denies_before_creating_approval(
     monkeypatch: pytest.MonkeyPatch,

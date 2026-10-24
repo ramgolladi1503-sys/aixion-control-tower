@@ -292,6 +292,49 @@ def test_revoked_connector_credentials_during_decision_poll_fail_closed(
     assert "consume" not in calls
 
 
+def test_revoked_connector_credentials_before_consume_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved snapshot cannot bypass revocation at the claim boundary."""
+    created: dict = {}
+    calls: list[str] = []
+
+    def request(
+        method: str,
+        url: str,
+        _agent_id: str,
+        _token: str,
+        body: dict | None = None,
+        **_kwargs: object,
+    ) -> dict:
+        endpoint = url.rsplit("/", 1)[-1]
+        calls.append(endpoint)
+        if method == "POST" and endpoint == "approvals":
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and endpoint == "decision":
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._payload_hash(approved)
+            return approved
+        if method == "POST" and endpoint == "consume":
+            # Revoke the connector after the decision read but before the
+            # backend's atomic authorization check for claiming delivery.
+            raise hook.GateError("HTTP 401: token revoked")
+        raise AssertionError(f"Unexpected request after revocation: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    monkeypatch.setattr(hook.time, "sleep", lambda _seconds: None)
+
+    result = hook.run(_hook_payload(), _test_environment())
+
+    assert result == {
+        "decision": "deny",
+        "reason": "Approval delivery could not be claimed safely",
+    }
+    assert calls == ["approvals", "decision", "consume"]
+
+
 def test_new_provider_session_cannot_reuse_previous_session_approval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
