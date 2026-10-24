@@ -264,6 +264,9 @@ fun ApprovalDetailContent(
                     }
                     items(approval.files) { file -> DiffBlock(file = file) }
                     item {
+                        ExactToolDecisionContext(approval = approval)
+                    }
+                    item {
                         ExactToolRequestReviewAcknowledgement(
                             checked = exactToolRequestReviewed,
                             onCheckedChange = { exactToolRequestReviewed = it }
@@ -278,7 +281,8 @@ fun ApprovalDetailContent(
                         canDecide = canDecide,
                         isBlocked = isBlocked,
                         hasUnsupportedData = hasUnsupportedData,
-                        hasRequiredActions = hasRequiredActions
+                        hasRequiredActions = hasRequiredActions,
+                        showDecisionContext = !hasExactToolRequest
                     )
                 }
 
@@ -798,7 +802,8 @@ private fun ApprovalHeroPanel(
     canDecide: Boolean,
     isBlocked: Boolean,
     hasUnsupportedData: Boolean,
-    hasRequiredActions: Boolean
+    hasRequiredActions: Boolean,
+    showDecisionContext: Boolean
 ) {
     val palette = LocalTowerPalette.current
     TowerHeroPanel {
@@ -825,7 +830,9 @@ private fun ApprovalHeroPanel(
                     fontSize = 14.sp,
                     uppercase = false
                 )
-                RiskBadge(approval.risk, readable = true)
+                if (showDecisionContext) {
+                    RiskBadge(approval.risk, readable = true)
+                }
             }
             Spacer(modifier = Modifier.height(TowerSpacing.md))
             Text(
@@ -839,22 +846,56 @@ private fun ApprovalHeroPanel(
             Text(text = approval.summary, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
         }
 
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(palette.canvas.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
-                .padding(TowerSpacing.md),
-            verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
-        ) {
-            Text("Request at a glance", color = palette.ink, style = MaterialTheme.typography.titleSmall)
-            DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
-            DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
-            DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
-            DecisionContextLine("Session", approval.sourceSessionId?.let(::shortSafeApprovalId) ?: "Not provided")
-            DecisionContextLine("Invocation", approval.sourceInvocationId?.let(::shortSafeApprovalId) ?: "Not provided")
-            DecisionContextLine("Expires", formatApprovalExpiry(approval.expiresAt))
+        if (showDecisionContext) {
+            Spacer(modifier = Modifier.height(TowerSpacing.md))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.canvas.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
+                    .padding(TowerSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+            ) {
+                Text("Request at a glance", color = palette.ink, style = MaterialTheme.typography.titleSmall)
+                DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
+                DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
+                DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
+                DecisionContextLine("Session", approval.sourceSessionId?.let(::shortSafeApprovalId) ?: "Not provided")
+                DecisionContextLine("Invocation", approval.sourceInvocationId?.let(::shortSafeApprovalId) ?: "Not provided")
+                DecisionContextLine("Expires", formatApprovalExpiry(approval.expiresAt))
+            }
         }
+    }
+}
+
+@Composable
+private fun ExactToolDecisionContext(
+    approval: ApprovalSummary,
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(modifier = modifier.testTag("approval-exact-tool-decision-context"), elevated = true) {
+        Text("Before you decide", color = palette.ink, style = MaterialTheme.typography.titleSmall)
+        DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Risk", color = palette.inkMuted, style = MaterialTheme.typography.labelLarge)
+            RiskBadge(approval.risk, readable = true)
+        }
+        DecisionContextLine(
+            "Why flagged",
+            approval.riskReasons
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .joinToString("; ")
+                .ifBlank { "No risk rationale was supplied by the backend." }
+        )
+        DecisionContextLine("Expires", formatApprovalExpiry(approval.expiresAt))
+        approval.sourceInvocationId
+            ?.takeIf(String::isNotBlank)
+            ?.let { DecisionContextLine("Invocation", shortSafeApprovalId(it)) }
     }
 }
 
