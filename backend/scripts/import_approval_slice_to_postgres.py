@@ -1007,6 +1007,20 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
                 raise ImportBlocked(f"audit_event/{event_id} references an unimported test-run approval")
             parent = {**test_runs[entity_id], "workspace_id": approval.get("workspace_id")}
             entity_type = "test_run"
+        elif (
+            isinstance(payload.get("event_type"), str)
+            and payload["event_type"].startswith("agent_task.")
+            and entity_id in tasks
+        ):
+            parent = tasks[entity_id]
+            entity_type = "agent_task"
+        elif (
+            isinstance(payload.get("event_type"), str)
+            and payload["event_type"].startswith("agent_run.")
+            and entity_id in runs
+        ):
+            parent = runs[entity_id]
+            entity_type = "agent_run"
         else:
             continue
         if payload.get("workspace_id") != parent.get("workspace_id"):

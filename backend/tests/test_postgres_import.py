@@ -918,6 +918,98 @@ def test_apply_import_and_retry_are_transactional_and_idempotent(tmp_path, postg
         assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 1
 
 
+def test_import_preserves_workspace_scoped_agent_task_and_run_audits(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot_with_run_audits.sqlite3"
+    _snapshot(path)
+    now = datetime.now(timezone.utc).isoformat()
+    run = AgentRun(
+        id="run-audit-test", task_id="t1", workspace_id="ws1", project_id="p1",
+        status=AgentRunStatus.SUCCEEDED,
+    )
+    events = [
+        {
+            "id": "audit-task-test", "event_type": "agent_task.created",
+            "actor": "owner@example.test", "entity_id": "t1", "workspace_id": "ws1",
+            "details": {"source": "legacy", "decision": "preserve"}, "created_at": now,
+        },
+        {
+            "id": "audit-run-test", "event_type": "agent_run.created",
+            "actor": "owner@example.test", "entity_id": run.id, "workspace_id": "ws1",
+            "details": {"source": "legacy", "decision": "preserve"}, "created_at": now,
+        },
+    ]
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            [
+                ("agent_run", run.id, json.dumps(run.model_dump(mode="json"))),
+                *[("audit_event", event["id"], json.dumps(event)) for event in events],
+            ],
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+
+    assert plan["planned_counts"]["audit_event"] == 10
+    assert selected["audit_event"]["audit-task-test"]["_import_entity_type"] == "agent_task"
+    assert selected["audit_event"]["audit-run-test"]["_import_entity_type"] == "agent_run"
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        persisted = conn.execute(
+            "SELECT event_id,workspace_id,entity_type,entity_id,event_type,details,payload "
+            "FROM audit_events WHERE event_id IN ('audit-task-test','audit-run-test') "
+            "ORDER BY event_id"
+        ).fetchall()
+    assert [(row[0], row[1], row[2], row[3], row[4]) for row in persisted] == [
+        ("audit-run-test", "ws1", "agent_run", "run-audit-test", "agent_run.created"),
+        ("audit-task-test", "ws1", "agent_task", "t1", "agent_task.created"),
+    ]
+    for row in persisted:
+        assert row[5] == {"source": "legacy", "decision": "preserve"}
+        assert row[6]["details"] == row[5]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "entity_id", "entity_type"),
+    [
+        ("agent_task.created", "t1", "agent_task"),
+        ("agent_run.created", "run-audit-scope-test", "agent_run"),
+    ],
+)
+def test_plan_rejects_cross_workspace_task_and_run_audits(
+    tmp_path, event_type, entity_id, entity_type,
+):
+    path = tmp_path / f"{entity_type}_cross_workspace_audit.sqlite3"
+    _snapshot(path)
+    now = datetime.now(timezone.utc).isoformat()
+    if entity_type == "agent_run":
+        run = AgentRun(
+            id=entity_id, task_id="t1", workspace_id="ws1", project_id="p1",
+            status=AgentRunStatus.SUCCEEDED,
+        )
+        run_record = ("agent_run", run.id, json.dumps(run.model_dump(mode="json")))
+    else:
+        run_record = None
+    audit = {
+        "id": "cross-workspace-audit", "event_type": event_type, "actor": "system",
+        "entity_id": entity_id, "workspace_id": "another-workspace", "details": {},
+        "created_at": now,
+    }
+    with sqlite3.connect(path) as conn:
+        rows = [("audit_event", audit["id"], json.dumps(audit))]
+        if run_record:
+            rows.append(run_record)
+        conn.executemany("INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)", rows)
+    os.chmod(path, 0o600)
+
+    # The read-only legacy audit may reject this before importer planning; either
+    # way the cross-workspace audit record must never enter an import plan.
+    with pytest.raises(ImportBlocked):
+        build_plan(path)
+
+
 def test_apply_import_rejects_email_key_mismatch_before_schema_changes(
     tmp_path, postgres_import_dsn, monkeypatch
 ):
