@@ -1649,17 +1649,26 @@ def execute_next_step(
     ):
         raise AgentRunConflict("AgentRun execution is unavailable for the configured repository.")
     if active_run_repository is None:
-        run = store.agent_runs.get(run_id)
-        if run is None:
-            raise ValueError("Agent run not found.")
         active_run_repository = agent_run_repository
-    else:
+    if isinstance(active_run_repository, PostgresAgentRunRepository):
         run = active_run_repository.get(run_id)
         if run is None:
             raise ValueError("Agent run not found.")
         run_steps = active_run_repository.list_steps_for_run(run_id)
         run_events = active_run_repository.list_events_for_run(run_id)
         store.project_agent_run_snapshot(run, run_steps, run_events)
+    elif isinstance(active_run_repository, SQLiteAgentRunRepository):
+        if run_repository is None:
+            run = store.agent_runs.get(run_id)
+            if run is None:
+                raise ValueError("Agent run not found.")
+        else:
+            run = active_run_repository.get(run_id)
+            if run is None:
+                raise ValueError("Agent run not found.")
+            run_steps = active_run_repository.list_steps_for_run(run_id)
+            run_events = active_run_repository.list_events_for_run(run_id)
+            store.project_agent_run_snapshot(run, run_steps, run_events)
     postgres_repository_execution = isinstance(active_run_repository, PostgresAgentRunRepository)
     if postgres_branch_coordinator is not None and not postgres_repository_execution:
         raise AgentRunConflict("PostgreSQL CREATE_BRANCH injection is unavailable for SQLite runs.")

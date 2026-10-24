@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Barrier
 
 import pytest
+from app import agent_run_supervisor
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -37,7 +38,7 @@ from app.agent_run_supervisor import (
     resume_agent_run,
     retry_agent_run_step,
 )
-from app.agent_run_repository import AgentRunRepositoryConflict
+from app.agent_run_repository import AgentRunRepositoryConflict, PostgresAgentRunRepository
 from app.approval_decisions import (
     agent_run_repository,
     agent_task_repository,
@@ -59,6 +60,29 @@ from app.store import store
 
 def setup_function() -> None:
     store.reset()
+
+
+def test_postgres_run_scheduler_does_not_fall_back_to_stale_process_local_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = object.__new__(PostgresAgentRunRepository)
+    looked_up: list[str] = []
+
+    def get_from_postgres(_repository, run_id: str):
+        looked_up.append(run_id)
+        return None
+
+    monkeypatch.setattr(PostgresAgentRunRepository, "get", get_from_postgres)
+    monkeypatch.setattr(agent_run_supervisor, "agent_run_repository", repository)
+    # A stale compatibility snapshot must not make the scheduler believe that
+    # a run missing from the authoritative PostgreSQL repository exists.
+    store.agent_runs["stale-local-run"] = object()
+
+    with pytest.raises(ValueError, match="Agent run not found"):
+        execute_next_step("stale-local-run", worker_id="worker-postgres")
+
+    assert looked_up == ["stale-local-run"]
+    assert list(store.agent_runs) == ["stale-local-run"]
 
 
 def _approved_task() -> AgentTask:
