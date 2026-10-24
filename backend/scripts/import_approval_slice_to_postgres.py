@@ -997,6 +997,30 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
                 )
             parent = {**session, "workspace_id": user.get("workspace_id")}
             entity_type = "auth_session"
+        elif event_type in {
+            "notification.device_registered",
+            "notification.device_reassigned",
+            "notification.device_unregistered",
+        }:
+            # Device IDs are only unique within their entity type. Resolve
+            # lifecycle events by their explicit domain before generic ID
+            # matches (for example, a device ID may equal an approval ID).
+            parent = devices.get(entity_id)
+            if parent is None:
+                # Unregister removes the current device row in the same
+                # transaction that appends its immutable audit record. In
+                # that case, the explicit workspace is the remaining scope
+                # proof; require that workspace in this snapshot. If a device
+                # with this ID does remain, the common check below rejects a
+                # cross-workspace audit.
+                workspace_id = payload.get("workspace_id")
+                workspace = workspaces.get(workspace_id)
+                if not workspace_id or workspace is None:
+                    raise ImportBlocked(
+                        f"audit_event/{event_id} references an unscoped device lifecycle event"
+                    )
+                parent = {**workspace, "workspace_id": workspace_id}
+            entity_type = "device_registration"
         elif entity_id in users and event_type in {
             "auth.account_deletion_requested",
             "auth.role_updated",

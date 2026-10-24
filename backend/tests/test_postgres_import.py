@@ -1049,6 +1049,140 @@ def test_import_preserves_user_and_session_security_audits(tmp_path, postgres_im
     ]
 
 
+def test_import_preserves_device_registration_lifecycle_audits(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot_with_device_registration_audit.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-device-registered", "event_type": "notification.device_registered",
+        "actor": "owner@example.test", "entity_id": "d1", "workspace_id": "ws1",
+        "details": {"platform": "android", "token_fingerprint": "safe-fingerprint"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+
+    assert plan["planned_counts"]["audit_event"] == 9
+    assert selected["audit_event"][event["id"]]["_import_entity_type"] == "device_registration"
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        persisted = conn.execute(
+            "SELECT workspace_id,entity_type,entity_id,event_type,details,payload "
+            "FROM audit_events WHERE event_id=%s",
+            (event["id"],),
+        ).fetchone()
+    assert persisted[:5] == (
+        "ws1", "device_registration", "d1", "notification.device_registered",
+        event["details"],
+    )
+    assert persisted[5] == {
+        **event,
+        "created_at": datetime.fromisoformat(event["created_at"])
+        .astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+
+
+def test_import_preserves_unregistered_device_audit_after_device_row_was_deleted(
+    tmp_path, postgres_import_dsn,
+):
+    path = tmp_path / "snapshot_with_unregistered_device_audit.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-device-unregistered", "event_type": "notification.device_unregistered",
+        "actor": "owner@example.test", "entity_id": "d1", "workspace_id": "ws1",
+        "details": {"platform": "android"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "DELETE FROM kv_store WHERE entity_type='device_registration' AND entity_id='d1'"
+        )
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+
+    assert plan["planned_counts"]["device_registration"] == 0
+    assert plan["planned_counts"]["audit_event"] == 9
+    assert selected["audit_event"][event["id"]]["_import_entity_type"] == "device_registration"
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        device_count = conn.execute(
+            "SELECT count(*) FROM device_registrations WHERE device_id='d1'"
+        ).fetchone()[0]
+        persisted = conn.execute(
+            "SELECT workspace_id,entity_type,entity_id,event_type,details "
+            "FROM audit_events WHERE event_id=%s",
+            (event["id"],),
+        ).fetchone()
+    assert device_count == 0
+    assert persisted == (
+        "ws1", "device_registration", "d1", "notification.device_unregistered",
+        event["details"],
+    )
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "notification.device_registered",
+        "notification.device_reassigned",
+        "notification.device_unregistered",
+    ],
+)
+def test_plan_rejects_device_lifecycle_audit_with_wrong_workspace(
+    tmp_path, event_type,
+):
+    path = tmp_path / f"snapshot_{event_type.rsplit('.', 1)[-1]}_wrong_workspace.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-device-cross-workspace", "event_type": event_type,
+        "actor": "owner@example.test", "entity_id": "d1",
+        "workspace_id": "ws2", "details": {},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            [
+                (
+                    "workspace", "ws2",
+                    json.dumps({
+                        "id": "ws2", "name": "Other account", "owner_user_id": "u2",
+                        "created_at": event["created_at"],
+                    }),
+                ),
+                (
+                    "user", "u2",
+                    json.dumps({
+                        "id": "u2", "email": "other@example.test", "password_hash": "hash",
+                        "password_salt": "salt", "workspace_id": "ws2",
+                        "created_at": event["created_at"], "updated_at": event["created_at"],
+                    }),
+                ),
+                ("audit_event", event["id"], json.dumps(event)),
+            ],
+        )
+    os.chmod(path, 0o600)
+
+    with pytest.raises(ImportBlocked, match="mismatched parent ownership"):
+        build_plan(path)
+
+
 def test_plan_resolves_auth_audit_by_event_domain_when_ids_collide(tmp_path):
     path = tmp_path / "snapshot_with_cross_entity_id_collision.sqlite3"
     _snapshot(path)
