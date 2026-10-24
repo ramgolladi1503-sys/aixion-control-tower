@@ -66,6 +66,11 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithTag("approval-detail-list")
             .performScrollToNode(hasText("Decision recorded"))
+        assertEquals(
+            LiveRegionMode.Polite,
+            composeRule.onNodeWithTag("approval-decision-outcome-panel")
+                .fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
         composeRule.onNodeWithTag("approval-decision-outcome").assertIsDisplayed()
         composeRule.onNodeWithText("Server decision: Approved").assertExists()
         composeRule.onNodeWithText("Request ail-test · Event nt-12345").assertExists()

@@ -92,6 +92,48 @@ def test_outbox_ciphertext_cannot_be_moved_to_another_recipient() -> None:
         )
 
 
+def test_sqlite_email_helpers_fail_closed_when_postgres_is_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outbox_id = email_delivery.enqueue_verification_email(
+        recipient="owner@example.com", code="123456"
+    )
+    before = _row(outbox_id)
+    monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED", "true")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "true")
+
+    with pytest.raises(RuntimeError, match="PostgreSQL or production mode"):
+        email_delivery.enqueue_verification_email(
+            recipient="other@example.com", code="654321"
+        )
+
+    with pytest.raises(RuntimeError, match="PostgreSQL or production mode"):
+        email_delivery.dispatch_one_due_email(sender=lambda *_: pytest.fail("must not send"))
+
+    assert _row(outbox_id) == before
+    with store._connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM auth_email_outbox WHERE recipient=?",
+            ("other@example.com",),
+        ).fetchone()[0] == 0
+
+
+def test_sqlite_email_helpers_fail_closed_in_production_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+
+    with pytest.raises(RuntimeError, match="PostgreSQL or production mode"):
+        email_delivery.enqueue_verification_email(
+            recipient="owner@example.com", code="123456"
+        )
+
+    with pytest.raises(RuntimeError, match="PostgreSQL or production mode"):
+        email_delivery.dispatch_one_due_email()
+
+
 def test_smtp_transport_uses_starttls_and_does_not_contact_external_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -57,6 +57,15 @@ def prepare_verification_email(*, recipient: str, code: str) -> tuple[str, bytes
     return outbox_id, encrypted, now
 
 
+def _require_sqlite_email_runtime() -> None:
+    """Prevent SQLite-only queue helpers from becoming a split authority."""
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        raise RuntimeError(
+            "SQLite email outbox operations are unavailable in PostgreSQL or production mode"
+        )
+
+
 def insert_verification_email(
     conn, *, outbox_id: str, recipient: str, encrypted_code: bytes, created_at: str
 ) -> None:
@@ -77,6 +86,7 @@ def insert_verification_email(
 
 def enqueue_verification_email(*, recipient: str, code: str) -> str:
     """Persist encrypted verification material; test/operator utility."""
+    _require_sqlite_email_runtime()
     outbox_id, encrypted, created_at = prepare_verification_email(recipient=recipient, code=code)
     with store._lock, store._connect() as conn:
         insert_verification_email(
@@ -118,6 +128,7 @@ def _send_smtp(recipient: str, code: str) -> None:
 
 def dispatch_one_due_email(*, sender=None) -> bool:
     """Claim and attempt one item. All durable state is kept in SQLite for local use."""
+    _require_sqlite_email_runtime()
     settings = get_settings()
     now = _now()
     lease_until = (now + timedelta(seconds=settings.email_lease_seconds)).isoformat()

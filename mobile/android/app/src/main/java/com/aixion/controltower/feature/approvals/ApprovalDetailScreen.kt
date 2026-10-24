@@ -608,7 +608,12 @@ private fun DecisionOutcomePanel(
         "revise" -> "Revision requested"
         else -> "Decision recorded"
     }
-    TowerPanel(elevated = true) {
+    TowerPanel(
+        modifier = Modifier
+            .testTag("approval-decision-outcome-panel")
+            .semantics { liveRegion = LiveRegionMode.Polite },
+        elevated = true
+    ) {
         Text(
             "Decision recorded",
             modifier = Modifier.testTag("approval-decision-outcome"),
