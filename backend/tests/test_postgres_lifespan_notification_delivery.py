@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.conninfo import make_conninfo
 
 from app import main, postgres_notification_dispatcher
 from app.postgres_notification_dispatcher import dispatch_one_postgres_push
@@ -277,7 +278,10 @@ def test_scheduled_push_entrypoint_dispatches_postgres_outbox_once(
     _repository, connect = outbox_repository
     dsn = os.environ["AIXION_TEST_POSTGRES_DSN"]
     monkeypatch.setenv("AIXION_PROFILE", "production")
-    monkeypatch.setenv("AIXION_POSTGRES_DSN", dsn + " sslmode=verify-full")
+    monkeypatch.setenv(
+        "AIXION_POSTGRES_DSN",
+        make_conninfo(dsn, sslmode="verify-full"),
+    )
     monkeypatch.setenv("AIXION_FCM_PROJECT_ID", "aixion-test-project")
     monkeypatch.setenv("AIXION_OUTBOX_DISPATCH_MODE", "scheduled")
     monkeypatch.setenv("AIXION_PUSH_DISPATCH_ENABLED", "true")

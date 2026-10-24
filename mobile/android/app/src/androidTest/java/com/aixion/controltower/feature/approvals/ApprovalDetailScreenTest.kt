@@ -535,16 +535,29 @@ class ApprovalDetailScreenTest {
     @Test
     fun decisionActionsStayVisibleWithoutScrollingInShortLargeTextViewport() {
         val viewportHeight = 320f
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            title = "Review protected production rollout",
+            sourceProvider = "ANTIGRAVITY",
+            risk = RiskLevel.HIGH
+        )
         composeRule.setContent {
             CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
                 Box(modifier = Modifier.width(360.dp).height(viewportHeight.dp).testTag("approval-short-viewport")) {
-                    ApprovalDetailContent(approval(ApprovalStatus.REQUESTED), null, {}, {}, {})
+                    ApprovalDetailContent(request, null, {}, {}, {})
                 }
             }
         }
 
         composeRule.onNodeWithText("Deny").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+        val identity = composeRule.onNodeWithTag("approval-decision-identity")
+        identity.assertIsDisplayed()
+        assertEquals(
+            listOf("Decision context: ANTIGRAVITY, Review protected production rollout, risk high."),
+            identity.fetchSemanticsNode().config[SemanticsProperties.ContentDescription]
+        )
+        composeRule.onNodeWithTag("approval-decision-identity-title")
+            .assertTextContains("Review protected production rollout")
         val viewport = composeRule.onNodeWithTag("approval-short-viewport").fetchSemanticsNode().boundsInRoot
         val panel = composeRule.onNodeWithTag("approval-decision-panel").fetchSemanticsNode().boundsInRoot
         val deny = composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot
@@ -559,6 +572,9 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Rollback Plan").assertIsDisplayed()
         composeRule.onNodeWithText("Deny").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+        identity.assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-decision-identity-title")
+            .assertTextContains("Review protected production rollout")
         assertEquals(deny.top, composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot.top)
         assertEquals(approve.top, composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot.top)
     }

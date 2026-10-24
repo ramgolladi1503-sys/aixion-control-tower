@@ -48,6 +48,7 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -397,7 +398,8 @@ fun ApprovalDetailContent(
                     decisionNeedsReconciliation = decisionNeedsReconciliation,
                     onReconcileDecision = onReconcileDecision,
                     approvalTitle = approval.title,
-                    approvalRisk = approval.risk.name.lowercase().replace('_', ' '),
+                    approvalProvider = approval.sourceLabel,
+                    approvalRisk = approval.risk,
                     onApprove = {
                         if (requiresRiskConfirmation) {
                             showRiskConfirmation = true
@@ -865,7 +867,8 @@ private fun DecisionPanel(
     decisionNeedsReconciliation: Boolean,
     onReconcileDecision: () -> Unit,
     approvalTitle: String,
-    approvalRisk: String,
+    approvalProvider: String,
+    approvalRisk: RiskLevel,
     onApprove: () -> Unit,
     onReject: () -> Unit,
     modifier: Modifier = Modifier,
@@ -873,6 +876,38 @@ private fun DecisionPanel(
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
+        Text(
+            text = approvalTitle,
+            color = palette.ink,
+            style = if (compactLayout) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+            maxLines = if (compactLayout) 1 else 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.testTag("approval-decision-identity-title")
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "Decision context: $approvalProvider, $approvalTitle, risk ${approvalRisk.name.lowercase().replace('_', ' ')}."
+                }
+                .testTag("approval-decision-identity"),
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = approvalProvider,
+                color = palette.inkMuted,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f).testTag("approval-decision-identity-provider")
+            )
+            RiskBadge(
+                risk = approvalRisk,
+                readable = true,
+                modifier = Modifier.testTag("approval-decision-identity-risk")
+            )
+        }
         if (!compactLayout) {
             Text(
                 text = "Decision Gate",
@@ -885,8 +920,8 @@ private fun DecisionPanel(
             text = when {
                 compactLayout && decisionNeedsReconciliation -> "Check the server before retrying."
                 compactLayout && decisionInFlight -> "Recording decision…"
-                compactLayout && exactToolRequestNeedsReview -> "Review the exact request above to enable approval."
-                compactLayout && fullDiffReviewNeedsReview -> "Review the full diff above to enable approval."
+                compactLayout && exactToolRequestNeedsReview -> "Review request to enable approval."
+                compactLayout && fullDiffReviewNeedsReview -> "Review full diff to enable approval."
                 compactLayout && canApprove -> "Review complete. Choose an action."
                 hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
                 decisionNeedsReconciliation -> "The previous decision may have reached the server, but its response was lost. Check server status before trying again."
@@ -903,7 +938,9 @@ private fun DecisionPanel(
                 .testTag("approval-decision-status")
                 .semantics { liveRegion = LiveRegionMode.Polite },
             color = if (canApprove) palette.inkMuted else palette.caution,
-            style = if (compactLayout) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge
+            style = if (compactLayout) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge,
+            maxLines = if (compactLayout) 2 else Int.MAX_VALUE,
+            overflow = TextOverflow.Ellipsis
         )
         Spacer(modifier = Modifier.height(if (compactLayout) TowerSpacing.xs else TowerSpacing.lg))
         if (decisionNeedsReconciliation) {
@@ -915,9 +952,11 @@ private fun DecisionPanel(
             ) { Text("Check server status") }
         }
         if (canDecide) {
-            Spacer(modifier = Modifier.height(TowerSpacing.md))
+            Spacer(modifier = Modifier.height(if (compactLayout) TowerSpacing.xs else TowerSpacing.md))
             Column(
-                verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                verticalArrangement = Arrangement.spacedBy(
+                    if (compactLayout) TowerSpacing.xs else TowerSpacing.sm
+                ),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 OutlinedButton(
@@ -926,7 +965,7 @@ private fun DecisionPanel(
                         .fillMaxWidth()
                         .heightIn(min = 56.dp)
                         .semantics(mergeDescendants = true) {
-                            contentDescription = "Deny request: $approvalTitle. Risk: $approvalRisk."
+                            contentDescription = "Deny request: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}."
                         },
                     enabled = canDecide
                 ) { Text("Deny", color = palette.danger) }
@@ -938,7 +977,7 @@ private fun DecisionPanel(
                         .fillMaxWidth()
                         .heightIn(min = 56.dp)
                         .semantics(mergeDescendants = true) {
-                            contentDescription = "Approve request: $approvalTitle. Risk: $approvalRisk."
+                            contentDescription = "Approve request: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}."
                         }
                 ) { Text("Approve request") }
             }
