@@ -343,6 +343,7 @@ def _audit_count(db_path: Path, approval_id: str, event_type: str) -> int:
 def _permission_event(*, tool_use_id: str | None) -> dict[str, Any]:
     event: dict[str, Any] = {
         "hook_event_name": "PermissionRequest",
+        "permission_mode": "default",
         "session_id": "codex-sqlite-restart-session",
         "turn_id": "codex-sqlite-restart-turn",
         "tool_name": "Bash",

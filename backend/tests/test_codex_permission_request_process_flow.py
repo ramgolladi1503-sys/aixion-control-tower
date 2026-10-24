@@ -222,6 +222,7 @@ def test_real_codex_permission_hook_allows_only_after_durable_phone_decision(
 
         permission_request = {
             "hook_event_name": "PermissionRequest",
+            "permission_mode": "default",
             "session_id": "codex-session-process-flow",
             "turn_id": "codex-turn-process-flow",
             "tool_use_id": "codex-tool-process-flow",
@@ -380,6 +381,7 @@ def test_codex_permission_hook_recovers_approved_decision_after_api_process_rest
 
         permission_request = {
             "hook_event_name": "PermissionRequest",
+            "permission_mode": "default",
             "session_id": "codex-session-restart-flow",
             "turn_id": "codex-turn-restart-flow",
             "tool_use_id": "codex-tool-restart-flow",
@@ -552,6 +554,7 @@ def test_real_codex_permission_hook_denies_without_claim_or_tool_side_effect(
         command = f"touch {shlex.quote(str(marker_path))}"
         permission_request = {
             "hook_event_name": "PermissionRequest",
+            "permission_mode": "default",
             "session_id": "codex-session-process-deny",
             "turn_id": "codex-turn-process-deny",
             "tool_use_id": "codex-tool-process-deny",

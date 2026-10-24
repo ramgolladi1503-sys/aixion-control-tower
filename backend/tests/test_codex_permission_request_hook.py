@@ -291,6 +291,7 @@ def test_unknown_hash_version_fails_closed() -> None:
 def _event(args: object | None = None) -> dict:
     return {
         "hook_event_name": "PermissionRequest",
+        "permission_mode": "default",
         "session_id": "session-123",
         "turn_id": "turn-456",
         "tool_use_id": "call-789",
@@ -327,7 +328,7 @@ def test_phone_approval_allows_exact_codex_permission_request(monkeypatch) -> No
         approved = _record({
             "project_id": ENV["AIXION_PROJECT_ID"],
             "title": "Codex permission: Bash",
-            "summary": "Review the exact Codex tool request before this paused invocation continues.",
+            "summary": created_body["summary"],
             "agent_name": "Codex",
             "target_branch": "current-workspace",
             "files": [{"path": "codex://tool/Bash", "change_type": "tool_call",
@@ -612,7 +613,7 @@ def test_duplicate_approval_delivery_claim_denies_codex_request(monkeypatch) -> 
         approved = _record({
             "project_id": ENV["AIXION_PROJECT_ID"],
             "title": "Codex permission: Bash",
-            "summary": "Review the exact Codex tool request before this paused invocation continues.",
+            "summary": created_body["summary"],
             "agent_name": "Codex",
             "target_branch": "current-workspace",
             "files": [{"path": "codex://tool/Bash", "change_type": "tool_call",
@@ -679,7 +680,7 @@ def test_phone_rejection_denies_codex_request(monkeypatch) -> None:
         return _record({
             "project_id": ENV["AIXION_PROJECT_ID"],
             "title": "Codex permission: Bash",
-            "summary": "Review the exact Codex tool request before this paused invocation continues.",
+            "summary": created_body["summary"],
             "agent_name": "Codex",
             "target_branch": "current-workspace",
             "files": [{"path": "codex://tool/Bash", "change_type": "tool_call",
@@ -733,7 +734,7 @@ def test_changed_payload_denies_even_when_approval_is_approved(monkeypatch) -> N
         record = _record({
             "project_id": ENV["AIXION_PROJECT_ID"],
             "title": "Codex permission: Bash",
-            "summary": "Review the exact Codex tool request before this paused invocation continues.",
+            "summary": created_body["summary"],
             "agent_name": "Codex", "target_branch": "current-workspace",
             "files": [{"path": "codex://tool/Bash", "change_type": "tool_call",
                        "diff": '{"command":"different"}', "new_content": None}],
@@ -764,7 +765,7 @@ def test_timeout_expires_approval_and_denies(monkeypatch) -> None:
         return _record({
             "project_id": ENV["AIXION_PROJECT_ID"],
             "title": "Codex permission: Bash",
-            "summary": "Review the exact Codex tool request before this paused invocation continues.",
+            "summary": created_body["summary"],
             "agent_name": "Codex", "target_branch": "current-workspace",
             "files": [{"path": "codex://tool/Bash", "change_type": "tool_call",
                        "diff": '{"command":"touch approved.txt"}', "new_content": None}],
