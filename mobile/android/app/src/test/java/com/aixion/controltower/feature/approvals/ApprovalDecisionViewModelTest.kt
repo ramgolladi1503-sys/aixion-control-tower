@@ -4,9 +4,12 @@ import android.app.Application
 import android.content.Context
 import com.aixion.controltower.core.api.ControlTowerApi
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryEventDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryResponseDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.RiskAssessmentDto
 import com.aixion.controltower.core.model.ApprovalStatus
+import com.aixion.controltower.core.model.ApprovalDeliveryStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.data.repository.ApprovalRepository
@@ -121,6 +124,93 @@ class ApprovalDecisionViewModelTest {
             assertEquals(ApprovalStatus.APPROVED, viewModel.state.value.selectedApproval?.status)
             assertEquals(ApprovalStatus.DENIED, viewModel.state.value.approvals.first { it.id == otherId }.status)
             assertEquals(REQUEST_ID, viewModel.state.value.detailTargetApprovalId)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun confirmedDecisionRefreshesHistoryAndMatchesNewestSameApprovalAndDecision() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                historyResult = {
+                    ApprovalHistoryResponseDto(
+                        events = listOf(
+                            deliveryEvent("other-approval", "approve", "CONSUMED", "2099-01-04T00:00:00Z"),
+                            deliveryEvent(REQUEST_ID, "reject", "EXPIRED", "2099-01-03T00:00:00Z"),
+                            deliveryEvent(REQUEST_ID, "approve", "AWAITING_DELIVERY", "2099-01-01T00:00:00Z"),
+                            deliveryEvent(REQUEST_ID, "approved", "CONSUMED", "2099-01-02T00:00:00Z")
+                        )
+                    )
+                }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+
+            assertEquals(1, api.historyCalls)
+            assertEquals(true, viewModel.state.value.historyLoaded)
+            assertEquals(4, viewModel.state.value.approvalHistory.size)
+            assertEquals(REQUEST_ID, viewModel.state.value.decisionOutcomeApprovalId)
+            assertEquals(ApprovalDeliveryStatus.CONSUMED, viewModel.state.value.decisionOutcomeEvent?.deliveryStatus)
+            assertEquals(
+                "event-$REQUEST_ID-approved-CONSUMED-2099-01-02T00:00:00Z",
+                viewModel.state.value.decisionOutcomeEvent?.eventId
+            )
+            assertFalse(viewModel.state.value.decisionDeliveryLoading)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun missingMatchingHistoryEventLeavesDeliveryUnknown() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                historyResult = {
+                    ApprovalHistoryResponseDto(
+                        events = listOf(deliveryEvent("different-approval", "approve", "CONSUMED"))
+                    )
+                }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+
+            assertEquals(REQUEST_ID, viewModel.state.value.decisionOutcomeApprovalId)
+            assertEquals(null, viewModel.state.value.decisionOutcomeEvent)
+            assertFalse(viewModel.state.value.decisionDeliveryLoading)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun historyFailureAfterConfirmedDecisionLeavesDeliveryUnknown() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi().apply {
+                historyResult = { throw IOException("history unavailable") }
+            }
+            val viewModel = newViewModel(api)
+            runCurrent()
+            viewModel.selectApproval(approvalSummary(REQUEST_ID))
+
+            viewModel.decide("approve", "reviewed")
+            runCurrent()
+
+            assertEquals(REQUEST_ID, viewModel.state.value.decisionOutcomeApprovalId)
+            assertEquals(null, viewModel.state.value.decisionOutcomeEvent)
+            assertFalse(viewModel.state.value.decisionDeliveryLoading)
+            assertEquals(ApprovalStatus.APPROVED, viewModel.state.value.selectedApproval?.status)
         } finally {
             Dispatchers.resetMain()
         }
@@ -451,8 +541,15 @@ class ApprovalDecisionViewModelTest {
         }
         var getResult: suspend (String, Int) -> ApprovalRequestDto = { id, _ -> approvalDto(id, "REQUESTED") }
         var listResult: suspend () -> List<ApprovalRequestDto> = { emptyList() }
+        var historyCalls = 0
+        var historyResult: suspend () -> ApprovalHistoryResponseDto = { ApprovalHistoryResponseDto() }
 
         override suspend fun listApprovals(): List<ApprovalRequestDto> = listResult()
+
+        override suspend fun listApprovalHistory(limit: Int, cursor: String?): ApprovalHistoryResponseDto {
+            historyCalls += 1
+            return historyResult()
+        }
 
         override suspend fun getApproval(approvalId: String): ApprovalRequestDto {
             statusApprovalIds += approvalId
@@ -486,6 +583,19 @@ class ApprovalDecisionViewModelTest {
             .let(::requireNotNull)
     }
 }
+
+private fun deliveryEvent(
+    approvalId: String,
+    decision: String,
+    deliveryStatus: String,
+    decidedAt: String? = null
+) = ApprovalHistoryEventDto(
+    auditEventId = "event-$approvalId-$decision-$deliveryStatus-$decidedAt",
+    approvalId = approvalId,
+    decision = decision,
+    deliveryStatus = deliveryStatus,
+    decidedAt = decidedAt
+)
 
 private fun approvalDto(id: String, status: String) = ApprovalRequestDto(
     id = id,

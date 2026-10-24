@@ -55,6 +55,7 @@ import kotlinx.coroutines.delay
 import java.time.Duration
 import java.time.Instant
 import com.aixion.controltower.core.model.ApprovalStatus
+import com.aixion.controltower.core.model.ApprovalHistoryEvent
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.components.DiffBlock
@@ -98,6 +99,10 @@ fun ApprovalDetailScreen(
         lastActionApprovalId = state.lastActionApprovalId,
         decisionInFlight = state.decisionInFlight,
         decisionNeedsReconciliation = state.decisionNeedsReconciliation,
+        decisionOutcomeApprovalId = state.decisionOutcomeApprovalId,
+        decisionOutcomeDecision = state.decisionOutcomeDecision,
+        decisionOutcomeEvent = state.decisionOutcomeEvent,
+        decisionDeliveryLoading = state.decisionDeliveryLoading,
         onReconcileDecision = viewModel::reconcileDecisionStatus,
         onOpenDiff = onOpenDiff,
         onApprove = {
@@ -175,6 +180,10 @@ fun ApprovalDetailContent(
     lastActionApprovalId: String? = null,
     decisionInFlight: Boolean = false,
     decisionNeedsReconciliation: Boolean = false,
+    decisionOutcomeApprovalId: String? = null,
+    decisionOutcomeDecision: String? = null,
+    decisionOutcomeEvent: ApprovalHistoryEvent? = null,
+    decisionDeliveryLoading: Boolean = false,
     onReconcileDecision: () -> Unit = {}
 ) {
     val palette = LocalTowerPalette.current
@@ -265,6 +274,16 @@ fun ApprovalDetailContent(
 
                 if (lastActionMessage != null && lastActionApprovalId == approval.id) {
                     item { DetailPanel(title = "Last Action", body = lastActionMessage) }
+                }
+
+                if (decisionOutcomeApprovalId == approval.id) {
+                    item {
+                        DecisionOutcomePanel(
+                            decision = decisionOutcomeDecision,
+                            event = decisionOutcomeEvent,
+                            deliveryLoading = decisionDeliveryLoading
+                        )
+                    }
                 }
 
                 if (hasUnsupportedData) {
@@ -484,6 +503,50 @@ fun ApprovalDetailContent(
                     modifier = Modifier.heightIn(min = 48.dp)
                 ) { Text("Go back") }
             }
+        )
+    }
+}
+
+@Composable
+private fun DecisionOutcomePanel(
+    decision: String?,
+    event: ApprovalHistoryEvent?,
+    deliveryLoading: Boolean
+) {
+    val palette = LocalTowerPalette.current
+    val decisionLabel = when (normalizeApprovalDecisionForHistory(decision.orEmpty())) {
+        "approve" -> "Approved"
+        "reject" -> "Denied"
+        "revise" -> "Revision requested"
+        else -> "Decision recorded"
+    }
+    TowerPanel(elevated = true) {
+        Text(
+            "Decision recorded",
+            modifier = Modifier.testTag("approval-decision-outcome"),
+            color = palette.ink,
+            style = MaterialTheme.typography.titleMedium
+        )
+        val serverDecisionLabel = event?.let {
+            when (normalizeApprovalDecisionForHistory(it.decision)) {
+                "approve" -> "Approved"
+                "reject" -> "Denied"
+                "revise" -> "Revision requested"
+                else -> "Decision recorded"
+            }
+        } ?: decisionLabel
+        Text("Server decision: $serverDecisionLabel", color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            "Request ${shortSafeApprovalId(event?.approvalId ?: "")}" +
+                (event?.eventId?.let { " · Event ${shortSafeApprovalId(it)}" } ?: ""),
+            modifier = Modifier.testTag("approval-decision-correlation"),
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text("Recorded ${formatHistoryTime(event?.decidedAt)}", color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
+        ApprovalDeliveryStatusContent(
+            deliveryStatus = event?.deliveryStatus,
+            loading = deliveryLoading
         )
     }
 }

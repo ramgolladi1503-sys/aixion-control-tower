@@ -556,22 +556,24 @@ private fun SkeletonBlock(modifier: Modifier, color: androidx.compose.ui.graphic
 }
 
 @Composable
-private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
+internal fun ApprovalDeliveryStatusContent(
+    deliveryStatus: ApprovalDeliveryStatus?,
+    loading: Boolean = false
+) {
     val palette = LocalTowerPalette.current
-    TowerPanel(elevated = true) {
-        StatusBadge(
-            event.decision.let(::decisionHistoryLabel),
-            color = when (event.decision.trim().lowercase()) {
-                "approve", "approved" -> palette.positive
-                "reject", "rejected", "deny", "denied" -> palette.danger
-                else -> palette.caution
-            },
-            fontSize = 14.sp,
-            uppercase = false
+    Text("Delivery status", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    val (deliveryLabel, deliveryExplanation, deliveryColor) = when {
+        loading -> Triple(
+            "Checking delivery status…",
+            "The decision is recorded. The app is checking whether the connector claimed it.",
+            palette.caution
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text("Delivery status", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        val (deliveryLabel, deliveryExplanation, deliveryColor) = when (event.deliveryStatus) {
+        deliveryStatus == null -> Triple(
+            "Delivery status unknown",
+            "We could not match this decision to delivery evidence. Connector receipt and agent resumption are unconfirmed.",
+            palette.caution
+        )
+        else -> when (deliveryStatus) {
             ApprovalDeliveryStatus.NOT_CONFIRMED -> Triple(
                 "Delivery not confirmed",
                 "The server has no usable delivery evidence for this decision.",
@@ -603,8 +605,33 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
                 palette.danger
             )
         }
-        StatusBadge(deliveryLabel, color = deliveryColor, fontSize = 14.sp, uppercase = false)
-        Text(deliveryExplanation, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
+    }
+    StatusBadge(
+        deliveryLabel,
+        modifier = Modifier.testTag("approval-delivery-status-label"),
+        color = deliveryColor,
+        fontSize = 14.sp,
+        uppercase = false
+    )
+    Text(deliveryExplanation, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
+}
+
+@Composable
+private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(elevated = true) {
+        StatusBadge(
+            event.decision.let(::decisionHistoryLabel),
+            color = when (event.decision.trim().lowercase()) {
+                "approve", "approved" -> palette.positive
+                "reject", "rejected", "deny", "denied" -> palette.danger
+                else -> palette.caution
+            },
+            fontSize = 14.sp,
+            uppercase = false
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        ApprovalDeliveryStatusContent(deliveryStatus = event.deliveryStatus)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, fontSize = 14.sp)
         Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, fontSize = 14.sp)
@@ -662,7 +689,7 @@ private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
     }
 }
 
-private fun formatHistoryTime(raw: String?): String {
+internal fun formatHistoryTime(raw: String?): String {
     if (raw.isNullOrBlank()) return "time unavailable"
     return runCatching {
         val formatter = DateTimeFormatter.ofPattern("MMM d, yyyy 'at' h:mm a", Locale.getDefault())

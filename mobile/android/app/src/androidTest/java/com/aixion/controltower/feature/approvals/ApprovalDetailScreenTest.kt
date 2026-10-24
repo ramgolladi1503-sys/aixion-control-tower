@@ -25,6 +25,8 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
+import com.aixion.controltower.core.model.ApprovalDeliveryStatus
+import com.aixion.controltower.core.model.ApprovalHistoryEvent
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
@@ -38,6 +40,66 @@ import org.junit.Test
 class ApprovalDetailScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun recordedDecisionIsShownSeparatelyFromConnectorDelivery() {
+        composeRule.setContent {
+            ApprovalDetailContent(
+                // Workflow status can advance after a decision. The immutable submitted
+                // decision must remain the label for this outcome panel.
+                approval = approval(ApprovalStatus.EXECUTING),
+                lastActionMessage = "Decision sent: approve.",
+                onOpenDiff = {},
+                onApprove = {},
+                onReject = {},
+                lastActionApprovalId = "approval-detail-test",
+                decisionOutcomeApprovalId = "approval-detail-test",
+                decisionOutcomeDecision = "approve",
+                decisionOutcomeEvent = outcomeEvent(
+                    decision = "approve",
+                    deliveryStatus = ApprovalDeliveryStatus.CONSUMED,
+                    decidedAt = "2026-10-24T10:00:00Z"
+                )
+            )
+        }
+
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Decision recorded"))
+        composeRule.onNodeWithTag("approval-decision-outcome").assertIsDisplayed()
+        composeRule.onNodeWithText("Server decision: Approved").assertExists()
+        composeRule.onNodeWithText("Request ail-test · Event nt-12345").assertExists()
+        composeRule.onNodeWithText("Recorded ${formatHistoryTime("2026-10-24T10:00:00Z")}").assertExists()
+        composeRule.onNodeWithText("Decision consumed").assertExists()
+        composeRule.onNodeWithText(
+            "The connector claimed this decision once. This confirms protocol consumption, not agent execution or task completion."
+        ).assertExists()
+        composeRule.onAllNodesWithText("Agent resumed", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun unavailableDeliveryEvidenceIsExplicitlyUnknown() {
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = approval(ApprovalStatus.DENIED),
+                lastActionMessage = "Server confirms the reject decision was recorded.",
+                onOpenDiff = {},
+                onApprove = {},
+                onReject = {},
+                lastActionApprovalId = "approval-detail-test",
+                decisionOutcomeApprovalId = "approval-detail-test",
+                decisionOutcomeDecision = "reject",
+                decisionOutcomeEvent = null
+            )
+        }
+
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Decision recorded"))
+        composeRule.onNodeWithText("Server decision: Denied").assertExists()
+        composeRule.onNodeWithText("Delivery status unknown").assertExists()
+        composeRule.onNodeWithText(
+            "We could not match this decision to delivery evidence. Connector receipt and agent resumption are unconfirmed."
+        ).assertExists()
+    }
 
     @Test
     fun expiryInRequestSummaryUsesReadableLocalTimeInsteadOfRawTimestamp() {
@@ -859,6 +921,22 @@ class ApprovalDetailScreenTest {
         assertEquals(1, retryCount)
     }
 }
+
+private fun outcomeEvent(
+    decision: String,
+    deliveryStatus: ApprovalDeliveryStatus,
+    decidedAt: String
+) = ApprovalHistoryEvent(
+    eventId = "event-12345",
+    approvalId = "approval-detail-test",
+    decision = decision,
+    reason = null,
+    decidedAt = decidedAt,
+    reviewerLabel = "You",
+    deliveryStatus = deliveryStatus,
+    requestSnapshotVerified = false,
+    requestSnapshot = null
+)
 
 private fun approval(status: ApprovalStatus) = ApprovalSummary(
     id = "approval-detail-test",

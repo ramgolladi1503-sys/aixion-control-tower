@@ -9,6 +9,7 @@ import com.aixion.controltower.core.model.ApprovalHistoryEvent
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.data.repository.ApprovalRepository
 import java.time.Clock
+import java.time.Instant
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,6 +51,29 @@ internal fun retainDecisionInHistory(
     history + updated
 }
 
+internal fun normalizeApprovalDecisionForHistory(decision: String): String? = when (decision.trim().lowercase()) {
+    "approve", "approved" -> "approve"
+    "reject", "rejected", "deny", "denied" -> "reject"
+    "revise", "revision", "revision_requested", "request_revision" -> "revise"
+    else -> null
+}
+
+internal fun matchingDecisionDeliveryEvent(
+    events: List<ApprovalHistoryEvent>,
+    approvalId: String,
+    decision: String
+): ApprovalHistoryEvent? {
+    val expectedDecision = normalizeApprovalDecisionForHistory(decision) ?: return null
+    return events.asSequence()
+        .filter { it.approvalId == approvalId }
+        .filter { normalizeApprovalDecisionForHistory(it.decision) == expectedDecision }
+        .maxWithOrNull(
+            compareBy<ApprovalHistoryEvent> { event ->
+                event.decidedAt?.let { runCatching { Instant.parse(it) }.getOrNull() } ?: Instant.MIN
+            }.thenBy { it.eventId }
+        )
+}
+
 data class ApprovalsUiState(
     val loading: Boolean = true,
     val refreshing: Boolean = false,
@@ -71,6 +95,10 @@ data class ApprovalsUiState(
     val decisionInFlight: Boolean = false,
     val decisionNeedsReconciliation: Boolean = false,
     val decisionBeingReconciled: String? = null,
+    val decisionOutcomeApprovalId: String? = null,
+    val decisionOutcomeDecision: String? = null,
+    val decisionOutcomeEvent: ApprovalHistoryEvent? = null,
+    val decisionDeliveryLoading: Boolean = false,
     val errorMessage: String? = null
 ) {
     val hasError: Boolean = errorMessage != null
@@ -573,6 +601,42 @@ class ApprovalsViewModel internal constructor(
             },
             lastActionApprovalId = updated.id
         )
+        refreshHistoryAfterDecision(updated.id, decision)
         onCompleted()
+    }
+
+    private suspend fun refreshHistoryAfterDecision(approvalId: String, decision: String) {
+        _state.value = _state.value.copy(
+            decisionOutcomeApprovalId = approvalId,
+            decisionOutcomeDecision = normalizeApprovalDecisionForHistory(decision),
+            decisionOutcomeEvent = null,
+            decisionDeliveryLoading = true
+        )
+        try {
+            val page = repository.listApprovalHistory()
+            val matchingEvent = matchingDecisionDeliveryEvent(page.events, approvalId, decision)
+            _state.value = _state.value.copy(
+                approvalHistory = page.events,
+                historyLoading = false,
+                historyLoaded = true,
+                historyLimit = page.limit,
+                historyHasMore = page.hasMore,
+                historyNextCursor = page.nextCursor,
+                historyErrorMessage = null,
+                decisionOutcomeEvent = matchingEvent,
+                decisionDeliveryLoading = false
+            )
+        } catch (cancelled: CancellationException) {
+            _state.value = _state.value.copy(
+                decisionOutcomeEvent = null,
+                decisionDeliveryLoading = false
+            )
+            throw cancelled
+        } catch (_: Exception) {
+            _state.value = _state.value.copy(
+                decisionOutcomeEvent = null,
+                decisionDeliveryLoading = false
+            )
+        }
     }
 }
