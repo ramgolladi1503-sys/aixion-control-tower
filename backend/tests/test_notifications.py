@@ -949,6 +949,32 @@ def test_device_unregistration_returns_no_content_without_disclosing_foreign_reg
     assert store.device_registrations[device.id] == device
 
 
+def test_device_unregistration_does_not_remove_same_user_record_from_another_workspace() -> None:
+    store.reset()
+    workspace_a = Workspace(name="Account A", owner_user_id="owner-a")
+    store.workspaces[workspace_a.id] = workspace_a
+    owner_a = AuthUser(
+        id="owner-a",
+        email="owner-a@example.test",
+        display_name="Owner A",
+        role=UserRole.OWNER,
+        workspace_id=workspace_a.id,
+    )
+    device = DeviceRegistration(
+        id="mismatched-device",
+        user_id=owner_a.id,
+        workspace_id="workspace-b",
+        token="mismatched-token",
+    )
+    store.device_registrations[device.id] = device
+    store.persist()
+
+    response = notifications.unregister_device(device.id, owner_a)
+
+    assert isinstance(response, Response) and response.status_code == 204
+    assert store.device_registrations[device.id] == device
+
+
 def test_registering_existing_installation_moves_it_to_the_current_account() -> None:
     store.reset()
     workspace_a = Workspace(name="Account A", owner_user_id="owner-a")

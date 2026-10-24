@@ -234,9 +234,16 @@ def test_sqlite_unregister_is_exact_owner_scoped_and_audited(
     )
     repository.register(device)
 
-    assert repository.unregister(device_id=device.id, user_id="owner-b") is None
+    assert repository.unregister(
+        device_id=device.id, user_id="owner-a", workspace_id="workspace-b"
+    ) is None
+    assert repository.unregister(
+        device_id=device.id, user_id="owner-b", workspace_id="workspace-a"
+    ) is None
     assert set(_persisted_sqlite_devices(connect)) == {device.id}
-    mutation = repository.unregister(device_id=device.id, user_id="owner-a")
+    mutation = repository.unregister(
+        device_id=device.id, user_id="owner-a", workspace_id="workspace-a"
+    )
 
     assert mutation is not None and mutation.device.id == device.id
     assert mutation.audit_event is not None
@@ -316,8 +323,15 @@ def test_postgres_registration_reassigns_and_unregisters_with_atomic_audit(
     assert reassigned.device.workspace_id == workspace_b
     assert reassigned.audit_event is not None
     assert reassigned.audit_event.event_type == "notification.device_reassigned"
-    assert repository.unregister_device(device_id=device.id, user_id="owner-a") is None
-    removed = repository.unregister_device(device_id=device.id, user_id="owner-b")
+    assert repository.unregister_device(
+        device_id=device.id, user_id="owner-b", workspace_id=workspace_a
+    ) is None
+    assert repository.unregister_device(
+        device_id=device.id, user_id="owner-a", workspace_id=workspace_b
+    ) is None
+    removed = repository.unregister_device(
+        device_id=device.id, user_id="owner-b", workspace_id=workspace_b
+    )
     assert removed is not None and removed.audit_event is not None
     assert removed.audit_event.event_type == "notification.device_unregistered"
     with connect() as connection:

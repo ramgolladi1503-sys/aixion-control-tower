@@ -179,12 +179,23 @@ def unregister_device(
     """Remove this user's device registration; unknown/foreign IDs are no-ops."""
     repository = _postgres_notification_repository(http_request)
     if repository is not None:
-        repository.unregister_device(device_id=device_id, user_id=user.id)
+        workspace_id = workspace_id_for_request(user, http_request)
+        if workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
+        repository.unregister_device(
+            device_id=device_id,
+            user_id=user.id,
+            workspace_id=workspace_id,
+        )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     with store.atomic():
+        workspace_id = workspace_id_for_user(user)
+        if get_settings().is_production and workspace_id is None:
+            raise HTTPException(status_code=403, detail="Workspace membership is required")
         mutation = store.device_registration_repository.unregister(
             device_id=device_id,
             user_id=user.id,
+            workspace_id=workspace_id,
         )
         if mutation is not None:
             store.device_registrations.pop(device_id, None)
@@ -194,7 +205,11 @@ def unregister_device(
                 store.audit_events.append(mutation.audit_event)
         else:
             cached_device = store.device_registrations.get(device_id)
-            if cached_device is not None and cached_device.user_id == user.id:
+            if (
+                cached_device is not None
+                and cached_device.user_id == user.id
+                and cached_device.workspace_id == workspace_id
+            ):
                 store.device_registrations.pop(device_id, None)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

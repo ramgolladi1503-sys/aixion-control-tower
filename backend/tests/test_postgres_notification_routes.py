@@ -220,6 +220,35 @@ def test_postgres_notification_routes_reject_claimed_foreign_workspace(
     assert workspace.id != foreign_claim.workspace_id
 
 
+def test_postgres_device_unregister_rejects_workspace_mismatch_without_deleting(
+    postgres_notification_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, user, _notification = postgres_notification_route_runtime
+    device = main.app.state.notification_outbox_repository.register_device(
+        notifications.DeviceRegistration(
+            user_id=user.id,
+            workspace_id=workspace.id,
+            token=f"fcm-token-{uuid.uuid4().hex}",
+        )
+    ).device
+    foreign_claim = user.model_copy(update={"workspace_id": f"workspace_{uuid.uuid4().hex}"})
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        AuthDependency.dependency,
+        lambda: foreign_claim,
+    )
+
+    response = TestClient(main.app).delete(f"/notifications/devices/{device.id}")
+
+    assert response.status_code == 403
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT user_id,workspace_id FROM device_registrations WHERE device_id=%s",
+            (device.id,),
+        ).fetchone() == (user.id, workspace.id)
+
+
 def test_notification_routes_fail_closed_without_postgres_repository_when_auth_uses_postgres(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

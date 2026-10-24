@@ -429,6 +429,7 @@ class PostgresNotificationOutboxRepository:
         *,
         device_id: str,
         user_id: str,
+        workspace_id: str,
     ) -> DeviceRegistrationMutation | None:
         """Delete only the exact owner's device and append audit in one transaction."""
         with self._connect() as conn:
@@ -440,11 +441,12 @@ class PostgresNotificationOutboxRepository:
             if row is None:
                 return None
             device = self._decode_device_row(row)
-            if device.user_id != user_id:
+            if device.user_id != user_id or device.workspace_id != workspace_id:
                 return None
             deleted = conn.execute(
-                "DELETE FROM device_registrations WHERE device_id=%s AND user_id=%s",
-                (device_id, user_id),
+                "DELETE FROM device_registrations "
+                "WHERE device_id=%s AND user_id=%s AND workspace_id=%s",
+                (device_id, user_id, workspace_id),
             )
             if deleted.rowcount != 1:
                 raise RuntimeError("Device registration changed during owner-scoped removal")

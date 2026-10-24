@@ -106,7 +106,13 @@ class SQLiteDeviceRegistrationRepository:
         finally:
             connection.close()
 
-    def unregister(self, *, device_id: str, user_id: str) -> DeviceRegistrationMutation | None:
+    def unregister(
+        self,
+        *,
+        device_id: str,
+        user_id: str,
+        workspace_id: str | None,
+    ) -> DeviceRegistrationMutation | None:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -119,7 +125,7 @@ class SQLiteDeviceRegistrationRepository:
                 connection.commit()
                 return None
             device = self._decode_row(row)
-            if device.user_id != user_id:
+            if device.user_id != user_id or device.workspace_id != workspace_id:
                 connection.commit()
                 return None
             deleted_row = connection.execute(
