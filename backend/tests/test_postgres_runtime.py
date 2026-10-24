@@ -9,7 +9,7 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 
 from app import postgres_database
-from app.postgres_database import run_postgres_migrations
+from app.postgres_database import _migration_checksum, run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
 from scripts.migrate_postgres import MigrationCommandError, inspect_or_apply
 
@@ -381,6 +381,132 @@ def test_migration_command_upgrades_from_a_prior_known_revision(
     assert repeated_ledger == upgraded_ledger
     assert retained_workspace == (workspace_payload,)
     assert retained_project == (workspace_id, project_payload)
+
+
+def test_migration_command_upgrades_documented_pg0033_state_to_current_schema(
+    postgres_schema: tuple[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema, connect = postgres_schema
+    migrations = postgres_database.POSTGRES_MIGRATIONS
+    current_index = next(
+        index for index, migration in enumerate(migrations)
+        if migration.migration_id == "pg_0034_agent_run_pull_request_intents"
+    )
+    assert current_index == len(migrations) - 1
+    assert migrations[current_index - 1].migration_id == "pg_0033_agent_run_validation_intents"
+    prior_migrations = migrations[:current_index]
+
+    # This is the documented supported upgrade boundary. Keep representative
+    # application data in the prior schema and exercise the guarded operator
+    # command, not only the lower-level migration runner.
+    monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", prior_migrations)
+    run_postgres_migrations(connect)
+    workspace_id = "workspace_pg0033_operator_upgrade_fixture"
+    project_id = "project_pg0033_operator_upgrade_fixture"
+    workspace_payload = {
+        "id": workspace_id,
+        "name": "Prior supported workspace",
+        "owner_user_id": "user_pg0033_operator_upgrade_fixture",
+        "metadata": {"source": "pg_0033", "must_survive": True},
+    }
+    project_payload = {
+        "id": project_id,
+        "workspace_id": workspace_id,
+        "name": "Prior supported project",
+        "metadata": {"must_survive": True},
+    }
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s::jsonb)",
+            (workspace_id, json.dumps(workspace_payload)),
+        )
+        connection.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s::jsonb)",
+            (project_id, workspace_id, json.dumps(project_payload)),
+        )
+        prior_ids = connection.execute(
+            "SELECT migration_id FROM schema_migrations ORDER BY migration_id"
+        ).fetchall()
+    assert prior_ids == [(migration.migration_id,) for migration in prior_migrations]
+
+    monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", migrations)
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    database = _test_database_name()
+    runtime = PostgresRuntime(
+        _dsn=dsn,
+        profile="test",
+        _connector=lambda *_args, **_kwargs: connect(),
+    )
+    report = inspect_or_apply(
+        runtime,
+        dsn=dsn,
+        apply=True,
+        expected_database=database,
+        expected_schema=schema,
+        allow_remote=False,
+    )
+    replay = inspect_or_apply(
+        runtime,
+        dsn=dsn,
+        apply=True,
+        expected_database=database,
+        expected_schema=schema,
+        allow_remote=False,
+    )
+
+    expected_ledger = [
+        (migration.migration_id, migration.name, _migration_checksum(migration))
+        for migration in migrations
+    ]
+    with connect() as connection:
+        actual_ledger = connection.execute(
+            "SELECT migration_id,name,migration_checksum FROM schema_migrations "
+            "ORDER BY migration_id"
+        ).fetchall()
+        retained_workspace = connection.execute(
+            "SELECT payload FROM workspaces WHERE workspace_id=%s", (workspace_id,),
+        ).fetchone()
+        retained_project = connection.execute(
+            "SELECT workspace_id,payload FROM projects WHERE project_id=%s", (project_id,),
+        ).fetchone()
+        schema_objects = connection.execute(
+            "SELECT to_regclass(%s),to_regclass(%s),to_regclass(%s)",
+            (
+                "agent_run_pull_request_intents",
+                "idx_agent_run_pull_request_reconcile",
+                "idx_agent_runs_id_workspace",
+            ),
+        ).fetchone()
+        intent_columns = {
+            row[0] for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema=%s AND table_name='agent_run_pull_request_intents'",
+                (schema,),
+            ).fetchall()
+        }
+
+    assert report["status"] == replay["status"] == "READY"
+    assert report["missing_migration_ids"] == replay["missing_migration_ids"] == []
+    assert report["unknown_migration_ids"] == replay["unknown_migration_ids"] == []
+    assert report["mismatched_migration_ids"] == replay["mismatched_migration_ids"] == []
+    assert report["applied_migration_ids"] == replay["applied_migration_ids"] == [
+        migration.migration_id for migration in migrations
+    ]
+    assert actual_ledger == expected_ledger
+    assert retained_workspace == (workspace_payload,)
+    assert retained_project == (workspace_id, project_payload)
+    assert schema_objects == (
+        "agent_run_pull_request_intents",
+        "idx_agent_run_pull_request_reconcile",
+        "idx_agent_runs_id_workspace",
+    )
+    assert {
+        "intent_id", "workspace_id", "run_id", "task_id", "approval_id",
+        "step_id", "action_id", "lease_id", "status", "title_sha256",
+        "body_sha256", "last_get_status", "get_match_count",
+        "get_response_sha256", "payload",
+    } <= intent_columns
 
 
 def test_invocation_lease_manifest_scope_migration_preserves_v11_and_allows_v12(

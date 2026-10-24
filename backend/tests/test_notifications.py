@@ -57,6 +57,13 @@ def _configure_fcm(monkeypatch: Any, response: httpx.Response, captured: dict[st
     )
 
 
+def _dispatch_local_production_scope_policy_for_test(
+    notification: notifications.Notification,
+) -> notifications.Notification:
+    """Exercise the SQLite target filter directly; production uses the PG outbox."""
+    return notifications._dispatch_push_from_local_state(notification, production=True)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -295,7 +302,7 @@ def test_production_push_requires_workspace_scope_and_never_broadcasts_legacy_re
         lambda token, **_: delivered.append(token),
     )
 
-    result = notifications.dispatch_push(notification)
+    result = _dispatch_local_production_scope_policy_for_test(notification)
 
     assert result.push_status == "SKIPPED"
     assert result.push_error == "RECIPIENT_SCOPE_MISSING"
@@ -357,7 +364,7 @@ def test_production_push_routes_only_to_matching_workspace_and_optional_user(
         workspace_id=workspace_a.id,
     )
 
-    notifications.dispatch_push(notification)
+    _dispatch_local_production_scope_policy_for_test(notification)
 
     assert set(delivered) == {"token-a1", "token-a2"}
     assert "token-b" not in delivered
@@ -365,7 +372,7 @@ def test_production_push_routes_only_to_matching_workspace_and_optional_user(
 
     delivered.clear()
     notification.user_id = "reviewer-a"
-    notifications.dispatch_push(notification)
+    _dispatch_local_production_scope_policy_for_test(notification)
     assert delivered == ["token-a2"]
 
 
@@ -398,7 +405,7 @@ def test_agent_task_approval_push_targets_the_linked_approval(monkeypatch: Any) 
         approval_request_id="approval_123",
     )
 
-    result = notifications.dispatch_push(notification)
+    result = _dispatch_local_production_scope_policy_for_test(notification)
 
     assert result.push_status == "SENT"
     assert captured[0]["data"] == {
@@ -437,7 +444,7 @@ def test_partial_delivery_does_not_retry_entire_workspace_fanout(monkeypatch: An
         lambda token, **_: None if token == "accepted" else "FCM_NETWORK_ERROR",
     )
 
-    result = notifications.dispatch_push(notification)
+    result = _dispatch_local_production_scope_policy_for_test(notification)
 
     assert result.push_status == "SENT"
     assert result.push_error == "PARTIAL_DELIVERY"
@@ -465,7 +472,7 @@ def test_unregistered_token_is_removed_and_audited(monkeypatch: Any) -> None:
         notifications, "_send_fcm_to_token", lambda **_: "FCM_TOKEN_UNREGISTERED"
     )
 
-    result = notifications.dispatch_push(notification)
+    result = _dispatch_local_production_scope_policy_for_test(notification)
 
     assert result.push_status == "FAILED"
     assert result.push_error == "FCM_TOKEN_UNREGISTERED"
@@ -794,6 +801,54 @@ def test_provider_outcome_is_not_visible_until_dispatcher_reacquires_store_lock(
     assert notifications.dispatch_one_due_push() == notification.id
     assert observed == ["SENDING"]
     assert notification.push_status == "SENT"
+
+
+@pytest.mark.parametrize("operation", ["dispatch_one_due_push", "dispatch_push"])
+@pytest.mark.parametrize("mode", ["postgres", "production"])
+def test_sqlite_notification_dispatch_helpers_refuse_postgres_authority(
+    operation: str,
+    mode: str,
+    monkeypatch: Any,
+) -> None:
+    store.reset()
+    notification = notifications.Notification(
+        title="Approval needed",
+        body="Review the request",
+        entity_type="approval_request",
+        entity_id="approval_pg_guard",
+        workspace_id="workspace_pg_guard",
+    )
+    store.notifications[notification.id] = notification
+    original_notification = notification.model_copy(deep=True)
+    provider_calls: list[str] = []
+    monkeypatch.setattr(
+        notifications,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=mode == "production",
+            postgres_auth_enabled=mode == "postgres",
+            push_dispatch_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(
+        notifications,
+        "_send_fcm_to_token",
+        lambda **_: provider_calls.append("sent") or None,
+    )
+    monkeypatch.setattr(
+        store,
+        "atomic",
+        lambda: (_ for _ in ()).throw(AssertionError("SQLite state must not be read")),
+    )
+
+    with pytest.raises(RuntimeError, match="SQLite notification operations"):
+        if operation == "dispatch_one_due_push":
+            notifications.dispatch_one_due_push()
+        else:
+            notifications.dispatch_push(notification)
+
+    assert store.notifications == {notification.id: original_notification}
+    assert provider_calls == []
 
 
 def test_api_lifespan_starts_and_stops_push_dispatcher(monkeypatch: Any) -> None:

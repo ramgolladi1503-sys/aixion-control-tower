@@ -30,6 +30,18 @@ PUSH_TITLE = "Aixion Control Tower"
 PUSH_BODY = "A request is waiting for your review. Open the app to view details."
 
 
+def _require_sqlite_notification_runtime() -> None:
+    """Keep local notification helpers from becoming a PostgreSQL fallback."""
+    settings = get_settings()
+    if getattr(settings, "is_production", False) or getattr(
+        settings, "postgres_auth_enabled", False
+    ):
+        raise RuntimeError(
+            "PostgreSQL notification dispatcher is required; SQLite notification operations "
+            "are unavailable in PostgreSQL or production mode"
+        )
+
+
 def _postgres_notification_repository(
     http_request: Request | None,
 ) -> PostgresNotificationOutboxRepository | None:
@@ -335,7 +347,14 @@ def _send_fcm_to_token(token: str, title: str, body: str, data: dict[str, str]) 
 
 
 def dispatch_push(notification: Notification) -> Notification:
+    _require_sqlite_notification_runtime()
     production = get_settings().is_production
+    return _dispatch_push_from_local_state(notification, production=production)
+
+
+def _dispatch_push_from_local_state(
+    notification: Notification, *, production: bool
+) -> Notification:
     with store.atomic():
         devices = [
             device.model_copy(deep=True)
@@ -499,6 +518,7 @@ def _is_retryable_push_failure(error: str | None) -> bool:
 
 def dispatch_one_due_push(*, now: datetime | None = None) -> str | None:
     """Claim and send one durable notification from the single-process SQLite queue."""
+    _require_sqlite_notification_runtime()
     settings = get_settings()
     if not settings.push_dispatch_enabled:
         return None
@@ -584,11 +604,8 @@ def dispatch_one_due_push(*, now: datetime | None = None) -> str | None:
 
 async def notification_dispatch_loop() -> None:
     """Run the opt-in local/demo outbox worker in the API process."""
+    _require_sqlite_notification_runtime()
     settings = get_settings()
-    if getattr(settings, "postgres_auth_enabled", False):
-        raise RuntimeError(
-            "PostgreSQL authentication requires the PostgreSQL notification dispatcher"
-        )
     if not settings.push_dispatch_enabled:
         logger.info("Push dispatch loop disabled by configuration")
         return
