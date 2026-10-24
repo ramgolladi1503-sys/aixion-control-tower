@@ -135,6 +135,71 @@ def _claim_apply_change_intent_in_process(
     )
 
 
+def _execute_agent_run_route_in_process(
+    dsn: str,
+    schema: str,
+    run_id: str,
+    user_data: dict,
+    barrier,
+    results,
+) -> None:
+    """Call the real execute-next HTTP route from an independent process."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient as ProcessTestClient
+
+    from app import agent_run_routes, main as process_main
+    from app.agent_run_routes import MaintainerDependency
+    from app.application_repositories import ApplicationRepositories as ProcessRepositories
+    from app.auth import require_maintainer
+    from app import application_repository_access
+    from app.models import AuthUser
+
+    def process_connect(_runtime_dsn: str = dsn, **connect_kwargs: object) -> Connection:
+        connection = psycopg.connect(dsn, **connect_kwargs)
+        connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        return connection
+
+    repositories = ProcessRepositories.from_connector(process_connect)
+    for name, value in {
+        "agent_run_repository": repositories.agent_runs,
+        "agent_task_repository": repositories.agent_tasks,
+        "approval_decision_repository": repositories.approval_decisions,
+    }.items():
+        setattr(process_main.app.state, name, value)
+
+    settings = SimpleNamespace(
+        auth_enabled=False,
+        is_production=False,
+        postgres_auth_enabled=False,
+    )
+    agent_run_routes.get_settings = lambda: settings
+    application_repository_access.get_settings = lambda: settings
+    user = AuthUser.model_validate(user_data)
+    process_main.app.dependency_overrides[require_maintainer] = lambda: user
+    process_main.app.dependency_overrides[MaintainerDependency.dependency] = lambda: user
+
+    execute = agent_run_routes.execute_next_step
+
+    def synchronized_execute(*args, **kwargs):
+        # Both requests have read the same durable run/step and entered the
+        # real HTTP route before either can acquire the PostgreSQL lease.
+        barrier.wait(timeout=30)
+        return execute(*args, **kwargs)
+
+    agent_run_routes.execute_next_step = synchronized_execute
+    try:
+        client = ProcessTestClient(process_main.app)
+        response = client.post(
+            f"/agent/runs/{run_id}/execute-next",
+            json={"worker_id": f"process-{os.getpid()}", "timeout_seconds": 10},
+        )
+        client.close()
+        results.put((os.getpid(), response.status_code, response.json()))
+    except BaseException as exc:
+        results.put((os.getpid(), None, f"{type(exc).__name__}: {exc}"))
+
+
 @pytest.fixture
 def postgres_agent_run_route_runtime(
     monkeypatch: pytest.MonkeyPatch,
@@ -1115,6 +1180,107 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
     assert "lifespan-owned repository bundle" in rejected.json()["detail"]
     assert repositories.agent_runs.get(run_id) == durable_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
+
+
+def test_postgres_execute_next_http_route_races_across_processes_once(
+    postgres_agent_run_route_runtime,
+) -> None:
+    """Independent route workers commit one durable scope-validation effect."""
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    with connect() as conn:
+        task_row = conn.execute(
+            "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        task = AgentTask.model_validate(task_row[0])
+        task.repository = "owner/approved-repository"
+        task.branch_preference = "feature/approved-branch"
+        conn.execute(
+            "UPDATE agent_tasks SET payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (Jsonb(task.model_dump(mode="json")), task_id, workspace.id),
+        )
+        approval_row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (task.approval_request_id, workspace.id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(approval_row[0])
+        approval.test_plan = ["python -m pytest"]
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval.id, workspace.id),
+        )
+
+    created = TestClient(main.app).post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    step_before = repositories.agent_runs.list_steps_for_run(run_id)[0]
+    assert step_before.step_type == AgentRunStepType.VALIDATE_SCOPE
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    assert dsn, "the PostgreSQL route fixture requires its isolated test DSN"
+    with connect() as conn:
+        schema = conn.execute("SELECT current_schema()").fetchone()[0]
+
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    user_data = state["users"][0].model_dump(mode="json")
+    workers = [
+        context.Process(
+            target=_execute_agent_run_route_in_process,
+            args=(dsn, schema, run_id, user_data, barrier, results),
+        )
+        for _ in range(2)
+    ]
+    try:
+        for worker in workers:
+            worker.start()
+        outcomes = []
+        for _ in workers:
+            try:
+                outcomes.append(results.get(timeout=45))
+            except queue_module.Empty:
+                pytest.fail("Timed out waiting for PostgreSQL execute-next route processes")
+        for worker in workers:
+            worker.join(timeout=15)
+            if worker.is_alive():
+                pytest.fail("execute-next route process did not exit within its timeout")
+        assert [worker.exitcode for worker in workers] == [0, 0]
+        assert len({outcome[0] for outcome in outcomes}) == 2
+        assert sorted(outcome[1] for outcome in outcomes) == [200, 409], outcomes
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+            worker.join(timeout=5)
+        results.close()
+        results.join_thread()
+
+    durable_run = repositories.agent_runs.get(run_id)
+    durable_steps = repositories.agent_runs.list_steps_for_run(run_id)
+    durable_events = repositories.agent_runs.list_events_for_run(run_id)
+    assert durable_run is not None
+    assert durable_steps[0].status == AgentRunStepStatus.SUCCEEDED
+    assert durable_steps[0].attempt_count == 1
+    assert sum(
+        event.step_id == step_before.id and event.event_type == AgentRunEventType.STEP_STARTED
+        for event in durable_events
+    ) == 1
+    assert sum(
+        event.step_id == step_before.id and event.event_type == AgentRunEventType.STEP_SUCCEEDED
+        for event in durable_events
+    ) == 1
+    with connect() as conn:
+        completion_audits = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_type='agent_run' "
+            "AND entity_id=%s AND event_type='agent_run.step_completed'",
+            (workspace.id, run_id),
+        ).fetchone()[0]
+    assert completion_audits == 1
 
 
 def test_postgres_scope_validation_rolls_back_all_completion_writes_on_audit_conflict(
