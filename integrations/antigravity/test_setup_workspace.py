@@ -88,6 +88,28 @@ def test_remove_deletes_only_exact_managed_hook_and_config(
     assert not config_path.exists()
 
 
+def test_remove_is_idempotent_and_keeps_unrelated_hooks(
+    install_paths: tuple[Path, Path, Path, Path],
+) -> None:
+    home, workspace, script, hooks_path = install_paths
+    hooks = _read_hooks(hooks_path)
+    hooks["OtherProvider"] = {"enabled": True, "hooks": [{"command": "other-tool"}]}
+    hooks_path.write_text(json.dumps(hooks))
+    hooks_path.chmod(0o600)
+    _workspace, config_path, _hooks_path = setup._paths(workspace, home, script)
+
+    assert setup.remove_workspace(workspace, home=home, hook_script=script) == (True, True)
+    hooks_after_first_remove = hooks_path.read_bytes()
+    assert json.loads(hooks_after_first_remove) == {
+        "OtherProvider": {"enabled": True, "hooks": [{"command": "other-tool"}]}
+    }
+    assert not config_path.exists()
+
+    assert setup.remove_workspace(workspace, home=home, hook_script=script) == (False, False)
+    assert hooks_path.read_bytes() == hooks_after_first_remove
+    assert not config_path.exists()
+
+
 def test_cli_config_home_keeps_workspace_metadata_out_of_real_home(tmp_path: Path) -> None:
     workspace = tmp_path / "isolated-workspace"
     workspace.mkdir()

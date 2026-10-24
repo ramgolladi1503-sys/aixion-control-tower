@@ -193,6 +193,14 @@ def test_postgres_lifespan_expiry_sweeper_is_durable_bounded_and_fail_closed(
         assert client.app.state.approval_expiry_status == "healthy"
         assert client.app.state.approval_expiry_last_changed_count == 1
     assert repository.get(lifespan_candidate.id).status == ApprovalStatus.EXPIRED
+    with connect() as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM audit_events WHERE entity_id=%s AND event_type='approval.expired'",
+                (lifespan_candidate.id,),
+            ).fetchone()[0]
+            == 1
+        )
     assert set(store.approval_requests) == store_snapshot["approvals"]
     assert {event.id for event in store.audit_events} == store_snapshot["audits"]
 

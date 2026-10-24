@@ -115,4 +115,25 @@ class AuthFormContentTest {
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Error"))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
     }
+
+    @Test
+    fun signInProgressIsAnnouncedToTalkBackWhileTheRequestIsInFlight() {
+        composeRule.setContent {
+            AuthFormContent(
+                state = AuthUiState(loading = true),
+                onEmailChange = {},
+                onPasswordChange = {},
+                onVerificationCodeChange = {},
+                onLogin = {},
+                onRegister = {},
+                onVerify = {},
+                onResendVerification = {}
+            )
+        }
+
+        composeRule.onNodeWithText("Signing in…")
+            .assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Information"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+    }
 }

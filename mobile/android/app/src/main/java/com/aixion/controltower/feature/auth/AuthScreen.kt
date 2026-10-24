@@ -304,6 +304,16 @@ internal fun AuthFormContent(
                 }
             }
 
+            if (state.loading && state.message == null) {
+                AuthProgressMessage(
+                    text = when {
+                        verificationStarted -> "Working…"
+                        registrationExpanded -> "Creating account…"
+                        else -> "Signing in…"
+                    }
+                )
+            }
+
             state.message?.let { message ->
                 AuthFeedbackMessage(message, state.messageSeverity)
             }
@@ -353,6 +363,20 @@ internal fun AuthFormContent(
             }
         }
     }
+}
+
+@Composable
+internal fun AuthProgressMessage(text: String) {
+    val palette = LocalTowerPalette.current
+    Text(
+        text = text,
+        color = palette.inkMuted,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.semantics {
+            liveRegion = LiveRegionMode.Polite
+            stateDescription = AuthMessageSeverity.INFO.accessibilityLabel
+        }
+    )
 }
 
 @Composable
