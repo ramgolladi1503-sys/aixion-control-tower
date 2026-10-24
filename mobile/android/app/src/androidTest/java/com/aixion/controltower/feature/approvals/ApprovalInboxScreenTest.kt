@@ -54,6 +54,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import kotlin.math.roundToInt
+import java.time.Instant
 
 class ApprovalInboxScreenTest {
     @get:Rule
@@ -330,23 +331,37 @@ class ApprovalInboxScreenTest {
 
     @Test
     fun approvalCardsShowLocalExpiryOrExplicitUnavailableState() {
-        val validExpiry = "2026-10-22T10:00:00Z"
+        val now = Instant.now()
+        val validExpiry = now.plusSeconds(3_600).toString()
+        val expiredExpiry = now.minusSeconds(3_600).toString()
+        var selectedId: String? = null
         val approvals = listOf(
             approval("approval_valid_expiry", "Valid expiry", ApprovalStatus.REQUESTED)
                 .copy(expiresAt = validExpiry),
+            approval("approval_expired_expiry", "Expired request", ApprovalStatus.REQUESTED)
+                .copy(expiresAt = expiredExpiry),
             approval("approval_missing_expiry", "Missing expiry", ApprovalStatus.REQUESTED),
             approval("approval_invalid_expiry", "Invalid expiry", ApprovalStatus.REQUESTED)
                 .copy(expiresAt = "not-a-timestamp")
         )
         composeRule.setContent {
             ApprovalInboxContent(
-                state = ApprovalsUiState(loading = false, approvals = approvals)
+                state = ApprovalsUiState(loading = false, approvals = approvals),
+                onApprovalSelected = { selectedId = it.id }
             )
         }
 
-        val validLabel = formatApprovalExpiry(validExpiry)
+        val validLabel = formatApprovalExpiry(validExpiry, now)
+        val expiredLabel = formatApprovalExpiry(expiredExpiry, now)
         composeRule.onNodeWithText(validLabel).assertExists()
+        composeRule.onNodeWithText(expiredLabel).assertExists()
+        composeRule.onNodeWithContentDescription(
+            "$expiredLabel. Request deadline passed; open details to check its current status."
+        ).assertExists()
         composeRule.onAllNodesWithText("Expiry unavailable").assertCountEquals(2)
+
+        composeRule.onNodeWithText("Expired request").performClick()
+        assertEquals("Expired requests remain openable for status review", "approval_expired_expiry", selectedId)
     }
 
     @Test

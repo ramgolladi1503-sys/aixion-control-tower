@@ -363,7 +363,9 @@ def test_installed_codex_callback_without_documented_call_id_cannot_reuse_approv
                 "HOME": str(home),
                 "AIXION_AGENT_TOKEN": token,
                 "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
-                "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "1",
+                # The first request must remain actionable while CI starts the
+                # reviewer call; only the replacement callback should expire fast.
+                "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "30",
             }
         )
 
@@ -425,6 +427,7 @@ def test_installed_codex_callback_without_documented_call_id_cannot_reuse_approv
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == ApprovalStatus.APPROVED.value
 
+        child_environment["AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS"] = "5"
         replacement_process = start_callback()
         deadline = time.monotonic() + 12
         rows = initial_rows
@@ -450,7 +453,7 @@ def test_installed_codex_callback_without_documented_call_id_cannot_reuse_approv
         }
 
         try:
-            stdout, stderr = replacement_process.communicate(timeout=10)
+            stdout, stderr = replacement_process.communicate(timeout=15)
         except subprocess.TimeoutExpired:
             replacement_process.kill()
             stdout, stderr = replacement_process.communicate()

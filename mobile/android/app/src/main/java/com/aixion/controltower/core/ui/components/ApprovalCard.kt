@@ -17,11 +17,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import java.time.Instant
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -85,11 +87,18 @@ fun ApprovalCard(
                 .testTag("approval-card-summary-preview")
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
-        val expiryLabel = formatApprovalExpiry(approval.expiresAt)
+        val now = Instant.now()
+        val expired = approvalExpiredAt(approval.expiresAt, now)
+        val expiryLabel = formatApprovalExpiry(approval.expiresAt, now)
         Text(
             text = expiryLabel,
-            color = if (expiryLabel == EXPIRY_UNAVAILABLE) palette.caution else palette.inkMuted,
-            style = MaterialTheme.typography.bodyMedium
+            color = if (expired || expiryLabel == EXPIRY_UNAVAILABLE) palette.caution else palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.semantics {
+                if (expired) {
+                    contentDescription = "$expiryLabel. Request deadline passed; open details to check its current status."
+                }
+            }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.lg))
         FlowRow(
@@ -128,12 +137,20 @@ fun ApprovalCard(
 
 private const val EXPIRY_UNAVAILABLE = "Expiry unavailable"
 
-internal fun formatApprovalExpiry(expiresAt: String?): String {
-    if (expiresAt.isNullOrBlank()) return EXPIRY_UNAVAILABLE
+private fun parseApprovalExpiry(expiresAt: String?): Instant? =
+    expiresAt?.takeIf(String::isNotBlank)
+        ?.let { raw -> runCatching { OffsetDateTime.parse(raw).toInstant() }.getOrNull() }
+
+internal fun approvalExpiredAt(expiresAt: String?, now: Instant): Boolean =
+    parseApprovalExpiry(expiresAt)?.let { expiry -> !expiry.isAfter(now) } ?: false
+
+internal fun formatApprovalExpiry(expiresAt: String?, now: Instant = Instant.now()): String {
+    val expiry = parseApprovalExpiry(expiresAt) ?: return EXPIRY_UNAVAILABLE
     return runCatching {
         val localFormatter = DateTimeFormatter
             .ofPattern("MMM d, yyyy 'at' h:mm a (XXX)", Locale.getDefault())
             .withZone(ZoneId.systemDefault())
-        "Expires ${localFormatter.format(Instant.parse(expiresAt))}"
+        val time = localFormatter.format(expiry)
+        if (!expiry.isAfter(now)) "Expired · $time" else "Expires $time"
     }.getOrDefault(EXPIRY_UNAVAILABLE)
 }

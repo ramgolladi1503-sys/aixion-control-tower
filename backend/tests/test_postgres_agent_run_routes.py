@@ -4824,7 +4824,7 @@ def test_postgres_credential_revocation_route_uses_durable_workspace_state(
         with conn.transaction():
             repositories.trust.insert_credential_grant(conn, grant)
 
-    runtime = SimpleNamespace(connect=connect)
+    runtime = SimpleNamespace(connect=connect, repositories=repositories)
     for name, value in {
         "postgres_runtime": runtime,
         "postgres_repositories": repositories,
@@ -4908,7 +4908,7 @@ def test_postgres_credential_issue_introspect_and_revoke_are_durable(
         state=state,
         client=client,
     )
-    runtime = SimpleNamespace(connect=connect)
+    runtime = SimpleNamespace(connect=connect, repositories=repositories)
     for name, value in {
         "postgres_runtime": runtime,
         "postgres_repositories": repositories,

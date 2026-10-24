@@ -40,7 +40,7 @@ class ApprovalRiskConfirmationUiTest {
         composeRule.onNodeWithText("High impact operation", substring = true).assertExists()
         composeRule.onNodeWithText("Target: Production workspace · release", substring = true).assertExists()
         composeRule.onNodeWithText("Risk: High", substring = true).assertExists()
-        composeRule.onNodeWithText("Provider: MANUAL", substring = true).assertExists()
+        composeRule.onNodeWithText("Provider: Manual", substring = true).assertExists()
         composeRule.onNodeWithText("Source verification: Not verified", substring = true).assertExists()
         composeRule.onNodeWithText("Request ID: val-test", substring = true).assertExists()
         composeRule.onNodeWithText("Invocation ID: Not provided", substring = true).assertExists()
@@ -71,7 +71,7 @@ class ApprovalRiskConfirmationUiTest {
 
         composeRule.onNodeWithText("Approve request").performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
-        composeRule.onNodeWithText("Provider: ANTIGRAVITY", substring = true).assertExists()
+        composeRule.onNodeWithText("Provider: Antigravity", substring = true).assertExists()
         composeRule.onNodeWithText("Source verification: Verified", substring = true).assertExists()
         composeRule.onNodeWithText("Request ID: val-test", substring = true).assertExists()
         composeRule.onNodeWithText("Invocation ID: tool-991", substring = true).assertExists()

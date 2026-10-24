@@ -1028,6 +1028,65 @@ def test_import_preserves_user_and_session_security_audits(tmp_path, postgres_im
     ]
 
 
+def test_import_preserves_workspace_scoped_audit_event_idempotently(
+    tmp_path, postgres_import_dsn
+):
+    path = tmp_path / "snapshot_with_workspace_audit.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-workspace-settings", "event_type": "workspace.settings_updated",
+        "actor": "owner@example.test", "entity_id": "ws1", "workspace_id": "ws1",
+        "details": {"setting": "approval_expiry", "value": "24h"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+    assert plan["planned_counts"]["audit_event"] == 9
+    assert selected["audit_event"][event["id"]]["_import_entity_type"] == "workspace"
+
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        persisted = conn.execute(
+            "SELECT workspace_id,entity_type,entity_id,event_type,details "
+            "FROM audit_events WHERE event_id=%s",
+            (event["id"],),
+        ).fetchone()
+        assert persisted == (
+            "ws1", "workspace", "ws1", "workspace.settings_updated", event["details"]
+        )
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_id=%s", (event["id"],)
+        ).fetchone()[0] == 1
+
+
+def test_plan_rejects_workspace_audit_with_mismatched_workspace_scope(tmp_path):
+    path = tmp_path / "snapshot_with_mismatched_workspace_audit.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-workspace-cross-scope", "event_type": "workspace.settings_updated",
+        "actor": "owner@example.test", "entity_id": "ws1",
+        "workspace_id": "foreign-workspace", "details": {},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    with pytest.raises(ImportBlocked):
+        build_plan(path)
+
+
 @pytest.mark.parametrize(
     ("event_type", "entity_id"),
     [

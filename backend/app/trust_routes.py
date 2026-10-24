@@ -9,10 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from .agent_auth import assert_agent_can, require_external_agent
 from .approval_decisions import approval_decision_repository
 from .approval_repository import SQLiteApprovalDecisionRepository
-from .application_repository_access import workspace_id_for_request
 from .application_repository_access import (
+    application_repositories_for_request,
     external_agent_auth_repository_for_request,
     is_sqlite_external_agent_auth_repository,
+    workspace_id_for_request,
 )
 from .auth import require_maintainer, require_owner, require_reviewer
 from .models import AgentAction, AuthUser, ExternalAgent, now_utc
@@ -107,8 +108,11 @@ def _postgres_attestation_runtime(request: Request | None):
         return None
     state = request.app.state
     runtime = getattr(state, "postgres_runtime", None)
-    repositories = getattr(state, "postgres_repositories", None)
-    if runtime is None or repositories is None:
+    if runtime is None:
+        return None
+    try:
+        repositories = application_repositories_for_request(request)
+    except RuntimeError:
         return None
     bindings = (
         ("approval_decision_repository", "approval_decisions"),

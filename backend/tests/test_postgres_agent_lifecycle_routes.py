@@ -355,7 +355,7 @@ def test_postgres_external_gateway_action_is_durable_and_partial_runtime_fails_c
     postgres_agent_route_runtime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     connect, workspace, project, _user, repositories = postgres_agent_route_runtime
-    runtime = SimpleNamespace(connect=connect)
+    runtime = SimpleNamespace(connect=connect, repositories=repositories)
     for name, value in {
         "postgres_runtime": runtime,
         "postgres_repositories": repositories,

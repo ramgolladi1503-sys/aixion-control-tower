@@ -5,18 +5,29 @@ import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.ApprovalHistoryEvent
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
+import com.aixion.controltower.core.ui.components.approvalExpiredAt
 import com.aixion.controltower.core.ui.components.formatApprovalExpiry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.Instant
 
 class ApprovalInboxFilterTest {
     @Test
     fun approvalExpiryLabelUsesLocalTimeOffsetAndFailsClosedForMissingOrInvalidValues() {
-        val formatted = formatApprovalExpiry("2026-10-22T10:00:00Z")
+        val now = Instant.parse("2026-10-22T09:00:00Z")
+        val formatted = formatApprovalExpiry("2026-10-22T10:00:00Z", now)
+        val expiredFormatted = formatApprovalExpiry("2026-10-22T08:00:00Z", now)
+        val offsetExpiredFormatted = formatApprovalExpiry("2026-10-22T10:00:00+02:00", now)
 
         assertTrue(formatted.startsWith("Expires "))
         assertTrue(Regex("\\((?:Z|[+-]\\d{2}:\\d{2})\\)$").containsMatchIn(formatted))
+        assertTrue(expiredFormatted.startsWith("Expired · "))
+        assertTrue(offsetExpiredFormatted.startsWith("Expired · "))
+        assertTrue(Regex("\\((?:Z|[+-]\\d{2}:\\d{2})\\)$").containsMatchIn(expiredFormatted))
+        assertTrue(approvalExpiredAt("2026-10-22T08:00:00Z", now))
+        assertTrue(!approvalExpiredAt("2026-10-22T10:00:00Z", now))
+        assertTrue(!approvalExpiredAt("not-a-timestamp", now))
         assertEquals("Expiry unavailable", formatApprovalExpiry(null))
         assertEquals("Expiry unavailable", formatApprovalExpiry(" "))
         assertEquals("Expiry unavailable", formatApprovalExpiry("not-a-timestamp"))

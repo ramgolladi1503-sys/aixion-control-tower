@@ -218,7 +218,7 @@ def _postgres_lease_issue_context(trust_repository, monkeypatch):
         )
     repositories = ApplicationRepositories.from_connector(connect)
     state = SimpleNamespace(
-        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_runtime=SimpleNamespace(connect=connect, repositories=repositories),
         postgres_repositories=repositories,
         approval_decision_repository=repositories.approval_decisions,
         workspace_membership_repository=repositories.workspace_membership,
@@ -2045,7 +2045,7 @@ def test_postgres_manual_consumption_route_uses_durable_trust_state(
 
     repositories = ApplicationRepositories.from_connector(connect)
     state = SimpleNamespace(
-        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_runtime=SimpleNamespace(connect=connect, repositories=repositories),
         postgres_repositories=repositories,
         approval_decision_repository=repositories.approval_decisions,
         workspace_membership_repository=repositories.workspace_membership,
@@ -2091,7 +2091,7 @@ def _postgres_decision_route_context(
 ):
     repositories = ApplicationRepositories.from_connector(connect)
     state = SimpleNamespace(
-        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_runtime=SimpleNamespace(connect=connect, repositories=repositories),
         postgres_repositories=repositories,
         approval_decision_repository=repositories.approval_decisions,
         workspace_membership_repository=repositories.workspace_membership,
@@ -2433,7 +2433,7 @@ def test_postgres_manual_action_evaluation_and_reviewer_decision_are_durable(
     repository, connect, workspace_id, user_id, project_id, _approval_id = trust_repository
     repositories = ApplicationRepositories.from_connector(connect)
     state = SimpleNamespace(
-        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_runtime=SimpleNamespace(connect=connect, repositories=repositories),
         postgres_repositories=repositories,
         approval_decision_repository=repositories.approval_decisions,
         workspace_membership_repository=repositories.workspace_membership,
@@ -2519,7 +2519,7 @@ def test_postgres_manual_action_decision_rolls_back_when_ledger_is_inconsistent(
     repository, connect, workspace_id, user_id, project_id, _approval_id = trust_repository
     repositories = ApplicationRepositories.from_connector(connect)
     state = SimpleNamespace(
-        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_runtime=SimpleNamespace(connect=connect, repositories=repositories),
         postgres_repositories=repositories,
         approval_decision_repository=repositories.approval_decisions,
         workspace_membership_repository=repositories.workspace_membership,
@@ -2586,7 +2586,7 @@ def test_postgres_manual_action_evaluation_rolls_back_when_ledger_is_inconsisten
     repository, connect, workspace_id, user_id, project_id, _approval_id = trust_repository
     repositories = ApplicationRepositories.from_connector(connect)
     state = SimpleNamespace(
-        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_runtime=SimpleNamespace(connect=connect, repositories=repositories),
         postgres_repositories=repositories,
         approval_decision_repository=repositories.approval_decisions,
         workspace_membership_repository=repositories.workspace_membership,
@@ -2986,6 +2986,47 @@ def test_postgres_attestation_routes_refuse_partial_binding_without_sqlite_fallb
 
     assert list_error.value.status_code == 503
     assert create_error.value.status_code == 503
+    assert store.reviewer_attestations == before
+
+
+def test_postgres_attestation_routes_refuse_runtime_bundle_mismatch(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _repository, _connect, _workspace_id, approval_id, request, user, _payload = (
+        _postgres_lease_issue_context(trust_repository, monkeypatch)
+    )
+    connection_attempts: list[bool] = []
+
+    def mismatched_connect():
+        connection_attempts.append(True)
+        raise AssertionError("A mismatched runtime must not be used")
+
+    request.app.state.postgres_runtime = SimpleNamespace(
+        connect=mismatched_connect,
+        repositories=object(),
+    )
+    before = dict(store.reviewer_attestations)
+
+    with pytest.raises(HTTPException) as list_error:
+        list_attestations(
+            approval_request_id=approval_id,
+            user=user,
+            request=request,
+        )
+    with pytest.raises(HTTPException) as create_error:
+        create_attestation(
+            ReviewerAttestationCreate(
+                approval_request_id=approval_id,
+                decision=ReviewerAttestationDecision.APPROVE,
+            ),
+            user=user,
+            request=request,
+        )
+
+    assert list_error.value.status_code == 503
+    assert create_error.value.status_code == 503
+    assert connection_attempts == []
     assert store.reviewer_attestations == before
 
 
@@ -4039,7 +4080,7 @@ def test_postgres_task_only_action_route_allows_and_consumes_exact_action(
     monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "true")
     repositories = ApplicationRepositories.from_connector(connect)
     state = SimpleNamespace(
-        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_runtime=SimpleNamespace(connect=connect, repositories=repositories),
         postgres_repositories=repositories,
         approval_decision_repository=repositories.approval_decisions,
         workspace_membership_repository=repositories.workspace_membership,

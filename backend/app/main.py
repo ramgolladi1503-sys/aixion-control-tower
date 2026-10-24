@@ -6,7 +6,7 @@ import binascii
 import json
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -548,14 +548,32 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             if task is not None:
                 task.cancel()
         application.state.approval_expiry_task = None
+        shutdown_failure: BaseException | None = None
         for task in (dispatch_task, email_task, recovery_task, expiry_task):
             if task is not None:
-                with suppress(asyncio.CancelledError):
+                try:
                     await task
-        if postgres_runtime is not None:
-            try:
+                except asyncio.CancelledError:
+                    pass
+                except BaseException as error:
+                    # A failed worker must remain visible to the server
+                    # shutdown path, but cannot prevent later workers and the
+                    # lifespan-owned database pool from being closed.
+                    logger.exception(
+                        "Background worker failed during application shutdown task=%s",
+                        task.get_name(),
+                    )
+                    if shutdown_failure is None:
+                        shutdown_failure = error
+        try:
+            if postgres_runtime is not None:
                 postgres_runtime.close()
-            finally:
+        except BaseException as error:
+            logger.exception("PostgreSQL runtime failed to close during application shutdown")
+            if shutdown_failure is None:
+                shutdown_failure = error
+        finally:
+            if postgres_runtime is not None:
                 application.state.postgres_runtime = None
                 application.state.postgres_repositories = None
                 runtime_repositories = getattr(postgres_runtime, "repositories", None)
@@ -574,6 +592,8 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                         delattr(application.state, state_name)
                     else:
                         setattr(application.state, state_name, previous)
+        if shutdown_failure is not None:
+            raise shutdown_failure
 
 
 app = FastAPI(

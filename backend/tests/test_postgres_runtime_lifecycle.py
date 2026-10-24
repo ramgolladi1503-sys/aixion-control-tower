@@ -394,3 +394,61 @@ def test_lifespan_closes_postgres_runtime_if_selected_recovery_is_unsupported(
 
     asyncio.run(exercise())
     assert runtime.closed is True
+
+
+def test_failed_background_worker_does_not_skip_postgres_runtime_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeRuntime()
+    worker_failed = asyncio.Event()
+
+    class SQLiteApprovalRepository:
+        pass
+
+    previous_approval_repository = SQLiteApprovalRepository()
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            outbox_dispatch_mode="scheduled",
+            push_dispatch_enabled=False,
+            email_dispatch_enabled=False,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=True,
+            approval_recovery_poll_seconds=60,
+        ),
+    )
+    monkeypatch.setattr(
+        main.PostgresRuntime,
+        "from_environment",
+        staticmethod(lambda: runtime),
+    )
+    monkeypatch.setattr(main, "reconcile_linked_approval_tasks", lambda **_kwargs: 0)
+
+    async def fail_recovery_worker(*_args, **_kwargs) -> None:
+        worker_failed.set()
+        raise RuntimeError("simulated recovery worker failure")
+
+    monkeypatch.setattr(main, "_approval_recovery_loop", fail_recovery_worker)
+    application = SimpleNamespace(
+        state=SimpleNamespace(
+            approval_decision_repository=previous_approval_repository,
+        )
+    )
+
+    async def exercise() -> None:
+        with pytest.raises(RuntimeError, match="simulated recovery worker failure"):
+            async with main.lifespan(application):
+                await asyncio.wait_for(worker_failed.wait(), timeout=1)
+                # Give the scheduled task a chance to publish its failure
+                # before lifespan shutdown awaits it.
+                await asyncio.sleep(0)
+        assert runtime.closed is True
+        assert application.state.postgres_runtime is None
+        assert application.state.postgres_repositories is None
+        assert application.state.approval_decision_repository is previous_approval_repository
+        for state_name in list(main._POSTGRES_APP_STATE_BINDINGS)[1:]:
+            assert not hasattr(application.state, state_name)
+
+    asyncio.run(exercise())

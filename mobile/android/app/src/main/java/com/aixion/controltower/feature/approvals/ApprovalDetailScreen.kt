@@ -493,7 +493,7 @@ fun ApprovalDetailContent(
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
                     Text(
                         buildString {
-                            append("Provider: ${approval.sourceProvider.ifBlank { "Unknown" }}\n")
+                            append("Provider: ${approvalProviderName(approval.sourceProvider)}\n")
                             append("Source verification: ${if (approval.verifiedSource) "Verified" else "Not verified"}\n")
                             append("Request ID: ${shortSafeApprovalId(approval.id)}\n")
                             append("Invocation ID: ${approval.sourceInvocationId?.let(::shortSafeApprovalId) ?: "Not provided"}\n")

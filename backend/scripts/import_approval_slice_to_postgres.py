@@ -1012,6 +1012,13 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         }:
             parent = users[entity_id]
             entity_type = "user"
+        elif entity_id in workspaces:
+            # Workspace-level security/configuration events have no narrower
+            # parent record. Preserve them only when the workspace itself is
+            # present in this snapshot; the exact workspace match below is the
+            # ownership proof used by the target audit_events FK.
+            parent = {**workspaces[entity_id], "workspace_id": entity_id}
+            entity_type = "workspace"
         elif entity_id in mcp_servers:
             parent = mcp_servers[entity_id]
             entity_type = "mcp_child_server"
