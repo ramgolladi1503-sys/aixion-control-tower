@@ -45,8 +45,8 @@ class ApprovalDecisionTargetSizeTest {
         }
 
         listOf(
-            "Deny request: Review target size. Risk: low.",
-            "Approve request: Review target size. Risk: low."
+            "Deny request ize-test from Unknown: Review target size. Risk: low.",
+            "Approve request ize-test from Unknown: Review target size. Risk: low."
         ).forEach { actionLabel ->
             val heightInDp = composeRule.onNodeWithContentDescription(actionLabel)
                 .fetchSemanticsNode()

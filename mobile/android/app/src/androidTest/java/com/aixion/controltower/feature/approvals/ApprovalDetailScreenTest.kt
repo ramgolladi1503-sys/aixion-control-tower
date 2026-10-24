@@ -220,10 +220,10 @@ class ApprovalDetailScreenTest {
         }
 
         composeRule.onNodeWithContentDescription(
-            "Deny request: Run production migration. Risk: high."
+            "Deny request ail-test from Antigravity: Run production migration. Risk: high."
         ).assertExists()
         composeRule.onNodeWithContentDescription(
-            "Approve request: Run production migration. Risk: high."
+            "Approve request ail-test from Antigravity: Run production migration. Risk: high."
         ).assertExists()
         // Keep concise visible button labels unchanged for sighted reviewers.
         composeRule.onNodeWithText("Deny").assertExists()

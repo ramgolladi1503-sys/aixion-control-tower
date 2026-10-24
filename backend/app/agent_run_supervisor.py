@@ -76,6 +76,7 @@ from .agent_task_repository import (
     PostgresAgentTaskRepository,
     SQLiteAgentTaskRepository,
 )
+from .postgres_audit_repository import PostgresAuditEventRepository
 from .approval_repository import (
     ApprovalDecisionRepository,
     PostgresApprovalDecisionRepository,
@@ -1600,6 +1601,7 @@ def execute_next_step(
     task_repository: AgentTaskRepository | None = None,
     approval_repository: ApprovalDecisionRepository | None = None,
     run_repository: AgentRunRepository | None = None,
+    audit_repository: PostgresAuditEventRepository | None = None,
     postgres_branch_coordinator: PostgresCreateBranchCoordinator | None = None,
     postgres_branch_request_factory: PostgresBranchRequestFactory | None = None,
     postgres_apply_change_coordinator: PostgresApplyChangesCoordinator | None = None,
@@ -2673,6 +2675,7 @@ def execute_next_step(
                 task_repository=task_repository,
                 approval_repository=approval_repository,
                 run_repository=run_repository,
+                audit_repository=audit_repository,
             )
             result = effective_executor(run, step, timeout_seconds)
     except InjectedAgentRunFault as error:
@@ -3074,6 +3077,7 @@ class DefaultAgentRunStepExecutor:
         task_repository: AgentTaskRepository | None = None,
         approval_repository: ApprovalDecisionRepository | None = None,
         run_repository: AgentRunRepository | None = None,
+        audit_repository: PostgresAuditEventRepository | None = None,
     ) -> None:
         self.branch_client = branch_client
         self.file_client = file_client
@@ -3084,6 +3088,7 @@ class DefaultAgentRunStepExecutor:
         self.task_repository = task_repository
         self.approval_repository = approval_repository
         self.run_repository = run_repository
+        self.audit_repository = audit_repository
 
     def __call__(
         self,
@@ -3091,6 +3096,21 @@ class DefaultAgentRunStepExecutor:
         step: AgentRunStep,
         timeout_seconds: int,
     ) -> AgentRunStepExecutionResult:
+        postgres_execution = isinstance(
+            self.task_repository, PostgresAgentTaskRepository
+        ) or isinstance(self.run_repository, PostgresAgentRunRepository)
+        if (
+            step.step_type == AgentRunStepType.RUN_VALIDATION
+            and postgres_execution
+            and not isinstance(self.audit_repository, PostgresAuditEventRepository)
+        ):
+            return classify_execution_result(
+                success=False,
+                reason=(
+                    "PostgreSQL AgentRun workspace preparation requires its "
+                    "runtime-bound audit repository."
+                ),
+            )
         task = (
             self.task_repository.get(run.task_id)
             if self.task_repository is not None
@@ -3147,6 +3167,11 @@ class DefaultAgentRunStepExecutor:
                 worker_id=f"mission-control:{run.id}:workspace",
                 workspace_parent=self.workspace_parent,
                 runner=self.workspace_runner,
+                audit_writer=(
+                    self.audit_repository.append_agent_task_event
+                    if isinstance(self.audit_repository, PostgresAuditEventRepository)
+                    else None
+                ),
             )
             if not workspace.success or workspace.repository_path is None:
                 return classify_execution_result(

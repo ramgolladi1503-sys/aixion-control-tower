@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from psycopg import Connection
+from psycopg.types.json import Jsonb
 
 from .models import AuditEvent
 
@@ -18,6 +19,26 @@ class PostgresAuditEventRepository:
 
     def __init__(self, connect: Callable[[], Connection]) -> None:
         self._connect = connect
+
+    def append_agent_task_event(self, event: AuditEvent) -> None:
+        """Persist worker evidence through the runtime-bound audit repository."""
+        if not event.workspace_id or not event.entity_id or not event.event_type:
+            raise ValueError("PostgreSQL AgentTask audit events require workspace and entity ownership")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
+                "actor,details,created_at,payload) VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                (
+                    event.id,
+                    event.workspace_id,
+                    event.entity_id,
+                    event.event_type,
+                    event.actor,
+                    Jsonb(event.details),
+                    event.created_at,
+                    Jsonb(event.model_dump(mode="json")),
+                ),
+            )
 
     @staticmethod
     def _decode(row: tuple[Any, ...], workspace_id: str) -> AuditEvent:

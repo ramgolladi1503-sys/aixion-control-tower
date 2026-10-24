@@ -1168,7 +1168,7 @@ private fun DecisionPanel(
                         .fillMaxWidth()
                         .heightIn(min = 56.dp)
                         .semantics(mergeDescendants = true) {
-                            contentDescription = "Deny request: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}."
+                            contentDescription = "Deny request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}."
                         },
                     enabled = canDecide
                 ) { Text("Deny", color = palette.danger) }
@@ -1180,7 +1180,7 @@ private fun DecisionPanel(
                         .fillMaxWidth()
                         .heightIn(min = 56.dp)
                         .semantics(mergeDescendants = true) {
-                            contentDescription = "Approve request: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}."
+                            contentDescription = "Approve request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}."
                         }
                 ) { Text("Approve request") }
             }

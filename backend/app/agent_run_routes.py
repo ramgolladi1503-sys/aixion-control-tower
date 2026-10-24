@@ -958,6 +958,11 @@ def execute_run_next_step(
                 task_repository=task_repository,
                 approval_repository=approval_repository,
                 run_repository=run_repository,
+                audit_repository=(
+                    application_repositories_for_request(request).audit_events
+                    if isinstance(run_repository, PostgresAgentRunRepository)
+                    else None
+                ),
                 postgres_branch_coordinator=branch_coordinator,
                 postgres_branch_request_factory=branch_request_factory,
                 postgres_apply_change_coordinator=apply_change_coordinator,

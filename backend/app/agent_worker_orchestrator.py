@@ -19,6 +19,7 @@ from .agent_worker_validation_runner import CommandExecutionResult, run_agent_wo
 from .agent_worker_workspace import AgentWorkerWorkspaceResult, WorkspaceCommandRunner, cleanup_agent_worker_workspace, prepare_agent_worker_workspace
 from .approval_repository import PostgresApprovalDecisionRepository
 from .models import AuditEvent
+from .postgres_audit_repository import PostgresAuditEventRepository
 from .postgres_runtime import PostgresRuntime
 from .settings import get_settings, validate_startup_environment
 from .store import store
@@ -88,24 +89,12 @@ def _append_summary_event(task: AgentTask, worker_id: str, success: bool, reason
     )
 
 
-def _insert_postgres_audit(task_repository: PostgresAgentTaskRepository, audit: AuditEvent) -> None:
+def _insert_postgres_audit(
+    audit_repository: PostgresAuditEventRepository, audit: AuditEvent
+) -> None:
     if not audit.workspace_id:
         raise ValueError("PostgreSQL orchestration audit requires workspace ownership.")
-    with task_repository._connect() as conn:
-        conn.execute(
-            "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
-            "actor,details,created_at,payload) VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
-            (
-                audit.id,
-                audit.workspace_id,
-                audit.entity_id,
-                audit.event_type,
-                audit.actor,
-                Jsonb(audit.details),
-                audit.created_at,
-                Jsonb(audit.model_dump(mode="json")),
-            ),
-        )
+    audit_repository.append_agent_task_event(audit)
 
 
 def _commit_postgres_orchestration_evidence(
@@ -231,16 +220,17 @@ def _build_container_validation_executor(
     container_runtime: ContainerRuntime | None = None,
     task: AgentTask | None = None,
     task_repository=None,
+    audit_repository: PostgresAuditEventRepository | None = None,
 ) -> Callable[[str], CommandExecutionResult] | None:
     if validation_cwd is None:
         return None
     policy = ContainerValidationPolicy()
     details = {"worker_id": worker_id, "container_validation_policy": container_validation_policy_metadata(policy)}
     if isinstance(task_repository, PostgresAgentTaskRepository):
-        if task is None:
+        if task is None or not isinstance(audit_repository, PostgresAuditEventRepository):
             raise ValueError("PostgreSQL container validation audit requires its AgentTask.")
         _insert_postgres_audit(
-            task_repository,
+            audit_repository,
             AuditEvent(
                 event_type="agent_worker.container_validation_configured",
                 entity_id=task.id,
@@ -275,8 +265,13 @@ def run_approved_agent_task_worker_flow(
     container_runtime: ContainerRuntime | None = None,
     task_repository=None,
     approval_repository=None,
+    audit_repository: PostgresAuditEventRepository | None = None,
 ) -> AgentWorkerOrchestrationResult:
     postgres_mode = _is_postgres_pair(task_repository, approval_repository)
+    if postgres_mode and not isinstance(audit_repository, PostgresAuditEventRepository):
+        raise ValueError("PostgreSQL orchestration requires its runtime-bound audit repository.")
+    if audit_repository is not None and not isinstance(audit_repository, PostgresAuditEventRepository):
+        raise ValueError("Orchestration audit repository is not supported.")
     task = _task(task_id, task_repository)
     if task is None:
         return AgentWorkerOrchestrationResult(success=False, task_id=task_id, worker_id=worker_id, reason="Agent task not found.")
@@ -317,7 +312,16 @@ def run_approved_agent_task_worker_flow(
         validation_cwd = cwd
         if _should_prepare_workspace(use_isolated_workspace, validation_executor, workspace_runner, cwd):
             current_task = _task(task.id, task_repository) or task
-            workspace_result = prepare_agent_worker_workspace(task=current_task, branch=branch_result.branch or current_task.branch_preference or "", worker_id=f"{worker_id}:workspace", workspace_parent=cwd, runner=workspace_runner)
+            workspace_result = prepare_agent_worker_workspace(
+                task=current_task,
+                branch=branch_result.branch or current_task.branch_preference or "",
+                worker_id=f"{worker_id}:workspace",
+                workspace_parent=cwd,
+                runner=workspace_runner,
+                audit_writer=(
+                    audit_repository.append_agent_task_event if postgres_mode else None
+                ),
+            )
             if not workspace_result.success:
                 return _failure_result(task_id=task.id, worker_id=worker_id, reason=f"Workspace step failed: {workspace_result.reason}", branch_result=branch_result, file_result=file_result, workspace_result=workspace_result, task_repository=task_repository)
             validation_cwd = workspace_result.repository_path
@@ -325,7 +329,15 @@ def run_approved_agent_task_worker_flow(
         effective_executor = validation_executor
         if effective_executor is None and use_container_validation:
             current_task = _task(task.id, task_repository) or task
-            effective_executor = _build_container_validation_executor(validation_cwd=validation_cwd, timeout_seconds=timeout_seconds, worker_id=f"{worker_id}:validation", container_runtime=container_runtime, task=current_task, task_repository=task_repository)
+            effective_executor = _build_container_validation_executor(
+                validation_cwd=validation_cwd,
+                timeout_seconds=timeout_seconds,
+                worker_id=f"{worker_id}:validation",
+                container_runtime=container_runtime,
+                task=current_task,
+                task_repository=task_repository,
+                audit_repository=audit_repository,
+            )
             if effective_executor is None:
                 return _failure_result(task_id=task.id, worker_id=worker_id, reason="Validation step failed: container validation requires an isolated workspace.", branch_result=branch_result, file_result=file_result, workspace_result=workspace_result, task_repository=task_repository)
 
@@ -400,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
                     use_container_validation=not args.no_container_validation,
                     task_repository=repositories.agent_tasks,
                     approval_repository=repositories.approval_decisions,
+                    audit_repository=repositories.audit_events,
                 )
             finally:
                 runtime.close()

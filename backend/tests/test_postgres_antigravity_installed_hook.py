@@ -960,6 +960,108 @@ def test_installed_antigravity_expired_invocation_lease_rejects_reviewer_decisio
         assert not any(row[1] == "approval.decision" for row in audit_after)
         assert notifications_after == notifications_before
         assert claims == 0
+
+        # A connector process may restart with a callback that has a fresh
+        # provider invocation identity. It must not inherit the expired
+        # invocation lease or consume any decision attached to the old call.
+        # The new callback is allowed to create its own independent pending
+        # approval, which can only be claimed after its own reviewer decision.
+        fresh_session_id = f"{session_id}-fresh-invocation"
+        fresh_payload = {
+            **payload,
+            "conversationId": fresh_session_id,
+            "stepIdx": payload["stepIdx"] + 1,
+        }
+        hook_process = subprocess.Popen(
+            argv,
+            cwd=workspace,
+            env=child_environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert hook_process.stdin is not None
+        hook_process.stdin.write(json.dumps(fresh_payload))
+        hook_process.stdin.close()
+        hook_process.stdin = None
+
+        fresh_row: tuple[str, str, str] | None = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if hook_process.poll() is not None:
+                stdout, stderr = hook_process.communicate()
+                pytest.fail(
+                    "Fresh connector invocation exited before creating its own "
+                    f"PostgreSQL approval (exit={hook_process.returncode}, "
+                    f"stdout={stdout!r}, stderr={stderr!r})"
+                )
+            with connect() as connection:
+                rows = connection.execute(
+                    "SELECT approval_id,source_invocation_id,status FROM approval_requests "
+                    "WHERE workspace_id=%s AND source_agent_id=%s "
+                    "AND payload->>'source_session_id'=%s",
+                    (workspace_record.id, agent.id, fresh_session_id),
+                ).fetchall()
+            assert len(rows) <= 1, "fresh invocation created duplicate approval rows"
+            if rows:
+                fresh_row = rows[0]
+                break
+            time.sleep(0.05)
+
+        assert fresh_row is not None, "fresh connector invocation created no durable approval"
+        fresh_approval_id, fresh_invocation_id, fresh_status = fresh_row
+        assert fresh_approval_id != approval_id
+        assert fresh_invocation_id != invocation_id
+        assert fresh_status == "PENDING_REVIEW"
+        with connect() as connection:
+            old_claims_before_fresh_decision = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0]
+            fresh_lease = connection.execute(
+                "SELECT workspace_id,source_agent_id,source_invocation_id,expires_at "
+                "FROM approval_invocation_leases WHERE approval_id=%s",
+                (fresh_approval_id,),
+            ).fetchone()
+        assert old_claims_before_fresh_decision == 0
+        assert fresh_lease is not None
+        assert fresh_lease[:3] == (workspace_record.id, agent.id, fresh_invocation_id)
+
+        with httpx.Client(timeout=10) as reviewer_client:
+            fresh_decision = reviewer_client.post(
+                f"{server[2]}/approvals/{fresh_approval_id}/decision",
+                json={"decision": "approve", "reason": "approve fresh invocation only"},
+            )
+        assert fresh_decision.status_code == 200, fresh_decision.text
+        fresh_stdout, fresh_stderr = hook_process.communicate(timeout=20)
+        assert hook_process.returncode == 0, fresh_stderr
+        assert json.loads(fresh_stdout)["decision"] == "auto_approve"
+        hook_process = None
+
+        with connect() as connection:
+            old_final = connection.execute(
+                "SELECT status,source_invocation_id FROM approval_requests WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()
+            old_claims = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0]
+            fresh_claims = connection.execute(
+                "SELECT source_agent_id,source_invocation_id FROM approval_delivery_claims "
+                "WHERE approval_id=%s",
+                (fresh_approval_id,),
+            ).fetchall()
+            fresh_decision_audits = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE approval_id=%s "
+                "AND event_type='approval.decision'",
+                (fresh_approval_id,),
+            ).fetchone()[0]
+        assert old_final == ("PENDING_REVIEW", invocation_id)
+        assert old_claims == 0
+        assert fresh_claims == [(agent.id, fresh_invocation_id)]
+        assert fresh_decision_audits == 1
     finally:
         if hook_process is not None and hook_process.poll() is None:
             hook_process.terminate()

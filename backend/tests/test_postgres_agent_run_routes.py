@@ -162,10 +162,13 @@ def _execute_agent_run_route_in_process(
         return connection
 
     repositories = ProcessRepositories.from_connector(process_connect)
+    process_main.app.state.postgres_repositories = repositories
+    process_main.app.state.postgres_runtime = SimpleNamespace(repositories=repositories)
     for name, value in {
         "agent_run_repository": repositories.agent_runs,
         "agent_task_repository": repositories.agent_tasks,
         "approval_decision_repository": repositories.approval_decisions,
+        "audit_event_repository": repositories.audit_events,
     }.items():
         setattr(process_main.app.state, name, value)
 
@@ -320,10 +323,14 @@ def postgres_agent_run_route_runtime(
                 task_ids_by_workspace[workspace.id] = task.id
 
         repositories = ApplicationRepositories.from_connector(connect)
+        postgres_runtime = SimpleNamespace(repositories=repositories)
+        monkeypatch.setattr(main.app.state, "postgres_runtime", postgres_runtime, raising=False)
+        monkeypatch.setattr(main.app.state, "postgres_repositories", repositories, raising=False)
         for name, value in {
             "approval_decision_repository": repositories.approval_decisions,
             "agent_task_repository": repositories.agent_tasks,
             "agent_run_repository": repositories.agent_runs,
+            "audit_event_repository": repositories.audit_events,
             "agent_run_validation_intent_repository": repositories.agent_run_validation_intents,
             "workspace_membership_repository": repositories.workspace_membership,
         }.items():
@@ -383,6 +390,87 @@ def postgres_agent_run_route_runtime(
         main.app.dependency_overrides.pop(MetricsDependency.dependency, None)
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_postgres_execute_route_injects_bound_audit_repository(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.agent_run_routes as agent_run_routes
+
+    connect, workspace, _project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    created = client.post("/agent/runs", json={"task_id": task_id})
+    assert created.status_code == 200, created.text
+    run_id = created.json()["run"]["id"]
+    captured: dict[str, object] = {}
+
+    def capture(*_args, **kwargs):
+        captured.update(kwargs)
+        from app.agent_run_supervisor import AgentRunConflict
+
+        raise AgentRunConflict("test stopped before execute-next side effects")
+
+    monkeypatch.setattr(agent_run_routes, "execute_next_step", capture)
+    response = client.post(
+        f"/agent/runs/{run_id}/execute-next",
+        json={"worker_id": "audit-binding-test", "timeout_seconds": 10},
+    )
+
+    assert response.status_code == 409
+    assert captured["audit_repository"] is state["repositories"].audit_events
+
+
+def test_postgres_agent_run_validation_fails_closed_without_audit_repository(
+    postgres_agent_run_route_runtime,
+) -> None:
+    from app.agent_run_models import AgentRun, AgentRunStep
+    from app.agent_run_supervisor import DefaultAgentRunStepExecutor
+
+    _connect, workspace, project, _other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    run = AgentRun(
+        id=f"run_missing_audit_{uuid.uuid4().hex}",
+        task_id=task_id,
+        project_id=project.id,
+        workspace_id=workspace.id,
+    )
+    step = AgentRunStep(
+        id=f"step_missing_audit_{uuid.uuid4().hex}",
+        run_id=run.id,
+        task_id=task_id,
+        sequence=0,
+        step_type=AgentRunStepType.RUN_VALIDATION,
+        status=AgentRunStepStatus.READY,
+        idempotency_key=f"{run.id}:0",
+    )
+
+    class WorkspaceRunner:
+        called = False
+
+        def run(self, *_args, **_kwargs):
+            self.called = True
+            raise AssertionError("workspace commands must not run without durable audit")
+
+    runner = WorkspaceRunner()
+    executor = DefaultAgentRunStepExecutor(
+        task_repository=state["repositories"].agent_tasks,
+        approval_repository=state["repositories"].approval_decisions,
+        run_repository=state["repositories"].agent_runs,
+        workspace_runner=runner,
+    )
+
+    result = executor(run, step, 10)
+
+    assert result.success is False
+    assert "runtime-bound audit repository" in result.reason
+    assert runner.called is False
+    assert store.audit_events == []
 
 
 def test_postgres_agent_run_http_routes_create_read_and_scope_durable_records(
@@ -1182,7 +1270,9 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
         json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
     )
     assert rejected.status_code == 503
-    assert "lifespan-owned repository bundle" in rejected.json()["detail"]
+    assert "complete lifespan-owned run, task, approval, trust, and intent repositories" in (
+        rejected.json()["detail"]
+    )
     assert repositories.agent_runs.get(run_id) == durable_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == durable_steps
 

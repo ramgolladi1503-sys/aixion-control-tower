@@ -17,7 +17,9 @@ from app.agent_worker_github_pr import GitHubPullRequestCreateResult
 from app.agent_worker_orchestrator import run_approved_agent_task_worker_flow
 from app import agent_worker_orchestrator as orchestrator_module
 from app.agent_worker_validation_runner import CommandExecutionResult
+from app.agent_worker_workspace import WorkspaceCommandResult
 from app.approval_repository import PostgresApprovalDecisionRepository
+from app.postgres_audit_repository import PostgresAuditEventRepository
 from app.models import (
     AgentProvider,
     ApprovalRequest,
@@ -100,6 +102,15 @@ class FakePRClient:
         return GitHubPullRequestCreateResult(repository, 41, title, head_branch, base_branch, f"https://github.com/{repository}/pull/41")
 
 
+class FakeWorkspaceRunner:
+    def run(self, command: list[str], *, cwd=None) -> WorkspaceCommandResult:
+        if command[:2] == ["git", "clone"]:
+            from pathlib import Path
+
+            Path(command[-1]).mkdir(parents=True, exist_ok=True)
+        return WorkspaceCommandResult(command=command, exit_code=0, output_summary="ok")
+
+
 def _seed_approved_task(connect: Callable[[], Connection]) -> AgentTask:
     suffix = uuid.uuid4().hex
     workspace = Workspace(id=f"workspace_{suffix}", name="Orchestration workspace", owner_user_id="owner")
@@ -135,7 +146,15 @@ def _seed_approved_task(connect: Callable[[], Connection]) -> AgentTask:
     return task
 
 
-def _run(task: AgentTask, task_repository: PostgresAgentTaskRepository, approval_repository: PostgresApprovalDecisionRepository, *, validation_exit_code: int = 0):
+def _run(
+    task: AgentTask,
+    task_repository: PostgresAgentTaskRepository,
+    approval_repository: PostgresApprovalDecisionRepository,
+    audit_repository: PostgresAuditEventRepository,
+    *,
+    validation_exit_code: int = 0,
+    use_workspace: bool = False,
+):
     branches = FakeBranchClient()
 
     def execute(command: str) -> CommandExecutionResult:
@@ -148,10 +167,12 @@ def _run(task: AgentTask, task_repository: PostgresAgentTaskRepository, approval
         file_client=FakeFileClient(branches),
         pr_client=FakePRClient(branches),
         validation_executor=execute,
-        use_isolated_workspace=False,
+        workspace_runner=FakeWorkspaceRunner() if use_workspace else None,
+        use_isolated_workspace=use_workspace,
         use_container_validation=False,
         task_repository=task_repository,
         approval_repository=approval_repository,
+        audit_repository=audit_repository,
     )
 
 
@@ -163,10 +184,14 @@ def test_postgres_orchestrator_persists_transactional_summary_without_global_sto
     expected_success: bool,
 ) -> None:
     task_repository, approval_repository, connect = postgres_repositories
+    audit_repository = PostgresAuditEventRepository(connect)
     store.reset()
     task = _seed_approved_task(connect)
 
-    result = _run(task, task_repository, approval_repository, validation_exit_code=validation_exit_code)
+    result = _run(
+        task, task_repository, approval_repository, audit_repository,
+        validation_exit_code=validation_exit_code,
+    )
 
     durable = task_repository.get(task.id)
     assert result.success is expected_success
@@ -191,10 +216,56 @@ def test_postgres_orchestrator_persists_transactional_summary_without_global_sto
     assert store.audit_events == []
 
 
+def test_postgres_orchestrator_workspace_audit_uses_runtime_repository(
+    postgres_repositories,
+) -> None:
+    task_repository, approval_repository, connect = postgres_repositories
+    audit_repository = PostgresAuditEventRepository(connect)
+    store.reset()
+    task = _seed_approved_task(connect)
+
+    result = _run(
+        task, task_repository, approval_repository, audit_repository, use_workspace=True
+    )
+
+    assert result.success is True
+    workspace_events = audit_repository.list_for_workspace(
+        task.workspace_id,
+        entity_id=task.id,
+        event_type="agent_worker.workspace_prepared",
+    )
+    assert len(workspace_events) == 1
+    assert workspace_events[0].workspace_id == task.workspace_id
+    assert workspace_events[0].details["workspace_isolated"] is True
+    assert store.audit_events == []
+    assert store.agent_tasks == {}
+    assert store.agent_task_events == {}
+
+
+def test_postgres_orchestrator_requires_audit_repository_before_work(
+    postgres_repositories,
+) -> None:
+    task_repository, approval_repository, connect = postgres_repositories
+    store.reset()
+    task = _seed_approved_task(connect)
+
+    with pytest.raises(ValueError, match="runtime-bound audit repository"):
+        run_approved_agent_task_worker_flow(
+            task_id=task.id,
+            task_repository=task_repository,
+            approval_repository=approval_repository,
+        )
+
+    assert store.agent_tasks == {}
+    assert store.agent_task_events == {}
+    assert store.audit_events == []
+
+
 def test_postgres_orchestration_summary_failure_rolls_back_and_reports_ambiguous_effects(
     postgres_repositories,
 ) -> None:
     task_repository, approval_repository, connect = postgres_repositories
+    audit_repository = PostgresAuditEventRepository(connect)
     store.reset()
     task = _seed_approved_task(connect)
     with connect() as conn:
@@ -217,7 +288,7 @@ def test_postgres_orchestration_summary_failure_rolls_back_and_reports_ambiguous
             "EXECUTE FUNCTION reject_orchestration_completed_audit()"
         )
 
-    result = _run(task, task_repository, approval_repository)
+    result = _run(task, task_repository, approval_repository, audit_repository)
 
     assert result.success is False
     assert result.pr_result is not None and result.pr_result.success is True
@@ -261,9 +332,14 @@ def test_cli_postgres_flag_opens_probes_and_closes_runtime(monkeypatch, capsys) 
     state = {"opened": False, "probed": False, "closed": False, "called": False}
     task_repository = object()
     approval_repository = object()
+    audit_repository = object()
 
     class RuntimeStub:
-        repositories = SimpleNamespace(agent_tasks=task_repository, approval_decisions=approval_repository)
+        repositories = SimpleNamespace(
+            agent_tasks=task_repository,
+            approval_decisions=approval_repository,
+            audit_events=audit_repository,
+        )
 
         @classmethod
         def from_environment(cls):
@@ -285,6 +361,7 @@ def test_cli_postgres_flag_opens_probes_and_closes_runtime(monkeypatch, capsys) 
         state["called"] = True
         assert kwargs["task_repository"] is task_repository
         assert kwargs["approval_repository"] is approval_repository
+        assert kwargs["audit_repository"] is audit_repository
         return orchestrator_module.AgentWorkerOrchestrationResult(success=True, task_id=kwargs["task_id"])
 
     monkeypatch.setenv("AIXION_PROFILE", "local")
