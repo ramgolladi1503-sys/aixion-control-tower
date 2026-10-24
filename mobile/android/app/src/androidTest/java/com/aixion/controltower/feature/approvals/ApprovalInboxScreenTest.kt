@@ -483,14 +483,20 @@ class ApprovalInboxScreenTest {
 
     @Test
     fun emptyInboxOmitsDangerBadgeWhenNoRequestsAreBlocked() {
+        var connectRequested = false
         composeRule.setContent {
-            ApprovalInboxContent(state = ApprovalsUiState(loading = false))
+            ApprovalInboxContent(
+                state = ApprovalsUiState(loading = false),
+                onOpenConnect = { connectRequested = true }
+            )
         }
 
         composeRule.onAllNodesWithText("Status blocked 0").assertCountEquals(0)
         composeRule.onAllNodesWithText("0 pending").assertCountEquals(0)
         composeRule.onAllNodesWithText("Needs review 0").assertCountEquals(0)
         composeRule.onNodeWithText("No requests need review").assertExists()
+        composeRule.onNodeWithText("Connect an agent").performClick()
+        assertEquals(true, connectRequested)
     }
 
     @Test

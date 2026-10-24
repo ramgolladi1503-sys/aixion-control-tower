@@ -243,6 +243,45 @@ def test_invocation_heartbeat_rejects_scope_mismatch_and_revoked_credential() ->
     assert revoked.status_code == 401
 
 
+def test_invocation_heartbeat_rechecks_revocation_after_route_authentication(
+    monkeypatch,
+) -> None:
+    """A credential revoked after auth cannot refresh a connector liveness lease."""
+    project, agent_id, token = _setup_agent()
+    headers = _headers(agent_id, token)
+    approval_id = _approval(project.id, headers)
+    repository = app.state.approval_decision_repository
+    original_heartbeat = repository.heartbeat_invocation
+    lease_before = repository.get_live_invocation_lease(
+        workspace_id=store.projects[project.id].workspace_id,
+        source_agent_id=agent_id,
+        source_invocation_id="antigravity:v1:hook-test",
+    )
+    assert lease_before is not None
+
+    def revoke_after_authentication(**kwargs):
+        # The route's authentication dependency has already accepted the token.
+        revoke = client.post(f"/agents/{agent_id}/token/revoke")
+        assert revoke.status_code == 200
+        return original_heartbeat(**kwargs)
+
+    monkeypatch.setattr(repository, "heartbeat_invocation", revoke_after_authentication)
+    response = client.post(
+        f"/agents/approvals/{approval_id}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": "antigravity:v1:hook-test"},
+    )
+
+    assert response.status_code == 401
+    persisted_lease = repository.get_live_invocation_lease(
+        workspace_id=store.projects[project.id].workspace_id,
+        source_agent_id=agent_id,
+        source_invocation_id="antigravity:v1:hook-test",
+    )
+    assert persisted_lease is not None
+    assert persisted_lease.heartbeat_at == lease_before.heartbeat_at
+
+
 def test_invocation_heartbeat_cannot_refresh_a_consumed_approval() -> None:
     project, agent_id, token = _setup_agent()
     headers = _headers(agent_id, token)

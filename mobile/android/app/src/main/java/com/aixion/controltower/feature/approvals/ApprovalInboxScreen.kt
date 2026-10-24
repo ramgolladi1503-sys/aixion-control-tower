@@ -131,7 +131,8 @@ internal fun filterApprovalHistory(
 @Composable
 fun ApprovalInboxScreen(
     viewModel: ApprovalsViewModel = viewModel(),
-    onApprovalSelected: (ApprovalSummary) -> Unit = {}
+    onApprovalSelected: (ApprovalSummary) -> Unit = {},
+    onOpenConnect: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
     ForegroundRefreshEffect(onRefresh = viewModel::refreshInForeground)
@@ -141,6 +142,7 @@ fun ApprovalInboxScreen(
         onHistorySelected = { viewModel.loadApprovalHistory() },
         onHistoryRetry = { viewModel.loadApprovalHistory(forceRefresh = true) },
         onLoadOlderHistory = viewModel::loadOlderApprovalHistory,
+        onOpenConnect = onOpenConnect,
         onApprovalSelected = { approval ->
             viewModel.selectApproval(approval)
             onApprovalSelected(approval)
@@ -155,7 +157,8 @@ fun ApprovalInboxContent(
     onHistorySelected: () -> Unit = {},
     onHistoryRetry: () -> Unit = {},
     onLoadOlderHistory: () -> Unit = {},
-    onApprovalSelected: (ApprovalSummary) -> Unit = {}
+    onApprovalSelected: (ApprovalSummary) -> Unit = {},
+    onOpenConnect: () -> Unit = {}
 ) {
     val palette = LocalTowerPalette.current
     val pendingCount = filterApprovalsForInbox(
@@ -394,6 +397,10 @@ fun ApprovalInboxContent(
                         color = palette.inkMuted,
                         style = MaterialTheme.typography.bodyMedium
                     )
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
+                        Text("Connect an agent")
+                    }
                 }
             }
         }

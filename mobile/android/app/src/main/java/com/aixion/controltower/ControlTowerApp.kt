@@ -291,6 +291,11 @@ fun ControlTowerApp(
                             TowerContentFrame {
                                 ApprovalInboxScreen(
                                     viewModel = approvalsViewModel,
+                                    onOpenConnect = {
+                                        navController.navigate(Route.Connectors.value) {
+                                            launchSingleTop = true
+                                        }
+                                    },
                                     onApprovalSelected = { approval ->
                                         approvalsViewModel.selectApproval(approval)
                                         navController.navigate(Route.ApprovalDetail.value)
