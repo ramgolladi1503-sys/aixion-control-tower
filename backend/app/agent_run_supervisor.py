@@ -246,6 +246,15 @@ def build_postgres_pull_request_completion(
             "run_id": intent.run_id, "step_id": intent.step_id,
             "pull_request_intent_id": intent.id, "repository": intent.repository,
             "head_branch": intent.head_branch, "base_branch": intent.base_branch,
+            # VERIFY_RESULT consumes this stable task-event contract. Keep the
+            # legacy aliases below for existing clients while writing both.
+            "worker_id": actor,
+            "approval_request_id": intent.approval_id,
+            "pull_request_number": intent.pull_number,
+            "pull_request_url": intent.pull_url,
+            "pull_request_opened": True,
+            "merged": False,
+            "operation_type": "github_pull_request_creation",
             "pull_number": intent.pull_number, "pull_url": intent.pull_url,
             "head_sha": intent.observed_head_sha, "base_sha": intent.observed_base_sha,
             "title_sha256": intent.title_sha256, "body_sha256": intent.body_sha256,

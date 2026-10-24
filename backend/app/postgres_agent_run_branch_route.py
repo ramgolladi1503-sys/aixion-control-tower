@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import HTTPException, Request
 
 from .agent_run_models import AgentRun, AgentRunStep, AgentRunStepType
@@ -22,10 +24,25 @@ from .postgres_trust_repository import PostgresTrustRepository
 SOURCE_BRANCH = DEFAULT_SOURCE_BRANCH
 
 
+def postgres_branch_enabled() -> bool:
+    """Explicit default-off rollout gate for PostgreSQL branch creation."""
+    return os.getenv("AIXION_POSTGRES_CREATE_BRANCH_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
 def postgres_branch_execution_dependencies(
     *, request: Request, run: AgentRun, step: AgentRunStep, actor: str
 ) -> tuple[PostgresCreateBranchCoordinator, object]:
     """Bind CREATE_BRANCH to the exact PostgreSQL authority owned by app lifespan."""
+    if not postgres_branch_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "PostgreSQL CREATE_BRANCH is disabled by the default-off "
+                "AIXION_POSTGRES_CREATE_BRANCH_ENABLED rollout gate."
+            ),
+        )
     state = request.app.state
     runtime = getattr(state, "postgres_runtime", None)
     try:

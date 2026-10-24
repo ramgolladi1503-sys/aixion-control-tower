@@ -65,7 +65,10 @@ from .application_repositories import ApplicationRepositories
 from .notification_outbox_repository import PostgresNotificationOutboxRepository
 from .postgres_trust_event_repository import PostgresTrustEventRepository
 from .postgres_trust_repository import PostgresTrustRepository
-from .postgres_agent_run_branch_route import postgres_branch_execution_dependencies
+from .postgres_agent_run_branch_route import (
+    postgres_branch_enabled,
+    postgres_branch_execution_dependencies,
+)
 from .postgres_agent_run_apply_changes_route import postgres_apply_changes_execution_dependencies
 from .postgres_agent_run_apply_changes_executor import postgres_apply_changes_enabled
 from .postgres_agent_run_validation import PostgresAgentRunValidationIntentRepository
@@ -828,6 +831,7 @@ def execute_run_next_step(
         } or (
             isinstance(run_repository, PostgresAgentRunRepository)
             and current_step.step_type == AgentRunStepType.CREATE_BRANCH
+            and postgres_branch_enabled()
         ) or (
             isinstance(run_repository, PostgresAgentRunRepository)
             and current_step.step_type == AgentRunStepType.APPLY_CHANGES
@@ -846,8 +850,10 @@ def execute_run_next_step(
                 status_code=409,
                 detail=(
                     "PostgreSQL AgentRun execution supports VALIDATE_SCOPE, VERIFY_RESULT, "
-                    "SEAL_EVIDENCE, CREATE_BRANCH, and explicitly enabled APPLY_CHANGES/RUN_VALIDATION "
-                    "with complete durable authority. CREATE_PULL_REQUEST also requires its explicit rollout gate."
+                    "and SEAL_EVIDENCE. CREATE_BRANCH requires the default-off "
+                    "AIXION_POSTGRES_CREATE_BRANCH_ENABLED gate; APPLY_CHANGES and RUN_VALIDATION "
+                    "require their explicit rollout gates and complete durable authority. "
+                    "CREATE_PULL_REQUEST also requires its explicit rollout gate."
                 ),
             )
         if (

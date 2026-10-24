@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 
 from app import main
 from app.agent_run_models import AgentRunStatus, AgentRunStepStatus, AgentRunStepType
+from app.agent_run_repository import AgentRunRepositoryConflict
 from app.agent_run_supervisor import (
     PostgresPullRequestRequest,
     build_postgres_pull_request_completion,
@@ -339,6 +340,14 @@ def test_postgres_pull_request_completion_is_atomic(
     assert next(item for item in updated_steps if item.id == run.current_step_id).status == AgentRunStepStatus.SUCCEEDED
     assert events and audit.event_type == "agent_run.step_completed"
     assert repositories.agent_tasks.get(task.id).status == AgentTaskStatus.READY_FOR_PR
+    persisted_task_event = repositories.agent_tasks.list_events(task.id, workspace_id=workspace.id)[-1]
+    assert persisted_task_event.metadata["worker_id"] == worker
+    assert persisted_task_event.metadata["approval_request_id"] == run.approval_request_id
+    assert persisted_task_event.metadata["pull_request_number"] == 23
+    assert persisted_task_event.metadata["pull_request_url"] == "https://github.com/owner/approved-repository/pull/23"
+    assert persisted_task_event.metadata["pull_request_opened"] is True
+    assert persisted_task_event.metadata["merged"] is False
+    assert persisted_task_event.metadata["operation_type"] == "github_pull_request_creation"
     completed_intent = intent_repository.get(intent_id=completion.intent_id, workspace_id=workspace.id)
     assert completed_intent and completed_intent.status == PullRequestIntentStatus.COMPLETED
     with connect() as conn:
@@ -353,3 +362,41 @@ def test_postgres_pull_request_completion_is_atomic(
             "AND entity_id=%s AND event_type='agent_task.pull_request_created'",
             (workspace.id, task.id),
         ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("canonical_key", "replacement"),
+    [("pull_request_url", None), ("merged", True)],
+    ids=["missing-url", "claims-merged"],
+)
+def test_postgres_pull_request_completion_rejects_invalid_canonical_event_metadata(
+    postgres_agent_run_route_runtime,
+    canonical_key: str,
+    replacement,
+) -> None:
+    from dataclasses import replace
+
+    _connect, repositories, workspace, task, run, worker, completion = _prepare_verified_pr(
+        postgres_agent_run_route_runtime=postgres_agent_run_route_runtime,
+    )
+    malformed_event = completion.task_event.model_copy(deep=True)
+    if replacement is None:
+        malformed_event.metadata.pop(canonical_key)
+    else:
+        malformed_event.metadata[canonical_key] = replacement
+    malformed_completion = replace(completion, task_event=malformed_event)
+
+    with pytest.raises(AgentRunRepositoryConflict, match="event or audit does not exactly bind"):
+        _commit_completion(
+            repositories=repositories,
+            run=run,
+            worker=worker,
+            completion=malformed_completion,
+        )
+
+    assert repositories.agent_tasks.get(task.id).status == AgentTaskStatus.APPROVED
+    intent = repositories.agent_run_pull_request_intents.get(
+        intent_id=completion.intent_id,
+        workspace_id=workspace.id,
+    )
+    assert intent is not None and intent.status == PullRequestIntentStatus.REMOTE_VERIFIED

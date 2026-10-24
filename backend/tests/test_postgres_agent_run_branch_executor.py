@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from app.agent_run_models import (
     AgentRun,
@@ -16,6 +17,10 @@ from app.agent_task_models import AgentTaskEventType
 from app.agent_worker_github_branch import GitHubBranchObservation
 from app.models import AgentProvider, AuditEvent, RiskLevel
 from app.postgres_agent_run_branch import AgentRunBranchIntent, BranchIntentStatus
+from app.postgres_agent_run_branch_route import (
+    postgres_branch_enabled,
+    postgres_branch_execution_dependencies,
+)
 from app.postgres_agent_run_branch_executor import (
     BranchCompletion,
     BranchExecutionRequest,
@@ -35,6 +40,24 @@ NOW = datetime(2026, 1, 2, tzinfo=timezone.utc)
 SHA = "a" * 40
 REF_URL = "https://github.com/acme/example/tree/feature/test"
 SOURCE_URL = "https://github.com/acme/example/tree/main"
+
+
+def test_postgres_create_branch_rollout_gate_is_default_off_and_checked_before_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AIXION_POSTGRES_CREATE_BRANCH_ENABLED", raising=False)
+    assert postgres_branch_enabled() is False
+    with pytest.raises(HTTPException) as rejected:
+        postgres_branch_execution_dependencies(
+            request=SimpleNamespace(), run=SimpleNamespace(),
+            step=SimpleNamespace(), actor="owner@example.test",
+        )
+    assert rejected.value.status_code == 503
+    assert "default-off" in rejected.value.detail
+    assert "AIXION_POSTGRES_CREATE_BRANCH_ENABLED" in rejected.value.detail
+
+    monkeypatch.setenv("AIXION_POSTGRES_CREATE_BRANCH_ENABLED", "true")
+    assert postgres_branch_enabled() is True
 
 
 class FakeProvider:

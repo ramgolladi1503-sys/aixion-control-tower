@@ -1117,6 +1117,7 @@ def _advance_postgres_agent_run_to_seal(
 
 def test_postgres_agent_run_executes_only_durable_scope_validation(
     postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connect, workspace, _project, _other_workspace, _other_project, state = (
         postgres_agent_run_route_runtime
@@ -1172,6 +1173,9 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
     durable_steps = repositories.agent_runs.list_steps_for_run(run_id)
     assert durable_steps[0].status == AgentRunStepStatus.SUCCEEDED
 
+    # This assertion targets the missing lifespan repository bundle rather
+    # than the independent default-off branch rollout gate.
+    monkeypatch.setenv("AIXION_POSTGRES_CREATE_BRANCH_ENABLED", "true")
     rejected = client.post(
         f"/agent/runs/{run_id}/execute-next",
         json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
@@ -3684,7 +3688,7 @@ def test_postgres_agent_run_rejects_unsupported_side_effect_before_claim_or_trus
         ).fetchone()[0] == audits_before
 
 
-@pytest.mark.parametrize("bundle_state", ["missing", "mismatched"])
+@pytest.mark.parametrize("bundle_state", ["missing", "mismatched", "disabled"])
 def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_bundle(
     postgres_agent_run_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
@@ -3692,6 +3696,11 @@ def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_b
 ) -> None:
     """CREATE_BRANCH must not execute through partial or mismatched app bindings."""
     import app.agent_run_routes as agent_run_routes
+
+    if bundle_state == "disabled":
+        monkeypatch.delenv("AIXION_POSTGRES_CREATE_BRANCH_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("AIXION_POSTGRES_CREATE_BRANCH_ENABLED", "true")
 
     connect, workspace, _project, _other_workspace, _other_project, state = (
         postgres_agent_run_route_runtime
@@ -3745,6 +3754,14 @@ def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_b
         intents_before = conn.execute(
             "SELECT count(*) FROM agent_run_branch_intents WHERE run_id=%s", (run_id,)
         ).fetchone()[0]
+        effects_before = conn.execute(
+            "SELECT (SELECT count(*) FROM action_consumptions WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM trust_events WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM policy_decisions WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM agent_run_events WHERE run_id=%s), "
+            "(SELECT count(*) FROM audit_events WHERE entity_id=%s)",
+            (workspace.id, workspace.id, workspace.id, run_id, run_id),
+        ).fetchone()
 
     def unexpected_execution(*_args, **_kwargs):
         raise AssertionError("Missing repository authority reached AgentRun execution")
@@ -3763,7 +3780,7 @@ def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_b
         monkeypatch.setattr(
             main.app.state, "postgres_runtime", SimpleNamespace(repositories=object()), raising=False
         )
-    else:
+    elif bundle_state == "missing":
         monkeypatch.setattr(main.app.state, "postgres_runtime", None, raising=False)
 
     rejected = client.post(
@@ -3771,14 +3788,26 @@ def test_postgres_create_branch_fails_closed_without_lifespan_owned_repository_b
         json={"worker_id": "postgres-branch-authority-guard", "timeout_seconds": 10},
     )
 
-    assert rejected.status_code == 503, rejected.text
-    assert "lifespan-owned repository bundle" in rejected.json()["detail"]
+    assert rejected.status_code == (409 if bundle_state == "disabled" else 503), rejected.text
+    if bundle_state == "disabled":
+        assert "AIXION_POSTGRES_CREATE_BRANCH_ENABLED" in rejected.json()["detail"]
+        assert "default-off" in rejected.json()["detail"]
+    else:
+        assert "lifespan-owned repository bundle" in rejected.json()["detail"]
     assert repositories.agent_runs.get(run_id) == before_run
     assert repositories.agent_runs.list_steps_for_run(run_id) == before_steps
     with connect() as conn:
         assert conn.execute(
             "SELECT count(*) FROM agent_run_branch_intents WHERE run_id=%s", (run_id,)
         ).fetchone()[0] == intents_before
+        assert conn.execute(
+            "SELECT (SELECT count(*) FROM action_consumptions WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM trust_events WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM policy_decisions WHERE workspace_id=%s), "
+            "(SELECT count(*) FROM agent_run_events WHERE run_id=%s), "
+            "(SELECT count(*) FROM audit_events WHERE entity_id=%s)",
+            (workspace.id, workspace.id, workspace.id, run_id, run_id),
+        ).fetchone() == effects_before
 
 
 def test_postgres_create_branch_route_commits_verified_branch_and_task_records_atomically(
@@ -3791,6 +3820,8 @@ def test_postgres_create_branch_route_commits_verified_branch_and_task_records_a
     from app.postgres_agent_run_branch import BranchIntentStatus
     from app.postgres_agent_run_branch_executor import PostgresCreateBranchCoordinator
     from app.postgres_runtime import PostgresRuntime
+
+    monkeypatch.setenv("AIXION_POSTGRES_CREATE_BRANCH_ENABLED", "true")
 
     connect, workspace, _project, _other_workspace, _other_project, state = (
         postgres_agent_run_route_runtime
