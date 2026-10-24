@@ -1091,13 +1091,20 @@ def test_import_preserves_device_registration_lifecycle_audits(tmp_path, postgre
     }
 
 
-def test_import_preserves_unregistered_device_audit_after_device_row_was_deleted(
-    tmp_path, postgres_import_dsn,
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "notification.device_unregistered",
+        "notification.device_token_invalidated",
+    ],
+)
+def test_import_preserves_removed_device_audit_after_device_row_was_deleted(
+    tmp_path, postgres_import_dsn, event_type,
 ):
-    path = tmp_path / "snapshot_with_unregistered_device_audit.sqlite3"
+    path = tmp_path / f"snapshot_with_{event_type.rsplit('.', 1)[-1]}_device_audit.sqlite3"
     _snapshot(path)
     event = {
-        "id": "audit-device-unregistered", "event_type": "notification.device_unregistered",
+        "id": f"audit-{event_type.rsplit('.', 1)[-1]}", "event_type": event_type,
         "actor": "owner@example.test", "entity_id": "d1", "workspace_id": "ws1",
         "details": {"platform": "android"},
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1131,27 +1138,271 @@ def test_import_preserves_unregistered_device_audit_after_device_row_was_deleted
         ).fetchone()
     assert device_count == 0
     assert persisted == (
-        "ws1", "device_registration", "d1", "notification.device_unregistered",
+        "ws1", "device_registration", "d1", event_type,
         event["details"],
     )
+
+
+def test_import_preserves_external_agent_token_rotation_audit(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot_with_agent_token_rotation_audit.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-agent-token-rotated", "event_type": "agent.token_rotated",
+        "actor": "owner@example.test", "entity_id": "agent1", "workspace_id": "ws1",
+        "details": {"token_rotated_at": datetime.now(timezone.utc).isoformat()},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+
+    assert plan["planned_counts"]["audit_event"] == 9
+    assert selected["audit_event"][event["id"]]["_import_entity_type"] == "external_agent"
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        persisted = conn.execute(
+            "SELECT workspace_id,entity_type,entity_id,event_type,details "
+            "FROM audit_events WHERE event_id=%s",
+            (event["id"],),
+        ).fetchone()
+    assert persisted == (
+        "ws1", "external_agent", "agent1", "agent.token_rotated", event["details"],
+    )
+
+
+@pytest.mark.parametrize("event_type", ["agent.auth_failed", "agent.rate_limited"])
+def test_import_scopes_external_agent_security_audit_to_known_agent(
+    tmp_path, postgres_import_dsn, event_type,
+):
+    path = tmp_path / f"snapshot_{event_type.rsplit('.', 1)[-1]}_agent_audit.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": f"audit-agent-{event_type.rsplit('.', 1)[-1]}", "event_type": event_type,
+        "actor": "external-agent-auth", "entity_id": "agent1",
+        "details": {"reason": "invalid_token"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+
+    imported_event = selected["audit_event"][event["id"]]
+    assert plan["planned_counts"]["audit_event"] == 9
+    assert imported_event["_import_entity_type"] == "external_agent"
+    assert imported_event["workspace_id"] == "ws1"
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        persisted = conn.execute(
+            "SELECT workspace_id,entity_type,entity_id,event_type,payload "
+            "FROM audit_events WHERE event_id=%s",
+            (event["id"],),
+        ).fetchone()
+    assert persisted[:4] == ("ws1", "external_agent", "agent1", event_type)
+    assert persisted[4]["workspace_id"] == "ws1"
+    assert persisted[4]["details"] == event["details"]
+
+
+def test_plan_fails_closed_for_unscoped_external_agent_auth_failure(tmp_path):
+    path = tmp_path / "snapshot_with_unknown_agent_auth_failure.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-unknown-agent-auth-failure", "event_type": "agent.auth_failed",
+        "actor": "external-agent-auth", "entity_id": "unknown_agent",
+        "details": {"agent_id": None, "reason": "unknown_agent"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    with pytest.raises(ImportBlocked, match="structural audit did not pass"):
+        build_plan(path)
 
 
 @pytest.mark.parametrize(
     "event_type",
     [
-        "notification.device_registered",
-        "notification.device_reassigned",
-        "notification.device_unregistered",
+        "agent_worker.task_released",
+        "agent_worker.validation_run_completed",
     ],
 )
-def test_plan_rejects_device_lifecycle_audit_with_wrong_workspace(
-    tmp_path, event_type,
+def test_import_preserves_agent_task_worker_audits(tmp_path, postgres_import_dsn, event_type):
+    path = tmp_path / f"snapshot_{event_type.rsplit('.', 1)[-1]}_worker_audit.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": f"audit-{event_type.rsplit('.', 1)[-1]}", "event_type": event_type,
+        "actor": "agent-worker-test", "entity_id": "t1",
+        "details": {"outcome": "recorded"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+
+    imported_event = selected["audit_event"][event["id"]]
+    assert plan["planned_counts"]["audit_event"] == 9
+    assert imported_event["_import_entity_type"] == "agent_task"
+    assert imported_event["workspace_id"] == "ws1"
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        persisted = conn.execute(
+            "SELECT workspace_id,entity_type,entity_id,event_type,payload "
+            "FROM audit_events WHERE event_id=%s",
+            (event["id"],),
+        ).fetchone()
+    assert persisted[:4] == ("ws1", "agent_task", "t1", event_type)
+    assert persisted[4]["workspace_id"] == "ws1"
+    assert persisted[4]["details"] == event["details"]
+
+
+@pytest.mark.parametrize("collision_type", ["approval_request", "work_order"])
+def test_worker_audit_resolves_task_before_colliding_entity_ids(
+    tmp_path, postgres_import_dsn, collision_type,
+):
+    path = tmp_path / f"snapshot_worker_collision_{collision_type}.sqlite3"
+    _snapshot(path)
+    now = datetime.now(timezone.utc).isoformat()
+    collision = None
+    if collision_type == "approval_request":
+        with sqlite3.connect(path) as conn:
+            raw = conn.execute(
+                "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id='a1'"
+            ).fetchone()[0]
+        collision = json.loads(raw)
+        collision.update({
+            "id": "t1", "project_id": "p2", "workspace_id": "ws2",
+            "status": "REQUESTED", "work_order_id": None,
+            "approved_payload_hash": None,
+            "source_agent_id": None, "source_invocation_id": None,
+        })
+    else:
+        with sqlite3.connect(path) as conn:
+            raw = conn.execute(
+                "SELECT payload FROM kv_store WHERE entity_type='work_order' AND entity_id='w1'"
+            ).fetchone()[0]
+        collision = json.loads(raw)
+        collision.update({
+            "id": "t1", "project_id": "p2", "workspace_id": "ws2",
+            "idea_id": None, "source_agent_id": None,
+        })
+    event = {
+        "id": f"audit-worker-collision-{collision_type}",
+        "event_type": "agent_worker.task_released", "actor": "worker",
+        "entity_id": "t1", "workspace_id": "ws1", "details": {},
+        "created_at": now,
+    }
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            [
+                ("workspace", "ws2", json.dumps({
+                    "id": "ws2", "name": "Other account", "owner_user_id": "u2",
+                    "created_at": now,
+                })),
+                ("user", "u2", json.dumps({
+                    "id": "u2", "email": "other@example.test", "password_hash": "hash",
+                    "password_salt": "salt", "workspace_id": "ws2",
+                    "created_at": now, "updated_at": now,
+                })),
+                ("project", "p2", json.dumps({
+                    "id": "p2", "name": "Other project", "workspace_id": "ws2",
+                    "created_at": now,
+                })),
+                (collision_type, "t1", json.dumps(collision)),
+                ("audit_event", event["id"], json.dumps(event)),
+            ],
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, digest = build_plan(path)
+
+    imported = selected["audit_event"][event["id"]]
+    assert imported["_import_entity_type"] == "agent_task"
+    assert imported["workspace_id"] == "ws1"
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    with psycopg.connect(postgres_import_dsn) as conn:
+        persisted = conn.execute(
+            "SELECT workspace_id,entity_type,entity_id,event_type FROM audit_events WHERE event_id=%s",
+            (event["id"],),
+        ).fetchone()
+    assert persisted == ("ws1", "agent_task", "t1", "agent_worker.task_released")
+
+
+@pytest.mark.parametrize(
+    ("event_type", "entity_id"),
+    [
+        ("agent_worker.validation_run_completed", "missing-task"),
+        ("agent_worker.future_event", "missing-task"),
+        ("agent_worker.container_validation_configured", "/tmp/validation-cwd"),
+    ],
+)
+def test_plan_fails_closed_for_worker_audit_without_task_parent(
+    tmp_path, event_type, entity_id,
+):
+    path = tmp_path / f"snapshot_worker_without_parent_{event_type.rsplit('.', 1)[-1]}.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-worker-without-parent", "event_type": event_type,
+        "actor": "worker", "entity_id": entity_id, "workspace_id": "ws1",
+        "details": {}, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    with pytest.raises(ImportBlocked, match="worker audit event has no supported AgentTask parent"):
+        build_plan(path)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "entity_id"),
+    [
+        ("notification.device_registered", "d1"),
+        ("notification.device_reassigned", "d1"),
+        ("notification.device_unregistered", "d1"),
+        ("notification.device_token_invalidated", "d1"),
+        ("agent.token_rotated", "agent1"),
+        ("agent.auth_failed", "agent1"),
+        ("agent.rate_limited", "agent1"),
+        ("agent_worker.validation_run_completed", "t1"),
+    ],
+)
+def test_plan_rejects_production_identity_lifecycle_audit_with_wrong_workspace(
+    tmp_path, event_type, entity_id,
 ):
     path = tmp_path / f"snapshot_{event_type.rsplit('.', 1)[-1]}_wrong_workspace.sqlite3"
     _snapshot(path)
     event = {
-        "id": "audit-device-cross-workspace", "event_type": event_type,
-        "actor": "owner@example.test", "entity_id": "d1",
+        "id": "audit-identity-cross-workspace", "event_type": event_type,
+        "actor": "owner@example.test", "entity_id": entity_id,
         "workspace_id": "ws2", "details": {},
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1179,7 +1430,7 @@ def test_plan_rejects_device_lifecycle_audit_with_wrong_workspace(
         )
     os.chmod(path, 0o600)
 
-    with pytest.raises(ImportBlocked, match="mismatched parent ownership"):
+    with pytest.raises(ImportBlocked):
         build_plan(path)
 
 

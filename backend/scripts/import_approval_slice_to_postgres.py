@@ -475,6 +475,17 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     digest = _sha256_file(path)
     report = audit(path)
     if report.get("status") != "STRUCTURAL_REVIEW_PASSED":
+        unresolved_worker_audits = [
+            finding
+            for finding in report.get("record_findings", [])
+            if "worker_audit_parent_unresolved" in finding.get("findings", [])
+        ]
+        if unresolved_worker_audits:
+            first = unresolved_worker_audits[0]
+            raise ImportBlocked(
+                "worker audit event has no supported AgentTask parent "
+                f"(audit_event/{first.get('entity_id')}); review audit findings"
+            )
         raise ImportBlocked("read-only structural audit did not pass; review its findings first")
     records = _read_records(path)
     selected = {key: value for key, value in records.items() if key in CORE_TYPES}
@@ -988,7 +999,18 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         # these before generic ID lookups because SQLite IDs are only unique
         # within an entity type; a user/session ID can legally collide with an
         # approval ID and must not become an approval audit by precedence.
-        if entity_id in sessions and event_type == "auth.session_revoked":
+        if isinstance(event_type, str) and event_type.startswith("agent_worker."):
+            if event_type == "agent_worker.container_validation_configured":
+                raise ImportBlocked(
+                    f"audit_event/{event_id} is a path-keyed worker configuration event without a task parent"
+                )
+            parent = tasks.get(entity_id)
+            if not parent:
+                raise ImportBlocked(
+                    f"audit_event/{event_id} references an unimported AgentTask worker parent"
+                )
+            entity_type = "agent_task"
+        elif entity_id in sessions and event_type == "auth.session_revoked":
             session = sessions[entity_id]
             user = users.get(session.get("user_id"))
             if not user or user.get("workspace_id") != payload.get("workspace_id"):
@@ -1001,6 +1023,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             "notification.device_registered",
             "notification.device_reassigned",
             "notification.device_unregistered",
+            "notification.device_token_invalidated",
         }:
             # Device IDs are only unique within their entity type. Resolve
             # lifecycle events by their explicit domain before generic ID
@@ -1028,6 +1051,24 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         }:
             parent = users[entity_id]
             entity_type = "user"
+        elif event_type in {
+            "agent.registered",
+            "agent.token_rotated",
+            "agent.token_revoked",
+            "agent.auth_failed",
+            "agent.rate_limited",
+        }:
+            # Agent IDs can collide with approval/project IDs in legacy
+            # SQLite. Resolve these security events by their explicit domain.
+            # Authentication failures and rate limits omit workspace_id in
+            # legacy AuditEvent payloads; only a matching registered agent
+            # provides a safe tenant scope for those records.
+            parent = agents.get(entity_id)
+            if parent is None:
+                raise ImportBlocked(
+                    f"audit_event/{event_id} references an unimported external agent"
+                )
+            entity_type = "external_agent"
         elif entity_id in approvals:
             parent = approvals[entity_id]
             entity_type = "approval_request"
@@ -1040,11 +1081,6 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         elif entity_id in ideas:
             parent = ideas[entity_id]
             entity_type = "idea"
-        elif entity_id in agents and payload.get("event_type") in {
-            "agent.registered", "agent.token_revoked",
-        }:
-            parent = agents[entity_id]
-            entity_type = "external_agent"
         elif entity_id in connectors:
             parent = connectors[entity_id]
             entity_type = "agent_connector"
@@ -1086,6 +1122,16 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             entity_type = "agent_run"
         else:
             continue
+        if payload.get("workspace_id") is None and entity_type == "agent_task" and isinstance(
+            event_type, str
+        ) and event_type.startswith("agent_worker."):
+            payload = {**payload, "workspace_id": parent.get("workspace_id")}
+        if (
+            payload.get("workspace_id") is None
+            and entity_type == "external_agent"
+            and event_type in {"agent.auth_failed", "agent.rate_limited"}
+        ):
+            payload = {**payload, "workspace_id": parent.get("workspace_id")}
         if payload.get("workspace_id") != parent.get("workspace_id"):
             raise ImportBlocked(f"audit_event/{event_id} has mismatched parent ownership")
         # Entity type is repository context and is not represented in the legacy AuditEvent model.

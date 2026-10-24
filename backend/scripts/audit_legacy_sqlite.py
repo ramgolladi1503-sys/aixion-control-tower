@@ -323,11 +323,23 @@ def audit(path: Path) -> dict[str, Any]:
                 linked_type, linked_id = payload.get("entity_type"), payload.get("entity_id")
                 return resolve_workspace(linked_type or "", linked_id or "", seen)
             if entity_type == "audit_event":
+                event_type = payload.get("event_type")
+                if isinstance(event_type, str) and event_type.startswith("agent_worker."):
+                    # Worker outcome audits are keyed by AgentTask IDs; do
+                    # not let colliding approval/work-order IDs determine
+                    # their tenant scope. This one known event is path-keyed,
+                    # so it has no task parent and stays unresolved.
+                    if event_type == "agent_worker.container_validation_configured":
+                        return None
+                    return resolve_workspace("agent_task", payload.get("entity_id") or "", seen)
                 details = payload.get("details") or {}
                 linked_id = details.get("entity_id") or payload.get("entity_id")
                 if payload.get("event_type") in {
                     "agent.registered",
+                    "agent.token_rotated",
                     "agent.token_revoked",
+                    "agent.auth_failed",
+                    "agent.rate_limited",
                 }:
                     return resolve_workspace("external_agent", linked_id or "", seen)
                 for candidate_type in ("approval_request", "work_order", "agent_task", "agent_run", "project"):
@@ -382,6 +394,17 @@ def audit(path: Path) -> dict[str, Any]:
             if payload is None:
                 continue
             invalid_parent = False
+            if (
+                entity_type == "audit_event"
+                and isinstance(payload.get("event_type"), str)
+                and payload["event_type"].startswith("agent_worker.")
+            ):
+                worker_event_type = payload["event_type"]
+                if (
+                    worker_event_type == "agent_worker.container_validation_configured"
+                    or parent_payload("agent_task", payload.get("entity_id")) is None
+                ):
+                    invalid_parent = True
             project_id = payload.get("project_id")
             if entity_type in {"idea", "work_order", "approval_request", "agent_task", "mcp_child_server", "mcp_pending_request"} and project_id:
                 if parent_payload("project", project_id) is None:
@@ -546,6 +569,17 @@ def audit(path: Path) -> dict[str, Any]:
                 reasons.append("workspace_parent_mismatch")
             if key in parent_conflict_keys:
                 reasons.append("parent_relationship_conflict")
+                if (
+                    entity_type == "audit_event"
+                    and payload is not None
+                    and isinstance(payload.get("event_type"), str)
+                    and payload["event_type"].startswith("agent_worker.")
+                    and (
+                        payload["event_type"] == "agent_worker.container_validation_configured"
+                        or parent_payload("agent_task", payload.get("entity_id")) is None
+                    )
+                ):
+                    reasons.append("worker_audit_parent_unresolved")
                 if (
                     entity_type == "workspace"
                     and payload is not None

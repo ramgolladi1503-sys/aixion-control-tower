@@ -175,7 +175,7 @@ def test_audit_blocks_tampered_trust_event_chain(tmp_path):
     assert result["trust_event_chain_verification"]["reason"] == "Event payload hash mismatch."
 
 
-def test_audit_resolves_agent_registration_and_revocation_to_agent_workspace(tmp_path):
+def test_audit_resolves_external_agent_security_audits_to_agent_workspace(tmp_path):
     path = tmp_path / "agent_audit_scope.sqlite3"
     _create_db(path, [
         ("workspace", "ws1", {"id": "ws1", "name": "Account", "owner_user_id": "u1"}),
@@ -199,6 +199,20 @@ def test_audit_resolves_agent_registration_and_revocation_to_agent_workspace(tmp
             "actor": "owner@example.test",
             "details": {},
         }),
+        ("audit_event", "audit_rotated", {
+            "id": "audit_rotated", "event_type": "agent.token_rotated",
+            "entity_id": "agent1", "actor": "owner@example.test", "details": {},
+        }),
+        ("audit_event", "audit_auth_failed", {
+            "id": "audit_auth_failed", "event_type": "agent.auth_failed",
+            "entity_id": "agent1", "actor": "external-agent-auth",
+            "details": {"agent_id": "agent1", "reason": "invalid_token"},
+        }),
+        ("audit_event", "audit_rate_limited", {
+            "id": "audit_rate_limited", "event_type": "agent.rate_limited",
+            "entity_id": "agent1", "actor": "agent:agent1",
+            "details": {"agent_id": "agent1", "limit": 5},
+        }),
     ])
 
     result = audit(path)
@@ -208,13 +222,22 @@ def test_audit_resolves_agent_registration_and_revocation_to_agent_workspace(tmp
     assert result["migration_authorized"] is False
 
 
-def test_audit_keeps_agent_event_unresolved_without_exact_agent_parent(tmp_path):
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "agent.token_revoked",
+        "agent.token_rotated",
+        "agent.auth_failed",
+        "agent.rate_limited",
+    ],
+)
+def test_audit_keeps_agent_event_unresolved_without_exact_agent_parent(tmp_path, event_type):
     path = tmp_path / "orphan_agent_audit_scope.sqlite3"
     _create_db(path, [
         ("workspace", "ws1", {"id": "ws1", "name": "Account", "owner_user_id": "u1"}),
         ("audit_event", "audit_orphan", {
             "id": "audit_orphan",
-            "event_type": "agent.token_revoked",
+            "event_type": event_type,
             "entity_id": "missing-agent",
             "actor": "owner@example.test",
             "details": {},
@@ -226,6 +249,118 @@ def test_audit_keeps_agent_event_unresolved_without_exact_agent_parent(tmp_path)
     assert result["status"] == "REVIEW_REQUIRED"
     assert result["ownership_review_counts"] == {"audit_event": 1}
     assert result["record_findings"][0]["findings"] == ["workspace_unresolved"]
+
+
+def test_audit_flags_external_agent_security_audit_with_wrong_workspace(tmp_path):
+    path = tmp_path / "agent_audit_wrong_workspace.sqlite3"
+    _create_db(path, [
+        ("workspace", "ws1", {"id": "ws1", "name": "Account 1", "owner_user_id": "u1"}),
+        ("workspace", "ws2", {"id": "ws2", "name": "Account 2", "owner_user_id": "u2"}),
+        ("external_agent", "agent1", {
+            "id": "agent1", "provider": "ANTIGRAVITY", "display_name": "Antigravity",
+            "workspace_id": "ws1",
+        }),
+        ("audit_event", "audit_auth_failed_wrong_workspace", {
+            "id": "audit_auth_failed_wrong_workspace", "event_type": "agent.auth_failed",
+            "entity_id": "agent1", "workspace_id": "ws2",
+            "actor": "external-agent-auth", "details": {"agent_id": "agent1"},
+        }),
+    ])
+
+    result = audit(path)
+
+    assert result["status"] == "REVIEW_REQUIRED"
+    assert result["ownership_conflict_counts"] == {"audit_event": 1}
+
+
+@pytest.mark.parametrize(
+    "collision_type",
+    ["approval_request", "work_order"],
+)
+def test_audit_resolves_worker_event_to_task_before_colliding_entity_id(
+    tmp_path, collision_type,
+):
+    path = tmp_path / f"worker_audit_{collision_type}_id_collision.sqlite3"
+    collision = (
+        (
+            "approval_request", "t1",
+            {
+                "id": "t1", "project_id": "p2", "workspace_id": "ws2",
+                "title": "Other approval", "summary": "Other workspace",
+                "target_branch": "main", "files": [], "risk": {"level": "LOW"},
+            },
+        )
+        if collision_type == "approval_request"
+        else (
+            "work_order", "t1",
+            {
+                "id": "t1", "project_id": "p2", "workspace_id": "ws2",
+                "goal": "Other workspace work order",
+            },
+        )
+    )
+    _create_db(path, [
+        ("workspace", "ws1", {"id": "ws1", "name": "Account 1", "owner_user_id": "u1"}),
+        ("workspace", "ws2", {"id": "ws2", "name": "Account 2", "owner_user_id": "u2"}),
+        ("user", "u1", {
+            "id": "u1", "email": "one@example.test", "password_hash": "hash",
+            "password_salt": "salt", "workspace_id": "ws1",
+        }),
+        ("user", "u2", {
+            "id": "u2", "email": "two@example.test", "password_hash": "hash",
+            "password_salt": "salt", "workspace_id": "ws2",
+        }),
+        ("project", "p1", {"id": "p1", "name": "Task project", "workspace_id": "ws1"}),
+        ("project", "p2", {"id": "p2", "name": "Collision project", "workspace_id": "ws2"}),
+        ("agent_task", "t1", {
+            "id": "t1", "title": "Worker task", "goal": "Run", "project_id": "p1",
+            "workspace_id": "ws1",
+        }),
+        collision,
+        ("audit_event", "audit-worker-collision", {
+            "id": "audit-worker-collision", "event_type": "agent_worker.task_released",
+            "entity_id": "t1", "workspace_id": "ws1", "actor": "worker",
+            "details": {},
+        }),
+    ])
+
+    result = audit(path)
+
+    assert result["status"] == "STRUCTURAL_REVIEW_PASSED"
+    assert result["ownership_conflict_counts"] == {}
+    assert result["parent_relationship_conflict_counts"] == {}
+
+
+@pytest.mark.parametrize(
+    ("event_type", "entity_id"),
+    [
+        ("agent_worker.validation_run_completed", "missing-task"),
+        ("agent_worker.future_event", "missing-task"),
+        ("agent_worker.container_validation_configured", "/tmp/validation-cwd"),
+    ],
+)
+def test_audit_blocks_worker_audit_without_supported_task_parent(
+    tmp_path, event_type, entity_id,
+):
+    path = tmp_path / "worker_audit_without_parent.sqlite3"
+    _create_db(path, [
+        ("workspace", "ws1", {"id": "ws1", "name": "Account", "owner_user_id": "u1"}),
+        ("audit_event", "audit-worker-no-parent", {
+            "id": "audit-worker-no-parent", "event_type": event_type,
+            "entity_id": entity_id, "workspace_id": "ws1", "actor": "worker",
+            "details": {},
+        }),
+    ])
+
+    result = audit(path)
+
+    assert result["status"] == "REVIEW_REQUIRED"
+    assert result["parent_relationship_conflict_counts"] == {"audit_event": 1}
+    finding = next(
+        item for item in result["record_findings"]
+        if item["entity_id"] == "audit-worker-no-parent"
+    )
+    assert "worker_audit_parent_unresolved" in finding["findings"]
 
 
 def test_cli_writes_private_report_and_refuses_to_overwrite(tmp_path, monkeypatch, capsys):
