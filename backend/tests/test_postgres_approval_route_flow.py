@@ -10,10 +10,12 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from threading import Barrier
 from unittest.mock import patch
 from urllib.parse import urlparse
 
@@ -1660,6 +1662,94 @@ def test_postgres_http_consume_rejects_revocation_after_authentication(
             (approval_id,),
         ).fetchone()[0] == 0
     client.close()
+
+
+def test_postgres_competing_connector_claims_deliver_approved_invocation_once(
+    postgres_approval_route_runtime,
+) -> None:
+    """Two connector workers racing after a retry can only claim one delivery."""
+    connect, workspace, project, _user, repositories, agent, agent_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    client = TestClient(main.app)
+    headers = {
+        "X-Aixion-Agent-Id": agent.id,
+        "X-Aixion-Agent-Token": agent_token,
+        "X-Aixion-Approval-Protocol": "1",
+    }
+    created = client.post(
+        "/agents/approvals",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "title": "Concurrent connector delivery claim",
+            "summary": "A retry and a resumed worker may race to claim one approval.",
+            "agent_name": agent.display_name,
+            "target_branch": "feature/concurrent-delivery-claim",
+            "files": [
+                {
+                    "path": "antigravity://tool/run_command",
+                    "change_type": "tool_call",
+                    "diff": '{"command":"echo single-claim"}',
+                }
+            ],
+            "source_session_id": f"session-{uuid.uuid4().hex}",
+            "source_invocation_id": f"invocation-{uuid.uuid4().hex}",
+        },
+    )
+    assert created.status_code == 200, created.text
+    approval_id = created.json()["id"]
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve"},
+    )
+    assert decision.status_code == 200, decision.text
+    approved = repositories.approval_decisions.get(approval_id)
+    assert approved is not None and approved.approved_payload_hash
+
+    barrier = Barrier(2)
+
+    def claim() -> bool:
+        barrier.wait(timeout=10)
+        return repositories.approval_decisions.claim_approved_delivery(
+            approval_id=approval_id,
+            workspace_id=workspace.id,
+            source_agent_id=agent.id,
+            source_invocation_id=approved.source_invocation_id or "",
+            expected_payload_hash=approved.approved_payload_hash or "",
+            presented_token_hash=hashlib.sha256(agent_token.encode("utf-8")).hexdigest(),
+            audit_event=AuditEvent(
+                event_type="approval.delivery_claimed",
+                entity_id=approval_id,
+                workspace_id=workspace.id,
+                actor=f"agent:{agent.id}",
+                details={
+                    "source_provider": approved.source_provider,
+                    "source_agent_id": agent.id,
+                    "source_invocation_id": approved.source_invocation_id,
+                    "approved_payload_hash": approved.approved_payload_hash,
+                    "delivery": "at_most_once",
+                },
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = (executor.submit(claim), executor.submit(claim))
+        outcomes = [future.result(timeout=20) for future in futures]
+
+    assert sorted(outcomes) == [False, True]
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_claimed'",
+            (approval_id,),
+        ).fetchone()[0] == 1
+    client.close()
+
 
 def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
     postgres_approval_route_runtime,
