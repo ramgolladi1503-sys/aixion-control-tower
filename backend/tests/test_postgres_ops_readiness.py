@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -14,6 +15,7 @@ from app import ops_routes
 from app.application_repositories import ApplicationRepositories
 from app.postgres_database import run_postgres_migrations
 from app.settings import get_settings
+from app.models import AuthUser, UserRole
 from app.trust_models import TrustEventType
 
 
@@ -102,6 +104,59 @@ def test_postgres_readiness_verifies_the_bound_durable_trust_ledger(
     assert readiness.flight_recorder_event_count == 1
     assert readiness.database_backend == "mixed"
     assert readiness.status == "not_ready"
+
+
+def test_postgres_readiness_requires_a_workspace_scoped_lease_count(
+    postgres_readiness_runtime,
+) -> None:
+    _connect, runtime, application_state = postgres_readiness_runtime
+
+    missing = ops_routes.build_runtime_readiness(
+        postgres_runtime=runtime,
+        application_state=application_state,
+    )
+    counted = ops_routes.build_runtime_readiness(
+        postgres_runtime=runtime,
+        application_state=application_state,
+        postgres_active_capability_leases=3,
+    )
+
+    assert missing.active_capability_leases == 0
+    assert missing.active_capability_leases_available is False
+    assert any("lease readiness count is unavailable" in e for e in missing.errors)
+    assert counted.active_capability_leases == 3
+    assert counted.active_capability_leases_available is True
+
+
+def test_postgres_readiness_logs_only_exception_type_for_unavailable_lease_count(
+    postgres_readiness_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _connect, runtime, application_state = postgres_readiness_runtime
+
+    def fail_with_sensitive_detail():
+        raise RuntimeError("private connection detail")
+
+    runtime.connect = fail_with_sensitive_detail
+    request = SimpleNamespace(app=SimpleNamespace(state=application_state))
+    user = AuthUser(
+        id="readiness-owner",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id="workspace-readiness",
+    )
+    monkeypatch.setattr(
+        ops_routes, "workspace_id_for_request", lambda _user, _request: "workspace-readiness"
+    )
+
+    with caplog.at_level(logging.WARNING, logger=ops_routes.__name__):
+        readiness = ops_routes.get_runtime_readiness(request, user)
+
+    assert readiness.active_capability_leases_available is False
+    assert "RuntimeError" in caplog.text
+    assert "private connection detail" not in caplog.text
 
 
 def test_postgres_readiness_fails_closed_on_mixed_trust_repository_binding(

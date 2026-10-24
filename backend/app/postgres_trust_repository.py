@@ -1892,6 +1892,26 @@ class PostgresTrustRepository:
         ).fetchall()
         return [self._capability_lease_from_row(row) for row in rows]
 
+    def count_active_capability_leases(
+        self,
+        conn: Connection,
+        *,
+        workspace_id: str,
+        now: datetime,
+    ) -> int:
+        """Count unexpired active leases for one workspace without touching local state."""
+        self._require_scope(workspace_id)
+        if now.utcoffset() is None:
+            raise ValueError("Capability lease count time must be timezone-aware")
+        row = conn.execute(
+            "SELECT COUNT(*) FROM capability_leases "
+            "WHERE workspace_id=%s AND status=%s AND expires_at>%s",
+            (workspace_id, CapabilityLeaseStatus.ACTIVE.value, now),
+        ).fetchone()
+        if row is None or not isinstance(row[0], int) or row[0] < 0:
+            raise PostgresTrustRepositoryError("Capability lease count is invalid")
+        return row[0]
+
     def expire_active_capability_lease(
         self,
         conn: Connection,

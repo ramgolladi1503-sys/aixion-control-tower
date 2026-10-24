@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Literal
 
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_maintainer
 from .application_repositories import ApplicationRepositories
+from .application_repository_access import workspace_id_for_request
 from .database_migrations import known_migration_ids
 from .external_agent_readiness import ExternalAgentReadinessResponse, build_external_agent_readiness
 from .models import AuthUser, UserRole, now_utc
@@ -25,6 +27,7 @@ from .trust_flight_recorder import verify_flight_recorder
 from .trust_models import CapabilityLeaseStatus, FlightRecorderVerification
 
 router = APIRouter(prefix="/ops", tags=["operations"])
+logger = logging.getLogger(__name__)
 MaintainerDependency = Depends(require_maintainer)
 
 
@@ -191,6 +194,7 @@ def build_runtime_readiness(
     *,
     postgres_runtime: PostgresRuntime | None = None,
     application_state: object | None = None,
+    postgres_active_capability_leases: int | None = None,
 ) -> RuntimeReadinessResponse:
     settings = get_settings()
     errors = list(settings.validation_errors)
@@ -398,16 +402,26 @@ def build_runtime_readiness(
             "credentials or send permission."
         )
 
-    active_capability_leases_available = not settings.postgres_auth_enabled
-    active_capability_leases = (
-        sum(
+    if settings.postgres_auth_enabled:
+        active_capability_leases_available = (
+            isinstance(postgres_active_capability_leases, int)
+            and not isinstance(postgres_active_capability_leases, bool)
+            and postgres_active_capability_leases >= 0
+        )
+        active_capability_leases = (
+            postgres_active_capability_leases
+            if active_capability_leases_available
+            else 0
+        )
+        if not active_capability_leases_available:
+            errors.append("PostgreSQL capability lease readiness count is unavailable.")
+    else:
+        active_capability_leases_available = True
+        active_capability_leases = sum(
             lease.status == CapabilityLeaseStatus.ACTIVE
             and lease.expires_at > now_utc()
             for lease in store.capability_leases.values()
         )
-        if active_capability_leases_available
-        else 0
-    )
     # Auth mode selects the lifespan-owned PostgreSQL bundle for many routes,
     # but process-global SQLite writers remain. Report that mixed authority
     # explicitly and never call it application-ready.
@@ -507,12 +521,44 @@ def build_runtime_readiness(
 @router.get("/readiness", response_model=RuntimeReadinessResponse)
 def get_runtime_readiness(
     request: Request,
-    _: AuthUser = MaintainerDependency,
+    user: AuthUser = MaintainerDependency,
 ) -> RuntimeReadinessResponse:
     runtime = getattr(request.app.state, "postgres_runtime", None)
+    postgres_active_capability_leases = None
+    settings = get_settings()
+    if settings.postgres_auth_enabled:
+        try:
+            repositories = getattr(request.app.state, "postgres_repositories", None)
+            trust_repository = getattr(repositories, "trust", None)
+            workspace_id = workspace_id_for_request(user, request)
+            if (
+                runtime is not None
+                and isinstance(repositories, ApplicationRepositories)
+                and getattr(runtime, "repositories", None) is repositories
+                and trust_repository is repositories.trust
+                and workspace_id
+            ):
+                with runtime.connect() as connection:
+                    with connection.transaction():
+                        postgres_active_capability_leases = (
+                            trust_repository.count_active_capability_leases(
+                                connection,
+                                workspace_id=workspace_id,
+                                now=now_utc(),
+                            )
+                        )
+        except Exception as exc:
+            # This is diagnostic data; unavailable selected persistence must not
+            # be silently replaced with the process-local SQLite projection.
+            postgres_active_capability_leases = None
+            logger.warning(
+                "PostgreSQL capability lease readiness count unavailable (%s)",
+                type(exc).__name__,
+            )
     return build_runtime_readiness(
         postgres_runtime=runtime,
         application_state=request.app.state,
+        postgres_active_capability_leases=postgres_active_capability_leases,
     )
 
 

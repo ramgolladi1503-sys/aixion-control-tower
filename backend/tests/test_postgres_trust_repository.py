@@ -421,6 +421,17 @@ def test_postgres_trust_repository_round_trips_workspace_records(trust_repositor
             )
             repository.insert_credential_grant(conn, grant)
 
+            assert repository.count_active_capability_leases(
+                conn, workspace_id=workspace_id, now=now
+            ) == 1
+            assert repository.count_active_capability_leases(
+                conn, workspace_id=f"other-{workspace_id}", now=now
+            ) == 0
+            with pytest.raises(ValueError, match="timezone-aware"):
+                repository.count_active_capability_leases(
+                    conn, workspace_id=workspace_id, now=now.replace(tzinfo=None)
+                )
+
             assert repository.get_capability_lease(conn, lease.id, workspace_id) == lease
             assert repository.get_reviewer_attestation(conn, attestation.id, workspace_id) == attestation
             assert repository.get_proposed_action(conn, action.id, workspace_id) == action
