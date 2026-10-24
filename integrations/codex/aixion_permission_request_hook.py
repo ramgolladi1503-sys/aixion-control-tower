@@ -589,6 +589,16 @@ def _run(
     if len(arg_bytes) > MAX_ARGUMENTS_BYTES:
         return "deny", "Tool arguments exceed the approval display limit"
 
+    # Validate the local wait budget before creating a server-side pending
+    # request. Otherwise a bad setting denies the Codex callback but leaves a
+    # phone approval that can never resume that callback.
+    try:
+        timeout = int(env.get("AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS", "600"))
+    except ValueError:
+        return "deny", "Codex approval timeout configuration is invalid"
+    if not 1 <= timeout <= MAX_WAIT_SECONDS:
+        return "deny", "Codex approval timeout is outside the allowed range"
+
     invocation_identity = _invocation_identity(event, tool_name=tool_name, tool_input=args)
     if invocation_identity is None:
         return "deny", "Codex permission request is missing stable session, turn, or tool-call identity"
@@ -636,12 +646,6 @@ def _run(
         return "deny", "Control Tower did not create a matching actionable approval"
     diagnostics["approval_id"] = _validated_diagnostic_approval_id(approval_id)
     original = _snapshot(created)
-    try:
-        timeout = int(env.get("AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS", "600"))
-    except ValueError:
-        return "deny", "Codex approval timeout configuration is invalid"
-    if not 1 <= timeout <= MAX_WAIT_SECONDS:
-        return "deny", "Codex approval timeout is outside the allowed range"
     wait_started_at = time.monotonic()
     deadline = wait_started_at + timeout
     next_heartbeat_at = wait_started_at + INVOCATION_HEARTBEAT_INTERVAL_SECONDS

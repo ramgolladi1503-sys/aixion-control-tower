@@ -299,6 +299,24 @@ def _codex_environment() -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize("timeout", ["invalid", "0", str(hook.MAX_WAIT_SECONDS + 1)])
+def test_invalid_approval_timeout_denies_before_creating_pending_request(
+    monkeypatch: pytest.MonkeyPatch,
+    timeout: str,
+) -> None:
+    environment = {**_codex_environment(), "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": timeout}
+
+    def unexpected_request(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("invalid timeout must be rejected before contacting the API")
+
+    monkeypatch.setattr(hook, "_request", unexpected_request)
+
+    behavior, message = hook.run(_codex_event(), environment)
+
+    assert behavior == "deny"
+    assert "timeout" in message.lower()
+
+
 @pytest.mark.parametrize(
     "raw_config",
     [
