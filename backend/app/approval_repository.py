@@ -31,6 +31,7 @@ from .models import (
     ApprovalRequest,
     ApprovalStatus,
     AgentAuthType,
+    AgentProvider,
     AuditEvent,
     ExternalAgent,
     Notification,
@@ -175,6 +176,17 @@ def _validate_delivery_evidence_row(
     if claim_id is None:
         if approval.status != ApprovalStatus.APPROVED:
             return "NOT_APPLICABLE"
+        if approval.source_provider == AgentProvider.MANUAL:
+            if approval.source_agent_id is None and approval.source_invocation_id is None:
+                return "NOT_APPLICABLE"
+            return "NOT_CONFIRMED"
+        if (
+            not isinstance(approval.source_agent_id, str)
+            or not approval.source_agent_id.strip()
+            or not isinstance(approval.source_invocation_id, str)
+            or not approval.source_invocation_id.strip()
+        ):
+            return "NOT_CONFIRMED"
         if approval.expires_at is None or approval.expires_at.utcoffset() is None:
             return "NOT_CONFIRMED"
         if approval.expires_at <= now_utc():

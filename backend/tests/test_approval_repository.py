@@ -25,6 +25,7 @@ from app.approval_repository import (
 )
 from app.database_migrations import run_migrations
 from app.models import (
+    AgentProvider,
     ApprovalRequest,
     ApprovalStatus,
     AuditEvent,
@@ -1804,6 +1805,7 @@ def _delivery_approval(
             "id": approval_id,
             "project_id": f"project-{approval_id}",
             "workspace_id": workspace_id,
+            "source_provider": AgentProvider.ANTIGRAVITY,
             "source_agent_id": agent_id,
             "source_invocation_id": invocation_id,
             **changes,
@@ -1881,7 +1883,7 @@ def test_sqlite_delivery_outcomes_are_batched_scoped_and_explicit(tmp_path: Path
         )
 
 
-def test_sqlite_delivery_outcomes_distinguish_waiting_expired_and_non_applicable(
+def test_sqlite_delivery_outcomes_distinguish_connector_and_manual_states(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "approval_delivery_states.sqlite3"
@@ -1899,21 +1901,47 @@ def test_sqlite_delivery_outcomes_distinguish_waiting_expired_and_non_applicable
     ).model_copy(
         update={"status": ApprovalStatus.DENIED}
     )
+    manual = _approved_decision(
+        _approval().model_copy(
+            update={
+                "id": "approval-manual",
+                "project_id": "project-approval-manual",
+                "workspace_id": "workspace-a",
+                "source_provider": AgentProvider.MANUAL,
+                "source_agent_id": None,
+                "source_invocation_id": None,
+                "expires_at": now_utc() + timedelta(minutes=5),
+            }
+        )
+    )
+    malformed_connector = _delivery_approval(
+        "approval-malformed-connector",
+        "workspace-a",
+        "",
+        "invocation-malformed",
+        source_provider=AgentProvider.CODEX,
+    )
     _seed_database(database, waiting)
     with sqlite3.connect(database) as connection:
         connection.executemany(
             "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
-            (("approval_request", item.id, item.model_dump_json()) for item in (expired, denied)),
+            (
+                ("approval_request", item.id, item.model_dump_json())
+                for item in (expired, denied, manual, malformed_connector)
+            ),
         )
 
     outcomes = _repository(database).list_delivery_outcomes(
-        workspace_id="workspace-a", approval_ids=[waiting.id, expired.id, denied.id]
+        workspace_id="workspace-a",
+        approval_ids=[waiting.id, expired.id, denied.id, manual.id, malformed_connector.id],
     )
 
     assert outcomes == {
         waiting.id: "AWAITING_DELIVERY",
         expired.id: "EXPIRED",
         denied.id: "NOT_APPLICABLE",
+        manual.id: "NOT_APPLICABLE",
+        malformed_connector.id: "NOT_CONFIRMED",
     }
 
 

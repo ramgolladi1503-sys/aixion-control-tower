@@ -894,6 +894,88 @@ def test_postgres_claim_waiting_on_approval_lock_rechecks_expiry(
             (approved.id,),
         ).fetchone()[0] == 0
 
+
+def test_postgres_delivery_outcomes_distinguish_manual_and_malformed_connector(
+    postgres_repository,
+) -> None:
+    repository, connect = postgres_repository
+    workspace, project, base_approval, _task = _seed(connect)
+    agent = ExternalAgent(
+        id=f"agent_delivery_classification_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Delivery classification connector",
+        workspace_id=workspace.id,
+    )
+    agent, _token_hash = _insert_agent_credential(connect, agent)
+    awaiting = _persist_live_approved_invocation(
+        connect,
+        approval=base_approval,
+        agent=agent,
+        source_invocation_id=f"awaiting:{uuid.uuid4().hex}",
+    )
+    future = now_utc() + timedelta(minutes=5)
+    manual = base_approval.model_copy(
+        update={
+            "id": f"approval_manual_delivery_{uuid.uuid4().hex}",
+            "status": ApprovalStatus.APPROVED,
+            "source_provider": AgentProvider.MANUAL,
+            "source_agent_id": None,
+            "source_invocation_id": None,
+            "expires_at": future,
+        }
+    )
+    malformed = base_approval.model_copy(
+        update={
+            "id": f"approval_malformed_delivery_{uuid.uuid4().hex}",
+            "status": ApprovalStatus.APPROVED,
+            "source_provider": AgentProvider.CODEX,
+            "source_agent_id": agent.id,
+            "source_invocation_id": None,
+            "expires_at": future,
+        }
+    )
+    expired = base_approval.model_copy(
+        update={
+            "id": f"approval_expired_delivery_{uuid.uuid4().hex}",
+            "status": ApprovalStatus.APPROVED,
+            "source_provider": AgentProvider.ANTIGRAVITY,
+            "source_agent_id": agent.id,
+            "source_invocation_id": f"expired:{uuid.uuid4().hex}",
+            "expires_at": now_utc() - timedelta(seconds=1),
+        }
+    )
+    with connect() as conn:
+        for item in (manual, malformed, expired):
+            conn.execute(
+                "INSERT INTO approval_requests "
+                "(approval_id,project_id,workspace_id,source_agent_id,status,expires_at,"
+                "created_at,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    item.id,
+                    project.id,
+                    workspace.id,
+                    item.source_agent_id,
+                    item.status.value,
+                    item.expires_at,
+                    item.created_at,
+                    item.updated_at,
+                    Jsonb(item.model_dump(mode="json")),
+                ),
+            )
+
+    outcomes = repository.list_delivery_outcomes(
+        workspace_id=workspace.id,
+        approval_ids=[awaiting.id, expired.id, manual.id, malformed.id],
+    )
+
+    assert outcomes == {
+        awaiting.id: "AWAITING_DELIVERY",
+        expired.id: "EXPIRED",
+        manual.id: "NOT_APPLICABLE",
+        malformed.id: "NOT_CONFIRMED",
+    }
+
+
 def test_postgres_delivery_failure_report_requires_matching_claim(postgres_repository) -> None:
     repository, connect = postgres_repository
     workspace, _project, approval, _task = _seed(connect)
