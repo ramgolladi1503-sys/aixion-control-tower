@@ -221,171 +221,208 @@ fun ApprovalDetailContent(
     var showRiskConfirmation by remember(approval.id) { mutableStateOf(false) }
     var showTechnicalDetails by remember(approval.id) { mutableStateOf(false) }
 
-    Column(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.canvas)
     ) {
-        LazyColumn(
-            modifier = Modifier
-                .testTag("approval-detail-list")
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-            verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
-        ) {
-            if (hasExactToolRequest) {
-                item {
-                    ExactToolRequestHeader()
+        // Keep the decision controls pinned in normal portrait layouts. In landscape,
+        // split-screen, or other short viewports, put them in the review scroll surface
+        // so large text cannot push the controls outside the visible window.
+        val compactViewport = maxHeight < 500.dp
+        Column(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier
+                    .testTag("approval-detail-list")
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
+            ) {
+                if (hasExactToolRequest) {
+                    item {
+                        ExactToolRequestHeader()
+                    }
+                    items(approval.files) { file -> DiffBlock(file = file) }
+                    item {
+                        ExactToolRequestReviewAcknowledgement(
+                            checked = exactToolRequestReviewed,
+                            onCheckedChange = { exactToolRequestReviewed = it }
+                        )
+                    }
                 }
-                items(approval.files) { file -> DiffBlock(file = file) }
+
                 item {
-                    ExactToolRequestReviewAcknowledgement(
-                        checked = exactToolRequestReviewed,
-                        onCheckedChange = { exactToolRequestReviewed = it }
+                    ApprovalHeroPanel(
+                        approval = approval,
+                        canApprove = canApprove,
+                        canDecide = canDecide,
+                        isBlocked = isBlocked,
+                        hasUnsupportedData = hasUnsupportedData,
+                        hasRequiredActions = hasRequiredActions
                     )
                 }
+
+                if (lastActionMessage != null && lastActionApprovalId == approval.id) {
+                    item { DetailPanel(title = "Last Action", body = lastActionMessage) }
+                }
+
+                if (hasUnsupportedData) {
+                    item {
+                        WarningPanel(
+                            title = "Unsupported approval data",
+                            body = "The backend returned a status or risk value this app does not recognize. Decisions are disabled until the app and backend versions are compatible."
+                        )
+                    }
+                } else if (isBlocked) {
+                    item {
+                        WarningPanel(
+                            title = "Approval blocked",
+                            body = "This request violates a hard safety rule. It cannot be approved from mobile."
+                        )
+                    }
+                } else if (decisionBlockReason != null) {
+                    item {
+                        WarningPanel(
+                            title = "Decision blocked",
+                            body = decisionBlockReason
+                        )
+                    }
+                } else if (!canDecide && !decisionNeedsReconciliation && !decisionInFlight) {
+                    item {
+                        WarningPanel(
+                            title = "Decision closed",
+                            body = "This approval is ${approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}. Decisions are available only while it is pending."
+                        )
+                    }
+                }
+
+                if (hasRequiredActions) {
+                    item { RequiredActionsPanel(actions = approval.requiredActions) }
+                }
+
+                item {
+                    TowerSectionHeader(
+                        title = "Review before deciding",
+                        subtitle = "Check the risk rationale, test plan, and rollback plan before making a decision."
+                    )
+                }
+
+                item {
+                    DetailPanel(
+                        title = "Risk rationale",
+                        body = approval.riskReasons.ifEmpty {
+                            listOf("No risk rationale was supplied by the backend.")
+                        }.joinToString("\n")
+                    )
+                }
+
+                item {
+                    TechnicalDetailsDisclosure(
+                        approval = approval,
+                        expanded = showTechnicalDetails,
+                        onToggle = { showTechnicalDetails = !showTechnicalDetails }
+                    )
+                }
+                item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
+                item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
+
+                item {
+                    Button(
+                        onClick = {
+                            if (requiresFullDiffReview) {
+                                fullDiffOpened = true
+                                fullDiffReviewed = false
+                            }
+                            onOpenDiff()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.canvas),
+                        modifier = Modifier.fillMaxWidth().testTag("approval-full-diff-review")
+                    ) { Text("Review Full Diff") }
+                }
+
+                if (!hasExactToolRequest) {
+                    item {
+                        TowerSectionHeader(
+                            title = "File Changes",
+                            subtitle = "Inline preview only. Open the full diff before approving risky changes.",
+                            modifier = Modifier.testTag("approval-file-changes")
+                        )
+                    }
+
+                    items(approval.files) { file -> DiffBlock(file = file) }
+                }
+
+                if (requiresFullDiffReview) {
+                    item {
+                        FullDiffReviewAcknowledgement(
+                            opened = fullDiffOpened,
+                            checked = fullDiffReviewed,
+                            onCheckedChange = { fullDiffReviewed = it }
+                        )
+                    }
+                }
+
+                if (compactViewport && (canDecide || decisionInFlight || decisionNeedsReconciliation)) {
+                    item {
+                        DecisionPanel(
+                            canApprove = canApprove,
+                            exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
+                            fullDiffReviewNeedsReview = requiresFullDiffReview && (!fullDiffOpened || !fullDiffReviewed),
+                            fullDiffOpened = fullDiffOpened,
+                            canDecide = canDecide,
+                            isBlocked = isBlocked,
+                            hasUnsupportedData = hasUnsupportedData,
+                            decisionInFlight = decisionInFlight,
+                            decisionNeedsReconciliation = decisionNeedsReconciliation,
+                            onReconcileDecision = onReconcileDecision,
+                            approvalTitle = approval.title,
+                            approvalRisk = approval.risk.name.lowercase().replace('_', ' '),
+                            onApprove = {
+                                if (requiresRiskConfirmation) {
+                                    showRiskConfirmation = true
+                                } else {
+                                    onApprove()
+                                }
+                            },
+                            onReject = onReject,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("approval-decision-panel")
+                        )
+                    }
+                }
+
             }
 
-            item {
-                ApprovalHeroPanel(
-                    approval = approval,
+            if (!compactViewport && (canDecide || decisionInFlight || decisionNeedsReconciliation)) {
+                DecisionPanel(
                     canApprove = canApprove,
+                    exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
+                    fullDiffReviewNeedsReview = requiresFullDiffReview && (!fullDiffOpened || !fullDiffReviewed),
+                    fullDiffOpened = fullDiffOpened,
                     canDecide = canDecide,
                     isBlocked = isBlocked,
                     hasUnsupportedData = hasUnsupportedData,
-                    hasRequiredActions = hasRequiredActions
-                )
-            }
-
-            if (lastActionMessage != null && lastActionApprovalId == approval.id) {
-                item { DetailPanel(title = "Last Action", body = lastActionMessage) }
-            }
-
-            if (hasUnsupportedData) {
-                item {
-                    WarningPanel(
-                        title = "Unsupported approval data",
-                        body = "The backend returned a status or risk value this app does not recognize. Decisions are disabled until the app and backend versions are compatible."
-                    )
-                }
-            } else if (isBlocked) {
-                item {
-                    WarningPanel(
-                        title = "Approval blocked",
-                        body = "This request violates a hard safety rule. It cannot be approved from mobile."
-                    )
-                }
-            } else if (decisionBlockReason != null) {
-                item {
-                    WarningPanel(
-                        title = "Decision blocked",
-                        body = decisionBlockReason
-                    )
-                }
-            } else if (!canDecide && !decisionNeedsReconciliation && !decisionInFlight) {
-                item {
-                    WarningPanel(
-                        title = "Decision closed",
-                        body = "This approval is ${approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}. Decisions are available only while it is pending."
-                    )
-                }
-            }
-
-            if (hasRequiredActions) {
-                item { RequiredActionsPanel(actions = approval.requiredActions) }
-            }
-
-            item {
-                TowerSectionHeader(
-                    title = "Review before deciding",
-                    subtitle = "Check the risk rationale, test plan, and rollback plan before making a decision."
-                )
-            }
-
-            item {
-                DetailPanel(
-                    title = "Risk rationale",
-                    body = approval.riskReasons.ifEmpty {
-                        listOf("No risk rationale was supplied by the backend.")
-                    }.joinToString("\n")
-                )
-            }
-
-            item {
-                TechnicalDetailsDisclosure(
-                    approval = approval,
-                    expanded = showTechnicalDetails,
-                    onToggle = { showTechnicalDetails = !showTechnicalDetails }
-                )
-            }
-            item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
-            item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
-
-            item {
-                Button(
-                    onClick = {
-                        if (requiresFullDiffReview) {
-                            fullDiffOpened = true
-                            fullDiffReviewed = false
+                    decisionInFlight = decisionInFlight,
+                    decisionNeedsReconciliation = decisionNeedsReconciliation,
+                    onReconcileDecision = onReconcileDecision,
+                    approvalTitle = approval.title,
+                    approvalRisk = approval.risk.name.lowercase().replace('_', ' '),
+                    onApprove = {
+                        if (requiresRiskConfirmation) {
+                            showRiskConfirmation = true
+                        } else {
+                            onApprove()
                         }
-                        onOpenDiff()
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.canvas),
-                    modifier = Modifier.fillMaxWidth().testTag("approval-full-diff-review")
-                ) { Text("Review Full Diff") }
+                    onReject = onReject,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.sm)
+                        .testTag("approval-decision-panel")
+                )
             }
-
-            if (!hasExactToolRequest) {
-                item {
-                    TowerSectionHeader(
-                        title = "File Changes",
-                        subtitle = "Inline preview only. Open the full diff before approving risky changes.",
-                        modifier = Modifier.testTag("approval-file-changes")
-                    )
-                }
-
-                items(approval.files) { file -> DiffBlock(file = file) }
-            }
-
-            if (requiresFullDiffReview) {
-                item {
-                    FullDiffReviewAcknowledgement(
-                        opened = fullDiffOpened,
-                        checked = fullDiffReviewed,
-                        onCheckedChange = { fullDiffReviewed = it }
-                    )
-                }
-            }
-
-        }
-
-        if (canDecide || decisionInFlight || decisionNeedsReconciliation) {
-            DecisionPanel(
-                canApprove = canApprove,
-                exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
-                fullDiffReviewNeedsReview = requiresFullDiffReview && (!fullDiffOpened || !fullDiffReviewed),
-                fullDiffOpened = fullDiffOpened,
-                canDecide = canDecide,
-                isBlocked = isBlocked,
-                hasUnsupportedData = hasUnsupportedData,
-                decisionInFlight = decisionInFlight,
-                decisionNeedsReconciliation = decisionNeedsReconciliation,
-                onReconcileDecision = onReconcileDecision,
-                approvalTitle = approval.title,
-                approvalRisk = approval.risk.name.lowercase().replace('_', ' '),
-                onApprove = {
-                    if (requiresRiskConfirmation) {
-                        showRiskConfirmation = true
-                    } else {
-                        onApprove()
-                    }
-                },
-                onReject = onReject,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.sm)
-            )
         }
     }
 

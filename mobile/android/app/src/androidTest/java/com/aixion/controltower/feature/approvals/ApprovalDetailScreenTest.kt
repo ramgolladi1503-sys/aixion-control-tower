@@ -470,6 +470,25 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun decisionActionsRemainReachableInShortLargeTextViewport() {
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(360.dp).height(320.dp)) {
+                    ApprovalDetailContent(approval(ApprovalStatus.REQUESTED), null, {}, {}, {})
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Deny"))
+        composeRule.onNodeWithText("Deny").assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Approve request"))
+        composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-decision-panel").assertExists()
+    }
+
+    @Test
     fun decisionProgressStatusUsesPoliteLiveRegionAndUpdatesInPlace() {
         val decisionInFlight = androidx.compose.runtime.mutableStateOf(false)
         composeRule.setContent {
