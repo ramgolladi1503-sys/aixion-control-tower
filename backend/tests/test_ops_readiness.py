@@ -52,9 +52,7 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     assert body["application_store_ready"] is True
     assert body["approval_recovery_status"] in {"not_started", "healthy", "degraded"}
     assert body["approval_recovery_poll_seconds"] == 60
-    assert body["approval_expiry_status"] in {
-        "not_started", "starting", "healthy", "failed"
-    }
+    assert body["approval_expiry_status"] in {"not_started", "starting", "healthy", "failed"}
     assert body["approval_expiry_failure_count"] >= 0
     assert body["approval_expiry_last_changed_count"] >= 0
     assert body["app_state_repository_bindings"]["approval_decisions"] == "sqlite"
@@ -107,7 +105,20 @@ def test_readiness_reports_postgres_probe_without_claiming_it_is_active_store(
 ) -> None:
     class Runtime:
         def probe(self):
-            schema = type("Schema", (), {"ready": True})()
+            expected_ids = tuple(
+                migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+            )
+            schema = type(
+                "Schema",
+                (),
+                {
+                    "ready": True,
+                    "applied_migration_ids": expected_ids,
+                    "missing_migration_ids": (),
+                    "unknown_migration_ids": (),
+                    "mismatched_migration_ids": (),
+                },
+            )()
             return type(
                 "Probe",
                 (),
@@ -143,7 +154,20 @@ def test_readiness_reports_postgres_probe_without_claiming_it_is_active_store(
 def test_readiness_reports_postgres_auth_as_mixed_and_not_ready(monkeypatch) -> None:
     class Runtime:
         def probe(self):
-            schema = type("Schema", (), {"ready": True})()
+            expected_ids = tuple(
+                migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+            )
+            schema = type(
+                "Schema",
+                (),
+                {
+                    "ready": True,
+                    "applied_migration_ids": expected_ids,
+                    "missing_migration_ids": (),
+                    "unknown_migration_ids": (),
+                    "mismatched_migration_ids": (),
+                },
+            )()
             return type(
                 "Probe",
                 (),
@@ -165,6 +189,25 @@ def test_readiness_reports_postgres_auth_as_mixed_and_not_ready(monkeypatch) -> 
         email_dispatch_enabled=True,
     )
     monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+
+    def sqlite_authority_must_not_be_read(*args, **kwargs):
+        pytest.fail("PostgreSQL readiness must not read SQLite recovery state")
+
+    monkeypatch.setattr(store, "applied_migrations", sqlite_authority_must_not_be_read)
+    monkeypatch.setattr(ops_routes, "export_recovery_snapshot", sqlite_authority_must_not_be_read)
+    monkeypatch.setitem(
+        store.capability_leases,
+        "stale-local-lease",
+        type(
+            "Lease",
+            (),
+            {
+                "status": "ACTIVE",
+                "expires_at": datetime.max.replace(tzinfo=timezone.utc),
+            },
+        )(),
+    )
+
     readiness = build_runtime_readiness(
         postgres_runtime=Runtime(),
         application_state=app.state,
@@ -175,6 +218,14 @@ def test_readiness_reports_postgres_auth_as_mixed_and_not_ready(monkeypatch) -> 
     assert readiness.application_store_ready is False
     assert readiness.postgres_probe_status == "ready"
     assert readiness.status == "not_ready"
+    assert readiness.db_reachable is True
+    assert readiness.migrations_applied is True
+    assert readiness.applied_migration_ids == sorted(
+        migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+    )
+    assert readiness.recovery_snapshot_available is False
+    assert readiness.active_capability_leases == 0
+    assert readiness.active_capability_leases_available is False
     assert any("persistence is mixed" in error for error in readiness.errors)
 
 
@@ -234,9 +285,7 @@ def test_readiness_recognizes_sqlite_repository_subclasses() -> None:
     class InstrumentedApprovalRepository(type(app.state.approval_decision_repository)):
         pass
 
-    repository = InstrumentedApprovalRepository(
-        app.state.approval_decision_repository._connect
-    )
+    repository = InstrumentedApprovalRepository(app.state.approval_decision_repository._connect)
     state = type(
         "ApplicationState",
         (),
@@ -473,9 +522,7 @@ def test_production_readiness_accepts_live_task_and_fresh_expiry_completion(monk
     assert readiness.approval_expiry_task_running is True
     assert readiness.approval_expiry_last_completion_fresh is True
     assert readiness.approval_expiry_max_completion_age_seconds == 180
-    assert not any(
-        error.startswith("Approval expiry worker") for error in readiness.errors
-    )
+    assert not any(error.startswith("Approval expiry worker") for error in readiness.errors)
 
 
 def test_readiness_reports_failed_approval_expiry_worker_without_changing_readiness() -> None:

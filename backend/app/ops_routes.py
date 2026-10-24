@@ -11,6 +11,7 @@ from .database_migrations import known_migration_ids
 from .external_agent_readiness import ExternalAgentReadinessResponse, build_external_agent_readiness
 from .models import AuthUser, UserRole, now_utc
 from .postgres_runtime import PostgresRuntime
+from .postgres_database import POSTGRES_MIGRATIONS
 from .recovery_routes import RECOVERY_FORMAT_VERSION, export_recovery_snapshot
 from .settings import get_settings
 from .store import store
@@ -77,6 +78,7 @@ class RuntimeReadinessResponse(BaseModel):
     flight_recorder_valid: bool
     flight_recorder_event_count: int
     active_capability_leases: int
+    active_capability_leases_available: bool = True
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -223,6 +225,7 @@ def build_runtime_readiness(
     migrations_applied = False
     recovery_snapshot_available = False
 
+    postgres_schema_status = None
     if settings.postgres_runtime_probe_enabled or settings.postgres_auth_enabled:
         postgres_probe_status = "not_ready"
         if postgres_runtime is None:
@@ -232,6 +235,7 @@ def build_runtime_readiness(
         else:
             try:
                 runtime_probe = postgres_runtime.probe()
+                postgres_schema_status = runtime_probe.schema
                 postgres_probe_schema_ready = runtime_probe.schema.ready
                 postgres_probe_status = "ready" if runtime_probe.ready else "not_ready"
                 postgres_pool_size = runtime_probe.pool_size
@@ -244,25 +248,53 @@ def build_runtime_readiness(
             except Exception:
                 errors.append("PostgreSQL runtime probe failed.")
 
-    try:
-        applied_migrations = store.applied_migrations()
-        applied_migration_ids = sorted(item["migration_id"] for item in applied_migrations)
-        db_reachable = True
-        missing_migration_ids = sorted(set(expected_migration_ids) - set(applied_migration_ids))
-        migrations_applied = not missing_migration_ids
-        if missing_migration_ids:
-            errors.append("Missing database migrations: " + ", ".join(missing_migration_ids))
-    except Exception as exc:  # pragma: no cover - exact sqlite exceptions vary by runtime
-        errors.append(f"Database readiness check failed: {exc}")
-
-    if db_reachable and migrations_applied:
+    if settings.postgres_auth_enabled:
+        # PostgreSQL-auth mode must not report SQLite migration/recovery state
+        # as if it belonged to the selected account database. Recovery export
+        # has no PostgreSQL repository yet, so keep it explicitly unavailable.
+        expected_migration_ids = sorted(
+            migration.migration_id for migration in POSTGRES_MIGRATIONS
+        )
+        if postgres_schema_status is not None:
+            db_reachable = True
+            applied_migration_ids = sorted(
+                getattr(postgres_schema_status, "applied_migration_ids", ())
+            )
+            migrations_applied = bool(postgres_schema_status.ready)
+            missing_postgres_migrations = getattr(
+                postgres_schema_status, "missing_migration_ids", ()
+            )
+            if missing_postgres_migrations:
+                errors.append(
+                    "Missing PostgreSQL migrations: "
+                    + ", ".join(missing_postgres_migrations)
+                )
+            if getattr(postgres_schema_status, "unknown_migration_ids", ()):
+                errors.append("PostgreSQL migration ledger contains unknown migrations.")
+            if getattr(postgres_schema_status, "mismatched_migration_ids", ()):
+                errors.append("PostgreSQL migration checksums do not match this build.")
+        # Recovery export remains unavailable until an authoritative
+        # PostgreSQL recovery repository is implemented.
+    else:
         try:
-            snapshot = export_recovery_snapshot(_probe_owner())
-            recovery_snapshot_available = snapshot.format_version == RECOVERY_FORMAT_VERSION
-            if not recovery_snapshot_available:
-                errors.append(f"Unexpected recovery format version: {snapshot.format_version}")
-        except Exception as exc:  # pragma: no cover - defensive operational check
-            errors.append(f"Recovery snapshot readiness check failed: {exc}")
+            applied_migrations = store.applied_migrations()
+            applied_migration_ids = sorted(item["migration_id"] for item in applied_migrations)
+            db_reachable = True
+            missing_migration_ids = sorted(set(expected_migration_ids) - set(applied_migration_ids))
+            migrations_applied = not missing_migration_ids
+            if missing_migration_ids:
+                errors.append("Missing database migrations: " + ", ".join(missing_migration_ids))
+        except Exception as exc:  # pragma: no cover - exact sqlite exceptions vary by runtime
+            errors.append(f"Database readiness check failed: {exc}")
+
+        if db_reachable and migrations_applied:
+            try:
+                snapshot = export_recovery_snapshot(_probe_owner())
+                recovery_snapshot_available = snapshot.format_version == RECOVERY_FORMAT_VERSION
+                if not recovery_snapshot_available:
+                    errors.append(f"Unexpected recovery format version: {snapshot.format_version}")
+            except Exception as exc:  # pragma: no cover - defensive operational check
+                errors.append(f"Recovery snapshot readiness check failed: {exc}")
 
     flight = verify_flight_recorder()
     if not flight.valid:
@@ -289,10 +321,15 @@ def build_runtime_readiness(
             "credentials or send permission."
         )
 
-    active_capability_leases = sum(
-        lease.status == CapabilityLeaseStatus.ACTIVE
-        and lease.expires_at > now_utc()
-        for lease in store.capability_leases.values()
+    active_capability_leases_available = not settings.postgres_auth_enabled
+    active_capability_leases = (
+        sum(
+            lease.status == CapabilityLeaseStatus.ACTIVE
+            and lease.expires_at > now_utc()
+            for lease in store.capability_leases.values()
+        )
+        if active_capability_leases_available
+        else 0
     )
     # Auth mode selects the lifespan-owned PostgreSQL bundle for many routes,
     # but process-global SQLite writers remain. Report that mixed authority
@@ -384,6 +421,7 @@ def build_runtime_readiness(
         flight_recorder_valid=flight.valid,
         flight_recorder_event_count=flight.event_count,
         active_capability_leases=active_capability_leases,
+        active_capability_leases_available=active_capability_leases_available,
         errors=errors,
         warnings=warnings,
     )
