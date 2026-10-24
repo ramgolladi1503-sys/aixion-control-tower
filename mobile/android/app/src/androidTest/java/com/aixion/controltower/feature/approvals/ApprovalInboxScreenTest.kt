@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.approvals
 
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.captureToImage
@@ -57,6 +58,49 @@ import kotlin.math.roundToInt
 class ApprovalInboxScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun selectedHistorySectionAndFilterSurviveSavedStateRestoration() {
+        val restorationTester = StateRestorationTester(composeRule)
+        restorationTester.setContent {
+            ControlTowerTheme {
+                ApprovalInboxContent(
+                    state = ApprovalsUiState(
+                        loading = false,
+                        historyLoaded = true,
+                        approvalHistory = listOf(
+                            historyEvent(
+                                id = "approved-restoration",
+                                decision = "approve",
+                                reviewerLabel = "Reviewer",
+                                requestSnapshotVerified = true,
+                                requestSnapshot = historySnapshot("Approved record")
+                            ),
+                            historyEvent(
+                                id = "denied-restoration",
+                                decision = "deny",
+                                reviewerLabel = "Reviewer",
+                                requestSnapshotVerified = true,
+                                requestSnapshot = historySnapshot("Denied record")
+                            )
+                        )
+                    )
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+        composeRule.onNodeWithText("Denied").performClick()
+        composeRule.onNodeWithText("Denied record").assertExists()
+        composeRule.onAllNodesWithText("Approved record").assertCountEquals(0)
+
+        restorationTester.emulateSavedInstanceStateRestore()
+
+        composeRule.onNodeWithText("History").assertIsSelected()
+        composeRule.onNodeWithText("Denied").assertIsSelected()
+        composeRule.onNodeWithText("Denied record").assertExists()
+        composeRule.onAllNodesWithText("Approved record").assertCountEquals(0)
+    }
 
     @Test
     fun inboxSyncStatusIsAnnouncedWhenRefreshStateChanges() {

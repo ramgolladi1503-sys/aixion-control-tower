@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
@@ -163,8 +164,8 @@ fun ApprovalInboxContent(
     ).size
     val blocked = state.approvals.filter { it.status == ApprovalStatus.BLOCKED }
     val unsupported = state.approvals.filter(::isUnsupportedInboxApproval)
-    var selectedSection by remember { mutableStateOf(ApprovalInboxSection.NEEDS_REVIEW) }
-    var selectedHistoryFilter by remember { mutableStateOf(ApprovalHistoryFilter.ALL) }
+    var selectedSection by rememberSaveable { mutableStateOf(ApprovalInboxSection.NEEDS_REVIEW) }
+    var selectedHistoryFilter by rememberSaveable { mutableStateOf(ApprovalHistoryFilter.ALL) }
     var technicalDetailsExpanded by remember(state.errorMessage) { mutableStateOf(false) }
     val visibleApprovals = filterApprovalsForInbox(
         approvals = state.approvals,
