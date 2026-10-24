@@ -26,6 +26,7 @@ from .mcp_pending_repository import (
     MCPPendingRepositoryConflict,
     MCPPendingRepositoryError,
 )
+from .mcp_tool_validation import validate_arguments_against_schema
 from .application_repository_access import workspace_id_for_request
 from .models import (
     AgentProvider,
@@ -278,6 +279,10 @@ def _postgres_mcp_submission(
     )
     if registered_tool is None or not registered_tool.mutating:
         raise HTTPException(status_code=409, detail="MCP tool is not registered as mutating on this server")
+    try:
+        validate_arguments_against_schema(call.arguments, registered_tool.input_schema)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     approved_action = {
         **approved_call.model_dump(mode="json"),
         "target_server_id": registered_server.id,

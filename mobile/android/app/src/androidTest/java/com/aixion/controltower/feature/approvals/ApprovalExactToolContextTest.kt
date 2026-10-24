@@ -58,20 +58,26 @@ class ApprovalExactToolContextTest {
         }
 
         val context = composeRule.onNodeWithTag("approval-exact-tool-context")
+        val header = composeRule.onNodeWithTag("approval-exact-tool-request")
         val path = composeRule.onNodeWithText("codex://tool/shell")
         val exactPayload = composeRule.onNodeWithText(payload)
         val acknowledgement = composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
 
         context.assertExists()
+        header.assertExists()
         path.assertExists()
         exactPayload.assertExists()
         acknowledgement.assertExists()
         context.assertTextContains("Provider: Codex · Project: Mobile app workspace")
 
         val contextTop = context.fetchSemanticsNode().boundsInRoot.top
+        val headerTop = header.fetchSemanticsNode().boundsInRoot.top
+        val pathTop = path.fetchSemanticsNode().boundsInRoot.top
         val payloadTop = exactPayload.fetchSemanticsNode().boundsInRoot.top
         val acknowledgementTop = acknowledgement.fetchSemanticsNode().boundsInRoot.top
-        assertTrue("Source context must precede the payload", contextTop < payloadTop)
+        assertTrue("The exact action header must precede provider and project context", headerTop < contextTop)
+        assertTrue("Provider and project context must precede the invocation payload", contextTop < pathTop)
+        assertTrue("The request path must precede its payload", pathTop <= payloadTop)
         assertTrue("The review acknowledgement must follow the payload", payloadTop < acknowledgementTop)
     }
 

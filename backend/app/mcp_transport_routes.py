@@ -31,6 +31,7 @@ from .mcp_child_server_repository import (
 from .models import ApprovalStatus, AuthUser, MCPChildServer, now_utc
 from .approval_expiry import expire_approval
 from .mcp_pending_repository import MCPPendingRepositoryError
+from .mcp_tool_validation import validate_arguments_against_schema
 from .settings import get_settings
 from .store import store
 from .workspace_access import project_workspace_id, workspace_id_for_user
@@ -170,68 +171,6 @@ def _registered_tool_policy(
     raise ValueError("tools/call references an unknown or disabled registered tool")
 
 
-def _validate_arguments_against_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> None:
-    """Minimal JSON-schema subset for registry-enforced tool arguments.
-
-    This intentionally supports the subset the registry uses today: object type,
-    required fields, primitive property types, and additionalProperties=false.
-    It is not a full JSON Schema implementation.
-    """
-    if schema.get("type", "object") != "object":
-        raise ValueError("registered tool input_schema must be an object schema")
-
-    required = schema.get("required", [])
-    if not isinstance(required, list):
-        raise ValueError("registered tool input_schema required must be a list")
-    for field_name in required:
-        if not isinstance(field_name, str):
-            raise ValueError("registered tool input_schema required entries must be strings")
-        if field_name not in arguments:
-            raise ValueError(f"tools/call arguments missing required field: {field_name}")
-
-    properties = schema.get("properties", {})
-    if not isinstance(properties, dict):
-        raise ValueError("registered tool input_schema properties must be an object")
-
-    if schema.get("additionalProperties") is False:
-        allowed = set(properties.keys())
-        extra = sorted(set(arguments.keys()) - allowed)
-        if extra:
-            raise ValueError(f"tools/call arguments include unsupported field: {extra[0]}")
-
-    for field_name, value in arguments.items():
-        property_schema = properties.get(field_name)
-        if property_schema is None:
-            continue
-        if not isinstance(property_schema, dict):
-            raise ValueError(f"registered tool input_schema property is invalid: {field_name}")
-        expected_type = property_schema.get("type")
-        if expected_type is None:
-            continue
-        if not _value_matches_json_type(value, expected_type):
-            raise ValueError(f"tools/call argument has wrong type: {field_name} must be {expected_type}")
-
-
-def _value_matches_json_type(value: Any, expected_type: str | list[str]) -> bool:
-    expected_types = expected_type if isinstance(expected_type, list) else [expected_type]
-    for item in expected_types:
-        if item == "string" and isinstance(value, str):
-            return True
-        if item == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
-            return True
-        if item == "integer" and isinstance(value, int) and not isinstance(value, bool):
-            return True
-        if item == "boolean" and isinstance(value, bool):
-            return True
-        if item == "object" and isinstance(value, dict):
-            return True
-        if item == "array" and isinstance(value, list):
-            return True
-        if item == "null" and value is None:
-            return True
-    return False
-
-
 def _tool_call_from_params(
     project_id: str,
     params: dict[str, Any],
@@ -271,7 +210,7 @@ def _tool_call_from_params(
     )
     if registered_policy is not None:
         server_name, registered_mutating, input_schema = registered_policy
-        _validate_arguments_against_schema(arguments, input_schema)
+        validate_arguments_against_schema(arguments, input_schema)
         mutating = registered_mutating
     else:
         if not allow_demo:

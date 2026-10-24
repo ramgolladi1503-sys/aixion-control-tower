@@ -862,7 +862,12 @@ def test_run_reconnects_after_ambiguous_decision_read_then_consumes_once(
 
 @pytest.mark.parametrize(
     ("consume_response", "expected_behavior"),
-    [("valid", "allow"), ("truncated", "deny"), ("malformed", "deny")],
+    [
+        ("valid", "allow"),
+        ("truncated", "deny"),
+        ("malformed", "deny"),
+        ("reset_after_claim", "deny"),
+    ],
 )
 def test_loopback_peer_disconnect_retries_decision_but_never_retries_consume(
     monkeypatch: pytest.MonkeyPatch,
@@ -874,6 +879,7 @@ def test_loopback_peer_disconnect_retries_decision_but_never_retries_consume(
     created: dict[str, object] = {}
     decision_reads = 0
     consume_posts = 0
+    committed_claims = 0
 
     class ProtocolHandler(BaseHTTPRequestHandler):
         def _send_json(self, value: dict[str, object]) -> None:
@@ -903,7 +909,7 @@ def test_loopback_peer_disconnect_retries_decision_but_never_retries_consume(
             self.send_error(404)
 
         def do_POST(self) -> None:
-            nonlocal consume_posts
+            nonlocal consume_posts, committed_claims
             length = int(self.headers.get("Content-Length", "0"))
             request_body = self.rfile.read(length) if length else b""
             if self.path == "/agents/approvals":
@@ -912,6 +918,15 @@ def test_loopback_peer_disconnect_retries_decision_but_never_retries_consume(
                 return
             if self.path.endswith("/consume"):
                 consume_posts += 1
+                if consume_response == "reset_after_claim":
+                    # The database claim may have committed even though the
+                    # hook never receives its response. Do not retry it.
+                    committed_claims += 1
+                    self.connection.setsockopt(
+                        socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+                    )
+                    self.connection.close()
+                    return
                 if consume_response == "valid":
                     self._send_json({"consumed": True})
                 elif consume_response == "truncated":
@@ -955,6 +970,7 @@ def test_loopback_peer_disconnect_retries_decision_but_never_retries_consume(
     assert result[0] == expected_behavior
     assert decision_reads == 2
     assert consume_posts == 1
+    assert committed_claims == (1 if consume_response == "reset_after_claim" else 0)
 
 
 def test_run_honors_retry_after_only_until_host_deadline(

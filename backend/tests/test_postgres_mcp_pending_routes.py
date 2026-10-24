@@ -533,6 +533,135 @@ def test_postgres_mcp_oversized_arguments_are_rejected_before_repository_access(
     assert store.approval_requests == before_sqlite_approvals
 
 
+@pytest.mark.parametrize(
+    ("input_schema", "arguments", "expected_status"),
+    [
+        (
+            {
+                "type": "object",
+                "required": ["path", "content"],
+                "additionalProperties": False,
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            },
+            {"path": "valid.txt"},
+            422,
+        ),
+        (
+            {
+                "type": "object",
+                "required": ["path"],
+                "additionalProperties": False,
+                "properties": {"path": {"type": "string"}},
+            },
+            {"path": 17},
+            422,
+        ),
+        (
+            {
+                "type": "object",
+                "required": ["path"],
+                "additionalProperties": False,
+                "properties": {"path": {"type": "string"}},
+            },
+            {"path": "valid.txt", "extra": "rejected"},
+            422,
+        ),
+        (
+            {
+                "type": "object",
+                "required": ["path"],
+                "properties": {"path": {"type": "string", "enum": ["safe.txt"]}},
+            },
+            {"path": "safe.txt"},
+            422,
+        ),
+        (
+            {
+                "type": "object",
+                "required": ["path", "content"],
+                "additionalProperties": False,
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            },
+            {"path": "valid.txt", "content": "approved content"},
+            200,
+        ),
+    ],
+)
+def test_postgres_gateway_submission_enforces_registered_schema_before_persisting(
+    postgres_mcp_pending_route_runtime,
+    input_schema: dict,
+    arguments: dict,
+    expected_status: int,
+) -> None:
+    connect, _workspace, project, user, _pending = postgres_mcp_pending_route_runtime
+    repositories = main.app.state.postgres_repositories
+    server = repositories.mcp_child_servers.list_for_workspace(
+        project.workspace_id,
+        project_id=project.id,
+        enabled=True,
+    )[0]
+    updated_server = server.model_copy(
+        update={
+            "tools": [server.tools[0].model_copy(update={"input_schema": input_schema})],
+            "updated_at": now_utc(),
+        }
+    )
+    repositories.mcp_child_servers.update(
+        server=updated_server,
+        expected_updated_at=server.updated_at.isoformat(),
+        audit_event=AuditEvent(
+            event_type="mcp.child_server.updated",
+            actor=user.email,
+            entity_id=server.id,
+            workspace_id=server.workspace_id,
+            details={"project_id": server.project_id, "name": server.name},
+        ),
+    )
+    with connect() as connection:
+        before = {
+            table: connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in ("approval_requests", "mcp_pending_requests", "audit_events", "notifications")
+        }
+    before_sqlite = (
+        dict(store.approval_requests),
+        dict(store.mcp_pending_requests),
+        {event.id for event in store.audit_events},
+    )
+
+    response = TestClient(main.app).post(
+        "/mcp-gateway/requests",
+        headers={"Idempotency-Key": f"schema-validation-{uuid.uuid4().hex}"},
+        json={
+            "project_id": project.id,
+            "request": {
+                "server_name": server.name,
+                "tool_name": "write_file",
+                "arguments": arguments,
+                "requested_by": "schema-validation-test",
+                "mutating": True,
+            },
+        },
+    )
+
+    assert response.status_code == expected_status, response.text
+    with connect() as connection:
+        after = {
+            table: connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            for table in before
+        }
+    if expected_status == 422:
+        assert after == before
+        assert response.json()["detail"]
+    else:
+        assert after["approval_requests"] == before["approval_requests"] + 1
+        assert after["mcp_pending_requests"] == before["mcp_pending_requests"] + 1
+        assert after["audit_events"] == before["audit_events"] + 1
+        assert after["notifications"] == before["notifications"] + 1
+    assert dict(store.approval_requests) == before_sqlite[0]
+    assert dict(store.mcp_pending_requests) == before_sqlite[1]
+    assert {event.id for event in store.audit_events} == before_sqlite[2]
+
+
 @pytest.mark.parametrize("failed_table", ["audit_events", "notifications"])
 def test_postgres_mcp_submission_rolls_back_all_rows_when_audit_or_notification_insert_fails(
     postgres_mcp_pending_route_runtime,
