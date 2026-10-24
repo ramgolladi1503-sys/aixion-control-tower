@@ -263,7 +263,8 @@ def test_postgres_external_agent_token_authenticates_across_independent_app_inst
     )
     assert created.status_code == 200, created.text
     agent_id = created.json()["agent"]["id"]
-    token = created.json()["agent_token"]
+    original_token = created.json()["agent_token"]
+    initial_sqlite_ids = set(store.external_agents)
 
     # Build a separate FastAPI app and repository adapters over the same schema,
     # matching a second API process without sharing its in-memory route bindings.
@@ -276,7 +277,7 @@ def test_postgres_external_agent_token_authenticates_across_independent_app_inst
     second_client = TestClient(second_app)
     headers = {
         "X-Aixion-Agent-Id": agent_id,
-        "X-Aixion-Agent-Token": token,
+        "X-Aixion-Agent-Token": original_token,
     }
     identity = second_client.get(
         "/agents/identity",
@@ -291,6 +292,43 @@ def test_postgres_external_agent_token_authenticates_across_independent_app_inst
         "project_id": project.id,
     }
 
+    # Rotate in the first app process, then verify the second process observes
+    # the durable credential change without sharing repository instances.
+    rotated = first_client.post(
+        f"/agents/{agent_id}/token/rotate",
+        json={"rate_limit_per_minute": 29},
+    )
+    assert rotated.status_code == 200, rotated.text
+    replacement_token = rotated.json()["agent_token"]
+    assert replacement_token and replacement_token != original_token
+
+    old_token_identity = second_client.get(
+        "/agents/identity",
+        params={"provider": "ANTIGRAVITY", "project_id": project.id},
+        headers=headers,
+    )
+    assert old_token_identity.status_code == 401
+    replacement_headers = {
+        "X-Aixion-Agent-Id": agent_id,
+        "X-Aixion-Agent-Token": replacement_token,
+    }
+    replacement_identity = second_client.get(
+        "/agents/identity",
+        params={"provider": "ANTIGRAVITY", "project_id": project.id},
+        headers=replacement_headers,
+    )
+    assert replacement_identity.status_code == 200, replacement_identity.text
+    assert replacement_identity.json() == identity.json()
+
+    revoked = first_client.post(f"/agents/{agent_id}/token/revoke")
+    assert revoked.status_code == 200, revoked.text
+    revoked_token_identity = second_client.get(
+        "/agents/identity",
+        params={"provider": "ANTIGRAVITY", "project_id": project.id},
+        headers=replacement_headers,
+    )
+    assert revoked_token_identity.status_code == 401
+
     with connect() as conn:
         credential = conn.execute(
             "SELECT payload FROM external_agent_credentials WHERE agent_id=%s",
@@ -303,8 +341,14 @@ def test_postgres_external_agent_token_authenticates_across_independent_app_inst
             (workspace.id, agent_id),
         ).fetchall()
     assert credential[0]["last_used_at"] is not None
-    assert [row[0] for row in audit_events] == ["agent.registered"]
-    assert set(store.external_agents).isdisjoint({agent_id})
+    assert [row[0] for row in audit_events] == [
+        "agent.registered",
+        "agent.token_rotated",
+        "agent.auth_failed",
+        "agent.token_revoked",
+        "agent.auth_failed",
+    ]
+    assert set(store.external_agents) == initial_sqlite_ids
 
 
 def test_postgres_external_gateway_action_is_durable_and_partial_runtime_fails_closed(
