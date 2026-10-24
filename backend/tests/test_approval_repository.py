@@ -866,6 +866,41 @@ def test_decision_rejects_audit_event_with_mismatched_approved_payload_hash(
     assert notification_count == 0
 
 
+def test_decision_rejects_audit_event_from_another_workspace(tmp_path: Path) -> None:
+    database = tmp_path / "approval_audit_workspace_mismatch.sqlite3"
+    approval = _approval().model_copy(update={"workspace_id": "workspace-a"})
+    _seed_database(database, approval)
+    updated = _approved_decision(approval)
+    audit_event = _audit(approval, "audit-workspace-mismatch")
+    audit_event.workspace_id = "workspace-b"
+
+    with pytest.raises(ValueError, match="audit workspace"):
+        _repository(database).commit_decision(
+            approval_id=approval.id,
+            expected_status=ApprovalStatus.REQUESTED,
+            expected_approval=approval,
+            updated_approval=updated,
+            audit_event=audit_event,
+            decision_notification=_notification(approval, "audit-workspace-mismatch"),
+        )
+
+    with sqlite3.connect(database) as connection:
+        approval_payload = connection.execute(
+            "SELECT payload FROM kv_store WHERE entity_type = ? AND entity_id = ?",
+            ("approval_request", approval.id),
+        ).fetchone()[0]
+        audit_count = connection.execute(
+            "SELECT COUNT(*) FROM kv_store WHERE entity_type = 'audit_event'"
+        ).fetchone()[0]
+        notification_count = connection.execute(
+            "SELECT COUNT(*) FROM kv_store WHERE entity_type = 'notification'"
+        ).fetchone()[0]
+
+    assert ApprovalRequest.model_validate_json(approval_payload) == approval
+    assert audit_count == 0
+    assert notification_count == 0
+
+
 def test_approved_decision_requires_a_frozen_payload_hash(tmp_path: Path) -> None:
     database = tmp_path / "approval_missing_payload_hash.sqlite3"
     approval = _approval()
@@ -1357,6 +1392,8 @@ def test_linked_task_workspace_is_checked_against_project_inferred_approval_scop
         entity_id=approval.id,
         workspace_id="workspace-a",
     )
+    decision_audit = _audit(approval, "inferred-workspace-mismatch")
+    decision_audit.workspace_id = "workspace-a"
 
     with pytest.raises(ApprovalDecisionConflict, match="Linked AgentTask workspace"):
         _repository(database).commit_decision(
@@ -1364,7 +1401,7 @@ def test_linked_task_workspace_is_checked_against_project_inferred_approval_scop
             expected_status=ApprovalStatus.REQUESTED,
             expected_approval=approval,
             updated_approval=updated,
-            audit_event=_audit(approval, "inferred-workspace-mismatch"),
+            audit_event=decision_audit,
             decision_notification=decision_notification,
         )
 

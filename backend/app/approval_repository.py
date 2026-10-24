@@ -1969,6 +1969,8 @@ class SQLiteApprovalDecisionRepository:
             approval_workspace_id = approval_workspace_id or project_workspace_id
             if decision_notification.workspace_id != approval_workspace_id:
                 raise ValueError("Approval notification workspace must match the durable approval scope")
+            if audit_event.workspace_id != approval_workspace_id:
+                raise ValueError("Approval audit workspace must match the durable approval scope")
 
             update = conn.execute(
                 "UPDATE kv_store SET payload = ? "
