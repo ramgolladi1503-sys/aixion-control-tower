@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+import os
 import re
 import unicodedata
 from typing import Any, TypeVar
@@ -94,6 +95,173 @@ class PostgresTrustRepository:
     def _require_scope(workspace_id: str) -> None:
         if not workspace_id:
             raise ValueError("PostgreSQL trust operations require a workspace")
+
+    @staticmethod
+    def task_actions_enabled() -> bool:
+        """Task-only effects remain disabled unless explicitly enabled per process."""
+        return os.getenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "false").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+
+    def _lock_approved_task_authority(
+        self, conn: Connection, *, task_id: str, workspace_id: str
+    ) -> tuple[AgentTask, ApprovalRequest]:
+        """Lock task -> project -> approval in the same order as AgentRun creation."""
+        identity = conn.execute(
+            "SELECT project_id,approval_request_id FROM agent_tasks "
+            "WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace_id),
+        ).fetchone()
+        if identity is None or not identity[1]:
+            raise PostgresTrustRepositoryConflict(
+                "Approved task action is not visible in this workspace"
+            )
+        task_row = conn.execute(
+            "SELECT task_id,project_id,workspace_id,approval_request_id,status,payload "
+            "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR UPDATE",
+            (task_id, workspace_id),
+        ).fetchone()
+        if task_row is None:
+            raise PostgresTrustRepositoryConflict("AgentTask is not visible in this workspace")
+        try:
+            task = AgentTask.model_validate(task_row[5])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored AgentTask payload is invalid") from error
+        project_row = conn.execute(
+            "SELECT project_id,workspace_id FROM projects "
+            "WHERE project_id=%s AND workspace_id=%s FOR KEY SHARE",
+            (identity[0], workspace_id),
+        ).fetchone()
+        if project_row is None:
+            raise PostgresTrustRepositoryConflict("Task project is not visible in this workspace")
+        approval_row = conn.execute(
+            "SELECT approval_id,project_id,workspace_id,status,payload "
+            "FROM approval_requests WHERE approval_id=%s AND workspace_id=%s FOR UPDATE",
+            (identity[1], workspace_id),
+        ).fetchone()
+        if approval_row is None:
+            raise PostgresTrustRepositoryConflict("Task approval is not visible in this workspace")
+        try:
+            approval = ApprovalRequest.model_validate(approval_row[4])
+        except Exception as error:
+            raise PostgresTrustRepositoryError("Stored task approval payload is invalid") from error
+        if (
+            task.id != task_row[0]
+            or task.project_id != task_row[1]
+            or task.workspace_id != task_row[2]
+            or task.approval_request_id != task_row[3]
+            or task.status.value != task_row[4]
+            or task.id != task_id
+            or task.project_id != identity[0]
+            or task.project_id != project_row[0]
+            or task.workspace_id != workspace_id
+            or task.approval_request_id != identity[1]
+            or task.status != AgentTaskStatus.APPROVED
+            or approval.id != approval_row[0]
+            or approval.project_id != approval_row[1]
+            or approval.workspace_id != approval_row[2]
+            or approval.status != ApprovalStatus.APPROVED
+            or approval.project_id != project_row[0]
+            or approval.workspace_id != project_row[1]
+            or approval.id != task.approval_request_id
+            or not approval.approved_payload_hash
+            or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+        ):
+            raise PostgresTrustRepositoryConflict(
+                "AgentTask is not approved or its project/approval binding is inconsistent"
+            )
+        if conn.execute(
+            "SELECT 1 FROM agent_runs WHERE task_id=%s AND workspace_id=%s LIMIT 1",
+            (task_id, workspace_id),
+        ).fetchone() is not None:
+            raise PostgresTrustRepositoryConflict(
+                "Task has an AgentRun; use the durable run-linked action transaction"
+            )
+        return task, approval
+
+    def lock_task_action_binding(
+        self,
+        conn: Connection,
+        *,
+        action_id: str,
+        workspace_id: str,
+        task_id: str,
+    ) -> tuple[ProposedAction, AgentTask, ApprovalRequest]:
+        """Lock and verify a task-only action against its approved authority.
+
+        Lock order is task -> project -> approval -> proposed action, matching
+        AgentRun creation. A run must not have
+        been created for the task; once a run exists, its run/step transaction
+        owns action lifecycle and the task-only route must reject it.
+        """
+        self._require_scope(workspace_id)
+        if not self.task_actions_enabled():
+            raise PostgresTrustRepositoryConflict(
+                "PostgreSQL task-only actions are disabled"
+            )
+        if not task_id or conn.autocommit:
+            raise ValueError("Task action binding requires a task and transaction")
+        task, approval = self._lock_approved_task_authority(
+            conn, task_id=task_id, workspace_id=workspace_id
+        )
+        action = self.get_proposed_action(
+            conn, action_id, workspace_id, for_update=True
+        )
+        if action is None:
+            raise PostgresTrustRepositoryConflict("Proposed task action is not visible")
+        if (
+            action.run_id is not None
+            or action.task_id != task.id
+            or action.workspace_id != workspace_id
+            or action.project_id != task.project_id
+            or action.provider != task.provider
+            or action.agent_id != task.external_agent_id
+            or action.repository != task.repository
+            or action.branch != task.branch_preference
+            or action.metadata.get("approval_request_id") != approval.id
+            or action.metadata.get("approved_payload_hash") != approval.approved_payload_hash
+        ):
+            raise PostgresTrustRepositoryConflict(
+                "Proposed action does not match its exact approved task payload and scope"
+            )
+        return action, task, approval
+
+    def lock_task_action_lease(
+        self,
+        conn: Connection,
+        *,
+        action: ProposedAction,
+        task: AgentTask,
+        approval: ApprovalRequest,
+    ) -> CapabilityLease:
+        """Lock and validate the signed active lease after action/policy locks."""
+        if not self.task_actions_enabled():
+            raise PostgresTrustRepositoryConflict("PostgreSQL task-only actions are disabled")
+        if conn.autocommit or not action.lease_id:
+            raise PostgresTrustRepositoryConflict("Task action requires a durable capability lease")
+        lease = self.get_capability_lease(
+            conn, action.lease_id, approval.workspace_id or "", for_update=True
+        )
+        checked_at = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+        if (
+            lease is None
+            or lease.status != CapabilityLeaseStatus.ACTIVE
+            or lease.expires_at <= checked_at
+            or lease.approval_request_id != approval.id
+            or lease.approved_payload_hash != approval.approved_payload_hash
+            or lease.provider != task.provider
+            or lease.agent_id != task.external_agent_id
+            or lease.scope.repository != task.repository
+            or lease.scope.branch != task.branch_preference
+            or action.action_type not in lease.scope.allowed_actions
+            or action.repository != lease.scope.repository
+            or action.branch != lease.scope.branch
+            or not verify_payload_signature(lease_receipt_payload(lease), lease.receipt_signature)
+        ):
+            raise PostgresTrustRepositoryConflict(
+                "Task action is outside its active signed capability lease"
+            )
+        return lease
 
     def lock_agent_run_action_binding(
         self,
@@ -2016,10 +2184,32 @@ class PostgresTrustRepository:
             raise ValueError("PostgreSQL action evaluation requires workspace scope")
         if not actor or conn.autocommit:
             raise ValueError("Action evaluation requires an actor and transaction")
-        if action.run_id or action.task_id:
+        if action.run_id:
             raise PostgresTrustRepositoryConflict(
                 "Run-linked action evaluation requires the durable AgentRun execution transaction"
             )
+
+        if action.task_id:
+            if not self.task_actions_enabled():
+                raise PostgresTrustRepositoryConflict(
+                    "PostgreSQL task-only actions are disabled"
+                )
+            task, approval = self._lock_approved_task_authority(
+                conn, task_id=action.task_id, workspace_id=workspace_id
+            )
+            if (
+                action.workspace_id != workspace_id
+                or action.project_id != task.project_id
+                or action.provider != task.provider
+                or action.agent_id != task.external_agent_id
+                or action.repository != task.repository
+                or action.branch != task.branch_preference
+                or action.metadata.get("approval_request_id") != approval.id
+                or action.metadata.get("approved_payload_hash") != approval.approved_payload_hash
+            ):
+                raise PostgresTrustRepositoryConflict(
+                    "Proposed action does not match its exact approved task payload and scope"
+                )
 
         lease: CapabilityLease | None = None
         if action.lease_id:
@@ -2036,6 +2226,34 @@ class PostgresTrustRepository:
                 raise PostgresTrustRepositoryConflict(
                     "Capability lease belongs to another external agent"
                 )
+            if action.task_id:
+                task = AgentTask.model_validate(
+                    conn.execute(
+                        "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+                        (action.task_id, workspace_id),
+                    ).fetchone()[0]
+                )
+                approval = ApprovalRequest.model_validate(
+                    conn.execute(
+                        "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+                        (task.approval_request_id, workspace_id),
+                    ).fetchone()[0]
+                )
+                if (
+                    lease.status != CapabilityLeaseStatus.ACTIVE
+                    or lease.approval_request_id != approval.id
+                    or lease.approved_payload_hash != approval.approved_payload_hash
+                    or lease.provider != task.provider
+                    or lease.agent_id != task.external_agent_id
+                    or lease.scope.repository != task.repository
+                    or lease.scope.branch != task.branch_preference
+                    or not verify_payload_signature(lease_receipt_payload(lease), lease.receipt_signature)
+                ):
+                    raise PostgresTrustRepositoryConflict(
+                        "Capability lease does not match the approved task scope"
+                    )
+        elif action.task_id:
+            raise PostgresTrustRepositoryConflict("Task action requires an active capability lease")
 
         decision = evaluate_action_policy(action, lease, now=now)
         self.insert_proposed_action(conn, action)
@@ -2442,11 +2660,26 @@ class PostgresTrustRepository:
         if conn.autocommit:
             raise ValueError("Trust consumption requires a transaction-enabled connection")
 
-        action = self.get_proposed_action(
-            conn, action_id, workspace_id, for_update=True
-        )
+        action = self.get_proposed_action(conn, action_id, workspace_id)
         if action is None:
             raise PostgresTrustRepositoryConflict("Proposed action not found")
+        if action.task_id and not action.run_id:
+            if not self.task_actions_enabled():
+                raise PostgresTrustRepositoryConflict(
+                    "PostgreSQL task-only actions are disabled"
+                )
+            action, _task, _approval = self.lock_task_action_binding(
+                conn,
+                action_id=action_id,
+                workspace_id=workspace_id,
+                task_id=action.task_id,
+            )
+        else:
+            action = self.get_proposed_action(
+                conn, action_id, workspace_id, for_update=True
+            )
+            if action is None:
+                raise PostgresTrustRepositoryConflict("Proposed action not found")
         if not action.lease_id:
             raise PostgresTrustRepositoryConflict("Allowed action has no capability lease")
 
@@ -2533,6 +2766,26 @@ class PostgresTrustRepository:
                     "Human authorization does not reference a REQUIRE_APPROVAL decision"
                 )
 
+        task_action_lease: CapabilityLease | None = None
+        if action.task_id and not action.run_id:
+            task_row = conn.execute(
+                "SELECT payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+                (action.task_id, workspace_id),
+            ).fetchone()
+            if task_row is None:
+                raise PostgresTrustRepositoryConflict("AgentTask is not visible in this workspace")
+            task = AgentTask.model_validate(task_row[0])
+            approval_row = conn.execute(
+                "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+                (task.approval_request_id, workspace_id),
+            ).fetchone()
+            if approval_row is None:
+                raise PostgresTrustRepositoryConflict("Task approval is not visible in this workspace")
+            approval = ApprovalRequest.model_validate(approval_row[0])
+            task_action_lease = self.lock_task_action_lease(
+                conn, action=action, task=task, approval=approval
+            )
+
         existing = self.get_action_consumption(conn, action.id, workspace_id)
         if existing is not None:
             if existing != consumption:
@@ -2548,13 +2801,53 @@ class PostgresTrustRepository:
                 )
             return existing
 
-        lease = self.get_capability_lease(
+        lease = task_action_lease or self.get_capability_lease(
             conn, action.lease_id, workspace_id, for_update=True
         )
         if lease is None:
             raise PostgresTrustRepositoryConflict("Capability lease is missing")
         if lease.status != CapabilityLeaseStatus.ACTIVE or lease.expires_at <= now:
             raise PostgresTrustRepositoryConflict("Capability lease is not active")
+        if action.task_id and not action.run_id:
+            task_row = conn.execute(
+                "SELECT task_id,project_id,workspace_id,approval_request_id,status,payload "
+                "FROM agent_tasks WHERE task_id=%s AND workspace_id=%s FOR SHARE",
+                (action.task_id, workspace_id),
+            ).fetchone()
+            if task_row is None:
+                raise PostgresTrustRepositoryConflict("AgentTask is not visible in this workspace")
+            task = AgentTask.model_validate(task_row[5])
+            approval_row = conn.execute(
+                "SELECT approval_id,project_id,workspace_id,status,payload FROM approval_requests "
+                "WHERE approval_id=%s AND workspace_id=%s FOR SHARE",
+                (task.approval_request_id, workspace_id),
+            ).fetchone()
+            if approval_row is None:
+                raise PostgresTrustRepositoryConflict("Task approval is not visible in this workspace")
+            approval = ApprovalRequest.model_validate(approval_row[4])
+            if (
+                task.status != AgentTaskStatus.APPROVED
+                or task.workspace_id != workspace_id
+                or task.project_id != action.project_id
+                or task.approval_request_id != approval.id
+                or approval.status != ApprovalStatus.APPROVED
+                or approval.workspace_id != workspace_id
+                or approval.project_id != task.project_id
+                or not approval.approved_payload_hash
+                or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+                or action.metadata.get("approval_request_id") != approval.id
+                or action.metadata.get("approved_payload_hash") != approval.approved_payload_hash
+                or lease.approval_request_id != approval.id
+                or lease.approved_payload_hash != approval.approved_payload_hash
+                or lease.provider != task.provider
+                or lease.agent_id != task.external_agent_id
+                or lease.scope.repository != task.repository
+                or lease.scope.branch != task.branch_preference
+                or not verify_payload_signature(lease_receipt_payload(lease), lease.receipt_signature)
+            ):
+                raise PostgresTrustRepositoryConflict(
+                    "Task action, approval, or signed capability lease changed before consumption"
+                )
 
         projected_runtime = lease.consumed_runtime_seconds + consumption.actual_runtime_seconds
         projected_cost = lease.consumed_cost_usd + consumption.actual_cost_usd
@@ -2625,6 +2918,38 @@ class PostgresTrustRepository:
             },
         )
         return consumption
+
+    def consume_task_action(
+        self,
+        conn: Connection,
+        *,
+        action_id: str,
+        workspace_id: str,
+        task_id: str,
+        consumption: ActionConsumption,
+        actor: str,
+        now: datetime,
+        expected_agent_id: str | None = None,
+    ) -> ActionConsumption:
+        """Consume an approved task action once, under the task binding lock."""
+        if not self.task_actions_enabled():
+            raise PostgresTrustRepositoryConflict("PostgreSQL task-only actions are disabled")
+        action, _task, _approval = self.lock_task_action_binding(
+            conn,
+            action_id=action_id,
+            workspace_id=workspace_id,
+            task_id=task_id,
+        )
+        if expected_agent_id is not None and action.agent_id != expected_agent_id:
+            raise PostgresTrustRepositoryConflict("Agent does not own this task action")
+        return self.consume_effective_action(
+            conn,
+            action_id=action_id,
+            workspace_id=workspace_id,
+            consumption=consumption,
+            actor=actor,
+            now=now,
+        )
 
     def consume_agent_run_action(
         self,

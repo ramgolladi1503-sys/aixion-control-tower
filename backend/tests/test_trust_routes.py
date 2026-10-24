@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 os.environ.setdefault("AIXION_PROFILE", "test")
@@ -23,8 +27,13 @@ from app.models import (
     UserRole,
 )
 from app.store import store
-from app.trust_models import ReviewerAttestationCreate, ReviewerAttestationDecision
-from app.trust_routes import create_attestation, list_attestations
+from app.trust_models import (
+    CapabilityActionType,
+    ProposedAction,
+    ReviewerAttestationCreate,
+    ReviewerAttestationDecision,
+)
+from app.trust_routes import create_attestation, evaluate_manual_action, list_attestations
 
 client = TestClient(app)
 
@@ -261,3 +270,50 @@ def test_external_credential_brokers_fail_honestly_until_configured() -> None:
     )
     assert response.status_code == 501
     assert "deployment-specific issuer" in response.json()["detail"]
+
+
+def test_postgres_task_only_action_route_fails_closed_when_flag_is_off(monkeypatch) -> None:
+    workspace_id = "workspace-task-action-route"
+    trust_repository = SimpleNamespace(task_actions_enabled=lambda: False)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_repositories=SimpleNamespace(
+                    trust=trust_repository,
+                    projects=SimpleNamespace(
+                        get=lambda _project_id: SimpleNamespace(workspace_id=workspace_id)
+                    ),
+                )
+            )
+        )
+    )
+    user = AuthUser(
+        id="maintainer-task-action-route",
+        email="maintainer@example.test",
+        display_name="Task action reviewer",
+        role=UserRole.MAINTAINER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    payload = ProposedAction(
+        task_id="task-route-test",
+        project_id="project-route-test",
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository="owner/repo",
+        branch="feature/task-action",
+        command="pytest -q",
+        metadata={
+            "approval_request_id": "approval-route-test",
+            "approved_payload_hash": "sha256:" + "a" * 64,
+        },
+    )
+    monkeypatch.setattr("app.trust_routes._postgres_action_runtime", lambda _request: object())
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    with pytest.raises(HTTPException) as error:
+        evaluate_manual_action(payload, user, request)
+    assert error.value.status_code == 409
+    assert "disabled" in str(error.value.detail)

@@ -7,7 +7,8 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Barrier
+from threading import Barrier, Event
+from time import sleep
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,11 +20,13 @@ from psycopg.types.json import Jsonb
 
 from app.agent_run_models import (
     AgentRun,
+    AgentRunCreate,
     AgentRunStatus,
     AgentRunStep,
     AgentRunStepStatus,
     AgentRunStepType,
 )
+from app.agent_run_creation import build_agent_run_creation_records
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.application_repositories import ApplicationRepositories
 from app.approval_integrity import compute_approval_payload_hash
@@ -80,6 +83,7 @@ from app.trust_action_authorization_models import (
 from app.trust_action_authorization import (
     ActionAuthorizationConflict,
     record_agent_run_action_authorization_postgres,
+    record_action_authorization_postgres,
 )
 from app.trust_models import (
     ActionConsumption,
@@ -99,6 +103,35 @@ from app.trust_models import (
     ReviewerAttestationDecision,
     TrustEventType,
 )
+
+
+def _consume_task_action_in_process(
+    dsn: str,
+    schema: str,
+    barrier: Any,
+    results: Any,
+    action_id: str,
+    workspace_id: str,
+    task_id: str,
+    consumption_payload: dict[str, Any],
+) -> None:
+    try:
+        barrier.wait(timeout=15)
+        with psycopg.connect(dsn) as conn:
+            conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+            with conn.transaction():
+                consumed = PostgresTrustRepository().consume_task_action(
+                    conn,
+                    action_id=action_id,
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    consumption=ActionConsumption.model_validate(consumption_payload),
+                    actor="agent:task-only-race",
+                    now=now_utc(),
+                )
+        results.put(("ok", consumed.model_dump(mode="json")))
+    except BaseException as error:  # pragma: no cover - surfaced by the parent test
+        results.put(("error", f"{type(error).__name__}: {error}"))
 
 
 def _consume_agent_run_action_in_process(
@@ -247,6 +280,7 @@ def trust_repository() -> tuple[PostgresTrustRepository, Callable[[], Connection
     user = User(
         id=user_id,
         email=f"{user_id}@example.test",
+        display_name="Task action reviewer",
         role=UserRole.OWNER,
         password_hash="test-password-hash",
         password_salt="test-password-salt",
@@ -3448,3 +3482,780 @@ def test_postgres_lease_issue_rolls_back_when_trust_event_append_fails(
             (workspace_id,),
         ).fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM trust_events").fetchone()[0] == 0
+
+
+def _task_only_action_fixture(trust_repository):
+    repository, connect, workspace_id, user_id, project_id, approval_id = trust_repository
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+            (approval_id, workspace_id),
+        ).fetchone()
+        approval = ApprovalRequest.model_validate(row[0]).model_copy(
+            update={
+                "created_by_user_id": f"creator_{uuid.uuid4().hex}",
+                "approved_by_user_id": user_id,
+                "test_plan": ["pytest -q tests/approved.py"],
+            }
+        )
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
+        conn.execute(
+            "UPDATE approval_requests SET payload=%s WHERE approval_id=%s AND workspace_id=%s",
+            (Jsonb(approval.model_dump(mode="json")), approval_id, workspace_id),
+        )
+        task = AgentTask(
+            id=f"task_{uuid.uuid4().hex}",
+            provider=AgentProvider.CODEX,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            title="Task-only approved action",
+            goal="Run one reviewed validation command.",
+            repository="owner/repo",
+            branch_preference="feature/trust-test",
+            approval_request_id=approval_id,
+            status=AgentTaskStatus.APPROVED,
+        )
+        conn.execute(
+            "INSERT INTO agent_tasks(task_id,project_id,workspace_id,external_agent_id,"
+            "approval_request_id,status,updated_at,payload) VALUES(%s,%s,%s,NULL,%s,%s,%s,%s)",
+            (task.id, project_id, workspace_id, approval_id, task.status.value,
+             task.updated_at, Jsonb(task.model_dump(mode="json"))),
+        )
+        lease = CapabilityLease(
+            id=f"lease_{uuid.uuid4().hex}",
+            approval_request_id=approval_id,
+            workspace_id=workspace_id,
+            approved_payload_hash=approval.approved_payload_hash,
+            provider=task.provider,
+            mode=CapabilityLeaseMode.STRICT,
+            scope=CapabilityScope(
+                repository=task.repository,
+                branch=task.branch_preference,
+                allowed_actions=[CapabilityActionType.RUN_COMMAND],
+                allowed_commands=approval.test_plan,
+                max_runtime_seconds=60,
+            ),
+            issued_by_user_id=user_id,
+            expires_at=now_utc() + timedelta(minutes=5),
+            receipt_nonce=uuid.uuid4().hex,
+            receipt_signature="pending",
+        )
+        lease.receipt_signature = sign_payload(lease_receipt_payload(lease))
+        repository.insert_capability_lease(conn, lease)
+    return repository, connect, workspace_id, user_id, project_id, approval, task, lease
+
+
+def _evaluate_task_only_action(repository, connect, *, workspace_id, task, approval, lease):
+    action = ProposedAction(
+        lease_id=lease.id,
+        provider=task.provider,
+        agent_id=task.external_agent_id,
+        task_id=task.id,
+        project_id=task.project_id,
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository=task.repository,
+        branch=task.branch_preference,
+        command=approval.test_plan[0],
+        metadata={
+            "approval_request_id": approval.id,
+            "approved_payload_hash": approval.approved_payload_hash,
+        },
+    )
+    with connect() as conn:
+        with conn.transaction():
+            decision, _ = repository.evaluate_proposed_action(
+                conn,
+                action=action,
+                actor="agent:test-task-only",
+                now=now_utc(),
+                trust_event_repository=PostgresTrustEventRepository(lambda: conn),
+            )
+    return action, decision
+
+
+def test_postgres_task_only_action_requires_opt_in_and_consumes_once(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    (
+        repository, connect, workspace_id, user_id, _project_id, approval, task, lease
+    ) = _task_only_action_fixture(trust_repository)
+    action = ProposedAction(
+        lease_id=lease.id,
+        provider=task.provider,
+        task_id=task.id,
+        project_id=task.project_id,
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository=task.repository,
+        branch=task.branch_preference,
+        command=approval.test_plan[0],
+        metadata={
+            "approval_request_id": approval.id,
+            "approved_payload_hash": approval.approved_payload_hash,
+        },
+    )
+    monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "false")
+    with pytest.raises(PostgresTrustRepositoryConflict, match="disabled"):
+        with connect() as conn, conn.transaction():
+            repository.evaluate_proposed_action(
+                conn,
+                action=action,
+                actor="agent:test-task-only",
+                now=now_utc(),
+                trust_event_repository=PostgresTrustEventRepository(lambda: conn),
+            )
+    with connect() as conn:
+        assert repository.get_proposed_action(conn, action.id, workspace_id) is None
+
+    monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "true")
+    action, decision = _evaluate_task_only_action(
+        repository, connect, workspace_id=workspace_id, task=task,
+        approval=approval, lease=lease,
+    )
+    assert decision.decision == PolicyDecisionType.REQUIRE_APPROVAL
+    monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "false")
+    with pytest.raises(PostgresTrustRepositoryConflict, match="disabled"):
+        with connect() as conn, conn.transaction():
+            repository.consume_effective_action(
+                conn,
+                action_id=action.id,
+                workspace_id=workspace_id,
+                consumption=ActionConsumption(actual_runtime_seconds=1),
+                actor="agent:test-task-only",
+                now=now_utc(),
+            )
+    with connect() as conn:
+        assert repository.get_action_consumption(conn, action.id, workspace_id) is None
+    monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "true")
+    reviewer = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="Task action reviewer",
+        role=UserRole.OWNER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    authorization = record_action_authorization_postgres(
+        action.id,
+        ActionAuthorizationCreate(
+            decision=ActionAuthorizationDecision.ALLOW,
+            reason="Allow this exact task action.",
+        ),
+        user=reviewer,
+        workspace_id=workspace_id,
+        connect=connect,
+        trust_repository=repository,
+        trust_event_repository=PostgresTrustEventRepository(connect),
+        now=now_utc(),
+    )
+    assert authorization.action_payload_hash
+    replayed_authorization = record_action_authorization_postgres(
+        action.id,
+        ActionAuthorizationCreate(
+            decision=ActionAuthorizationDecision.ALLOW,
+            reason="Allow this exact task action.",
+        ),
+        user=reviewer,
+        workspace_id=workspace_id,
+        connect=connect,
+        trust_repository=repository,
+        trust_event_repository=PostgresTrustEventRepository(connect),
+        now=now_utc(),
+    )
+    assert replayed_authorization == authorization
+    consumption = ActionConsumption(actual_runtime_seconds=2, evidence={"result": "ok"})
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    assert dsn
+    with connect() as conn:
+        schema = conn.execute("SELECT current_schema()").fetchone()[0]
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_consume_task_action_in_process,
+            args=(
+                dsn, schema, barrier, results, action.id, workspace_id, task.id,
+                consumption.model_dump(mode="json"),
+            ),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    outcomes = [results.get(timeout=30) for _ in processes]
+    for process in processes:
+        process.join(timeout=30)
+    assert all(process.exitcode == 0 for process in processes), outcomes
+    assert all(status == "ok" for status, _payload in outcomes), outcomes
+    assert all(payload == consumption.model_dump(mode="json") for _status, payload in outcomes)
+    with connect() as conn:
+        assert repository.get_action_consumption(conn, action.id, workspace_id) == consumption
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type=%s",
+            (workspace_id, action.id, TrustEventType.ACTION_CONSUMED.value),
+        ).fetchone()[0] == 1
+        stored_lease = repository.get_capability_lease(conn, lease.id, workspace_id)
+        assert stored_lease is not None
+        assert stored_lease.consumed_runtime_seconds == 2
+
+    denied_action, denied_policy = _evaluate_task_only_action(
+        repository, connect, workspace_id=workspace_id, task=task,
+        approval=approval, lease=lease,
+    )
+    assert denied_policy.decision == PolicyDecisionType.REQUIRE_APPROVAL
+    denial = record_action_authorization_postgres(
+        denied_action.id,
+        ActionAuthorizationCreate(
+            decision=ActionAuthorizationDecision.BLOCK,
+            reason="Deny this exact task action.",
+        ),
+        user=reviewer,
+        workspace_id=workspace_id,
+        connect=connect,
+        trust_repository=repository,
+        trust_event_repository=PostgresTrustEventRepository(connect),
+        now=now_utc(),
+    )
+    assert denial.decision == ActionAuthorizationDecision.BLOCK
+    with pytest.raises(PostgresTrustRepositoryConflict, match="effective ALLOW"):
+        with connect() as conn, conn.transaction():
+            repository.consume_task_action(
+                conn,
+                action_id=denied_action.id,
+                workspace_id=workspace_id,
+                task_id=task.id,
+                consumption=ActionConsumption(),
+                actor="agent:test-task-only",
+                now=now_utc(),
+            )
+
+
+def test_postgres_task_action_consumption_serializes_with_lease_revocation(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, _project_id, _approval_id = trust_repository
+    events = PostgresTrustEventRepository(connect)
+    monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "true")
+
+    def new_approval_fixture_tuple():
+        approval_id = f"approval_{uuid.uuid4().hex}"
+        with connect() as conn:
+            source_row = conn.execute(
+                "SELECT payload FROM approval_requests WHERE approval_id=%s AND workspace_id=%s",
+                (_approval_id, workspace_id),
+            ).fetchone()
+            assert source_row is not None
+            source = ApprovalRequest.model_validate(source_row[0])
+            approval = source.model_copy(
+                update={
+                    "id": approval_id,
+                    "created_by_user_id": f"creator_{uuid.uuid4().hex}",
+                    "approved_by_user_id": user_id,
+                    "test_plan": ["pytest -q tests/approved.py"],
+                    "approved_payload_hash": None,
+                }
+            )
+            approval.approved_payload_hash = compute_approval_payload_hash(approval)
+            conn.execute(
+                "INSERT INTO approval_requests(approval_id,project_id,workspace_id,work_order_id,"
+                "source_agent_id,status,expires_at,created_at,updated_at,version,source_invocation_id,payload) "
+                "VALUES(%s,%s,%s,NULL,NULL,%s,NULL,%s,%s,0,NULL,%s)",
+                (
+                    approval_id,
+                    approval.project_id,
+                    workspace_id,
+                    approval.status.value,
+                    approval.created_at,
+                    approval.updated_at,
+                    Jsonb(approval.model_dump(mode="json")),
+                ),
+            )
+        return (*trust_repository[:5], approval_id)
+
+    def prepare_action():
+        (
+            _repository, _connect, _workspace_id, _user_id, _project_id,
+            approval, task, lease,
+        ) = _task_only_action_fixture(new_approval_fixture_tuple())
+        action, policy = _evaluate_task_only_action(
+            repository,
+            connect,
+            workspace_id=workspace_id,
+            task=task,
+            approval=approval,
+            lease=lease,
+        )
+        assert policy.decision == PolicyDecisionType.REQUIRE_APPROVAL
+        reviewer = AuthUser(
+            id=user_id,
+            email=f"{user_id}@example.test",
+            display_name="Lease race reviewer",
+            role=UserRole.OWNER,
+            workspace_id=workspace_id,
+            email_verified=True,
+        )
+        record_action_authorization_postgres(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Allow the exact task action for the lease race test.",
+            ),
+            user=reviewer,
+            workspace_id=workspace_id,
+            connect=connect,
+            trust_repository=repository,
+            trust_event_repository=events,
+            now=now_utc(),
+        )
+        return action, task, lease
+
+    def wait_until_blocked(pid: int, blocker_pid: int) -> None:
+        # Query PostgreSQL's lock graph directly; the bounded polling only waits
+        # for the worker to reach the known row-lock boundary.
+        for _ in range(300):
+            with connect() as observer:
+                blockers = observer.execute(
+                    "SELECT pg_blocking_pids(%s)", (pid,)
+                ).fetchone()[0]
+            if blocker_pid in blockers:
+                return
+            sleep(0.01)
+        pytest.fail(f"PostgreSQL backend {pid} never waited on {blocker_pid}")
+
+    def revoke_in_worker(lease: CapabilityLease, pid_queue, result_queue) -> None:
+        try:
+            with connect() as conn:
+                pid_queue.put(conn.execute("SELECT pg_backend_pid()").fetchone()[0])
+                with conn.transaction():
+                    revoked = repository.revoke_capability_lease(
+                        conn,
+                        lease_id=lease.id,
+                        workspace_id=workspace_id,
+                        actor_user_id=user_id,
+                        actor="owner@example.test",
+                        reason="Revoke during task action consumption.",
+                        now=now_utc(),
+                        trust_event_repository=PostgresTrustEventRepository(lambda: conn),
+                    )
+            result_queue.put(revoked)
+        except BaseException as error:  # pragma: no cover - surfaced by assertions
+            result_queue.put(error)
+
+    def consume_in_worker(action: ProposedAction, task: AgentTask, pid_queue, result_queue) -> None:
+        try:
+            with connect() as conn:
+                pid_queue.put(conn.execute("SELECT pg_backend_pid()").fetchone()[0])
+                with conn.transaction():
+                    consumed = repository.consume_task_action(
+                        conn,
+                        action_id=action.id,
+                        workspace_id=workspace_id,
+                        task_id=task.id,
+                        consumption=ActionConsumption(actual_runtime_seconds=2),
+                        actor="agent:lease-revoke-race",
+                        now=now_utc(),
+                    )
+            result_queue.put(consumed)
+        except BaseException as error:  # pragma: no cover - surfaced by assertions
+            result_queue.put(error)
+
+    # Consume first while holding the lease row lock. Revocation reaches that
+    # same row and must wait until the consumption transaction commits.
+    consume_first_action, consume_first_task, consume_first_lease = prepare_action()
+    consumed = ActionConsumption(actual_runtime_seconds=2)
+    revoke_pid: queue_module.Queue[int] = queue_module.Queue()
+    revoke_result: queue_module.Queue[object] = queue_module.Queue()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with connect() as conn:
+            with conn.transaction():
+                consumer_pid = conn.execute("SELECT pg_backend_pid()").fetchone()[0]
+                assert repository.get_capability_lease(
+                    conn, consume_first_lease.id, workspace_id, for_update=True
+                ) is not None
+                assert repository.consume_task_action(
+                    conn,
+                    action_id=consume_first_action.id,
+                    workspace_id=workspace_id,
+                    task_id=consume_first_task.id,
+                    consumption=consumed,
+                    actor="agent:lease-revoke-race",
+                    now=now_utc(),
+                ) == consumed
+                revoke_future = pool.submit(
+                    revoke_in_worker,
+                    consume_first_lease,
+                    revoke_pid,
+                    revoke_result,
+                )
+                revoker_pid = revoke_pid.get(timeout=10)
+                wait_until_blocked(revoker_pid, consumer_pid)
+                assert not revoke_future.done()
+        revoke_future.result(timeout=10)
+        revoked = revoke_result.get(timeout=1)
+        assert isinstance(revoked, CapabilityLease)
+        assert revoked.status == CapabilityLeaseStatus.REVOKED
+
+    with connect() as conn:
+        stored = repository.get_capability_lease(conn, consume_first_lease.id, workspace_id)
+        assert stored is not None and stored.consumed_runtime_seconds == 2
+        assert repository.get_action_consumption(
+            conn, consume_first_action.id, workspace_id
+        ) == consumed
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type=%s",
+            (workspace_id, consume_first_action.id, TrustEventType.ACTION_CONSUMED.value),
+        ).fetchone()[0] == 1
+    with connect() as conn, conn.transaction():
+        with pytest.raises(PostgresTrustRepositoryConflict, match="active signed capability lease"):
+            repository.consume_task_action(
+                conn,
+                action_id=consume_first_action.id,
+                workspace_id=workspace_id,
+                task_id=consume_first_task.id,
+                consumption=consumed,
+                actor="agent:lease-revoke-race",
+                now=now_utc(),
+            )
+
+    # Revoke first while retaining the lease row lock. Consumption must be
+    # blocked until the revoke transaction commits, then reject without writing
+    # a consumption event or increasing any lease budget.
+    revoke_first_action, revoke_first_task, revoke_first_lease = prepare_action()
+    consume_pid: queue_module.Queue[int] = queue_module.Queue()
+    consume_result: queue_module.Queue[object] = queue_module.Queue()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with connect() as conn:
+            with conn.transaction():
+                revoker_pid = conn.execute("SELECT pg_backend_pid()").fetchone()[0]
+                revoked = repository.revoke_capability_lease(
+                    conn,
+                    lease_id=revoke_first_lease.id,
+                    workspace_id=workspace_id,
+                    actor_user_id=user_id,
+                    actor="owner@example.test",
+                    reason="Revoke before task action consumption.",
+                    now=now_utc(),
+                    trust_event_repository=PostgresTrustEventRepository(lambda: conn),
+                )
+                assert revoked.status == CapabilityLeaseStatus.REVOKED
+                consume_future = pool.submit(
+                    consume_in_worker,
+                    revoke_first_action,
+                    revoke_first_task,
+                    consume_pid,
+                    consume_result,
+                )
+                consumer_pid = consume_pid.get(timeout=10)
+                wait_until_blocked(consumer_pid, revoker_pid)
+                assert not consume_future.done()
+        consume_future.result(timeout=10)
+        consume_error = consume_result.get(timeout=1)
+        assert isinstance(consume_error, PostgresTrustRepositoryConflict)
+        assert "active signed capability lease" in str(consume_error)
+
+    with connect() as conn:
+        revoked_lease = repository.get_capability_lease(
+            conn, revoke_first_lease.id, workspace_id
+        )
+        assert revoked_lease is not None
+        assert revoked_lease.status == CapabilityLeaseStatus.REVOKED
+        assert revoked_lease.consumed_runtime_seconds == 0
+        assert repository.get_action_consumption(
+            conn, revoke_first_action.id, workspace_id
+        ) is None
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type=%s",
+            (workspace_id, revoke_first_action.id, TrustEventType.ACTION_CONSUMED.value),
+        ).fetchone()[0] == 0
+
+    # A signed but database-expired lease must be rejected using PostgreSQL's
+    # clock even if the caller supplies a stale pre-expiry timestamp.
+    expired_action, expired_task, expired_lease = prepare_action()
+    with connect() as conn, conn.transaction():
+        expired = expired_lease.model_copy(
+            update={"expires_at": now_utc() - timedelta(seconds=1), "receipt_signature": "pending"}
+        )
+        expired.receipt_signature = sign_payload(lease_receipt_payload(expired))
+        conn.execute(
+            "UPDATE capability_leases SET expires_at=%s,payload=%s "
+            "WHERE lease_id=%s AND workspace_id=%s",
+            (
+                expired.expires_at,
+                Jsonb(expired.model_dump(mode="json")),
+                expired.id,
+                workspace_id,
+            ),
+        )
+    stale_caller_time = expired_lease.issued_at
+    with connect() as conn, conn.transaction():
+        with pytest.raises(PostgresTrustRepositoryConflict, match="active signed capability lease"):
+            repository.consume_task_action(
+                conn,
+                action_id=expired_action.id,
+                workspace_id=workspace_id,
+                task_id=expired_task.id,
+                consumption=ActionConsumption(actual_runtime_seconds=2),
+                actor="agent:expired-task-action",
+                now=stale_caller_time,
+            )
+    with connect() as conn:
+        persisted_expired = repository.get_capability_lease(
+            conn, expired_lease.id, workspace_id
+        )
+        assert persisted_expired is not None
+        assert persisted_expired.consumed_runtime_seconds == 0
+        assert repository.get_action_consumption(conn, expired_action.id, workspace_id) is None
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type=%s",
+            (workspace_id, expired_action.id, TrustEventType.ACTION_CONSUMED.value),
+        ).fetchone()[0] == 0
+
+
+def test_postgres_task_only_action_route_allows_and_consumes_exact_action(
+    trust_repository, monkeypatch: pytest.MonkeyPatch
+):
+    repository, connect, workspace_id, user_id, project_id, approval, task, lease = (
+        _task_only_action_fixture(trust_repository)
+    )
+    monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "true")
+    repositories = ApplicationRepositories.from_connector(connect)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(connect=connect),
+        postgres_repositories=repositories,
+        approval_decision_repository=repositories.approval_decisions,
+        workspace_membership_repository=repositories.workspace_membership,
+        trust_repository=repositories.trust,
+        trust_event_repository=repositories.trust_events,
+        project_repository=repositories.projects,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    reviewer = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="Task action route reviewer",
+        role=UserRole.OWNER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    action = ProposedAction(
+        lease_id=lease.id,
+        provider=task.provider,
+        task_id=task.id,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository=task.repository,
+        branch=task.branch_preference,
+        command=approval.test_plan[0],
+        metadata={
+            "approval_request_id": approval.id,
+            "approved_payload_hash": approval.approved_payload_hash,
+        },
+    )
+    evaluated = evaluate_manual_action(action, reviewer, request)
+    assert evaluated.action.task_id == task.id
+    assert evaluated.decision.decision == PolicyDecisionType.REQUIRE_APPROVAL
+    authorization = decide_exact_action(
+        action.id,
+        ActionAuthorizationCreate(
+            decision=ActionAuthorizationDecision.ALLOW,
+            reason="Approve the exact task action.",
+        ),
+        reviewer,
+        request,
+    )
+    assert authorization.action_payload_hash
+    consumption = ActionConsumption(actual_runtime_seconds=1, evidence={"result": "complete"})
+    consumed = consume_manual_action(action.id, consumption, reviewer, request)
+    assert consumed == consumption
+    with connect() as conn:
+        assert repository.get_action_consumption(conn, action.id, workspace_id) == consumption
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type=%s",
+            (workspace_id, action.id, TrustEventType.ACTION_CONSUMED.value),
+        ).fetchone()[0] == 1
+
+
+def test_postgres_task_only_action_event_failure_rolls_back_evaluation(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, _user_id, _project_id, approval, task, lease = (
+        _task_only_action_fixture(trust_repository)
+    )
+    monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "true")
+
+    def fail_event(*_args, **_kwargs):
+        raise RuntimeError("injected task action event failure")
+
+    action = ProposedAction(
+        lease_id=lease.id,
+        provider=task.provider,
+        task_id=task.id,
+        project_id=task.project_id,
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository=task.repository,
+        branch=task.branch_preference,
+        command=approval.test_plan[0],
+        metadata={
+            "approval_request_id": approval.id,
+            "approved_payload_hash": approval.approved_payload_hash,
+        },
+    )
+    monkeypatch.setattr(PostgresTrustEventRepository, "append_in_transaction", fail_event)
+    with pytest.raises(RuntimeError, match="injected task action event failure"):
+        with connect() as conn, conn.transaction():
+            repository.evaluate_proposed_action(
+                conn,
+                action=action,
+                actor="agent:test-task-only",
+                now=now_utc(),
+                trust_event_repository=PostgresTrustEventRepository(lambda: conn),
+            )
+    with connect() as conn:
+        assert repository.get_proposed_action(conn, action.id, workspace_id) is None
+        assert repository.get_latest_policy_decision_for_action(conn, action.id, workspace_id) is None
+
+
+def test_postgres_task_only_action_reviewer_event_failure_rolls_back_authorization(
+    trust_repository,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repository, connect, workspace_id, user_id, _project_id, approval, task, lease = (
+        _task_only_action_fixture(trust_repository)
+    )
+    monkeypatch.setenv("AIXION_POSTGRES_TASK_ACTIONS_ENABLED", "true")
+    action, decision = _evaluate_task_only_action(
+        repository, connect, workspace_id=workspace_id, task=task,
+        approval=approval, lease=lease,
+    )
+    assert decision.decision == PolicyDecisionType.REQUIRE_APPROVAL
+
+    reviewer = AuthUser(
+        id=user_id,
+        email=f"{user_id}@example.test",
+        display_name="Task action rollback reviewer",
+        role=UserRole.OWNER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+
+    def fail_event(*_args, **_kwargs):
+        raise RuntimeError("injected reviewer audit failure")
+
+    monkeypatch.setattr(PostgresTrustEventRepository, "append_in_transaction", fail_event)
+    with pytest.raises(RuntimeError, match="injected reviewer audit failure"):
+        record_action_authorization_postgres(
+            action.id,
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Allow only this action.",
+            ),
+            user=reviewer,
+            workspace_id=workspace_id,
+            connect=connect,
+            trust_repository=repository,
+            trust_event_repository=PostgresTrustEventRepository(connect),
+            now=now_utc(),
+        )
+
+    with connect() as conn:
+        assert repository.get_action_authorization_for_action(
+            conn, action.id, workspace_id
+        ) is None
+        current = repository.get_latest_policy_decision_for_action(
+            conn, action.id, workspace_id
+        )
+        assert current is not None
+        assert current.decision == PolicyDecisionType.REQUIRE_APPROVAL
+        assert conn.execute(
+            "SELECT count(*) FROM trust_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type=%s",
+            (workspace_id, action.id, TrustEventType.ACTION_ALLOWED.value),
+        ).fetchone()[0] == 0
+
+
+def test_postgres_agent_run_creation_serializes_with_task_action_binding(
+    trust_repository,
+):
+    """The task row lock makes the run absence check race-safe with run creation."""
+    repository, connect, workspace_id, _user_id, project_id, approval, task, _lease = (
+        _task_only_action_fixture(trust_repository)
+    )
+    lock_acquired = Event()
+    release_lock = Event()
+    run_attempting = Event()
+    outcomes: queue_module.Queue[str] = queue_module.Queue()
+
+    def lock_task_authority() -> None:
+        try:
+            with connect() as conn, conn.transaction():
+                repository._lock_approved_task_authority(
+                    conn, task_id=task.id, workspace_id=workspace_id
+                )
+                lock_acquired.set()
+                if not release_lock.wait(timeout=10):
+                    raise TimeoutError("test did not release task authority lock")
+            outcomes.put("task-lock-committed")
+        except Exception as error:  # pragma: no cover - thread error surfaced below
+            outcomes.put(f"task-lock-error:{type(error).__name__}:{error}")
+
+    def create_run() -> None:
+        try:
+            if not lock_acquired.wait(timeout=10):
+                raise TimeoutError("task authority lock was not acquired")
+            run_attempting.set()
+            records = build_agent_run_creation_records(
+                task=task,
+                approval=approval,
+                payload=AgentRunCreate(task_id=task.id),
+                actor="test:concurrent-run",
+            )
+            with connect() as conn, conn.transaction():
+                repository_for_run = ApplicationRepositories.from_connector(connect).agent_runs
+                repository_for_run.create_in_transaction(
+                    conn,
+                    run=records.run,
+                    steps=records.steps,
+                    events=records.events,
+                    audit=records.audit,
+                    scheduled_audit=records.scheduled_audit,
+                )
+            outcomes.put("run-created")
+        except Exception as error:  # pragma: no cover - thread error surfaced below
+            outcomes.put(f"run-error:{type(error).__name__}:{error}")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        lock_future = pool.submit(lock_task_authority)
+        run_future = pool.submit(create_run)
+        assert lock_acquired.wait(timeout=10)
+        assert run_attempting.wait(timeout=10)
+        # AgentRun creation must wait behind the task lock until the
+        # task-action authority check has committed.
+        sleep(0.1)
+        assert not run_future.done()
+        release_lock.set()
+        lock_future.result(timeout=15)
+        run_future.result(timeout=15)
+
+    observed = {outcomes.get(timeout=1), outcomes.get(timeout=1)}
+    assert observed == {"task-lock-committed", "run-created"}
+    with connect() as conn, conn.transaction():
+        with pytest.raises(PostgresTrustRepositoryConflict, match="has an AgentRun"):
+            repository._lock_approved_task_authority(
+                conn, task_id=task.id, workspace_id=workspace_id
+            )

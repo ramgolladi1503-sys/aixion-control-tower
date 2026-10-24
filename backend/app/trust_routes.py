@@ -521,11 +521,13 @@ def evaluate_external_agent_action(
                 status_code=409,
                 detail="PostgreSQL gateway actions require the external-agent auth repository from the same runtime",
             )
-        if normalized.run_id or normalized.task_id:
+        if normalized.run_id:
             raise HTTPException(
                 status_code=409,
                 detail="Run-linked external-agent actions require the durable AgentRun execution transaction",
             )
+        if normalized.task_id and not repositories.trust.task_actions_enabled():
+            raise HTTPException(status_code=409, detail="PostgreSQL task-only actions are disabled")
         if normalized.project_id:
             project = repositories.projects.get(normalized.project_id)
             if project is None or project.workspace_id != agent.workspace_id:
@@ -587,11 +589,13 @@ def evaluate_manual_action(
             project = repositories.projects.get(payload.project_id)
             if project is None or project.workspace_id != workspace_id:
                 raise HTTPException(status_code=404, detail="Project not found")
-        if payload.run_id or payload.task_id:
+        if payload.run_id:
             raise HTTPException(
                 status_code=409,
                 detail="Run-linked action evaluation requires the durable AgentRun execution transaction",
             )
+        if payload.task_id and not repositories.trust.task_actions_enabled():
+            raise HTTPException(status_code=409, detail="PostgreSQL task-only actions are disabled")
         action = payload.model_copy(update={"workspace_id": workspace_id})
         try:
             with runtime.connect() as conn:
@@ -659,7 +663,7 @@ def decide_exact_action(
             raise _trust_error(error) from error
         if action is None:
             raise HTTPException(status_code=404, detail="Proposed action not found")
-        if action.run_id is not None or action.task_id is not None:
+        if action.run_id is not None:
             metadata = action.metadata
             run_id = action.run_id
             task_id = action.task_id
@@ -814,11 +818,13 @@ def consume_external_agent_action(
                 raise HTTPException(status_code=404, detail="Proposed action not found")
             if action.agent_id != agent.id or action.workspace_id != agent.workspace_id:
                 raise HTTPException(status_code=403, detail="Agent does not own this action")
-            if action.run_id or action.task_id:
+            if action.run_id:
                 raise HTTPException(
                     status_code=409,
                     detail="Run-linked action consumption requires the durable AgentRun execution transaction",
                 )
+            if action.task_id and not repositories.trust.task_actions_enabled():
+                raise HTTPException(status_code=409, detail="PostgreSQL task-only actions are disabled")
             assert_agent_can(
                 agent,
                 AgentAction.EXECUTE_GITHUB,
@@ -828,6 +834,17 @@ def consume_external_agent_action(
             )
             with runtime.connect() as conn:
                 with conn.transaction():
+                    if action.task_id:
+                        return repositories.trust.consume_task_action(
+                            conn,
+                            action_id=action_id,
+                            workspace_id=agent.workspace_id,
+                            task_id=action.task_id,
+                            consumption=payload,
+                            actor=f"agent:{agent.id}",
+                            now=now_utc(),
+                            expected_agent_id=agent.id,
+                        )
                     locked_action = repositories.trust.get_proposed_action(
                         conn, action_id, agent.workspace_id, for_update=True
                     )
@@ -842,7 +859,7 @@ def consume_external_agent_action(
                         raise HTTPException(
                             status_code=403, detail="Agent does not own this action"
                         )
-                    if locked_action.run_id or locked_action.task_id:
+                    if locked_action.run_id:
                         raise HTTPException(
                             status_code=409,
                             detail="Run-linked action consumption requires the durable AgentRun execution transaction",

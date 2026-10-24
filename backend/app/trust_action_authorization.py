@@ -294,15 +294,26 @@ def record_action_authorization_postgres(
 
     with connect() as conn:
         with conn.transaction():
-            action = trust_repository.get_proposed_action(
-                conn, action_id, workspace_id, for_update=True
-            )
+            action = trust_repository.get_proposed_action(conn, action_id, workspace_id)
             if action is None:
                 raise ValueError("Proposed action not found.")
-            if action.run_id or action.task_id:
+            if action.run_id:
                 raise ActionAuthorizationConflict(
                     "Run-linked action decisions require the durable AgentRun execution transaction."
                 )
+            if action.task_id:
+                action, _task, _approval = trust_repository.lock_task_action_binding(
+                    conn,
+                    action_id=action_id,
+                    workspace_id=workspace_id,
+                    task_id=action.task_id,
+                )
+            else:
+                action = trust_repository.get_proposed_action(
+                    conn, action_id, workspace_id, for_update=True
+                )
+                if action is None:
+                    raise ValueError("Proposed action not found.")
 
             current = trust_repository.get_latest_policy_decision_for_action(
                 conn, action_id, workspace_id, for_update=True
@@ -312,6 +323,16 @@ def record_action_authorization_postgres(
             existing = trust_repository.get_action_authorization_for_action(
                 conn, action_id, workspace_id, for_update=True
             )
+            if action.task_id:
+                _task_action, task, approval = trust_repository.lock_task_action_binding(
+                    conn,
+                    action_id=action_id,
+                    workspace_id=workspace_id,
+                    task_id=action.task_id,
+                )
+                trust_repository.lock_task_action_lease(
+                    conn, action=action, task=task, approval=approval
+                )
 
             def verify_existing() -> ActionAuthorization:
                 if (
