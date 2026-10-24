@@ -45,8 +45,29 @@ fun ConnectorsContent(
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item { ConnectorsHero() }
+        item { ConnectorPrerequisitesPanel() }
         item { ProviderSetupPanel(onOpenAgentAccess = onOpenAgentAccess) }
         item { ApprovalFlowNote() }
+    }
+}
+
+@Composable
+private fun ConnectorPrerequisitesPanel() {
+    val palette = LocalTowerPalette.current
+    TowerPanel {
+        Text("Before you start", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text(
+            "You’ll need the computer and project workspace where the agent runs. Keep that computer and the same agent session online while a request is waiting.",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text(
+            "This phone creates a project-limited connector and gives you a local hook setup command. The app cannot confirm hook installation from here.",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
 
@@ -90,7 +111,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             name = "Antigravity",
             status = "Local phone flow verified",
             statusColor = palette.brand,
-            description = "Approved and resumed the same local Antigravity invocation on a phone. Hosted and off-LAN delivery are not verified.",
+            description = "Same local Antigravity invocation resumed after a phone decision. Hosted and off-LAN delivery are not verified.",
             buttonLabel = "Set up Antigravity",
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
@@ -99,7 +120,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             name = "Codex",
             status = "Not verified for native sessions",
             statusColor = palette.caution,
-            description = "Codex Desktop approval interception and same-session phone resume are not verified.",
+            description = "Codex Desktop approval interception and same-session phone resume are not verified. Follow setup steps, but do not rely on native Codex interception yet.",
             buttonLabel = "Set up Codex",
             onClick = { onOpenAgentAccess("CODEX") }
         )

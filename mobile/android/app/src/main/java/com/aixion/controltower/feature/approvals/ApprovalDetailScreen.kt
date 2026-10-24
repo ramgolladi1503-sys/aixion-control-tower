@@ -2,6 +2,7 @@ package com.aixion.controltower.feature.approvals
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,6 +37,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -48,11 +51,13 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.Duration
 import java.time.Instant
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -188,6 +193,8 @@ fun ApprovalDetailContent(
     onReconcileDecision: () -> Unit = {}
 ) {
     val palette = LocalTowerPalette.current
+    val requestListState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
     var decisionClock by remember(approval.id) { mutableStateOf(Instant.now()) }
     val expiryInstant = remember(approval.expiresAt) {
         ApprovalDecisionPolicy.expiryInstant(approval.expiresAt)
@@ -229,6 +236,7 @@ fun ApprovalDetailContent(
         (!requiresFullDiffReview || (fullDiffOpened && fullDiffReviewed))
     val requiresRiskConfirmation = requiresExplicitRiskConfirmation(approval.risk)
     var showRiskConfirmation by remember(approval.id) { mutableStateOf(false) }
+    var showCompactToolReview by remember(approval.id) { mutableStateOf(false) }
     var showTechnicalDetails by remember(approval.id) { mutableStateOf(false) }
 
     BoxWithConstraints(
@@ -242,6 +250,7 @@ fun ApprovalDetailContent(
         val compactViewport = maxHeight < 500.dp
         Column(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
+                state = requestListState,
                 modifier = Modifier
                     .testTag("approval-detail-list")
                     .weight(1f)
@@ -398,7 +407,8 @@ fun ApprovalDetailContent(
                     decisionNeedsReconciliation = decisionNeedsReconciliation,
                     onReconcileDecision = onReconcileDecision,
                     approvalTitle = approval.title,
-                    approvalProvider = approval.sourceLabel,
+                    approvalId = approval.id,
+                    approvalProvider = approval.sourceProvider.ifBlank { approval.sourceLabel },
                     approvalRisk = approval.risk,
                     onApprove = {
                         if (requiresRiskConfirmation) {
@@ -408,6 +418,13 @@ fun ApprovalDetailContent(
                         }
                     },
                     onReject = onReject,
+                    onReviewFullRequest = {
+                        if (compactViewport && hasExactToolRequest) {
+                            showCompactToolReview = true
+                        } else {
+                            coroutineScope.launch { requestListState.animateScrollToItem(0) }
+                        }
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.sm)
@@ -416,6 +433,19 @@ fun ApprovalDetailContent(
                 )
             }
         }
+    }
+
+    if (showCompactToolReview && hasExactToolRequest) {
+        CompactExactToolRequestReviewDialog(
+            approval = approval,
+            checked = exactToolRequestReviewed,
+            canConfirm = canDecide,
+            onConfirm = {
+                exactToolRequestReviewed = true
+                showCompactToolReview = false
+            },
+            onDismiss = { showCompactToolReview = false }
+        )
     }
 
     if (showRiskConfirmation) {
@@ -479,6 +509,77 @@ fun ApprovalDetailContent(
             }
         )
     }
+}
+
+@Composable
+private fun CompactExactToolRequestReviewDialog(
+    approval: ApprovalSummary,
+    checked: Boolean,
+    canConfirm: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val palette = LocalTowerPalette.current
+    var draftChecked by remember(approval.id) { mutableStateOf(checked) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Review full request") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState())
+                    .testTag("approval-compact-tool-review-content"),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+            ) {
+                Text("Action: ${approval.title}", color = palette.ink, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Provider: ${approvalProviderName(approval.sourceProvider)} · Request ${shortSafeApprovalId(approval.id)}",
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Text("Project: ${approval.projectName.ifBlank { "Not provided" }}", color = palette.inkMuted)
+                Text(
+                    "Invocation: ${approval.sourceInvocationId?.let(::shortSafeApprovalId) ?: "Not provided"}",
+                    color = palette.inkMuted
+                )
+                Text("Exact tool name and arguments", color = palette.ink, style = MaterialTheme.typography.titleSmall)
+                approval.files.forEachIndexed { index, file ->
+                    DiffBlock(
+                        file = file,
+                        modifier = Modifier.testTag("approval-compact-tool-arguments-$index")
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("approval-compact-tool-review-acknowledgement")
+                        .toggleable(
+                            value = draftChecked,
+                            role = Role.Checkbox,
+                            onValueChange = { draftChecked = it }
+                        )
+                        .padding(vertical = TowerSpacing.sm),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(checked = draftChecked, onCheckedChange = null)
+                    Text(
+                        "I reviewed the exact tool name and arguments above.",
+                        color = palette.ink,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm, enabled = draftChecked && canConfirm) {
+                Text("Acknowledge and continue")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
 }
 
 @Composable
@@ -867,41 +968,70 @@ private fun DecisionPanel(
     decisionNeedsReconciliation: Boolean,
     onReconcileDecision: () -> Unit,
     approvalTitle: String,
+    approvalId: String,
     approvalProvider: String,
     approvalRisk: RiskLevel,
     onApprove: () -> Unit,
     onReject: () -> Unit,
+    onReviewFullRequest: () -> Unit,
     modifier: Modifier = Modifier,
     compactLayout: Boolean = false
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
-            text = approvalTitle,
-            color = palette.ink,
-            style = if (compactLayout) MaterialTheme.typography.labelLarge else MaterialTheme.typography.titleSmall,
+            text = if (compactLayout) "Review full request" else approvalTitle,
+            color = if (compactLayout) palette.brand else palette.ink,
+            style = if (compactLayout) {
+                MaterialTheme.typography.labelLarge.copy(textDecoration = TextDecoration.Underline)
+            } else {
+                MaterialTheme.typography.titleSmall
+            },
             maxLines = if (compactLayout) 1 else 2,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.testTag("approval-decision-identity-title")
+            modifier = if (compactLayout) {
+                Modifier
+                    .heightIn(min = 48.dp)
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = "Review full request: $approvalTitle from $approvalProvider, request ${shortSafeApprovalId(approvalId)}."
+                    }
+                    .clickable(role = Role.Button, onClick = onReviewFullRequest)
+                    .testTag("approval-decision-identity-title")
+            } else {
+                Modifier.testTag("approval-decision-identity-title")
+            }
         )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "Decision context: $approvalProvider, $approvalTitle, risk ${approvalRisk.name.lowercase().replace('_', ' ')}."
+                    contentDescription = "Decision context: $approvalProvider, $approvalTitle, request ${shortSafeApprovalId(approvalId)}, risk ${approvalRisk.name.lowercase().replace('_', ' ')}."
                 }
                 .testTag("approval-decision-identity"),
             horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = approvalProvider,
-                color = palette.inkMuted,
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f).testTag("approval-decision-identity-provider")
-            )
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+            ) {
+                Text(
+                    text = approvalProvider,
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("approval-decision-identity-provider")
+                )
+                Text(
+                    text = "Request ${shortSafeApprovalId(approvalId)}",
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("approval-decision-identity-request-id")
+                )
+            }
             RiskBadge(
                 risk = approvalRisk,
                 readable = true,
@@ -918,11 +1048,11 @@ private fun DecisionPanel(
         }
         Text(
             text = when {
-                compactLayout && decisionNeedsReconciliation -> "Check the server before retrying."
+                compactLayout && decisionNeedsReconciliation -> "Check server status."
                 compactLayout && decisionInFlight -> "Recording decision…"
-                compactLayout && exactToolRequestNeedsReview -> "Review request to enable approval."
-                compactLayout && fullDiffReviewNeedsReview -> "Review full diff to enable approval."
-                compactLayout && canApprove -> "Review complete. Choose an action."
+                compactLayout && exactToolRequestNeedsReview -> "Review request first."
+                compactLayout && fullDiffReviewNeedsReview -> "Review full diff first."
+                compactLayout && canApprove -> "Ready for decision."
                 hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
                 decisionNeedsReconciliation -> "The previous decision may have reached the server, but its response was lost. Check server status before trying again."
                 decisionInFlight -> "Sending the decision and waiting for the server."
@@ -939,7 +1069,7 @@ private fun DecisionPanel(
                 .semantics { liveRegion = LiveRegionMode.Polite },
             color = if (canApprove) palette.inkMuted else palette.caution,
             style = if (compactLayout) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge,
-            maxLines = if (compactLayout) 2 else Int.MAX_VALUE,
+            maxLines = if (compactLayout) 1 else Int.MAX_VALUE,
             overflow = TextOverflow.Ellipsis
         )
         Spacer(modifier = Modifier.height(if (compactLayout) TowerSpacing.xs else TowerSpacing.lg))

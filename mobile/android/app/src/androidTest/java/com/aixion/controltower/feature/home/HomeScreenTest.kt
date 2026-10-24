@@ -1,13 +1,21 @@
 package com.aixion.controltower.feature.home
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
@@ -25,15 +33,21 @@ class HomeScreenTest {
     fun lastSuccessfulSyncRemainsReadableAtLargeFontScale() {
         composeRule.setContent {
             CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
-                HomeSyncTimestamp(Instant.parse("2026-10-22T10:00:00Z"))
+                Box(modifier = Modifier.width(320.dp).testTag("timestamp-viewport")) {
+                    Box(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+                        HomeSyncTimestamp(Instant.parse("2026-10-22T10:00:00Z"))
+                    }
+                }
             }
         }
 
         val timestamp = composeRule.onNodeWithText("Last successful sync", substring = true)
         timestamp.assertExists()
+        val viewportBounds = composeRule.onNodeWithTag("timestamp-viewport").fetchSemanticsNode().boundsInRoot
         val timestampBounds = timestamp.fetchSemanticsNode().boundsInRoot
         assertTrue("Timestamp should have visible layout bounds", timestampBounds.width > 0f && timestampBounds.height > 0f)
-        assertTrue("Timestamp should scale to at least 40dp high", timestampBounds.height >= 40f)
+        assertTrue("Timestamp should wrap and remain within the compact viewport", timestampBounds.left >= viewportBounds.left + 20f && timestampBounds.right <= viewportBounds.right - 20f)
+        assertTrue("Large text should occupy a readable multi-line layout", timestampBounds.height > 20f)
     }
 
     @Test

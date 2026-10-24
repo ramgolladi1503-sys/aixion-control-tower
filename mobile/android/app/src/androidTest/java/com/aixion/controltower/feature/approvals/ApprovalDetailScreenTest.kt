@@ -553,11 +553,12 @@ class ApprovalDetailScreenTest {
         val identity = composeRule.onNodeWithTag("approval-decision-identity")
         identity.assertIsDisplayed()
         assertEquals(
-            listOf("Decision context: ANTIGRAVITY, Review protected production rollout, risk high."),
+            listOf("Decision context: ANTIGRAVITY, Review protected production rollout, request ail-test, risk high."),
             identity.fetchSemanticsNode().config[SemanticsProperties.ContentDescription]
         )
+        composeRule.onNodeWithText("Request ail-test").assertIsDisplayed()
         composeRule.onNodeWithTag("approval-decision-identity-title")
-            .assertTextContains("Review protected production rollout")
+            .assertTextContains("Review full request")
         val viewport = composeRule.onNodeWithTag("approval-short-viewport").fetchSemanticsNode().boundsInRoot
         val panel = composeRule.onNodeWithTag("approval-decision-panel").fetchSemanticsNode().boundsInRoot
         val deny = composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot
@@ -573,10 +574,83 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Deny").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
         identity.assertIsDisplayed()
+        composeRule.onNodeWithText("Request ail-test").assertIsDisplayed()
         composeRule.onNodeWithTag("approval-decision-identity-title")
-            .assertTextContains("Review protected production rollout")
+            .assertTextContains("Review full request")
         assertEquals(deny.top, composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot.top)
         assertEquals(approve.top, composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot.top)
+    }
+
+    @Test
+    fun compactExactToolPanelJumpsToTheFullCommandBeforeDecision() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            id = "approval-command-987654321",
+            title = "Run the requested production shell command",
+            sourceProvider = "CODEX",
+            files = listOf(
+                FileChangeSummary(
+                    path = "codex://tool/shell",
+                    changeType = "tool_call",
+                    diff = "{\"command\":\"deploy --environment production\",\"payload\":\"${"x".repeat(128)}\"}",
+                    risk = RiskLevel.HIGH
+                )
+            )
+        )
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(320.dp).height(320.dp)) {
+                    ApprovalDetailContent(request, null, {}, {}, {})
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("Review full request").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(
+            "Review full request: Run the requested production shell command from CODEX, request 87654321."
+        ).assertExists()
+        composeRule.onNodeWithTag("approval-decision-identity")
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("CODEX", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Request 87654321", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Deny").assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+
+        composeRule.onNodeWithText("Review full request").performClick()
+
+        composeRule.onNodeWithText("Action: Run the requested production shell command").assertIsDisplayed()
+        composeRule.onNodeWithText("Provider: Codex · Request 87654321").assertIsDisplayed()
+        composeRule.onNodeWithText("Project: Test project").assertIsDisplayed()
+        composeRule.onNodeWithText("Invocation: ail-test").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Exact tool name and arguments").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("deploy --environment production", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        val payloadScroller = composeRule.onNodeWithTag("approval-unbroken-payload-scroll-0")
+        payloadScroller.performScrollTo().assertIsDisplayed()
+        val scrollRange = payloadScroller.fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange]
+        assertTrue("Long exact arguments must be horizontally reachable", scrollRange.maxValue() > 0f)
+        val acknowledgement = composeRule.onNodeWithText("Acknowledge and continue")
+        acknowledgement.assertIsNotEnabled()
+        composeRule.onNodeWithTag("approval-compact-tool-review-acknowledgement")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        acknowledgement.assertIsEnabled()
+        composeRule.onNodeWithText("Close").performClick()
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+
+        composeRule.onNodeWithText("Review full request").performClick()
+        acknowledgement.assertIsNotEnabled()
+        composeRule.onNodeWithTag("approval-compact-tool-review-acknowledgement")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+        acknowledgement.assertIsEnabled()
+        acknowledgement.performClick()
+
+        composeRule.onNodeWithText("Approve request").assertIsEnabled()
+        composeRule.onNodeWithText("Deny").assertIsDisplayed()
     }
 
     @Test

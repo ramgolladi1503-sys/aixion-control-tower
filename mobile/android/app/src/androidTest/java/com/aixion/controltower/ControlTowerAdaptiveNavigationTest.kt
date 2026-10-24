@@ -3,17 +3,25 @@ package com.aixion.controltower
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.core.ui.theme.TowerLayout
@@ -23,12 +31,43 @@ import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.feature.approvals.ApprovalsUiState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
 class ControlTowerAdaptiveNavigationTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun compactBottomNavigationKeepsFourLabelsWithinBarAtLargeFontScale() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    BoxWithConstraints(
+                        modifier = Modifier.width(390.dp).height(600.dp).testTag("navigation-viewport")
+                    ) {
+                        AdaptivePrimaryNavigation(
+                            expanded = false,
+                            currentRoute = Route.Home.value,
+                            approvalsState = ApprovalsUiState(loading = false),
+                            onNavigate = {}
+                        )
+                    }
+                }
+            }
+        }
+
+        val barBounds = composeRule.onNodeWithTag("primary-navigation-bar")
+            .fetchSemanticsNode().boundsInRoot
+        listOf(Route.Home, Route.Inbox, Route.Connectors, Route.Account).forEach { route ->
+            val label = composeRule.onNodeWithText(route.label)
+            label.assertIsDisplayed()
+            val labelBounds = label.fetchSemanticsNode().boundsInRoot
+            assertTrue("${route.label} label should remain inside the navigation bar", labelBounds.left >= barBounds.left && labelBounds.right <= barBounds.right)
+            assertTrue("${route.label} label should not be clipped vertically", labelBounds.top >= barBounds.top && labelBounds.bottom <= barBounds.bottom)
+        }
+    }
 
     @Test
     fun compactWidthUsesBottomNavigationWithAllPrimaryDestinations() {
@@ -86,8 +125,8 @@ class ControlTowerAdaptiveNavigationTest {
         )
 
         listOf(unsupportedOnly, loading, refreshing, error).forEach { state ->
-            listOf(390, 840).forEach { width ->
-                renderNavigation(width = width, approvalsState = state)
+            listOf(false, true).forEach { expanded ->
+                renderNavigation(width = 390, expanded = expanded, approvalsState = state)
                 composeRule.waitForIdle()
                 composeRule.onAllNodesWithTag("approval-navigation-badge").assertCountEquals(0)
                 composeRule.onAllNodesWithContentDescription("Approvals, 1 pending").assertCountEquals(0)
@@ -105,23 +144,42 @@ class ControlTowerAdaptiveNavigationTest {
     }
 
     private var selectedRoute: Route? = null
+    private val navigationWidth = mutableIntStateOf(390)
+    private val navigationExpanded = mutableStateOf(false)
+    private val navigationApprovalsState = mutableStateOf(ApprovalsUiState(loading = false))
+    private var navigationContentStarted = false
 
     private fun renderNavigation(
         width: Int,
+        expanded: Boolean? = null,
         approvalsState: ApprovalsUiState = ApprovalsUiState(loading = false)
     ) {
         selectedRoute = null
-        composeRule.setContent {
-            ControlTowerTheme {
-                BoxWithConstraints(
-                    modifier = Modifier.width(width.dp).height(600.dp).testTag("navigation-viewport")
-                ) {
-                    AdaptivePrimaryNavigation(
-                        expanded = maxWidth >= TowerLayout.expandedBreakpoint,
-                        currentRoute = Route.Home.value,
-                        approvalsState = approvalsState,
-                        onNavigate = { selectedRoute = it }
-                    )
+        if (navigationContentStarted) {
+            composeRule.runOnIdle {
+                navigationWidth.intValue = width
+                navigationExpanded.value = expanded ?: (width.dp >= TowerLayout.expandedBreakpoint)
+                navigationApprovalsState.value = approvalsState
+            }
+        } else {
+            navigationWidth.intValue = width
+            navigationExpanded.value = expanded ?: (width.dp >= TowerLayout.expandedBreakpoint)
+            navigationApprovalsState.value = approvalsState
+            navigationContentStarted = true
+            composeRule.setContent {
+                ControlTowerTheme {
+                    BoxWithConstraints(
+                        modifier = Modifier.width(navigationWidth.intValue.dp)
+                            .height(600.dp)
+                            .testTag("navigation-viewport")
+                    ) {
+                        AdaptivePrimaryNavigation(
+                            expanded = navigationExpanded.value,
+                            currentRoute = Route.Home.value,
+                            approvalsState = navigationApprovalsState.value,
+                            onNavigate = { selectedRoute = it }
+                        )
+                    }
                 }
             }
         }
@@ -132,12 +190,21 @@ class ControlTowerAdaptiveNavigationTest {
         expectedText: String,
         expectedDescription: String
     ) {
-        listOf(390, 840).forEach { width ->
-            renderNavigation(width = width, approvalsState = state)
+        listOf(false, true).forEach { expanded ->
+            renderNavigation(width = 390, expanded = expanded, approvalsState = state)
             composeRule.waitForIdle()
             composeRule.onNodeWithTag("approval-navigation-badge").assertIsDisplayed()
-            composeRule.onNodeWithText(expectedText, useUnmergedTree = true).assertIsDisplayed()
-            composeRule.onNodeWithContentDescription(expectedDescription).assertIsDisplayed()
+            val badgeNode = composeRule.onNodeWithText(expectedText, useUnmergedTree = true)
+            badgeNode.assertIsDisplayed()
+            val badgeAnnouncement = expectedDescription.substringAfter(", ")
+                .replace(" pending", " pending approvals")
+            assertEquals(
+                listOf(badgeAnnouncement),
+                badgeNode.fetchSemanticsNode().config[SemanticsProperties.ContentDescription]
+            )
+            composeRule.onNodeWithText(Route.Inbox.label)
+                .assertIsDisplayed()
+                .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Tab))
         }
     }
 

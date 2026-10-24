@@ -22,17 +22,22 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Set up a project").assertExists()
         composeRule.onNodeWithText("Connect your coding agent").assertExists()
+        composeRule.onNodeWithText("Before you start").assertExists()
+        composeRule.onNodeWithText("computer and project workspace where the agent runs", substring = true)
+            .assertExists()
+        composeRule.onNodeWithText("The app cannot confirm hook installation from here.", substring = true)
+            .assertExists()
         composeRule.onAllNodesWithText("CONNECT ONCE").assertCountEquals(0)
         composeRule.onNodeWithText("Choose a provider").assertExists()
         composeRule.onNodeWithText("Antigravity").assertExists()
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
         composeRule.onNodeWithText(
-            "Approved and resumed the same local Antigravity invocation on a phone. Hosted and off-LAN delivery are not verified."
+            "Same local Antigravity invocation resumed after a phone decision. Hosted and off-LAN delivery are not verified."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Set up Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText(
-            "Codex Desktop approval interception and same-session phone resume are not verified."
+            "Codex Desktop approval interception and same-session phone resume are not verified. Follow setup steps, but do not rely on native Codex interception yet."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Local phone flow verified").assertExists()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
@@ -52,8 +57,10 @@ class ConnectorsScreenTest {
                 "Keep the computer and agent session running so the same task can continue."
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText(explanation, useUnmergedTree = true)
+        composeRule.onNodeWithText("When an approval is needed")
             .performScrollTo()
+            .assertIsDisplayed()
+        composeRule.onNodeWithText(explanation, useUnmergedTree = true)
             .assertExists()
             .assertTextEquals(explanation)
             .assertIsDisplayed()

@@ -155,6 +155,8 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
             }
         }
 
+        item { AgentAccessSetupGuide(state) }
+
         if (state.notice.isNotBlank()) item { Text(state.notice, color = palette.positive) }
         if (state.error.isNotBlank()) item { Text(state.error, color = palette.danger) }
 
@@ -323,6 +325,87 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                 Text("Refresh agent status")
             }
         }
+    }
+}
+
+@Composable
+internal fun AgentAccessSetupGuide(state: AgentAccessUiState) {
+    val palette = LocalTowerPalette.current
+    val selectedProject = state.projects.firstOrNull { it.id == state.selectedProjectId }
+    val projectReady = state.projectsLoaded && selectedProject != null
+    val connectorReady = projectReady && state.agents.any { summary ->
+        summary.agent.provider == state.selectedProvider &&
+            summary.agent.enabled &&
+            summary.agent.allowed_project_ids == listOf(state.selectedProjectId) &&
+            summary.credentialState == "ACTIVE" &&
+            summary.credential?.token_present == true
+    }
+    val completePhoneSteps = listOf(projectReady, connectorReady).count { it }
+
+    TowerPanel(elevated = true) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Setup progress", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+            StatusBadge(
+                label = if (state.loading && !state.projectsLoaded) "Loading" else "$completePhoneSteps of 2 phone steps",
+                color = if (completePhoneSteps == 2) palette.positive else palette.caution,
+                uppercase = false
+            )
+        }
+        Spacer(Modifier.height(TowerSpacing.sm))
+        SetupGuideStep(
+            number = "1",
+            title = "Choose a project",
+            detail = when {
+                selectedProject != null -> "Selected: ${selectedProject.name}"
+                !state.projectsLoaded && state.loading -> "Loading projects from your account…"
+                state.projectsLoaded -> "Select an existing project or create one below."
+                else -> "Refresh projects before continuing."
+            },
+            complete = projectReady
+        )
+        Spacer(Modifier.height(TowerSpacing.sm))
+        SetupGuideStep(
+            number = "2",
+            title = "Create a project connector",
+            detail = if (connectorReady) {
+                "An active project-scoped credential is available."
+            } else {
+                "Create it below. The token is shown once for secure installation on your Mac."
+            },
+            complete = connectorReady
+        )
+        Spacer(Modifier.height(TowerSpacing.md))
+        StatusBadge(label = "Mac setup not confirmed", color = palette.caution, uppercase = false)
+        Spacer(Modifier.height(TowerSpacing.xs))
+        Text(
+            "After creating the connector, run its local hook setup command on the computer. This app cannot confirm hook installation or same-session resume.",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        if (state.selectedProvider == "CODEX") {
+            Spacer(Modifier.height(TowerSpacing.xs))
+            Text(
+                "Native Codex Desktop approval interception is not verified. Do not rely on it until that workflow is confirmed.",
+                color = palette.caution,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+    }
+}
+
+@Composable
+private fun SetupGuideStep(number: String, title: String, detail: String, complete: Boolean) {
+    val palette = LocalTowerPalette.current
+    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
+        Text(
+            text = "$number. $title${if (complete) " · Done" else ""}",
+            color = palette.ink,
+            style = MaterialTheme.typography.titleSmall
+        )
+        Text(detail, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
