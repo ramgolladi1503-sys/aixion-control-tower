@@ -55,10 +55,15 @@ class OneTimeTokenPanelTest {
             announcement.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
         )
         composeRule.onNodeWithText("one-time-token-example").assertExists()
-        assertFalse(
-            announcement.fetchSemanticsNode().config.getOrNull(SemanticsProperties.ContentDescription)
-                ?.any { it.contains("one-time-token-example") } == true
-        )
+        val announcementSemantics = announcement.fetchSemanticsNode().config
+        val contentDescription = if (
+            SemanticsProperties.ContentDescription in announcementSemantics
+        ) {
+            announcementSemantics[SemanticsProperties.ContentDescription]
+        } else {
+            emptyList()
+        }
+        assertFalse(contentDescription.any { it.contains("one-time-token-example") })
     }
 
     @Test
