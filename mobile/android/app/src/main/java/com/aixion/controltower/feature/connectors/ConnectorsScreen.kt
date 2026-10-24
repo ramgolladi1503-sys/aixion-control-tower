@@ -88,7 +88,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupCard(
             name = "Antigravity",
-            status = "Setup available",
+            status = "Hook setup available",
             statusColor = palette.brand,
             description = "Install the Control Tower tool hook in this project workspace. Same-session phone approval and resume still need verification.",
             buttonLabel = "Set up Antigravity",

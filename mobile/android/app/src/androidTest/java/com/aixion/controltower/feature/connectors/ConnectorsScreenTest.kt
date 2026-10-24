@@ -34,7 +34,8 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText(
             "Codex Desktop approval interception and same-session phone resume are not verified."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Setup available").assertExists()
+        composeRule.onNodeWithText("Hook setup available").assertExists()
+        composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
         composeRule.onNodeWithText("Not verified for native sessions").performScrollTo().assertExists()
         composeRule.onNodeWithText("When an approval is needed").performScrollTo().assertExists()
 
@@ -77,7 +78,7 @@ class ConnectorsScreenTest {
     fun providerReadinessStatesAreDistinctAndDoNotClaimLiveConnection() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("Setup available").assertExists()
+        composeRule.onNodeWithText("Hook setup available").assertExists()
         composeRule.onNodeWithText("Not verified for native sessions").assertExists()
         composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
