@@ -29,6 +29,7 @@ class ApprovalExactToolContextTest {
             title = "Check repository state",
             summary = "A pending Codex shell approval.",
             agentName = "Codex",
+            sourceProvider = "CODEX",
             targetBranch = "main",
             status = ApprovalStatus.REQUESTED,
             risk = RiskLevel.LOW,
