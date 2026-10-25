@@ -58,6 +58,43 @@ def test_missing_request_fails_closed_before_returning_sqlite_task_repository(
     assert store.audit_events == before[3]
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=["production", "postgres-auth"],
+)
+def test_task_scope_helper_rejects_missing_request_before_sqlite_read(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+) -> None:
+    accessed: list[str] = []
+
+    class TrapRepository:
+        def get(self, _task_id: str) -> AgentTask | None:
+            accessed.append("get")
+            raise AssertionError("SQLite task repository must not be read without request scope")
+
+    monkeypatch.setattr(agent_task_routes, "get_settings", lambda: settings)
+    user = AuthUser(
+        id="reviewer-1",
+        email="reviewer@example.test",
+        display_name="Reviewer",
+        role=UserRole.REVIEWER,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        agent_task_routes._task_for_user(
+            "task-1", user, repository=TrapRepository(), http_request=None  # type: ignore[arg-type]
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert accessed == []
+
+
 def test_request_bound_task_repository_failure_is_retryable_and_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

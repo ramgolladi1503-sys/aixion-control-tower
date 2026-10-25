@@ -203,6 +203,14 @@ def _task_for_user(
     task_id: str, user: AuthUser, repository: AgentTaskRepository | None = None,
     http_request: Request | None = None,
 ) -> AgentTask:
+    if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL AgentTask access requires an app-bound request",
+                headers={"Retry-After": "1"},
+            )
     active_repository = repository if repository is not None else agent_task_repository
     task = active_repository.get(task_id)
     if task is None:
