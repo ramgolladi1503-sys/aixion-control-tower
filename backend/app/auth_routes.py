@@ -126,6 +126,15 @@ def _record_account_deletion_request(
 
 def register_with_invite(payload: RegisterRequest, *, postgres_repository=None) -> RegistrationResponse:
     _validate_registration_payload(payload)
+    settings = get_settings()
+    if postgres_repository is None and (
+        settings.is_production or settings.postgres_auth_enabled
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL invite registration repository is unavailable",
+            headers={"Retry-After": "1"},
+        )
     normalized_email = str(payload.email).lower().strip()
     if postgres_repository is not None:
         invite = postgres_repository.get_invite_by_token_hash(

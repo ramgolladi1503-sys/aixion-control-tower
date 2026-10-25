@@ -694,6 +694,16 @@ def _project_for_user(
 
 def _project_repository_for_route(http_request: Request | None) -> ProjectRepository:
     if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            # The legacy global repository is SQLite-backed. Without the HTTP
+            # request there is no workspace-scoped PostgreSQL repository to
+            # select, so fail closed instead of silently writing to SQLite.
+            raise HTTPException(
+                status_code=503,
+                detail="Project storage context is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            )
         # Direct function calls in local tests use the explicit local adapter.
         return project_repository
     return project_repository_for_request(http_request)

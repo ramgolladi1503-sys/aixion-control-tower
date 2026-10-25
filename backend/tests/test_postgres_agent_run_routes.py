@@ -111,13 +111,23 @@ def test_postgres_execute_next_requires_request_before_local_fallback(
     assert raised.value.headers == {"Retry-After": "1"}
 
 
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
 def test_postgres_create_run_requires_request_before_local_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
 ) -> None:
     monkeypatch.setattr(
         agent_run_routes,
         "get_settings",
-        lambda: SimpleNamespace(postgres_auth_enabled=True),
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
     )
 
     def reject_local_access(*_args, **_kwargs):

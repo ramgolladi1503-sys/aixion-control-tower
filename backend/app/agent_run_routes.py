@@ -271,7 +271,8 @@ def create_run(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
-    if request is None and get_settings().postgres_auth_enabled:
+    settings = get_settings()
+    if request is None and (settings.is_production or settings.postgres_auth_enabled):
         # HTTP requests always carry the application-bound repositories. A
         # direct invocation without Request must never fall back to the
         # module-level SQLite adapters while PostgreSQL auth is active.

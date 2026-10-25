@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 import pytest
 
+import app.auth_routes as auth_routes
 from app.auth import RegisterRequest, create_session, create_user
 from app.auth_routes import register_with_invite
 from app.invite_routes import (
@@ -294,6 +298,47 @@ def test_invite_registration_restores_memory_when_atomic_persist_fails(monkeypat
     assert store.invites[invite.id].status == InviteStatus.PENDING
     assert store.invites[invite.id].accepted_by_user_id is None
     assert {event.id for event in store.audit_events} == committed_event_ids
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+)
+def test_invite_registration_fails_closed_without_postgres_repository(
+    monkeypatch, is_production: bool, postgres_auth_enabled: bool
+) -> None:
+    owner = create_user("owner@example.com", PASSWORD, "Owner")
+    invite = create_invite(
+        InviteCreateRequest(email="reviewer@example.com"),
+        auth_user(owner.id, owner.email, owner.role),
+    )
+    users_before = set(store.users)
+    invites_before = store.invites[invite.id].model_copy(deep=True)
+    events_before = [event.model_copy(deep=True) for event in store.audit_events]
+    monkeypatch.setattr(
+        auth_routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        register_with_invite(
+            RegisterRequest(
+                email="reviewer@example.com",
+                password=PASSWORD,
+                display_name="Reviewer",
+                invite_token=invite.token,
+            )
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert set(store.users) == users_before
+    assert store.invites[invite.id] == invites_before
+    assert store.audit_events == events_before
 
 
 def test_registration_rejects_invite_email_mismatch(monkeypatch) -> None:

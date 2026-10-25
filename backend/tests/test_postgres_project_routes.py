@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -15,7 +16,7 @@ from app import main
 import app.application_repository_access as repository_access
 from app.application_repositories import ApplicationRepositories
 from app.auth import require_maintainer, require_reviewer
-from app.models import AuthUser, User, UserRole, Workspace
+from app.models import AuthUser, ProjectCreate, User, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
 from app.store import store
 
@@ -127,3 +128,40 @@ def test_project_http_fails_closed_when_postgres_runtime_is_missing(
 
     with pytest.raises(RuntimeError, match="PostgreSQL application repository runtime is unavailable"):
         main._project_repository_for_route(request)
+
+
+def test_project_create_without_request_fails_closed_in_postgres_auth_mode(
+    postgres_project_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, user = postgres_project_route_runtime
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+    before_projects = set(store.projects)
+    before_audits = {event.id for event in store.audit_events}
+    with store._connect() as connection:
+        before_sqlite_rows = set(
+            connection.execute(
+                "SELECT entity_type, entity_id FROM kv_store "
+                "WHERE entity_type IN ('project', 'audit_event')"
+            ).fetchall()
+        )
+
+    with pytest.raises(HTTPException) as raised:
+        main.create_project(ProjectCreate(name="Must not reach SQLite"), user, None)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert set(store.projects) == before_projects
+    assert {event.id for event in store.audit_events} == before_audits
+    with store._connect() as connection:
+        after_sqlite_rows = set(
+            connection.execute(
+                "SELECT entity_type, entity_id FROM kv_store "
+                "WHERE entity_type IN ('project', 'audit_event')"
+            ).fetchall()
+        )
+    assert after_sqlite_rows == before_sqlite_rows
