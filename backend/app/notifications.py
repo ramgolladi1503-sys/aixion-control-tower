@@ -154,11 +154,18 @@ def register_device(
         workspace_id = workspace_id_for_request(user, http_request)
         if workspace_id is None:
             raise HTTPException(status_code=403, detail="Workspace membership is required")
+        session_id = getattr(http_request.state, "authenticated_session_id", None)
+        if not isinstance(session_id, str) or not session_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="An authenticated session is required for device registration",
+            )
         try:
             return repository.register_device(
                 DeviceRegistration(
                     user_id=user.id,
                     workspace_id=workspace_id,
+                    session_id=session_id,
                     token=payload.token,
                     platform=payload.platform,
                     app_version=payload.app_version,

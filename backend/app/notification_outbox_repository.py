@@ -313,10 +313,14 @@ class PostgresNotificationOutboxRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT device.payload, device.device_id, device.user_id, "
-                "device.workspace_id, device.token, device.platform, device.app_version "
+                "device.workspace_id, device.token, device.platform, device.app_version, "
+                "device.session_id "
                 "FROM device_registrations AS device "
                 "JOIN users AS account ON account.user_id=device.user_id "
                 "AND account.workspace_id=device.workspace_id "
+                "JOIN sessions AS session ON session.session_id=device.session_id "
+                "AND session.user_id=device.user_id AND session.revoked=FALSE "
+                "AND session.expires_at > clock_timestamp() "
                 "WHERE device.workspace_id=%s AND account.disabled=FALSE "
                 "AND (%s::text IS NULL OR device.user_id=%s) "
                 "ORDER BY device.device_id",
@@ -333,6 +337,7 @@ class PostgresNotificationOutboxRepository:
                 or device.token != row[4]
                 or device.platform != row[5]
                 or device.app_version != row[6]
+                or device.session_id != row[7]
                 or device.workspace_id != notification.workspace_id
             ):
                 raise ValueError("Device registration payload does not match its scoped row")
@@ -429,8 +434,10 @@ class PostgresNotificationOutboxRepository:
 
     def register_device(self, device: DeviceRegistration) -> DeviceRegistrationMutation:
         """Persist an authenticated device owner and its audit record atomically."""
-        if not device.user_id or not device.workspace_id:
-            raise ValueError("PostgreSQL device registration requires user and workspace scope")
+        if not device.user_id or not device.workspace_id or not device.session_id:
+            raise ValueError(
+                "PostgreSQL device registration requires user, workspace, and session scope"
+            )
         with self._connect() as conn:
             # The unique token constraint is the final invariant. The advisory
             # lock makes owner reassignment and its audit event deterministic
@@ -445,10 +452,22 @@ class PostgresNotificationOutboxRepository:
             ).fetchone()
             if account is None or account[0] != device.workspace_id or account[1]:
                 raise PermissionError("Device owner is disabled or outside its workspace")
+            session = conn.execute(
+                "SELECT user_id, revoked, expires_at > clock_timestamp() FROM sessions "
+                "WHERE session_id=%s FOR SHARE",
+                (device.session_id,),
+            ).fetchone()
+            if (
+                session is None
+                or session[0] != device.user_id
+                or session[1]
+                or not session[2]
+            ):
+                raise PermissionError("Device registration requires an active owner session")
 
             row = conn.execute(
-                "SELECT payload, device_id, user_id, workspace_id, token, platform, app_version "
-                "FROM device_registrations WHERE token=%s FOR UPDATE",
+                "SELECT payload, device_id, user_id, workspace_id, token, platform, app_version, "
+                "session_id FROM device_registrations WHERE token=%s FOR UPDATE",
                 (device.token,),
             ).fetchone()
             if row is None:
@@ -456,8 +475,8 @@ class PostgresNotificationOutboxRepository:
                 event = device_registration_audit("notification.device_registered", persisted)
                 conn.execute(
                     "INSERT INTO device_registrations "
-                    "(device_id,user_id,workspace_id,platform,token,app_version,created_at,updated_at,payload) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "(device_id,user_id,workspace_id,platform,token,app_version,session_id,"
+                    "created_at,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     self._device_columns(persisted),
                 )
             else:
@@ -468,6 +487,7 @@ class PostgresNotificationOutboxRepository:
                         "workspace_id": device.workspace_id,
                         "platform": device.platform,
                         "app_version": device.app_version,
+                        "session_id": device.session_id,
                         "updated_at": device.updated_at,
                     }
                 )
@@ -475,14 +495,17 @@ class PostgresNotificationOutboxRepository:
                     existing.user_id != persisted.user_id
                     or existing.workspace_id != persisted.workspace_id
                 )
+                changed_session = existing.session_id != persisted.session_id
                 updated_row = conn.execute(
                     "UPDATE device_registrations SET user_id=%s,workspace_id=%s,platform=%s,"
-                    "app_version=%s,updated_at=%s,payload=%s WHERE device_id=%s AND token=%s",
+                    "app_version=%s,session_id=%s,updated_at=%s,payload=%s "
+                    "WHERE device_id=%s AND token=%s",
                     (
                         persisted.user_id,
                         persisted.workspace_id,
                         persisted.platform,
                         persisted.app_version,
+                        persisted.session_id,
                         persisted.updated_at,
                         Jsonb(persisted.model_dump(mode="json")),
                         persisted.id,
@@ -494,6 +517,10 @@ class PostgresNotificationOutboxRepository:
                 event = (
                     device_registration_audit("notification.device_reassigned", persisted)
                     if changed_owner
+                    else device_registration_audit(
+                        "notification.device_session_rebound", persisted
+                    )
+                    if changed_session
                     else None
                 )
 
@@ -511,7 +538,7 @@ class PostgresNotificationOutboxRepository:
         """Delete only the exact owner's device and append audit in one transaction."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT payload, device_id, user_id, workspace_id, token, platform, app_version "
+                "SELECT payload, device_id, user_id, workspace_id, token, platform, app_version, session_id "
                 "FROM device_registrations WHERE device_id=%s FOR UPDATE",
                 (device_id,),
             ).fetchone()
@@ -540,6 +567,7 @@ class PostgresNotificationOutboxRepository:
             device.platform,
             device.token,
             device.app_version,
+            device.session_id,
             device.created_at,
             device.updated_at,
             Jsonb(device.model_dump(mode="json")),
@@ -555,6 +583,7 @@ class PostgresNotificationOutboxRepository:
             or device.token != row[4]
             or device.platform != row[5]
             or device.app_version != row[6]
+            or device.session_id != row[7]
         ):
             raise ValueError("Device registration payload does not match its scoped row")
         return device
@@ -605,7 +634,7 @@ class PostgresNotificationOutboxRepository:
     ) -> bool:
         row = conn.execute(
             "DELETE FROM device_registrations WHERE device_id=%s AND token=%s "
-            "RETURNING payload, device_id, user_id, workspace_id, token, platform, app_version",
+            "RETURNING payload, device_id, user_id, workspace_id, token, platform, app_version, session_id",
             (device_id, token),
         ).fetchone()
         if row is None:
@@ -618,6 +647,7 @@ class PostgresNotificationOutboxRepository:
             or device.token != row[4]
             or device.platform != row[5]
             or device.app_version != row[6]
+            or device.session_id != row[7]
             or device.workspace_id is None
         ):
             raise ValueError("Device registration payload does not match its scoped row")

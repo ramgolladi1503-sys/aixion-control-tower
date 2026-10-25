@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -191,6 +192,21 @@ fun ApprovalInboxContent(
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
+        item {
+            Text(
+                text = when (selectedSection) {
+                    ApprovalInboxSection.NEEDS_REVIEW -> "Needs your decision"
+                    ApprovalInboxSection.HISTORY -> "Decision history"
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("approval-inbox-heading")
+                    .semantics { heading() },
+                color = palette.ink,
+                style = MaterialTheme.typography.headlineMedium
+            )
+        }
+
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),

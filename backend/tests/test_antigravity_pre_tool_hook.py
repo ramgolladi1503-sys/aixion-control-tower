@@ -923,7 +923,7 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
 
     with (
         patch.object(hook, "_request", side_effect=request),
-        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 1.2, 1.2, 1.2]),
+        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 0.0, 1.2, 1.2, 1.2, 1.2]),
         patch.object(hook.time, "sleep"),
     ):
         result = _call_hook(
@@ -955,7 +955,7 @@ def test_approval_received_after_host_deadline_is_denied() -> None:
 
     with (
         patch.object(hook, "_request", side_effect=request),
-        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 2.0, 2.0]),
+        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 0.0, 2.0, 2.0]),
     ):
         result = _call_hook(
             {"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe"}}},
@@ -998,7 +998,7 @@ def test_approval_racing_with_timeout_is_denied() -> None:
 
     with (
         patch.object(hook, "_request", side_effect=request),
-        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 1.2, 1.2, 1.2]),
+        patch.object(hook.time, "monotonic", side_effect=[0.0, 0.0, 0.0, 0.0, 1.2, 1.2, 1.2, 1.2, 1.2]),
     ):
         result = _call_hook(
             {"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe"}}},

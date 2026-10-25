@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 from psycopg.conninfo import conninfo_to_dict
+from psycopg.errors import UndefinedTable
 
 from app import postgres_database
 from app.postgres_database import _migration_checksum, run_postgres_migrations
@@ -341,6 +342,39 @@ def test_migration_command_applies_and_rechecks_idempotently(
     assert first_ledger == second_ledger
 
 
+def test_migration_runner_rolls_back_ddl_and_ledger_on_statement_failure(
+    postgres_schema: tuple[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _schema, connect = postgres_schema
+    monkeypatch.setattr(
+        postgres_database,
+        "POSTGRES_MIGRATIONS",
+        (
+            postgres_database.PostgresMigration(
+                migration_id="pg_test_transaction_rollback",
+                name="Test transactional DDL rollback",
+                statements=(
+                    "CREATE TABLE migration_rollback_probe (probe_id TEXT PRIMARY KEY)",
+                    "SELECT * FROM table_that_does_not_exist_for_migration_rollback",
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        UndefinedTable,
+        match="table_that_does_not_exist_for_migration_rollback",
+    ):
+        run_postgres_migrations(connect)
+
+    with connect() as connection:
+        assert connection.execute("SELECT to_regclass('schema_migrations')").fetchone() == (None,)
+        assert connection.execute(
+            "SELECT to_regclass('migration_rollback_probe')"
+        ).fetchone() == (None,)
+
+
 def test_migration_command_upgrades_from_a_prior_known_revision(
     postgres_schema: tuple[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -413,14 +447,14 @@ def test_migration_command_upgrades_documented_pg0034_state_to_current_schema(
     migrations = postgres_database.POSTGRES_MIGRATIONS
     next_index = next(
         index for index, migration in enumerate(migrations)
-        if migration.migration_id == "pg_0035_legacy_notification_targets"
+        if migration.migration_id == "pg_0036_device_session_binding"
     )
     assert next_index == len(migrations) - 1
-    assert migrations[next_index - 1].migration_id == "pg_0034_agent_run_pull_request_intents"
+    assert migrations[next_index - 1].migration_id == "pg_0035_legacy_notification_targets"
     prior_migrations = migrations[:next_index]
 
-    # Model the supported pg_0034 schema and verify the guarded operator
-    # command applies pg_0035 while preserving representative application data.
+    # Model the supported pg_0035 schema and verify the guarded operator
+    # command binds legacy devices to no session without dropping their records.
     monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", prior_migrations)
     run_postgres_migrations(connect)
     workspace_id = "workspace_pg0034_operator_upgrade_fixture"
@@ -437,6 +471,30 @@ def test_migration_command_upgrades_documented_pg0034_state_to_current_schema(
         "name": "Prior supported project",
         "metadata": {"must_survive": True},
     }
+    user_id = "user_pg0035_operator_upgrade_fixture"
+    user_payload = {
+        "id": user_id,
+        "email": "pg0035-upgrade@example.test",
+        "display_name": "Prior supported owner",
+        "role": "OWNER",
+        "password_hash": "hash",
+        "password_salt": "salt",
+        "workspace_id": workspace_id,
+        "email_verified": True,
+        "disabled": False,
+    }
+    device_id = "device_pg0035_operator_upgrade_fixture"
+    legacy_device_payload = {
+        "id": device_id,
+        "user_id": user_id,
+        "workspace_id": workspace_id,
+        "platform": "android",
+        "token": "legacy-device-token",
+        "app_version": "prior",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }
+    legacy_device_created_at = "2026-01-01T00:00:00Z"
     with connect() as connection:
         connection.execute(
             "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s::jsonb)",
@@ -445,6 +503,30 @@ def test_migration_command_upgrades_documented_pg0034_state_to_current_schema(
         connection.execute(
             "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s::jsonb)",
             (project_id, workspace_id, json.dumps(project_payload)),
+        )
+        connection.execute(
+            "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+            "VALUES(%s,%s,%s,%s,'OWNER',FALSE,TRUE,%s::jsonb)",
+            (
+                user_id,
+                workspace_id,
+                user_payload["email"],
+                user_payload["email"],
+                json.dumps(user_payload),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO device_registrations "
+            "(device_id,user_id,workspace_id,platform,token,app_version,created_at,updated_at,payload) "
+            "VALUES(%s,%s,%s,'android','legacy-device-token','prior',%s,%s,%s::jsonb)",
+            (
+                device_id,
+                user_id,
+                workspace_id,
+                legacy_device_created_at,
+                legacy_device_created_at,
+                json.dumps(legacy_device_payload),
+            ),
         )
         prior_ids = connection.execute(
             "SELECT migration_id FROM schema_migrations ORDER BY migration_id"
@@ -491,6 +573,11 @@ def test_migration_command_upgrades_documented_pg0034_state_to_current_schema(
         retained_project = connection.execute(
             "SELECT workspace_id,payload FROM projects WHERE project_id=%s", (project_id,),
         ).fetchone()
+        retained_legacy_device = connection.execute(
+            "SELECT session_id,payload->>'session_id',payload->>'token' "
+            "FROM device_registrations WHERE device_id=%s",
+            (device_id,),
+        ).fetchone()
         schema_objects = connection.execute(
             "SELECT to_regclass(%s),to_regclass(%s),to_regclass(%s)",
             (
@@ -517,6 +604,7 @@ def test_migration_command_upgrades_documented_pg0034_state_to_current_schema(
     assert actual_ledger == expected_ledger
     assert retained_workspace == (workspace_payload,)
     assert retained_project == (workspace_id, project_payload)
+    assert retained_legacy_device == (None, None, "legacy-device-token")
     assert schema_objects == (
         "agent_run_pull_request_intents",
         "idx_agent_run_pull_request_reconcile",

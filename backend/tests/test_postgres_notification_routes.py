@@ -3,15 +3,17 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from app import main, notifications
+from app import application_repository_access, main, notifications
 from app.application_repositories import ApplicationRepositories
 from app.models import (
     ApprovalRequest,
@@ -23,9 +25,11 @@ from app.models import (
     Project,
     RiskAssessment,
     RiskLevel,
+    SessionToken,
     User,
     UserRole,
     Workspace,
+    now_utc,
 )
 from app.notifications import AuthDependency
 from app.postgres_database import run_postgres_migrations
@@ -70,6 +74,12 @@ def postgres_notification_route_runtime(
             name="Notification project",
             workspace_id=workspace.id,
         )
+        session = SessionToken(
+            id=f"session_{uuid.uuid4().hex}",
+            user_id=owner.id,
+            token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            expires_at=now_utc() + timedelta(days=1),
+        )
         with connect() as connection:
             connection.execute(
                 "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
@@ -90,6 +100,18 @@ def postgres_notification_route_runtime(
             connection.execute(
                 "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
                 (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+            )
+            connection.execute(
+                "INSERT INTO sessions(session_id,user_id,token_hash,created_at,expires_at,revoked,payload) "
+                "VALUES(%s,%s,%s,%s,%s,FALSE,%s)",
+                (
+                    session.id,
+                    session.user_id,
+                    session.token_hash,
+                    session.created_at,
+                    session.expires_at,
+                    Jsonb(session.model_dump(mode="json")),
+                ),
             )
 
         repositories = ApplicationRepositories.from_connector(connect)
@@ -115,7 +137,15 @@ def postgres_notification_route_runtime(
             role=owner.role,
             workspace_id=workspace.id,
         )
-        monkeypatch.setitem(main.app.dependency_overrides, AuthDependency.dependency, lambda: user)
+        def authenticated_test_user(request: Request) -> AuthUser:
+            request.state.authenticated_session_id = session.id
+            return user
+
+        monkeypatch.setitem(
+            main.app.dependency_overrides,
+            AuthDependency.dependency,
+            authenticated_test_user,
+        )
         approval = ApprovalRequest(
             id=f"approval_{uuid.uuid4().hex}",
             project_id=project.id,
@@ -146,7 +176,6 @@ def postgres_notification_route_runtime(
         )
         yield connect, workspace, user, notification
     finally:
-        main.app.dependency_overrides.pop(AuthDependency.dependency, None)
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
@@ -225,10 +254,14 @@ def test_postgres_device_unregister_does_not_delete_on_workspace_claim_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connect, workspace, user, _notification = postgres_notification_route_runtime
+    postgres_settings = SimpleNamespace(postgres_auth_enabled=True)
+    monkeypatch.setattr(notifications, "get_settings", lambda: postgres_settings)
+    monkeypatch.setattr(application_repository_access, "get_settings", lambda: postgres_settings)
     device = main.app.state.notification_outbox_repository.register_device(
         notifications.DeviceRegistration(
             user_id=user.id,
             workspace_id=workspace.id,
+            session_id=_session_id(connect, user.id),
             token=f"fcm-token-{uuid.uuid4().hex}",
         )
     ).device
@@ -241,14 +274,24 @@ def test_postgres_device_unregister_does_not_delete_on_workspace_claim_mismatch(
 
     response = TestClient(main.app).delete(f"/notifications/devices/{device.id}")
 
-    # Unknown/foreign registrations are an idempotent no-op. A mismatched
-    # workspace claim must not delete the existing registration.
-    assert response.status_code == 204
+    # A foreign workspace claim is rejected before repository access. The
+    # existing registration must remain untouched.
+    assert response.status_code == 403
     with connect() as connection:
         assert connection.execute(
             "SELECT user_id,workspace_id FROM device_registrations WHERE device_id=%s",
             (device.id,),
         ).fetchone() == (user.id, workspace.id)
+
+
+def _session_id(connect: Callable[[], Connection], user_id: str) -> str:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT session_id FROM sessions WHERE user_id=%s ORDER BY session_id LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    assert row is not None
+    return row[0]
 
 
 @pytest.mark.parametrize(
@@ -329,7 +372,6 @@ def test_device_registration_fails_closed_without_postgres_repository_in_postgre
     assert set(store.notifications) == before_notifications
     assert set(store.device_registrations) == before_devices
     assert {event.id for event in store.audit_events} == before_audits
-    main.app.dependency_overrides.pop(AuthDependency.dependency, None)
 
 
 @pytest.mark.parametrize(
@@ -374,7 +416,6 @@ def test_postgres_device_mutations_fail_closed_without_runtime_bundle(
     assert response.json()["detail"] == "PostgreSQL notification runtime is unavailable"
     assert set(store.device_registrations) == before_devices
     assert {event.id for event in store.audit_events} == before_audits
-    main.app.dependency_overrides.pop(AuthDependency.dependency, None)
 
 
 def test_notification_route_rejects_repository_from_another_runtime(
@@ -387,7 +428,12 @@ def test_notification_route_rejects_repository_from_another_runtime(
         "get_settings",
         lambda: SimpleNamespace(postgres_auth_enabled=True),
     )
-    main.app.state.postgres_runtime = SimpleNamespace(repositories=object())
+    monkeypatch.setattr(
+        main.app.state,
+        "postgres_runtime",
+        SimpleNamespace(repositories=object()),
+        raising=False,
+    )
 
     response = TestClient(main.app).get("/notifications")
 

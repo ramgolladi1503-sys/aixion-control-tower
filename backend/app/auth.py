@@ -505,6 +505,7 @@ def require_user(
         authenticated = postgres_repository.authenticate_session(token_hash)
         if authenticated is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
+        request.state.authenticated_session_id = authenticated.session.id
         user = _to_auth_user(authenticated.user)
         # Auth and workspace ownership must be read from the same durable
         # runtime. Never let a PostgreSQL session fall back to the SQLite
@@ -527,6 +528,8 @@ def require_user(
     )
     if not session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session")
+
+    request.state.authenticated_session_id = session.id
 
     user = store.users.get(session.user_id)
     if not user or user.disabled:

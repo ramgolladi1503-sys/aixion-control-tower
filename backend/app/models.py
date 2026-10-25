@@ -516,6 +516,10 @@ class DeviceRegistration(BaseModel):
     id: str = Field(default_factory=lambda: new_id("device"))
     user_id: str | None = None
     workspace_id: str | None = None
+    # PostgreSQL push delivery is bound to the authenticated app session that
+    # registered this token. Nullable for legacy/local records; the PostgreSQL
+    # registration route requires a live session before writing.
+    session_id: str | None = None
     platform: str = "android"
     token: str
     app_version: str = ""

@@ -61,6 +61,25 @@ class ApprovalInboxScreenTest {
     val composeRule = createComposeRule()
 
     @Test
+    fun inboxUsesASectionSpecificAccessibleHeading() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalInboxContent(state = ApprovalsUiState(loading = false))
+            }
+        }
+
+        val heading = composeRule.onNodeWithTag("approval-inbox-heading")
+        heading.assertTextContains("Needs your decision")
+        assertTrue(
+            "The inbox title should be exposed as a heading to assistive technology",
+            heading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
+
+        composeRule.onNodeWithText("History").performClick()
+        heading.assertTextContains("Decision history")
+    }
+
+    @Test
     fun selectingHistoryRefreshesEvenWhenHistoryWasAlreadyLoaded() {
         var historyLoadRequests = 0
         composeRule.setContent {

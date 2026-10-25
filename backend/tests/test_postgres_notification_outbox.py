@@ -23,6 +23,7 @@ from app.models import (
     Project,
     RiskAssessment,
     RiskLevel,
+    SessionToken,
     User,
     UserRole,
     Workspace,
@@ -180,17 +181,26 @@ def _insert_user(conn: Connection, workspace: Workspace, user_id: str, *, disabl
     return user
 
 
-def _insert_device(conn: Connection, workspace: Workspace, user_id: str, token: str) -> DeviceRegistration:
+def _insert_device(
+    conn: Connection,
+    workspace: Workspace,
+    user_id: str,
+    token: str,
+    *,
+    session: SessionToken | None = None,
+) -> DeviceRegistration:
+    session = session or _insert_session(conn, user_id)
     device = DeviceRegistration(
         id=f"device_{uuid.uuid4().hex}",
         user_id=user_id,
         workspace_id=workspace.id,
+        session_id=session.id,
         token=token,
     )
     conn.execute(
         "INSERT INTO device_registrations "
-        "(device_id,user_id,workspace_id,platform,token,app_version,created_at,updated_at,payload) "
-        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "(device_id,user_id,workspace_id,platform,token,app_version,session_id,created_at,updated_at,payload) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
             device.id,
             device.user_id,
@@ -198,12 +208,76 @@ def _insert_device(conn: Connection, workspace: Workspace, user_id: str, token: 
             device.platform,
             device.token,
             device.app_version,
+            device.session_id,
             device.created_at,
             device.updated_at,
             Jsonb(device.model_dump(mode="json")),
         ),
     )
     return device
+
+
+def _insert_session(
+    conn: Connection,
+    user_id: str,
+    *,
+    revoked: bool = False,
+    expires_at: datetime | None = None,
+) -> SessionToken:
+    session = SessionToken(
+        id=f"session_{uuid.uuid4().hex}",
+        user_id=user_id,
+        token_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+        expires_at=expires_at or now_utc() + timedelta(days=1),
+        revoked=revoked,
+    )
+    conn.execute(
+        "INSERT INTO sessions(session_id,user_id,token_hash,created_at,expires_at,revoked,payload) "
+        "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+        (
+            session.id,
+            session.user_id,
+            session.token_hash,
+            session.created_at,
+            session.expires_at,
+            session.revoked,
+            Jsonb(session.model_dump(mode="json")),
+        ),
+    )
+    return session
+
+
+@pytest.mark.parametrize("session_state", ["revoked", "expired"])
+def test_postgres_device_registration_requires_an_active_user_session(
+    outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
+    session_state: str,
+) -> None:
+    repository, connect = outbox_repository
+    workspace, _, _ = _seed_notification(connect)
+    with connect() as conn:
+        user = _insert_user(conn, workspace, f"device-owner-{session_state}")
+        session = _insert_session(
+            conn,
+            user.id,
+            revoked=session_state == "revoked",
+            expires_at=(now_utc() - timedelta(seconds=1)) if session_state == "expired" else None,
+        )
+
+    with pytest.raises(PermissionError, match="active owner session"):
+        repository.register_device(
+            DeviceRegistration(
+                user_id=user.id,
+                workspace_id=workspace.id,
+                session_id=session.id,
+                token=f"fcm-invalid-session-{uuid.uuid4().hex}",
+            )
+        )
+
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM device_registrations WHERE user_id=%s",
+            (user.id,),
+        ).fetchone() == (0,)
 
 
 def _persisted_notification(connect: Callable[[], Connection], notification_id: str) -> Notification:
@@ -410,6 +484,55 @@ def test_device_targets_enforce_user_workspace_and_disabled_account_scope(
     workspace_notification = notification.model_copy(update={"user_id": None})
     workspace_targets = repository.list_device_targets(workspace_notification)
     assert {device.token for device in workspace_targets} == {"token-a", "token-b"}
+
+
+def test_device_targets_exclude_revoked_and_expired_sessions(
+    outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
+) -> None:
+    repository, connect = outbox_repository
+    workspace, _, notification = _seed_notification(connect, user_id="active-owner")
+    with connect() as conn:
+        active_user_id = "active-owner"
+        revoked_user = _insert_user(conn, workspace, "revoked-owner")
+        expired_user = _insert_user(conn, workspace, "expired-owner")
+        active_session = _insert_session(conn, active_user_id)
+        revoked_session = _insert_session(conn, revoked_user.id, revoked=True)
+        expired_session = _insert_session(
+            conn,
+            expired_user.id,
+            expires_at=now_utc() - timedelta(seconds=1),
+        )
+        _insert_device(conn, workspace, active_user_id, "token-active", session=active_session)
+        _insert_device(conn, workspace, revoked_user.id, "token-revoked", session=revoked_session)
+        _insert_device(conn, workspace, expired_user.id, "token-expired", session=expired_session)
+        # Legacy records upgraded through pg_0036 keep a NULL session and are
+        # deliberately excluded until the authenticated app re-registers.
+        legacy_device = DeviceRegistration(
+            id=f"device_legacy_{uuid.uuid4().hex}",
+            user_id=active_user_id,
+            workspace_id=workspace.id,
+            token="token-legacy-unbound",
+        )
+        conn.execute(
+            "INSERT INTO device_registrations "
+            "(device_id,user_id,workspace_id,platform,token,app_version,session_id,"
+            "created_at,updated_at,payload) VALUES(%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s)",
+            (
+                legacy_device.id,
+                legacy_device.user_id,
+                legacy_device.workspace_id,
+                legacy_device.platform,
+                legacy_device.token,
+                legacy_device.app_version,
+                legacy_device.created_at,
+                legacy_device.updated_at,
+                Jsonb(legacy_device.model_dump(mode="json")),
+            ),
+        )
+
+    targets = repository.list_device_targets(notification.model_copy(update={"user_id": None}))
+
+    assert [device.token for device in targets] == ["token-active"]
 
 
 def test_inbox_listing_and_read_state_are_workspace_and_user_scoped(

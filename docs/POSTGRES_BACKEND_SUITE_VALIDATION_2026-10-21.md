@@ -17,6 +17,14 @@ The focused auth repository, invite lookup, temporal session validation, Postgre
 
 The new `backend/tests/test_postgres_auth_cross_process.py` test creates a PostgreSQL auth session, commits owner-driven revocation in the test process, then starts a fresh spawned Python process and verifies the revoked session cannot authenticate. It passed independently (**1 passed in 0.74s**). Ruff and Python compilation passed for the new test.
 
+## Device-session binding hardening — 2026-10-25
+
+Migration `pg_0036_device_session_binding` binds each PostgreSQL push-device token to the active auth session that registered it. Dispatch targets require that exact session to remain unrevoked and unexpired. A device token re-registered by another active session is rebound and audited; logout makes the prior registration ineligible for future dispatch.
+
+The migration intentionally preserves legacy registrations with `session_id=NULL`; it does not infer or backfill a session. PostgreSQL dispatch excludes those registrations until the authenticated app registers its current FCM token again. Roll out the migration before deploying the matching backend, then have signed-in clients re-register on their next app start. This can temporarily yield `NO_DEVICE` for accounts that have not re-registered; do not manually assign legacy tokens to sessions.
+
+The migration runner executes DDL and ledger insertion in one PostgreSQL transaction under an advisory transaction lock. A failed statement rolls back the migration and ledger together. Repeated application verifies the same checksum and leaves `applied_at` unchanged; migration definitions must advance under a new ID rather than being edited after application.
+
 ## What this proves
 
 The backend test suite in this checkout passes with PostgreSQL integration tests pointed at the available local PostgreSQL test database. The focused subset exercises PostgreSQL auth repository methods and the test route that selects PostgreSQL-backed auth rate-limit storage. The new process test proves that a committed PostgreSQL session revocation is visible to a fresh process using the auth repository.

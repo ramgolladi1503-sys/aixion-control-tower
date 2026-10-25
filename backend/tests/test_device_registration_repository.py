@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from pathlib import Path
 from threading import Barrier
 
@@ -15,7 +16,7 @@ from psycopg.types.json import Jsonb
 
 from app.database_migrations import run_migrations
 from app.device_registration_repository import SQLiteDeviceRegistrationRepository
-from app.models import DeviceRegistration, Workspace
+from app.models import DeviceRegistration, SessionToken, Workspace, now_utc
 from app.notification_outbox_repository import PostgresNotificationOutboxRepository
 from app.postgres_database import run_postgres_migrations
 
@@ -81,6 +82,19 @@ def postgres_device_repository() -> Iterator[
                         Jsonb(payload),
                     ),
                 )
+                session = _session_for_test_user(user_id)
+                connection.execute(
+                    "INSERT INTO sessions(session_id,user_id,token_hash,created_at,expires_at,revoked,payload) "
+                    "VALUES(%s,%s,%s,%s,%s,FALSE,%s)",
+                    (
+                        session.id,
+                        session.user_id,
+                        session.token_hash,
+                        session.created_at,
+                        session.expires_at,
+                        Jsonb(session.model_dump(mode="json")),
+                    ),
+                )
             disabled_id = "disabled-reviewer"
             disabled_email = f"{disabled_id}@example.test"
             connection.execute(
@@ -103,6 +117,19 @@ def postgres_device_repository() -> Iterator[
                     ),
                 ),
             )
+            disabled_session = _session_for_test_user(disabled_id)
+            connection.execute(
+                "INSERT INTO sessions(session_id,user_id,token_hash,created_at,expires_at,revoked,payload) "
+                "VALUES(%s,%s,%s,%s,%s,FALSE,%s)",
+                (
+                    disabled_session.id,
+                    disabled_session.user_id,
+                    disabled_session.token_hash,
+                    disabled_session.created_at,
+                    disabled_session.expires_at,
+                    Jsonb(disabled_session.model_dump(mode="json")),
+                ),
+            )
         yield (
             PostgresNotificationOutboxRepository(connect),
             connect,
@@ -111,6 +138,15 @@ def postgres_device_repository() -> Iterator[
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def _session_for_test_user(user_id: str) -> SessionToken:
+    return SessionToken(
+        id=f"session-{user_id}",
+        user_id=user_id,
+        token_hash=f"test-session-token-hash-{user_id}",
+        expires_at=now_utc() + timedelta(days=1),
+    )
 
 
 def _persisted_sqlite_devices(connect: Callable[[], sqlite3.Connection]) -> dict[str, str]:
@@ -297,6 +333,7 @@ def test_postgres_registration_reassigns_and_unregisters_with_atomic_audit(
     device = DeviceRegistration(
         user_id="owner-a",
         workspace_id=workspace_a,
+        session_id=_session_for_test_user("owner-a").id,
         token=f"token-{uuid.uuid4().hex}",
     )
 
@@ -308,6 +345,7 @@ def test_postgres_registration_reassigns_and_unregisters_with_atomic_audit(
         DeviceRegistration(
             user_id="owner-b",
             workspace_id=workspace_b,
+            session_id=_session_for_test_user("owner-b").id,
             token=device.token,
             app_version="2.0",
         )
@@ -363,6 +401,7 @@ def test_postgres_registration_rejects_disabled_or_wrong_workspace_owner(
             DeviceRegistration(
                 user_id="owner-b",
                 workspace_id=workspace_a,
+                session_id=_session_for_test_user("owner-b").id,
                 token=f"token-{uuid.uuid4().hex}",
             )
         )
@@ -371,6 +410,7 @@ def test_postgres_registration_rejects_disabled_or_wrong_workspace_owner(
             DeviceRegistration(
                 user_id="disabled-reviewer",
                 workspace_id=workspace_b,
+                session_id=_session_for_test_user("disabled-reviewer").id,
                 token=f"token-{uuid.uuid4().hex}",
             )
         )
@@ -390,7 +430,12 @@ def test_postgres_concurrent_registration_serializes_same_token(
     def register(user_id: str, workspace_id: str) -> str:
         barrier.wait(timeout=5)
         return repository.register_device(
-            DeviceRegistration(user_id=user_id, workspace_id=workspace_id, token=token)
+            DeviceRegistration(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                session_id=_session_for_test_user(user_id).id,
+                token=token,
+            )
         ).device.id
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -437,6 +482,7 @@ def test_postgres_registration_rolls_back_when_audit_insert_fails(
     device = DeviceRegistration(
         user_id="owner-a",
         workspace_id=workspace_a,
+        session_id=_session_for_test_user("owner-a").id,
         token=f"token-{uuid.uuid4().hex}",
     )
 

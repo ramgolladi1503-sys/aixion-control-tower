@@ -5,9 +5,11 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from datetime import timedelta
 
 import psycopg
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -22,10 +24,12 @@ from app.models import (
     AuthUser,
     ExternalAgent,
     Project,
+    SessionToken,
     User,
     UserRole,
     Workspace,
     new_id,
+    now_utc,
 )
 from app.postgres_database import run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
@@ -75,6 +79,12 @@ def postgres_lifespan_approval_context(
             role=user_record.role,
             workspace_id=workspace.id,
         )
+        auth_session = SessionToken(
+            id=f"session_{uuid.uuid4().hex}",
+            user_id=user.id,
+            token_hash=hashlib.sha256(uuid.uuid4().bytes).hexdigest(),
+            expires_at=now_utc() + timedelta(hours=1),
+        )
         project = Project(
             id=f"project_{uuid.uuid4().hex}",
             name="Lifespan approval project",
@@ -98,6 +108,18 @@ def postgres_lifespan_approval_context(
                     user_record.disabled,
                     user_record.email_verified,
                     Jsonb(user_record.model_dump(mode="json")),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO sessions(session_id,user_id,token_hash,created_at,expires_at,revoked,payload) "
+                "VALUES(%s,%s,%s,%s,%s,FALSE,%s)",
+                (
+                    auth_session.id,
+                    auth_session.user_id,
+                    auth_session.token_hash,
+                    auth_session.created_at,
+                    auth_session.expires_at,
+                    Jsonb(auth_session.model_dump(mode="json")),
                 ),
             )
             connection.execute(
@@ -129,10 +151,14 @@ def postgres_lifespan_approval_context(
         monkeypatch.setattr(application_repository_access, "get_settings", lambda: settings)
         monkeypatch.setattr(notifications, "get_settings", lambda: settings)
         monkeypatch.setattr(main.PostgresRuntime, "from_environment", lambda: runtime)
+        def authenticated_test_user(request: Request) -> AuthUser:
+            request.state.authenticated_session_id = auth_session.id
+            return user
+
         monkeypatch.setitem(
             main.app.dependency_overrides,
             notifications.AuthDependency.dependency,
-            lambda: user,
+            authenticated_test_user,
         )
         monkeypatch.setitem(
             main.app.dependency_overrides,

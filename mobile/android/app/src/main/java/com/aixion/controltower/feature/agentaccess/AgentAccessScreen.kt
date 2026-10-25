@@ -43,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -141,18 +142,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            TowerHeroPanel {
-                AgentAccessStatusBadge(isLoading = state.loading)
-                Spacer(Modifier.height(TowerSpacing.md))
-                Text("Connect ${agentProviderName(state.selectedProvider)}", color = palette.ink, fontSize = 26.sp)
-                Spacer(Modifier.height(TowerSpacing.sm))
-                Text(
-                    "Create a project-limited connector credential here, then install its local hook in that project on your Mac. Approval decisions stay in this phone app.",
-                    color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp
-                )
-            }
+            AgentAccessHero(provider = state.selectedProvider, isLoading = state.loading)
         }
 
         item { AgentAccessSetupGuide(state) }
@@ -325,6 +315,27 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                 Text("Refresh agent status")
             }
         }
+    }
+}
+
+@Composable
+internal fun AgentAccessHero(provider: String, isLoading: Boolean) {
+    val palette = LocalTowerPalette.current
+    TowerHeroPanel {
+        AgentAccessStatusBadge(isLoading = isLoading)
+        Spacer(Modifier.height(TowerSpacing.md))
+        Text(
+            text = "Connect ${agentProviderName(provider)}",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.headlineMedium
+        )
+        Spacer(Modifier.height(TowerSpacing.sm))
+        Text(
+            "Create a project-limited connector credential here, then install its local hook in that project on your Mac. Approval decisions stay in this phone app.",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
 

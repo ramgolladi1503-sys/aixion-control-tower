@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -140,6 +141,37 @@ class AgentAccessSetupGuideTest {
             assertTrue("Setup title must fit the viewport", titleBounds.left >= 0f && titleBounds.right <= 240f)
             assertTrue("Setup status must fit the viewport", badgeBounds.left >= 0f && badgeBounds.right <= 240f)
             assertTrue("Setup status must sit below the title at large text", badgeBounds.top >= titleBounds.bottom)
+        }
+    }
+
+    @Test
+    fun agentAccessHeroUsesSharedHierarchyAndWrapsAtLargeFontScale() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    ControlTowerTheme {
+                        AgentAccessHero(provider = "ANTIGRAVITY", isLoading = false)
+                    }
+                }
+            }
+        }
+
+        val title = composeRule.onNodeWithText("Connect Antigravity")
+        val body = composeRule.onNodeWithText(
+            "Create a project-limited connector credential here, then install its local hook in that project on your Mac. Approval decisions stay in this phone app."
+        )
+        title.assertIsDisplayed()
+        body.assertIsDisplayed()
+        assertTrue(
+            "The hero title should be exposed as a heading",
+            title.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
+        composeRule.runOnIdle {
+            val titleBounds = title.fetchSemanticsNode().boundsInRoot
+            val bodyBounds = body.fetchSemanticsNode().boundsInRoot
+            assertTrue("The title must wrap within the narrow viewport", titleBounds.left >= 0f && titleBounds.right <= 240f)
+            assertTrue("The setup guidance must wrap within the narrow viewport", bodyBounds.left >= 0f && bodyBounds.right <= 240f)
+            assertTrue("Large text should remain multi-line", bodyBounds.height > titleBounds.height)
         }
     }
 }

@@ -15,6 +15,7 @@ from psycopg import Connection, sql
 
 from app.application_repositories import ApplicationRepositories
 from app.main import app
+from app.models import Notification
 from app.postgres_auth_repository import AuthenticatedSession, PostgresAuthRepository
 from app.postgres_database import run_postgres_migrations
 from app.store import store
@@ -65,6 +66,12 @@ def postgres_auth_runtime(
         monkeypatch.setenv("AIXION_AUTH_LOGIN_LIMIT_PER_IP", "100")
         monkeypatch.setattr(app.state, "postgres_runtime", runtime, raising=False)
         monkeypatch.setattr(app.state, "postgres_repositories", repositories, raising=False)
+        monkeypatch.setattr(
+            app.state,
+            "notification_outbox_repository",
+            repositories.notification_outbox,
+            raising=False,
+        )
         yield repository, connect, dsn, schema
     finally:
         monkeypatch.setattr(app.state, "postgres_runtime", prior_runtime, raising=False)
@@ -199,6 +206,87 @@ def test_postgres_logout_revokes_only_current_session_with_durable_audit(
     assert workspace_id == user["workspace_id"]
     assert details["session_id"] == session_id
     assert details["reason"] == "user_logout"
+
+
+def test_postgres_push_device_is_bound_to_the_registering_session_and_stops_on_logout(
+    postgres_auth_runtime: tuple[PostgresAuthRepository, Callable[[], Connection], str, str],
+) -> None:
+    _, connect, _, _ = postgres_auth_runtime
+    repositories = app.state.postgres_repositories
+    client = TestClient(app)
+    email = f"device-session-{uuid.uuid4().hex}@example.com"
+    password = "Device-Session-Local-Postgres-Password-842!"
+    user, first_token = _register_and_login(client, email, password)
+    second_login = client.post("/auth/login", json={"email": email, "password": password})
+    assert second_login.status_code == 200, second_login.text
+    second_token = second_login.json()["access_token"]
+
+    registered = client.post(
+        "/notifications/devices",
+        headers={"Authorization": f"Bearer {first_token}"},
+        json={"token": f"fcm-session-{uuid.uuid4().hex}", "app_version": "1.0"},
+    )
+    assert registered.status_code == 200, registered.text
+    device = registered.json()
+    first_session_hash = hashlib.sha256(first_token.encode()).hexdigest()
+    with connect() as conn:
+        first_session_id = conn.execute(
+            "SELECT session_id FROM sessions WHERE token_hash=%s",
+            (first_session_hash,),
+        ).fetchone()[0]
+        stored_device = conn.execute(
+            "SELECT session_id,payload->>'session_id' FROM device_registrations WHERE device_id=%s",
+            (device["id"],),
+        ).fetchone()
+    assert stored_device == (first_session_id, first_session_id)
+
+    target = Notification(
+        title="Approval",
+        body="Review requested",
+        entity_type="approval_request",
+        entity_id="approval-session-binding",
+        workspace_id=user["workspace_id"],
+        user_id=user["id"],
+    )
+    assert [item.id for item in repositories.notification_outbox.list_device_targets(target)] == [
+        device["id"]
+    ]
+
+    logged_out = client.post(
+        "/auth/logout",
+        headers={"Authorization": f"Bearer {first_token}"},
+    )
+    assert logged_out.status_code == 204
+    assert repositories.notification_outbox.list_device_targets(target) == []
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {second_token}"}).status_code == 200
+
+    rebound = client.post(
+        "/notifications/devices",
+        headers={"Authorization": f"Bearer {second_token}"},
+        json={"token": device["token"], "app_version": "1.0"},
+    )
+    assert rebound.status_code == 200, rebound.text
+    second_session_hash = hashlib.sha256(second_token.encode()).hexdigest()
+    with connect() as conn:
+        second_session_id = conn.execute(
+            "SELECT session_id FROM sessions WHERE token_hash=%s",
+            (second_session_hash,),
+        ).fetchone()[0]
+        stored_device = conn.execute(
+            "SELECT device_id,session_id,payload->>'session_id' "
+            "FROM device_registrations WHERE token=%s",
+            (device["token"],),
+        ).fetchone()
+        rebound_events = conn.execute(
+            "SELECT event_type FROM audit_events WHERE entity_id=%s "
+            "AND event_type='notification.device_session_rebound'",
+            (device["id"],),
+        ).fetchall()
+    assert stored_device == (device["id"], second_session_id, second_session_id)
+    assert len(rebound_events) == 1
+    assert [item.id for item in repositories.notification_outbox.list_device_targets(target)] == [
+        device["id"]
+    ]
 
 
 def test_postgres_auth_rejects_session_without_durable_membership(

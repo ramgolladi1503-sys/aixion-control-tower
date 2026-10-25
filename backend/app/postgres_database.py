@@ -1722,6 +1722,23 @@ POSTGRES_MIGRATIONS = (
             "CHECK (payload ? 'entity_id' AND payload->>'entity_id' = COALESCE(approval_id,task_id,project_id,device_id))",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0036_device_session_binding",
+        name="Bind mobile push devices to authenticated sessions",
+        statements=(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_id_user "
+            "ON sessions(session_id,user_id)",
+            "ALTER TABLE device_registrations ADD COLUMN IF NOT EXISTS session_id TEXT",
+            "ALTER TABLE device_registrations DROP CONSTRAINT IF EXISTS device_registrations_session_user_fk",
+            "ALTER TABLE device_registrations ADD CONSTRAINT device_registrations_session_user_fk "
+            "FOREIGN KEY (session_id,user_id) REFERENCES sessions(session_id,user_id) ON DELETE RESTRICT",
+            "ALTER TABLE device_registrations DROP CONSTRAINT IF EXISTS device_registrations_payload_session_check",
+            "ALTER TABLE device_registrations ADD CONSTRAINT device_registrations_payload_session_check "
+            "CHECK (payload->>'session_id' IS NOT DISTINCT FROM session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_device_registrations_session "
+            "ON device_registrations(session_id,user_id)",
+        ),
+    ),
 )
 
 
