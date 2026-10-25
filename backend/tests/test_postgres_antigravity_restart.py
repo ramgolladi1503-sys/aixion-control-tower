@@ -289,8 +289,9 @@ def _finish_hook(process: subprocess.Popen[str]) -> tuple[dict[str, Any], str]:
     return __import__("json").loads(lines[-1]), stderr
 
 
-def test_antigravity_pending_approval_survives_postgres_api_restart_and_claims_once(
-    tmp_path: Path,
+@pytest.mark.parametrize("decision_value", ["approve", "deny"])
+def test_antigravity_pending_approval_survives_postgres_api_restart(
+    tmp_path: Path, decision_value: str
 ) -> None:
     base_dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
     if not base_dsn:
@@ -401,59 +402,95 @@ def test_antigravity_pending_approval_survives_postgres_api_restart_and_claims_o
         with httpx.Client(base_url=base_url, timeout=5) as reviewer:
             decision = reviewer.post(
                 f"/approvals/{approval['id']}/decision",
-                json={"decision": "approve", "reason": "PostgreSQL restart integration test"},
+                json={
+                    "decision": decision_value,
+                    "reason": f"PostgreSQL restart {decision_value} integration test",
+                },
             )
         assert decision.status_code == 200, decision.text
-        assert decision.json()["status"] == "APPROVED"
+        expected_status = "APPROVED" if decision_value == "approve" else "DENIED"
+        assert decision.json()["status"] == expected_status
 
         result, _diagnostic = _finish_hook(hook_process)
         hook_process = None
-        assert result == {
-            "decision": "auto_approve",
-            "reason": "Approved from Aixion Control Tower",
-        }
+        if decision_value == "approve":
+            assert result == {
+                "decision": "auto_approve",
+                "reason": "Approved from Aixion Control Tower",
+            }
+        else:
+            assert result == {
+                "decision": "deny",
+                "reason": "Control Tower decision: DENIED",
+            }
         with connect() as connection:
-            claim = connection.execute(
-                "SELECT workspace_id,source_agent_id,source_invocation_id "
-                "FROM approval_delivery_claims WHERE approval_id=%s",
-                (approval["id"],),
-            ).fetchone()
-            assert claim is not None
-            assert claim == (workspace.id, agent_id, invocation_id)
-            delivery_audit = connection.execute(
-                "SELECT details FROM audit_events WHERE entity_id=%s "
-                "AND event_type='approval.delivery_claimed'",
-                (approval["id"],),
-            ).fetchone()
-            assert delivery_audit is not None
-            assert delivery_audit[0]["source_provider"] == "ANTIGRAVITY"
-            assert delivery_audit[0]["source_agent_id"] == agent_id
-            assert delivery_audit[0]["source_invocation_id"] == invocation_id
-            assert (
-                delivery_audit[0]["approved_payload_hash"]
-                == decision.json()["approved_payload_hash"]
-            )
-            assert delivery_audit[0]["delivery"] == "at_most_once"
-            assert (
-                connection.execute(
-                    "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            if decision_value == "approve":
+                claim = connection.execute(
+                    "SELECT workspace_id,source_agent_id,source_invocation_id "
+                    "FROM approval_delivery_claims WHERE approval_id=%s",
                     (approval["id"],),
-                ).fetchone()[0]
-                == 1
-            )
+                ).fetchone()
+                assert claim is not None
+                assert claim == (workspace.id, agent_id, invocation_id)
+                delivery_audit = connection.execute(
+                    "SELECT details FROM audit_events WHERE entity_id=%s "
+                    "AND event_type='approval.delivery_claimed'",
+                    (approval["id"],),
+                ).fetchone()
+                assert delivery_audit is not None
+                assert delivery_audit[0]["source_provider"] == "ANTIGRAVITY"
+                assert delivery_audit[0]["source_agent_id"] == agent_id
+                assert delivery_audit[0]["source_invocation_id"] == invocation_id
+                assert (
+                    delivery_audit[0]["approved_payload_hash"]
+                    == decision.json()["approved_payload_hash"]
+                )
+                assert delivery_audit[0]["delivery"] == "at_most_once"
+                assert (
+                    connection.execute(
+                        "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                        (approval["id"],),
+                    ).fetchone()[0]
+                    == 1
+                )
+            else:
+                stored = connection.execute(
+                    "SELECT status FROM approval_requests WHERE approval_id=%s",
+                    (approval["id"],),
+                ).fetchone()
+                assert stored == ("DENIED",)
+                decision_audit = connection.execute(
+                    "SELECT details FROM audit_events WHERE entity_id=%s "
+                    "AND event_type='approval.decision'",
+                    (approval["id"],),
+                ).fetchone()
+                assert decision_audit is not None
+                assert decision_audit[0]["decision"] == "deny"
+                assert decision_audit[0]["new_status"] == "DENIED"
+                assert decision_audit[0]["source_provider"] == "ANTIGRAVITY"
+                assert decision_audit[0]["source_agent_id"] == agent_id
+                assert (
+                    connection.execute(
+                        "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                        (approval["id"],),
+                    ).fetchone()[0]
+                    == 0
+                )
 
         replay_process = _launch_hook(payload, environment)
         replay, _replay_diagnostic = _finish_hook(replay_process)
         replay_process = None
         assert replay["decision"] == "deny"
         with connect() as connection:
-            assert (
-                connection.execute(
-                    "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
-                    (approval["id"],),
-                ).fetchone()[0]
-                == 1
-            )
+            assert connection.execute(
+                "SELECT status FROM approval_requests WHERE approval_id=%s",
+                (approval["id"],),
+            ).fetchone() == (expected_status,)
+            expected_claims = 1 if decision_value == "approve" else 0
+            assert connection.execute(
+                "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval["id"],),
+            ).fetchone()[0] == expected_claims
     finally:
         for process in (hook_process, replay_process):
             if process is not None and process.poll() is None:

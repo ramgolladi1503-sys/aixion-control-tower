@@ -312,6 +312,15 @@ def require_external_agent(
     x_aixion_agent_token: str | None = Header(default=None),
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ExternalAgent:
+    settings = get_settings()
+    if http_request is None and (
+        settings.is_production or settings.postgres_auth_enabled
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="External agent authentication runtime is unavailable",
+            headers={"Retry-After": "5"},
+        )
     repository = (
         agent_auth_repository
         if http_request is None
@@ -322,7 +331,7 @@ def require_external_agent(
         token=x_aixion_agent_token,
         occurred_at=now_utc(),
         window_seconds=int(AGENT_RATE_LIMIT_WINDOW.total_seconds()),
-        require_workspace=get_settings().is_production,
+        require_workspace=settings.is_production,
     )
     if isinstance(repository, SQLiteExternalAgentAuthRepository):
         if result.agent is not None:
