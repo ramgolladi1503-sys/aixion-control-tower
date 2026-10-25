@@ -101,8 +101,39 @@ class ApprovalRiskConfirmationUiTest {
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("Approve this request").assertIsNotEnabled()
+        composeRule.onAllNodesWithText("Confirm high-risk approval").assertCountEquals(0)
         composeRule.runOnIdle { assertEquals("An expired request must not submit", 0, decisionCount) }
+    }
+
+    @Test
+    fun highRiskConfirmationClosesWhenSameIdSnapshotChanges() {
+        val approval = mutableStateOf(approval(RiskLevel.HIGH))
+        var decisionCount = 0
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = approval.value,
+                lastActionMessage = null,
+                onOpenDiff = {},
+                onApprove = { decisionCount += 1 },
+                onReject = {}
+            )
+        }
+
+        composeRule.onNodeWithText("Approve request").performClick()
+        composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
+        composeRule.onNodeWithText("High impact operation", substring = true).assertExists()
+
+        composeRule.runOnIdle {
+            // Same ID and still pending, but refreshed decision context.
+            approval.value = approval.value.copy(title = "Different production action")
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onAllNodesWithText("Confirm high-risk approval").assertCountEquals(0)
+        composeRule.onNodeWithText("Different production action").assertExists()
+        composeRule.runOnIdle {
+            assertEquals("A changed snapshot must not inherit the prior confirmation", 0, decisionCount)
+        }
     }
 }
 

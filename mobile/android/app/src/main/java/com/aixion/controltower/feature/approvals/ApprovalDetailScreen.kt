@@ -241,7 +241,10 @@ fun ApprovalDetailContent(
         (!hasExactToolRequest || exactToolRequestReviewed) &&
         (!requiresFullDiffReview || (fullDiffOpened && fullDiffReviewed))
     val requiresRiskConfirmation = requiresExplicitRiskConfirmation(approval.risk)
-    var showRiskConfirmation by remember(approval.id) { mutableStateOf(false) }
+    // A high-risk confirmation is consent to the exact snapshot the reviewer saw.
+    // If a refreshed record reuses the ID but changes any decision context, close
+    // the dialog and require the reviewer to reopen it against the new snapshot.
+    var showRiskConfirmation by remember(approval) { mutableStateOf(false) }
     var showCompactToolReview by remember(approval.id) { mutableStateOf(false) }
     var showTechnicalDetails by remember(approval.id) { mutableStateOf(false) }
 
