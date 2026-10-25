@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,6 +27,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -174,25 +177,34 @@ private fun ConnectorStep(number: String, title: String, detail: String) {
 private fun ConnectorsHero() {
     val palette = LocalTowerPalette.current
     TowerHeroPanel {
-        Row(verticalAlignment = Alignment.Top) {
-            Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = "Set up a project", color = palette.brand, uppercase = false)
-                Spacer(modifier = Modifier.height(TowerSpacing.md))
-                Text(
-                    text = "Connect an agent",
-                    modifier = Modifier.semantics { heading() },
-                    color = palette.ink,
-                    style = MaterialTheme.typography.headlineLarge
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(
-                    text = "Choose the provider used by this project. Complete setup on the computer where the agent runs.",
-                    color = palette.inkMuted,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val showBrandMark = maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
+            Row(verticalAlignment = Alignment.Top) {
+                Column(modifier = if (showBrandMark) Modifier.weight(1f) else Modifier.fillMaxWidth()) {
+                    StatusBadge(label = "Set up a project", color = palette.brand, uppercase = false)
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Text(
+                        text = "Connect an agent",
+                        modifier = Modifier.semantics { heading() },
+                        color = palette.ink,
+                        style = MaterialTheme.typography.headlineLarge
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(
+                        text = "Choose the provider used by this project. Complete setup on the computer where the agent runs.",
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                if (showBrandMark) {
+                    Spacer(modifier = Modifier.padding(horizontal = TowerSpacing.xs))
+                    ForgedLogoMark(
+                        modifier = Modifier.testTag("connect-hero-logo"),
+                        size = 44.dp,
+                        color = palette.ink.copy(alpha = 0.78f)
+                    )
+                }
             }
-            Spacer(modifier = Modifier.padding(horizontal = TowerSpacing.xs))
-            ForgedLogoMark(size = 44.dp, color = palette.ink.copy(alpha = 0.78f))
         }
     }
 }

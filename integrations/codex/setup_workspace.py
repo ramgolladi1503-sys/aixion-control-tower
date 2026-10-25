@@ -33,6 +33,14 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _serialize_hooks_file(value: dict[str, Any]) -> bytes:
+    """Serialize a managed hooks file only when the hook can read it back."""
+    encoded = (json.dumps(value, indent=2) + "\n").encode()
+    if len(encoded) > MAX_JSON_BYTES:
+        raise SetupError(f"Updated Codex hooks file exceeds {MAX_JSON_BYTES} bytes")
+    return encoded
+
+
 def _api_url(value: str) -> str:
     value = value.strip().rstrip("/")
     try:
@@ -255,11 +263,7 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
     if not managed:
         hooks["PermissionRequest"] = [*existing_entries, entry]
         hooks_file["hooks"] = hooks
-        updated_hooks_bytes = (json.dumps(hooks_file, indent=2) + "\n").encode()
-        if len(updated_hooks_bytes) > MAX_JSON_BYTES:
-            raise SetupError(
-                f"Updated Codex hooks file exceeds {MAX_JSON_BYTES} bytes"
-            )
+        updated_hooks_bytes = _serialize_hooks_file(hooks_file)
         hooks_mode = stat.S_IMODE(hooks_path.stat().st_mode) if hooks_path.exists() else 0o600
     _ensure_config_dir(home, config_dir)
     config_created = False
@@ -316,22 +320,25 @@ def remove_workspace(workspace: Path, *, home: Path | None = None,
         _read_json(config_path, allow_missing=False, require_private=True)
     hooks_snapshot = _hooks_file_snapshot(hooks_path)
     remaining = [item for item in entries if item not in managed]
-    try:
-        if remaining:
-            hooks["PermissionRequest"] = remaining
-        else:
-            hooks.pop("PermissionRequest", None)
+    updated_hooks_bytes: bytes | None = None
+    if remaining:
+        hooks["PermissionRequest"] = remaining
+        hooks_file["hooks"] = hooks
+        updated_hooks_bytes = _serialize_hooks_file(hooks_file)
+    else:
+        hooks.pop("PermissionRequest", None)
         if hooks:
             hooks_file["hooks"] = hooks
-            _atomic_write(hooks_path, (json.dumps(hooks_file, indent=2) + "\n").encode(),
-                          hooks_snapshot[1])
+            updated_hooks_bytes = _serialize_hooks_file(hooks_file)
         else:
             hooks_file.pop("hooks", None)
             if hooks_file:
-                _atomic_write(hooks_path, (json.dumps(hooks_file, indent=2) + "\n").encode(),
-                              hooks_snapshot[1])
-            else:
-                hooks_path.unlink()
+                updated_hooks_bytes = _serialize_hooks_file(hooks_file)
+    try:
+        if updated_hooks_bytes is not None:
+            _atomic_write(hooks_path, updated_hooks_bytes, hooks_snapshot[1])
+        else:
+            hooks_path.unlink()
         if config_exists:
             config_path.unlink()
     except (OSError, SetupError) as remove_error:

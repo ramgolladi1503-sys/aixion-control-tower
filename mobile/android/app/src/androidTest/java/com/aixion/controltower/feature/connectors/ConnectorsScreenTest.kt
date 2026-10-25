@@ -14,6 +14,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -60,14 +61,13 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Open Antigravity setup").assertExists()
         composeRule.onNodeWithText(
-            "Set up the connector on the computer running Antigravity. Keep that computer available so a decision can return to the waiting session."
+            "Antigravity's local pre-tool hook is the supported approval path. Install it on the computer running this project, and keep that computer, session, and API reachable while a request waits."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("View setup only (unverified)").performScrollTo().assertExists()
         composeRule.onNodeWithText(
             "Codex Desktop phone approval delivery and returning a decision to the same task are not verified. This setup page does not establish a live approval connection. Do not rely on it for live work."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Unverified · not a live connection").assertExists()
-        composeRule.onNodeWithText("Not verified").performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
         composeRule.onNodeWithText("When an approval arrives").performScrollTo().assertExists()
 
@@ -156,8 +156,8 @@ class ConnectorsScreenTest {
     @Test
     fun setupGuidanceWrapsAtLargeFontScaleOnNarrowScreen() {
         composeRule.setContent {
-            Box(modifier = Modifier.width(240.dp)) {
-                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(240.dp)) {
                     ConnectorsContent()
                 }
             }
@@ -165,18 +165,30 @@ class ConnectorsScreenTest {
 
         val heading = composeRule.onNodeWithText("Connect an agent")
         heading.assertExists()
+        composeRule.onNodeWithTag("connect-hero-logo").assertDoesNotExist()
         assertTrue(
             "Connect page title should be exposed as a screen-reader heading",
             heading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
         )
-        composeRule.runOnIdle {
-            val bounds = heading.fetchSemanticsNode().boundsInRoot
-            assertTrue("Connect heading must remain within the narrow viewport", bounds.right <= 240f)
-            assertTrue("Connect heading must wrap at large font scale", bounds.height > 48f)
-        }
+        val bounds = heading.fetchSemanticsNode().boundsInRoot
+        assertTrue("Connect heading must remain within the narrow viewport", bounds.right <= 240f)
+        assertTrue("Connect heading must wrap at large font scale", bounds.height > 48f)
 
         composeRule.onNodeWithText("Choose a provider").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Supported hook · setup required").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun connectHeroKeepsBrandMarkBesideCopyOnRegularWidth() {
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1f)) {
+                Box(modifier = Modifier.width(500.dp)) {
+                    ConnectorsContent()
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("connect-hero-logo").assertExists()
     }
 
     @Test

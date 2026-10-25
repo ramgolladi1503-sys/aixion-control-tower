@@ -158,6 +158,33 @@ def test_install_refuses_output_hooks_file_over_size_limit_without_mutation(
     assert config_path.read_bytes() == config_bytes
 
 
+def test_remove_refuses_pretty_print_expansion_without_mutation(tmp_path: Path) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+
+    hooks_file = _hooks(hooks_path)
+    # Compact JSON is well below the input limit, but pretty-printing this
+    # many small values during removal expands it beyond the hook's read cap.
+    hooks_file["hooks"]["Stop"] = [{} for _ in range(10_000)]
+    original = json.dumps(hooks_file, separators=(",", ":")).encode()
+    assert len(original) <= setup.MAX_JSON_BYTES
+    hooks_path.write_bytes(original)
+    hooks_path.chmod(0o640)
+    original_config = config_path.read_bytes()
+    original_config_mode = os.stat(config_path).st_mode & 0o777
+
+    with pytest.raises(setup.SetupError, match="Updated Codex hooks file exceeds"):
+        setup.remove_workspace(workspace, home=home)
+
+    assert hooks_path.read_bytes() == original
+    assert os.stat(hooks_path).st_mode & 0o777 == 0o640
+    assert config_path.read_bytes() == original_config
+    assert os.stat(config_path).st_mode & 0o777 == original_config_mode
+
+
 def test_install_restores_legacy_config_bytes_and_mode_if_hook_write_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
