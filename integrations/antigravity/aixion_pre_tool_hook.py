@@ -820,7 +820,10 @@ def _run(
     approval_id = created.get("id")
     if (
         not isinstance(approval_id, str)
-        or not approval_id
+        # This opaque ID is interpolated into every subsequent URL path. Match
+        # the backend's canonical identifier grammar before any follow-up call;
+        # a merely non-empty value could inject path segments or query syntax.
+        or DIAGNOSTIC_APPROVAL_ID.fullmatch(approval_id) is None
         or created.get("status") not in {"PENDING_REVIEW", "REQUESTED", "APPROVED"}
         or not _matches_request_identity(
             created, approval_id=approval_id, project_id=project_id, agent_id=agent_id

@@ -583,6 +583,38 @@ def test_run_denies_create_conflict_or_mismatched_retry_response(
     assert calls == 1
 
 
+@pytest.mark.parametrize(
+    "invalid_id",
+    [
+        "approval_0123456789ab/../../identity",
+        "approval_0123456789ab?scope=other",
+        "approval_0123456789aZ",
+        "",
+    ],
+)
+def test_run_rejects_noncanonical_approval_id_before_followup_request(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_id: str,
+) -> None:
+    calls: list[str] = []
+
+    def request(method: str, url: str, _agent_id: str, _token: str,
+                body: dict | None = None, **_kwargs: object) -> dict:
+        calls.append(url)
+        assert method == "POST" and url.endswith("/agents/approvals")
+        assert body is not None
+        response = _approval_from_request(body)
+        response["id"] = invalid_id
+        return response
+
+    monkeypatch.setattr(hook, "_request", request)
+
+    result = hook.run(_hook_payload(), _test_environment())
+
+    assert result["decision"] == "deny"
+    assert len(calls) == 1
+
+
 class _FakeClock:
     def __init__(self) -> None:
         self.now = 100.0
