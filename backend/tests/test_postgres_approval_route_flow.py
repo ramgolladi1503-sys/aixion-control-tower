@@ -218,6 +218,7 @@ def _race_postgres_approval_http_decision(
     workspace_id: str,
     user_id: str,
     user_email: str,
+    user_role: str,
     decision: str,
     barrier: multiprocessing.synchronize.Barrier,
     results: multiprocessing.queues.Queue,
@@ -245,7 +246,7 @@ def _race_postgres_approval_http_decision(
             id=user_id,
             email=user_email,
             display_name="Concurrent reviewer",
-            role=UserRole.OWNER,
+            role=UserRole(user_role),
             workspace_id=workspace_id,
         )
         main.app.dependency_overrides[main.ReviewerDependency.dependency] = lambda: user
@@ -2195,6 +2196,30 @@ def test_postgres_http_decision_race_across_independent_app_processes(
     connect, workspace, project, user, repositories, _agent, _token, schema = (
         postgres_approval_route_runtime
     )
+    second_reviewer = User(
+        id=f"reviewer_{uuid.uuid4().hex}",
+        email=f"second-reviewer-{uuid.uuid4().hex}@example.test",
+        display_name="Second reviewer",
+        role=UserRole.REVIEWER,
+        password_hash="0" * 64,
+        password_salt="0" * 32,
+        workspace_id=workspace.id,
+    )
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                second_reviewer.id,
+                second_reviewer.workspace_id,
+                second_reviewer.email,
+                second_reviewer.email.lower(),
+                second_reviewer.role,
+                second_reviewer.disabled,
+                second_reviewer.email_verified,
+                Jsonb(second_reviewer.model_dump(mode="json")),
+            ),
+        )
     approval = ApprovalRequest(
         project_id=project.id,
         workspace_id=workspace.id,
@@ -2225,6 +2250,15 @@ def test_postgres_http_decision_race_across_independent_app_processes(
     context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(2)
     results = context.Queue()
+    reviewer_by_decision = {
+        "approve": (user.id, user.email, user.role.value),
+        "deny": (
+            second_reviewer.id,
+            second_reviewer.email,
+            second_reviewer.role.value,
+        ),
+    }
+    assert reviewer_by_decision["approve"][0] != reviewer_by_decision["deny"][0]
     processes = [
         context.Process(
             target=_race_postgres_approval_http_decision,
@@ -2233,8 +2267,9 @@ def test_postgres_http_decision_race_across_independent_app_processes(
                 schema,
                 approval.id,
                 workspace.id,
-                user.id,
-                user.email,
+                reviewer_by_decision[decision][0],
+                reviewer_by_decision[decision][1],
+                reviewer_by_decision[decision][2],
                 decision,
                 barrier,
                 results,
@@ -2259,11 +2294,16 @@ def test_postgres_http_decision_race_across_independent_app_processes(
     durable = repositories.approval_decisions.get(approval.id)
     assert durable is not None
     assert durable.status in {ApprovalStatus.APPROVED, ApprovalStatus.DENIED}
+    winning_decision = (
+        "approve" if durable.status == ApprovalStatus.APPROVED else "deny"
+    )
+    winning_reviewer_email = reviewer_by_decision[winning_decision][1]
     with connect() as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM audit_events WHERE entity_id=%s AND event_type='approval.decision'",
+        decision_audits = connection.execute(
+            "SELECT actor FROM audit_events WHERE entity_id=%s AND event_type='approval.decision'",
             (approval.id,),
-        ).fetchone()[0] == 1
+        ).fetchall()
+        assert decision_audits == [(winning_reviewer_email,)]
         assert connection.execute(
             "SELECT count(*) FROM notifications WHERE approval_id=%s",
             (approval.id,),

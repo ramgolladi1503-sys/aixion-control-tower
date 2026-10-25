@@ -193,6 +193,7 @@ internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
     TowerPanel(elevated = false) {
         Text(
             text = "Agent connections",
+            modifier = Modifier.semantics { heading() },
             color = palette.ink,
             style = MaterialTheme.typography.titleMedium
         )

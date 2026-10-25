@@ -139,7 +139,11 @@ class HomeScreenTest {
             HomeAgentConnectionPanel(onOpenConnect = { opened = true })
         }
 
-        composeRule.onNodeWithText("Agent connections").assertExists()
+        val connectionHeading = composeRule.onNodeWithText("Agent connections").assertExists()
+        assertTrue(
+            "Agent connection setup should be available through screen-reader heading navigation",
+            connectionHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         composeRule.onNodeWithText(
             "Set up Antigravity or Codex for the project on the computer where the agent runs. Keep that computer online while approvals are pending."
         ).assertExists()

@@ -171,10 +171,20 @@ def _postgres_pending_repository_for_request(request: Request):
     the process-local store in that state could disclose stale or incomplete
     approval data.
     """
+    settings = get_settings()
     state = request.app.state
     runtime = getattr(state, "postgres_runtime", None)
     repositories = getattr(state, "postgres_repositories", None)
-    if not get_settings().postgres_auth_enabled:
+    if getattr(settings, "is_production", False) and not settings.postgres_auth_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Production MCP gateway requires an active PostgreSQL runtime "
+                "with PostgreSQL-backed authentication"
+            ),
+            headers={"Retry-After": "1"},
+        )
+    if not settings.postgres_auth_enabled:
         if runtime is not None or repositories is not None:
             raise HTTPException(
                 status_code=503,

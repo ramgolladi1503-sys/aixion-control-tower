@@ -88,6 +88,11 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("When an approval arrives")
             .performScrollTo()
             .assertIsDisplayed()
+        val approvalFlowHeading = composeRule.onNodeWithText("When an approval arrives")
+        assertTrue(
+            "The approval flow explanation should be available through screen-reader heading navigation",
+            approvalFlowHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         composeRule.onNodeWithText(explanation, useUnmergedTree = true)
             .assertExists()
             .assertTextEquals(explanation)

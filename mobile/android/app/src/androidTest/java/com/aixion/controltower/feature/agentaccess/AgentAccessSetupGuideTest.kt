@@ -135,6 +135,10 @@ class AgentAccessSetupGuideTest {
         val badge = composeRule.onNodeWithText("0 of 2 phone steps")
         title.assertIsDisplayed()
         badge.assertIsDisplayed()
+        assertTrue(
+            "Setup progress should be available through screen-reader heading navigation",
+            title.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         composeRule.runOnIdle {
             val titleBounds = title.fetchSemanticsNode().boundsInRoot
             val badgeBounds = badge.fetchSemanticsNode().boundsInRoot

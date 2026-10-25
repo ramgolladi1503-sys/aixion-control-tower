@@ -266,6 +266,7 @@ private fun ApprovalFlowNote() {
     Column {
         Text(
             text = "When an approval arrives",
+            modifier = Modifier.semantics { heading() },
             color = palette.ink,
             style = MaterialTheme.typography.titleMedium
         )

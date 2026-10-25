@@ -1296,6 +1296,39 @@ def test_partial_postgres_runtime_does_not_fall_back_to_sqlite_pending_reads(
     assert store.mcp_pending_requests == before_pending
 
 
+def test_production_pending_read_does_not_select_process_local_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenLocalMap:
+        def values(self):
+            raise AssertionError("production MCP pending read touched process-local state")
+
+    user = AuthUser(
+        id="production-mcp-reader",
+        email="production-mcp-reader@example.test",
+        display_name="Production MCP Reader",
+        role=UserRole.OWNER,
+        workspace_id="production-mcp-workspace",
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        mcp_gateway_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+    monkeypatch.setattr(store, "mcp_pending_requests", ForbiddenLocalMap())
+
+    with pytest.raises(HTTPException) as raised:
+        mcp_gateway_routes.list_pending_gateway_requests(user=user, request=request)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert raised.value.detail == (
+        "Production MCP gateway requires an active PostgreSQL runtime "
+        "with PostgreSQL-backed authentication"
+    )
+
+
 def test_postgres_mcp_rejects_sqlite_pending_repository_in_mixed_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

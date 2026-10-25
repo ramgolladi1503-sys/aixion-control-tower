@@ -358,7 +358,12 @@ internal fun AgentAccessSetupGuide(state: AgentAccessUiState) {
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
         ) {
-            Text("Setup progress", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Setup progress",
+                modifier = Modifier.semantics { heading() },
+                color = palette.ink,
+                style = MaterialTheme.typography.titleMedium
+            )
             StatusBadge(
                 label = if (state.loading && !state.projectsLoaded) "Loading" else "$completePhoneSteps of 2 phone steps",
                 color = if (completePhoneSteps == 2) palette.positive else palette.caution,
