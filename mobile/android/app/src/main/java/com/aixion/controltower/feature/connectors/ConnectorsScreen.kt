@@ -16,6 +16,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
@@ -56,25 +58,50 @@ private fun ConnectorPrerequisitesPanel() {
     val palette = LocalTowerPalette.current
     TowerPanel {
         Text("Before you connect", color = palette.ink, style = MaterialTheme.typography.titleMedium)
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text(
-            "Open the project on the Mac where your agent runs. Keep that Mac and the same agent session running while an approval is pending.",
-            color = palette.inkMuted,
-            style = MaterialTheme.typography.bodyMedium
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        ConnectorStep(
+            number = "1",
+            title = "Open the project on its Mac",
+            detail = "Use the computer and agent session that should pause for approvals."
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text(
-            "Choose a provider below and follow its project setup steps. The connector token appears once; save it like a password.",
-            color = palette.inkMuted,
-            style = MaterialTheme.typography.bodyMedium
+        ConnectorStep(
+            number = "2",
+            title = "Keep it reachable",
+            detail = "The Mac, agent session, and Control Tower API must stay available while a request is waiting."
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        ConnectorStep(
+            number = "3",
+            title = "Save the one-time token",
+            detail = "Setup shows the connector token once. Store it like a password."
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            "The Mac, agent session, and Control Tower API must stay reachable for a decision to return. The phone cannot wake or restart the Mac, and this screen cannot confirm hook installation.",
+            "The phone cannot wake or restart the Mac. This screen does not verify hook installation.",
             color = palette.inkMuted,
-            style = MaterialTheme.typography.bodyMedium
+            style = MaterialTheme.typography.bodySmall
         )
     }
+}
+
+@Composable
+private fun ConnectorStep(number: String, title: String, detail: String) {
+    val palette = LocalTowerPalette.current
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(TowerSpacing.md),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = number,
+            color = palette.brand,
+            style = MaterialTheme.typography.titleMedium
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = palette.ink, style = MaterialTheme.typography.titleSmall)
+            Text(detail, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+    Spacer(modifier = Modifier.height(TowerSpacing.md))
 }
 
 @Composable
@@ -87,6 +114,7 @@ private fun ConnectorsHero() {
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
                     text = "Connect your coding agent",
+                    modifier = Modifier.semantics { heading() },
                     color = palette.ink,
                     style = MaterialTheme.typography.headlineLarge
                 )

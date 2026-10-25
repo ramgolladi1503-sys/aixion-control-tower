@@ -31,6 +31,11 @@ class AccountInfoPanelTest {
         }
 
         composeRule.onNodeWithText("Account information").assertExists()
+        assertTrue(
+            "Account section title should be exposed as a screen-reader heading",
+            composeRule.onNodeWithText("Account information")
+                .fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         composeRule.onNodeWithText("Owner · owner@example.com").assertExists()
         composeRule.onNodeWithText("Logout").assertExists().performClick()
         composeRule.onNodeWithText("Registration, login, and verification controls are hidden because this session is already active.")

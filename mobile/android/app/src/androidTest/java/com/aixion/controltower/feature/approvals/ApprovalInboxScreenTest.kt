@@ -132,6 +132,30 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
+    fun inboxQueueContextRemainsReadableAtLargeFontScale() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    ApprovalInboxContent(
+                        state = ApprovalsUiState(
+                            loading = false,
+                            approvals = listOf(
+                                approval("pending-heading", "Review this request", ApprovalStatus.REQUESTED)
+                            )
+                        )
+                    )
+                }
+            }
+        }
+
+        val count = composeRule.onNodeWithText("1 request is waiting for your decision.")
+        count.assertExists()
+        val bounds = count.fetchSemanticsNode().boundsInRoot
+        assertTrue("Queue summary must remain within a narrow viewport", bounds.right <= 240f)
+        assertTrue("Queue summary should wrap instead of clipping at large text", bounds.height > 24f)
+    }
+
+    @Test
     fun decisionHistoryLoadingIsAnnouncedPolitely() {
         composeRule.setContent {
             ApprovalInboxContent(

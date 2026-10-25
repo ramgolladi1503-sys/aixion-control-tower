@@ -39,6 +39,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -134,7 +135,12 @@ internal fun AccountInfoPanel(
     TowerPanel(elevated = true) {
         StatusBadge(label = "Signed in", color = palette.positive, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Account information", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Account information",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.titleMedium
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = state.userLabel ?: "Current session is active.",

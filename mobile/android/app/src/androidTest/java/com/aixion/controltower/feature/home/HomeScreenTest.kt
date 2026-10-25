@@ -8,6 +8,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -123,6 +124,11 @@ class HomeScreenTest {
         composeRule.onNodeWithText("Backend synced").assertExists()
         composeRule.onNodeWithText("Synced").assertDoesNotExist()
         composeRule.onAllNodesWithText("No approvals waiting").assertCountEquals(1)
+        assertTrue(
+            "Home status should be exposed as a screen-reader heading",
+            composeRule.onNodeWithText("No approvals waiting")
+                .fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         composeRule.onAllNodesWithText("All clear").assertCountEquals(0)
         composeRule.onAllNodesWithText("Command state").assertCountEquals(0)
         composeRule.onNodeWithText("Agent connection status is not available here.", substring = true)

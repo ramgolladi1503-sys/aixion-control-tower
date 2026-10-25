@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
@@ -31,18 +32,21 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Set up a project").assertExists()
         composeRule.onNodeWithText("Connect your coding agent").assertExists()
         composeRule.onNodeWithText("Before you connect").assertExists()
+        composeRule.onNodeWithText("Open the project on its Mac").assertExists()
         composeRule.onNodeWithText(
-            "Open the project on the Mac where your agent runs. Keep that Mac and the same agent session running while an approval is pending."
-        )
-            .assertExists()
+            "Use the computer and agent session that should pause for approvals."
+        ).assertExists()
+        composeRule.onNodeWithText("Keep it reachable").assertExists()
         composeRule.onNodeWithText(
-            "Choose a provider below and follow its project setup steps. The connector token appears once; save it like a password."
-        )
-            .assertExists()
+            "The Mac, agent session, and Control Tower API must stay available while a request is waiting."
+        ).assertExists()
+        composeRule.onNodeWithText("Save the one-time token").assertExists()
         composeRule.onNodeWithText(
-            "The Mac, agent session, and Control Tower API must stay reachable for a decision to return. The phone cannot wake or restart the Mac, and this screen cannot confirm hook installation."
-        )
-            .assertExists()
+            "Setup shows the connector token once. Store it like a password."
+        ).assertExists()
+        composeRule.onNodeWithText(
+            "The phone cannot wake or restart the Mac. This screen does not verify hook installation."
+        ).assertExists()
         composeRule.onAllNodesWithText("CONNECT ONCE").assertCountEquals(0)
         composeRule.onNodeWithText("Choose a provider").assertExists()
         composeRule.onNodeWithText("Antigravity").assertExists()
@@ -123,6 +127,10 @@ class ConnectorsScreenTest {
 
         val heading = composeRule.onNodeWithText("Connect your coding agent")
         heading.assertExists()
+        assertTrue(
+            "Connect page title should be exposed as a screen-reader heading",
+            heading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         composeRule.runOnIdle {
             val bounds = heading.fetchSemanticsNode().boundsInRoot
             assertTrue("Connect heading must remain within the narrow viewport", bounds.right <= 240f)
