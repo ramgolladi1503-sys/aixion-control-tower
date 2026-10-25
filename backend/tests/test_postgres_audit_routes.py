@@ -13,9 +13,9 @@ from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
-from app import application_repository_access, audit_routes, main
-from app.auth import require_maintainer, require_reviewer
-from app.models import AuditEvent, AuthUser, User, UserRole, Workspace, now_utc
+from app import application_repository_access, audit_routes, main, recovery_routes
+from app.auth import require_maintainer, require_owner, require_reviewer
+from app.models import AuditEvent, AuthUser, Project, User, UserRole, Workspace, now_utc
 from app.postgres_database import run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
 from app.settings import get_settings
@@ -92,6 +92,7 @@ def postgres_audit_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[
         assert membership.resolved_workspace_exists
         monkeypatch.setattr(main, "get_settings", lambda: settings)
         monkeypatch.setattr(audit_routes, "get_settings", lambda: settings)
+        monkeypatch.setattr(recovery_routes, "get_settings", lambda: settings)
         monkeypatch.setattr(
             application_repository_access, "get_settings", lambda: settings
         )
@@ -118,6 +119,7 @@ def postgres_audit_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[
             role=owner.role,
             workspace_id=workspace.id,
         )
+        monkeypatch.setitem(main.app.dependency_overrides, require_owner, lambda: user)
         monkeypatch.setitem(main.app.dependency_overrides, require_reviewer, lambda: user)
         monkeypatch.setitem(main.app.dependency_overrides, require_maintainer, lambda: user)
         yield connect, workspace, user, runtime
@@ -340,12 +342,72 @@ def test_postgres_audit_reads_fail_closed_without_matching_lifespan_bundle(
     assert runtime.repositories is not None
 
 
-def test_postgres_audit_recovery_export_remains_blocked(
+def test_postgres_audit_recovery_export_uses_workspace_scoped_runtime_snapshot(
     postgres_audit_route_runtime,
 ) -> None:
+    connect, workspace, _user, _runtime = postgres_audit_route_runtime
+    own_project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Recovery export owner project",
+        workspace_id=workspace.id,
+    )
+    foreign_workspace = Workspace(
+        id=f"workspace_{uuid.uuid4().hex}",
+        name="Foreign recovery workspace",
+        owner_user_id=f"user_{uuid.uuid4().hex}",
+    )
+    foreign_project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Foreign recovery project",
+        workspace_id=foreign_workspace.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+            (foreign_workspace.id, Jsonb(foreign_workspace.model_dump(mode="json"))),
+        )
+        for project in (own_project, foreign_project):
+            conn.execute(
+                "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+                (
+                    project.id,
+                    project.workspace_id,
+                    Jsonb(project.model_dump(mode="json")),
+                ),
+            )
+
+    client = TestClient(main.app)
+    audit_response = client.get("/audit/recovery/export")
+    client.close()
+
+    assert audit_response.status_code == 200, audit_response.text
+    audit_snapshot = audit_response.json()
+    expected_project_ids = [own_project.id]
+    assert [row["id"] for row in audit_snapshot["entities"]["projects"]] == expected_project_ids
+    assert audit_snapshot["applied_migrations"]
+
+
+@pytest.mark.parametrize("runtime_state", ["missing", "mismatched"])
+def test_postgres_recovery_export_fails_closed_without_matching_runtime(
+    postgres_audit_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_state: str,
+) -> None:
+    _connect, _workspace, _user, runtime = postgres_audit_route_runtime
+    if runtime_state == "missing":
+        monkeypatch.setattr(main.app.state, "postgres_runtime", None)
+    else:
+        mismatched = PostgresRuntime(
+            _dsn="unused",
+            profile="test",
+            _connector=lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(main.app.state, "postgres_repositories", mismatched.repositories)
+
     response = TestClient(main.app).get("/audit/recovery/export")
 
-    assert response.status_code == 503
+    assert response.status_code == 503, response.text
+    assert runtime.repositories is not None
 
 
 def test_postgres_audit_read_fails_closed_without_workspace(
