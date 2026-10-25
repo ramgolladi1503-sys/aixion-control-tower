@@ -486,7 +486,8 @@ def test_production_readiness_rejects_sqlite_application_store(monkeypatch) -> N
     readiness = build_runtime_readiness()
 
     assert readiness.status == "not_ready"
-    assert readiness.application_store_mode == "sqlite_local"
+    assert readiness.application_store_mode == "postgres_auth_runtime"
+    assert readiness.database_backend == "mixed"
     assert readiness.application_store_ready is False
     assert any("not bound to one complete PostgreSQL" in error for error in readiness.errors)
 
