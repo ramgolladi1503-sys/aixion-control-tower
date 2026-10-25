@@ -114,6 +114,63 @@ def test_install_refuses_shared_writable_hooks_without_partial_config_or_mutatio
     assert not (home / ".config").exists()
 
 
+@pytest.mark.parametrize("mode", [0o770, 0o707])
+def test_install_refuses_shared_writable_codex_directory_without_partial_mutation(
+    tmp_path: Path, mode: int,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    codex_dir = workspace / ".codex"
+    codex_dir.mkdir(parents=True)
+    codex_dir.chmod(mode)
+    hooks_path = codex_dir / "hooks.json"
+    original = json.dumps({"hooks": {"PermissionRequest": []}}).encode()
+    hooks_path.write_bytes(original)
+    hooks_path.chmod(0o600)
+
+    with pytest.raises(setup.SetupError, match=r"\.codex directory must not be group- or other-writable"):
+        _install(workspace, home)
+
+    assert hooks_path.read_bytes() == original
+    assert not (home / ".config").exists()
+
+
+def test_install_rejects_codex_directory_owned_by_another_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    (workspace / ".codex").mkdir(parents=True)
+    current_uid = os.getuid()
+    monkeypatch.setattr(setup.os, "getuid", lambda: current_uid + 1)
+
+    with pytest.raises(setup.SetupError, match=r"\.codex path must be a real directory owned by this user"):
+        _install(workspace, home)
+
+    assert not (home / ".config").exists()
+
+
+def test_remove_refuses_shared_writable_codex_directory_without_mutation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+    hooks_before = hooks_path.read_bytes()
+    config_before = config_path.read_bytes()
+    hooks_path.parent.chmod(0o770)
+
+    with pytest.raises(setup.SetupError, match=r"\.codex directory must not be group- or other-writable"):
+        setup.remove_workspace(workspace, home=home)
+
+    assert hooks_path.read_bytes() == hooks_before
+    assert config_path.read_bytes() == config_before
+
+
 def test_remove_deletes_only_managed_codex_hook_and_config(tmp_path: Path) -> None:
     home = tmp_path / "config-home"
     home.mkdir(mode=0o700)

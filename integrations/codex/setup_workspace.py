@@ -157,8 +157,11 @@ def _managed_paths(workspace: Path, home: Path, hook_script: Path) -> tuple[Path
     codex_dir = hooks_path.parent
     if os.path.lexists(codex_dir):
         metadata = codex_dir.lstat()
-        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-            raise SetupError("Workspace .codex path must be a real directory")
+        if (not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != os.getuid()):
+            raise SetupError("Workspace .codex path must be a real directory owned by this user")
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise SetupError("Workspace .codex directory must not be group- or other-writable")
     return resolved, config_path, hooks_path
 
 

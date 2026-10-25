@@ -411,10 +411,29 @@ def test_audit_reports_wal_presence_without_certifying_snapshot(tmp_path):
     result = audit(path)
 
     assert result["wal_sidecar_present"] is True
+    assert result["status"] == "REVIEW_REQUIRED"
+    assert "sqlite_wal_sidecar_present" in result["findings"]
     assert result["snapshot_certified"] is False
     assert result["migration_authorized"] is False
     assert result["entity_counts"]["future_entity"] == 1
     writer.close()
+
+
+def test_audit_blocks_structural_pass_when_shm_sidecar_exists(tmp_path):
+    path = tmp_path / "shm_source.sqlite3"
+    _create_db(path, [
+        ("workspace", "ws1", {
+            "id": "ws1", "name": "Account", "owner_user_id": "owner1",
+        }),
+    ])
+    shm_sidecar = path.with_name(path.name + "-shm")
+    shm_sidecar.write_bytes(b"")
+
+    result = audit(path)
+
+    assert result["shm_sidecar_present"] is True
+    assert "sqlite_shm_sidecar_present" in result["findings"]
+    assert result["status"] == "REVIEW_REQUIRED"
 
 
 def test_audit_reports_unknown_entity_and_invalid_payload_without_exposing_payload(tmp_path):

@@ -162,6 +162,7 @@ def audit(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError("database path must name an existing regular file")
     wal_sidecar = path.with_name(path.name + "-wal")
+    shm_sidecar = path.with_name(path.name + "-shm")
     uri = f"file:{quote(path.resolve().as_posix(), safe='/')}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, timeout=5.0)
     conn.row_factory = sqlite3.Row
@@ -180,6 +181,7 @@ def audit(path: Path) -> dict[str, Any]:
             "scope": "read_only_structural_review_only",
             "snapshot_certified": False,
             "wal_sidecar_present": wal_sidecar.exists(),
+            "shm_sidecar_present": shm_sidecar.exists(),
             "snapshot_note": (
                 "This audit does not prove a quiesced or recoverable SQLite snapshot; "
                 "WAL sidecars must be handled by a coordinated backup procedure."
@@ -208,6 +210,10 @@ def audit(path: Path) -> dict[str, Any]:
         }
         if unknown_tables:
             report["findings"].append("unknown_source_tables")
+        if report["wal_sidecar_present"]:
+            report["findings"].append("sqlite_wal_sidecar_present")
+        if report["shm_sidecar_present"]:
+            report["findings"].append("sqlite_shm_sidecar_present")
         if "kv_store" not in tables:
             report["findings"].append("missing_kv_store_table")
             return report
@@ -655,6 +661,15 @@ def audit(path: Path) -> dict[str, Any]:
             report["findings"].append("workspace_owner_has_multiple_workspaces")
         if identity_conflict_keys:
             report["findings"].append("duplicate_normalized_user_email")
+        # Recheck before declaring a pass so a sidecar created while the
+        # read-only audit was running cannot be missed. If one was present at
+        # open time, retain the finding even if it disappeared meanwhile.
+        report["wal_sidecar_present"] = report["wal_sidecar_present"] or wal_sidecar.exists()
+        report["shm_sidecar_present"] = report["shm_sidecar_present"] or shm_sidecar.exists()
+        if report["wal_sidecar_present"] and "sqlite_wal_sidecar_present" not in report["findings"]:
+            report["findings"].append("sqlite_wal_sidecar_present")
+        if report["shm_sidecar_present"] and "sqlite_shm_sidecar_present" not in report["findings"]:
+            report["findings"].append("sqlite_shm_sidecar_present")
         if not report["findings"]:
             report["status"] = "STRUCTURAL_REVIEW_PASSED"
         return report
