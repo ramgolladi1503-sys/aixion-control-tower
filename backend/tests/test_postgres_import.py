@@ -1798,6 +1798,82 @@ def test_import_preserves_removed_device_audit_after_device_row_was_deleted(
     )
 
 
+def test_device_token_invalidation_inventory_uses_explicit_workspace_without_live_device(
+    tmp_path,
+):
+    path = tmp_path / "snapshot_with_removed_device_invalidation_inventory.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-device-token-invalidated-inventory",
+        "event_type": "notification.device_token_invalidated",
+        "actor": "system:fcm",
+        "entity_id": "d1",
+        "workspace_id": "ws1",
+        "details": {"platform": "android"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "DELETE FROM kv_store WHERE entity_type='device_registration' AND entity_id='d1'"
+        )
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    report = build_audit_event_inventory_report(path)
+    row = next(
+        item for item in report["events"]
+        if item["entity_id"] == "d1" and item["event_type"] == event["event_type"]
+    )
+
+    assert row["parent_entity_type"] == "device_registration"
+    assert row["parent_resolution"] == "device_token_invalidation_workspace_scope"
+    assert row["parent_exists"] is False
+    assert row["parent_identity_match"] is None
+    assert row["parent_workspace_exists"] is True
+    assert row["workspace_match"] is True
+    assert row["classification"] == "explicit_workspace_scope_without_live_device_parent"
+
+
+def test_removed_device_token_invalidation_without_persisted_workspace_blocks_import(
+    tmp_path,
+):
+    path = tmp_path / "snapshot_with_unscoped_removed_device_invalidation.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-device-token-invalidated-unscoped",
+        "event_type": "notification.device_token_invalidated",
+        "actor": "system:fcm",
+        "entity_id": "d1",
+        "workspace_id": "missing-workspace",
+        "details": {"platform": "android"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "DELETE FROM kv_store WHERE entity_type='device_registration' AND entity_id='d1'"
+        )
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    report = build_audit_event_inventory_report(path)
+    row = next(
+        item for item in report["events"]
+        if item["entity_id"] == "d1" and item["event_type"] == event["event_type"]
+    )
+    assert row["parent_resolution"] == "event_type_rule"
+    assert row["parent_workspace_exists"] is False
+    assert row["classification"] == "parent_not_found"
+
+    with pytest.raises(ImportBlocked, match="structural audit did not pass"):
+        build_plan(path)
+
+
 def test_import_preserves_external_agent_token_rotation_audit(tmp_path, postgres_import_dsn):
     path = tmp_path / "snapshot_with_agent_token_rotation_audit.sqlite3"
     _snapshot(path)

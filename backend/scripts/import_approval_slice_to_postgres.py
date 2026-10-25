@@ -317,6 +317,19 @@ def _resolve_audit_event_parent(
             workspace = workspaces.get(workspace_id)
             if workspace is not None:
                 return "device_registration", {**workspace, "workspace_id": workspace_id}, "device_unregister_workspace_scope"
+        if event_type == "notification.device_token_invalidated" and workspace_id:
+            # FCM invalidation deletes the registration and appends its audit
+            # row in one transaction. A later SQLite snapshot therefore has
+            # no device row to join against. The event's explicit workspace
+            # must still resolve to a persisted workspace; use that record
+            # only as scope evidence and never synthesize a registration.
+            workspace = workspaces.get(workspace_id)
+            if workspace is not None:
+                return (
+                    "device_registration",
+                    {**workspace, "workspace_id": workspace_id},
+                    "device_token_invalidation_workspace_scope",
+                )
         return "device_registration", None, "event_type_rule"
     if entity_id in users and event_type in {
         "auth.account_deletion_requested",
@@ -615,7 +628,11 @@ def build_audit_event_inventory_report(path: Path) -> dict[str, Any]:
             mcp_pending=mcp_pending,
             test_runs=test_runs,
         )
-        parent_exists = parent is not None and resolution != "device_unregister_workspace_scope"
+        workspace_scoped_device_lifecycle = resolution in {
+            "device_unregister_workspace_scope",
+            "device_token_invalidation_workspace_scope",
+        }
+        parent_exists = parent is not None and not workspace_scoped_device_lifecycle
         # Workspace records are keyed by workspace_id in the source/target
         # persistence contract. The resolver annotates that key explicitly;
         # use it for identity evidence rather than assuming every parent uses
@@ -654,7 +671,7 @@ def build_audit_event_inventory_report(path: Path) -> dict[str, Any]:
             classification = "workspace_mismatch"
         elif workspace_id not in workspaces:
             classification = "workspace_not_found_in_snapshot"
-        elif resolution == "device_unregister_workspace_scope":
+        elif workspace_scoped_device_lifecycle:
             classification = "explicit_workspace_scope_without_live_device_parent"
         elif resolution == "entity_id_fallback":
             classification = "same_workspace_parent_via_entity_id_fallback"
