@@ -199,11 +199,21 @@ def _stop_server(
     assert process.exitcode == 0
 
 
+@pytest.mark.parametrize(
+    ("decision_value", "expected_decision", "expected_claims"),
+    [
+        ("approve", "auto_approve", 1),
+        ("deny", "deny", 0),
+    ],
+)
 def test_lifespan_owned_postgres_approval_survives_api_restart_and_resumes_once(
     postgres_approval_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
+    decision_value: str,
+    expected_decision: str,
+    expected_claims: int,
 ) -> None:
-    """Prove real lifespan repository selection, API restart, and hook recovery."""
+    """Prove approve and deny decisions recover across a real API restart."""
     connect, workspace, project, reviewer, _repositories, agent, token, schema = (
         postgres_approval_route_runtime
     )
@@ -295,15 +305,20 @@ def test_lifespan_owned_postgres_approval_survives_api_restart_and_resumes_once(
         with httpx.Client(timeout=15) as client:
             decision = client.post(
                 f"{first[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "restart recovery E2E"},
+                json={"decision": decision_value, "reason": "restart recovery E2E"},
             )
         assert decision.status_code == 200, decision.text
-        assert decision.json()["status"] == ApprovalStatus.APPROVED
+        expected_status = (
+            ApprovalStatus.APPROVED
+            if decision_value == "approve"
+            else ApprovalStatus.DENIED
+        )
+        assert decision.json()["status"] == expected_status
         with connect() as connection:
             assert connection.execute(
                 "SELECT status FROM approval_requests WHERE approval_id=%s",
                 (approval_id,),
-            ).fetchone() == (ApprovalStatus.APPROVED,)
+            ).fetchone() == (expected_status,)
             assert connection.execute(
                 "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
                 "AND event_type='approval.decision'",
@@ -328,8 +343,12 @@ def test_lifespan_owned_postgres_approval_survives_api_restart_and_resumes_once(
         stdout, stderr = hook.communicate(timeout=30)
         assert hook.returncode == 0, stderr
         assert json.loads(stdout) == {
-            "decision": "auto_approve",
-            "reason": "Approved from Aixion Control Tower",
+            "decision": expected_decision,
+            "reason": (
+                "Approved from Aixion Control Tower"
+                if decision_value == "approve"
+                else "Control Tower decision: DENIED"
+            ),
         }
 
         with connect() as connection:
@@ -337,35 +356,40 @@ def test_lifespan_owned_postgres_approval_survives_api_restart_and_resumes_once(
                 "SELECT approval_id,status,source_invocation_id FROM approval_requests "
                 "WHERE approval_id=%s AND workspace_id=%s AND source_agent_id=%s",
                 (approval_id, workspace.id, agent.id),
-            ).fetchall() == [(approval_id, ApprovalStatus.APPROVED, invocation_id)]
+            ).fetchall() == [(approval_id, expected_status, invocation_id)]
             assert connection.execute(
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
                 (approval_id,),
-            ).fetchone()[0] == 1
-            replay = httpx.post(
-                f"{second[2]}/agents/approvals/{approval_id}/consume",
-                headers={
-                    "X-Aixion-Agent-Id": agent.id,
-                    "X-Aixion-Agent-Token": token,
-                    "X-Aixion-Approval-Protocol": "1",
-                },
-                timeout=15,
-            )
-            assert replay.status_code == 409, replay.text
-            assert "already delivered" in replay.json()["detail"]
-            assert connection.execute(
-                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
-                (approval_id,),
-            ).fetchone()[0] == 1
+            ).fetchone()[0] == expected_claims
+            if decision_value == "approve":
+                replay = httpx.post(
+                    f"{second[2]}/agents/approvals/{approval_id}/consume",
+                    headers={
+                        "X-Aixion-Agent-Id": agent.id,
+                        "X-Aixion-Agent-Token": token,
+                        "X-Aixion-Approval-Protocol": "1",
+                    },
+                    timeout=15,
+                )
+                assert replay.status_code == 409, replay.text
+                assert "already delivered" in replay.json()["detail"]
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                    (approval_id,),
+                ).fetchone()[0] == 1
             for event_type in (
                 "approval.created_by_agent",
                 "approval.decision",
-                "approval.delivery_claimed",
             ):
                 assert connection.execute(
                     "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s AND event_type=%s",
                     (approval_id, event_type),
                 ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.delivery_claimed'",
+                (approval_id,),
+            ).fetchone()[0] == expected_claims
     finally:
         if hook is not None and hook.poll() is None:
             hook.kill()

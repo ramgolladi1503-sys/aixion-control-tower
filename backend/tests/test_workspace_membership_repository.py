@@ -208,6 +208,45 @@ def test_production_workspace_authorization_rejects_claim_without_durable_user(
     assert error.value.detail == "Workspace membership is required"
 
 
+@pytest.mark.parametrize("authoritative_mode", ["production", "postgres_auth"])
+def test_workspace_id_resolution_rejects_implicit_sqlite_membership_in_authoritative_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    authoritative_mode: str,
+) -> None:
+    monkeypatch.setattr(
+        workspace_access,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=authoritative_mode == "production",
+            postgres_auth_enabled=authoritative_mode == "postgres_auth",
+        ),
+    )
+
+    class ForbiddenMembershipRepository:
+        def snapshot(self, **_kwargs):
+            pytest.fail("implicit SQLite workspace membership must not be read")
+
+    monkeypatch.setattr(
+        workspace_access,
+        "workspace_membership_repository",
+        ForbiddenMembershipRepository(),
+    )
+    user = AuthUser(
+        id="owner",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id="claimed-workspace",
+    )
+
+    with pytest.raises(HTTPException) as error:
+        workspace_id_for_user(user)
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert "PostgreSQL" in error.value.detail
+
+
 def test_postgres_membership_snapshot_reads_normalized_scope_atomically(
     postgres_schema,
     monkeypatch: pytest.MonkeyPatch,

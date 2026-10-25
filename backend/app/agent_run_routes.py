@@ -383,11 +383,17 @@ def _require_non_production_fault_injection() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
-def _require_durable_fault_repository(request: Request) -> None:
-    state = request.app.state
+def _require_durable_fault_repository() -> None:
+    # Fault controls currently live only in the SQLite store. Whether a
+    # PostgreSQL probe object happens to be attached does not select that
+    # database as the application authority; probe-only mode intentionally
+    # retains the local SQLite adapter. Conversely, PostgreSQL auth mode must
+    # fail closed even when called without a Request or before runtime state is
+    # available, rather than silently using process-local fault state.
+    settings = get_settings()
     if (
-        getattr(state, "postgres_runtime", None) is not None
-        or getattr(state, "postgres_repositories", None) is not None
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_auth_enabled", False)
     ):
         raise HTTPException(
             status_code=503,
@@ -581,8 +587,7 @@ def list_faults(
     request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentRunFaultConfig]:
     _require_non_production_fault_injection()
-    if request is not None:
-        _require_durable_fault_repository(request)
+    _require_durable_fault_repository()
     workspace_id = workspace_id_for_user(user)
     return sorted(
         [
@@ -608,8 +613,7 @@ def create_fault(
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunFaultConfig:
     _require_non_production_fault_injection()
-    if request is not None:
-        _require_durable_fault_repository(request)
+    _require_durable_fault_repository()
     workspace_id = workspace_id_for_user(user)
     if not payload.run_id:
         raise HTTPException(
@@ -650,8 +654,7 @@ def disable_fault(
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunFaultConfig:
     _require_non_production_fault_injection()
-    if request is not None:
-        _require_durable_fault_repository(request)
+    _require_durable_fault_repository()
     fault = store.agent_run_faults.get(fault_id)
     workspace_id = workspace_id_for_user(user)
     if (

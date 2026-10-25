@@ -42,6 +42,16 @@ def workspace_id_for_user(
     membership repository from the same lifespan-owned PostgreSQL bundle.
     The SQLite adapter remains the default for the local/test application.
     """
+    settings = get_settings()
+    if membership_repository is None and (
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_auth_enabled", False)
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL workspace membership repository is required",
+            headers={"Retry-After": "1"},
+        )
     repository = membership_repository or workspace_membership_repository
     membership = repository.snapshot(
         user_id=user.id,

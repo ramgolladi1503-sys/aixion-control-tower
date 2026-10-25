@@ -47,8 +47,8 @@ fun ConnectorsContent(
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item { ConnectorsHero() }
-        item { ConnectorPrerequisitesPanel() }
         item { ProviderSetupPanel(onOpenAgentAccess = onOpenAgentAccess) }
+        item { ConnectorPrerequisitesPanel() }
         item { ApprovalFlowNote() }
     }
 }
@@ -57,7 +57,12 @@ fun ConnectorsContent(
 private fun ConnectorPrerequisitesPanel() {
     val palette = LocalTowerPalette.current
     TowerPanel {
-        Text("Before you connect", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Before you connect",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.titleMedium
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ConnectorStep(
             number = "1",
@@ -137,6 +142,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
     TowerPanel {
         Text(
             text = "Choose a provider",
+            modifier = Modifier.semantics { heading() },
             color = palette.ink,
             style = MaterialTheme.typography.titleLarge
         )
@@ -174,6 +180,7 @@ private fun ProviderSetupCard(
     TowerPanel(elevated = true) {
         Text(
             text = name,
+            modifier = Modifier.semantics { heading() },
             color = palette.ink,
             style = MaterialTheme.typography.titleMedium
         )

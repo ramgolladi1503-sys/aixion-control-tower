@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.connectors
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
@@ -139,5 +140,32 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Choose a provider").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Earlier build tested").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun providerChoiceComesBeforePrerequisitesAndBothSectionsAreHeadings() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(390.dp).height(1800.dp)) {
+                ConnectorsContent()
+            }
+        }
+
+        val providerHeading = composeRule.onNodeWithText("Choose a provider")
+        val prerequisiteHeading = composeRule.onNodeWithText("Before you connect")
+        providerHeading.assertIsDisplayed()
+        prerequisiteHeading.assertIsDisplayed()
+        assertTrue(
+            "Provider choices should appear before setup prerequisites",
+            providerHeading.fetchSemanticsNode().boundsInRoot.center.y <
+                prerequisiteHeading.fetchSemanticsNode().boundsInRoot.center.y
+        )
+        assertTrue(
+            "Provider choices should be announced as a heading",
+            providerHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
+        assertTrue(
+            "Prerequisites should be announced as a heading",
+            prerequisiteHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
     }
 }
