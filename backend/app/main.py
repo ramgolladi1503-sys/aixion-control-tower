@@ -1683,10 +1683,19 @@ def list_audit_events(
     user: AuthUser = ReviewerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[AuditEvent]:
+    settings = get_settings()
+    if http_request is None and (settings.is_production or settings.postgres_auth_enabled):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Audit reads are unavailable without the active request-scoped "
+                "PostgreSQL runtime."
+            ),
+        )
     if http_request is not None:
         state = http_request.app.state
         postgres_runtime = getattr(state, "postgres_runtime", None)
-        if get_settings().postgres_auth_enabled or postgres_runtime is not None:
+        if settings.postgres_auth_enabled or postgres_runtime is not None:
             repositories = getattr(state, "postgres_repositories", None)
             runtime_repositories = getattr(postgres_runtime, "repositories", None)
             runtime_audit_repository = getattr(repositories, "audit_events", None)

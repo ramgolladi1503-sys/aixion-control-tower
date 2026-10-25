@@ -8,6 +8,7 @@ from datetime import timedelta
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -356,3 +357,72 @@ def test_postgres_audit_read_fails_closed_without_workspace(
     response = TestClient(main.app).get("/audit/events")
 
     assert response.status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("profile", "postgres_auth_enabled"),
+    [("production", False), ("test", True)],
+)
+def test_direct_legacy_audit_read_fails_closed_before_sqlite_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+    postgres_auth_enabled: bool,
+) -> None:
+    settings = replace(
+        get_settings(),
+        profile=profile,
+        postgres_auth_enabled=postgres_auth_enabled,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    def unexpected_workspace_lookup(_user: AuthUser) -> str | None:
+        raise AssertionError("direct audit read touched SQLite workspace membership")
+
+    class UnexpectedAuditEvents:
+        def __iter__(self):
+            raise AssertionError("direct audit read touched SQLite audit events")
+
+    monkeypatch.setattr(main, "_workspace_id_for_user", unexpected_workspace_lookup)
+    monkeypatch.setattr(main.store, "audit_events", UnexpectedAuditEvents())
+    user = AuthUser(
+        id="direct-audit-user",
+        email="direct-audit@example.test",
+        display_name="Direct audit user",
+        role=UserRole.OWNER,
+        workspace_id="workspace_direct_audit",
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        main.list_audit_events(user=user, http_request=None)
+
+    assert raised.value.status_code == 503
+
+
+def test_direct_legacy_audit_read_retains_local_sqlite_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        get_settings(),
+        profile="test",
+        postgres_auth_enabled=False,
+        postgres_runtime_probe_enabled=True,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    event = AuditEvent(
+        workspace_id="workspace_direct_audit",
+        event_type="local.direct_audit_read",
+        entity_id="direct-audit",
+        actor="owner@example.test",
+        details={"source": "sqlite"},
+    )
+    monkeypatch.setattr(main, "_workspace_id_for_user", lambda _user: "workspace_direct_audit")
+    monkeypatch.setattr(main.store, "audit_events", [event])
+    user = AuthUser(
+        id="direct-audit-user",
+        email="direct-audit@example.test",
+        display_name="Direct audit user",
+        role=UserRole.OWNER,
+        workspace_id="workspace_direct_audit",
+    )
+
+    assert main.list_audit_events(user=user, http_request=None) == [event]
