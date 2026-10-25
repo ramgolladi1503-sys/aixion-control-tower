@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.agent_run_models import (
@@ -13,6 +15,7 @@ from app.agent_run_models import (
     AgentRunStep,
     AgentRunStepStatus,
 )
+from app import agent_run_routes
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.approval_integrity import compute_approval_payload_hash
 from app.main import app
@@ -24,6 +27,8 @@ from app.models import (
     Project,
     RiskAssessment,
     RiskLevel,
+    AuthUser,
+    UserRole,
 )
 from app.store import store
 
@@ -124,6 +129,79 @@ def test_create_list_detail_summary_and_metrics_routes() -> None:
     assert resumed.status_code == 200 and resumed.json()["run"]["status"] == "SCHEDULED"
     cancelled = client.post(f"/agent/runs/{run_id}/cancel", json={"reason": "route test"})
     assert cancelled.status_code == 200 and cancelled.json()["run"]["status"] == "CANCELLED"
+
+
+@pytest.mark.parametrize("authoritative_mode", ["production", "postgres_auth"])
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda user: agent_run_routes.recover_stale_run_leases(user=user),
+        lambda user: agent_run_routes.bind_run_capability_lease(
+            "missing-run",
+            agent_run_routes.AgentRunCapabilityLeaseRequest(capability_lease_id="lease"),
+            user=user,
+        ),
+        lambda user: agent_run_routes.heartbeat_agent_run(
+            "missing-run",
+            agent_run_routes.AgentRunHeartbeatRequest(worker_id="worker", lease_token="token"),
+            user=user,
+        ),
+        lambda user: agent_run_routes.pause_run(
+            "missing-run", agent_run_routes.AgentRunControlRequest(), user=user
+        ),
+        lambda user: agent_run_routes.resume_run(
+            "missing-run", agent_run_routes.AgentRunControlRequest(), user=user
+        ),
+        lambda user: agent_run_routes.cancel_run(
+            "missing-run", agent_run_routes.AgentRunControlRequest(), user=user
+        ),
+        lambda user: agent_run_routes.retry_run(
+            "missing-run", agent_run_routes.AgentRunRetryRequest(), user=user
+        ),
+    ],
+    ids=["lease-recovery", "capability", "heartbeat", "pause", "resume", "cancel", "retry"],
+)
+def test_mutating_run_routes_require_app_request_in_authoritative_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    authoritative_mode: str,
+    invoke,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=authoritative_mode == "production",
+            postgres_auth_enabled=authoritative_mode == "postgres_auth",
+        ),
+    )
+    monkeypatch.setattr(
+        agent_run_routes,
+        "agent_run_repository_for_request",
+        lambda _request: pytest.fail("repository selection must not run without Request"),
+    )
+    monkeypatch.setattr(
+        agent_run_routes,
+        "_run_or_404",
+        lambda *_args, **_kwargs: pytest.fail("SQLite run lookup must not run"),
+    )
+    monkeypatch.setattr(
+        agent_run_routes,
+        "recover_stale_leases",
+        lambda **_kwargs: pytest.fail("SQLite lease recovery must not run"),
+    )
+    user = AuthUser(
+        id="owner",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        invoke(user)
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert "app-bound request" in error.value.detail
 
 
 @pytest.mark.parametrize(

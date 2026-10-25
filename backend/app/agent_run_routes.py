@@ -265,6 +265,17 @@ def _release_execution_lock(run_id: str, lock: Lock) -> None:
             _EXECUTION_LOCKS.pop(run_id, None)
 
 
+def _require_app_bound_request(request: Request | None, operation: str) -> None:
+    """Prevent internal callers from selecting SQLite in authoritative modes."""
+    settings = get_settings()
+    if request is None and (settings.is_production or settings.postgres_auth_enabled):
+        raise HTTPException(
+            status_code=503,
+            detail=f"PostgreSQL AgentRun {operation} requires an app-bound request",
+            headers={"Retry-After": "1"},
+        )
+
+
 @router.post("", response_model=AgentRunDetail)
 def create_run(
     payload: AgentRunCreate,
@@ -546,6 +557,7 @@ def recover_stale_run_leases(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, int]:
+    _require_app_bound_request(request, "lease recovery")
     repository = agent_run_repository_for_request(request) if request is not None else None
     workspace_id = (
         workspace_id_for_request(user, request)
@@ -707,6 +719,7 @@ def bind_run_capability_lease(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
+    _require_app_bound_request(request, "capability lease binding")
     run_repository = agent_run_repository_for_request(request) if request is not None else None
     if isinstance(run_repository, PostgresAgentRunRepository):
         workspace_id = workspace_id_for_request(user, request)
@@ -1024,6 +1037,7 @@ def heartbeat_agent_run(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRun:
+    _require_app_bound_request(request, "heartbeat")
     repository = agent_run_repository_for_request(request) if request is not None else None
     run = (
         _durable_run_or_404(run_id, user=user, request=request)
@@ -1049,6 +1063,7 @@ def pause_run(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
+    _require_app_bound_request(request, "pause")
     repository = agent_run_repository_for_request(request) if request is not None else None
     run = (
         _durable_run_or_404(run_id, user=user, request=request)
@@ -1072,6 +1087,7 @@ def resume_run(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
+    _require_app_bound_request(request, "resume")
     repository = agent_run_repository_for_request(request) if request is not None else None
     run = (
         _durable_run_or_404(run_id, user=user, request=request)
@@ -1094,6 +1110,7 @@ def cancel_run(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
+    _require_app_bound_request(request, "cancellation")
     repository = agent_run_repository_for_request(request) if request is not None else None
     run = (
         _durable_run_or_404(run_id, user=user, request=request)
@@ -1117,6 +1134,7 @@ def retry_run(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
+    _require_app_bound_request(request, "retry")
     repository = agent_run_repository_for_request(request) if request is not None else None
     run = (
         _durable_run_or_404(run_id, user=user, request=request)
