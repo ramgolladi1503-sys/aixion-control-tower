@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.auth import require_user
 from app import ops_routes
-from app.main import app
+from app.main import _POSTGRES_APP_STATE_BINDINGS, app
 from app.models import AuthUser, UserRole
 from app.settings import get_settings
 from app.ops_routes import build_runtime_readiness
@@ -389,6 +389,11 @@ def test_readiness_recognizes_sqlite_repository_subclasses() -> None:
 
 
 def test_readiness_reports_all_high_risk_postgres_lifespan_bindings() -> None:
+    assert set(ops_routes._APP_STATE_REPOSITORIES.values()) == {
+        (state_name, repository_name)
+        for state_name, repository_name in _POSTGRES_APP_STATE_BINDINGS.items()
+    }
+
     binding_fields = {
         "agent_run_faults": (
             "agent_run_fault_repository",
