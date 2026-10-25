@@ -9,36 +9,16 @@ from fastapi import FastAPI
 
 from app import main
 from app import postgres_notification_dispatcher as postgres_dispatcher
+from app.application_repositories import ApplicationRepositories
 from app.models import DeviceRegistration, Notification, now_utc
 from app.notification_outbox_repository import PostgresNotificationOutboxRepository
 
 
 class FakeRuntime:
     def __init__(self) -> None:
-        self.repositories = SimpleNamespace(
-            notification_outbox=object.__new__(PostgresNotificationOutboxRepository),
-            approval_decisions=object(),
-            agent_tasks=object(),
-            agent_runs=object(),
-            agent_run_faults=object(),
-            agent_run_branch_intents=object(),
-            agent_run_apply_change_intents=object(),
-            agent_run_pull_request_intents=object(),
-            agent_run_validation_intents=object(),
-            projects=object(),
-            workspace_membership=object(),
-            external_agent_auth=object(),
-            audit_events=object(),
-            email_outbox=object(),
-            work_orders=object(),
-            ideas=object(),
-            test_runs=object(),
-            connectors=object(),
-            mcp_child_servers=object(),
-            mcp_pending_requests=object(),
-            trust=object(),
-            trust_events=object(),
-        )
+        # The lifespan validates the complete typed bundle, while this worker
+        # test deliberately avoids opening a database connection.
+        self.repositories = ApplicationRepositories.from_connector(lambda: None)
         self.closed = False
 
     def open(self, *, wait: bool = False) -> None:
