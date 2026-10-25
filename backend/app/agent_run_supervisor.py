@@ -747,7 +747,6 @@ def create_agent_run(
     if not any(provided_repositories) and (
         settings.is_production
         or settings.postgres_auth_enabled
-        or settings.postgres_runtime_probe_enabled
     ):
         raise AgentRunConflict(
             "AgentRun creation requires explicit durable repositories in production "
@@ -759,7 +758,6 @@ def create_agent_run(
     if (
         settings.is_production
         or settings.postgres_auth_enabled
-        or settings.postgres_runtime_probe_enabled
     ) and not (
         isinstance(active_task_repository, PostgresAgentTaskRepository)
         and isinstance(active_approval_repository, PostgresApprovalDecisionRepository)
@@ -1649,7 +1647,6 @@ def execute_next_step(
     if run_repository is None and (
         settings.is_production
         or settings.postgres_auth_enabled
-        or settings.postgres_runtime_probe_enabled
     ):
         raise AgentRunConflict(
             "AgentRun execution requires an explicit durable repository in production "
@@ -1696,7 +1693,6 @@ def execute_next_step(
     if (
         settings.is_production
         or settings.postgres_auth_enabled
-        or settings.postgres_runtime_probe_enabled
     ) and not isinstance(active_run_repository, PostgresAgentRunRepository):
         raise AgentRunConflict(
             "AgentRun execution requires a PostgreSQL repository in production "

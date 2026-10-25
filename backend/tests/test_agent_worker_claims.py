@@ -34,7 +34,7 @@ def setup_function() -> None:
 
 @pytest.mark.parametrize(
     "authoritative_mode",
-    ["production", "postgres_auth", "postgres_runtime_probe"],
+    ["production", "postgres_auth"],
 )
 @pytest.mark.parametrize(
     "claim",
@@ -54,15 +54,63 @@ def test_worker_claims_fail_closed_without_postgres_repository(
         lambda: SimpleNamespace(
             is_production=authoritative_mode == "production",
             postgres_auth_enabled=authoritative_mode == "postgres_auth",
-            postgres_runtime_probe_enabled=authoritative_mode == "postgres_runtime_probe",
         ),
+    )
+    task = _approved_task()
+    before_tasks = {
+        key: value.model_copy(deep=True) for key, value in store.agent_tasks.items()
+    }
+    before_audit_ids = {event.id for event in store.audit_events}
+    with store._connect() as connection:
+        before_task_rows = connection.execute(
+            "SELECT COUNT(*) FROM kv_store WHERE entity_type='agent_task'"
+        ).fetchone()[0]
+        before_audit_rows = connection.execute(
+            "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event'"
+        ).fetchone()[0]
+    monkeypatch.setattr(
+        agent_worker_claims.agent_task_repository,
+        "claim",
+        lambda **_kwargs: pytest.fail("local task repository must not be called"),
     )
 
     with pytest.raises(RuntimeError, match="require a PostgreSQL task repository"):
         if claim is agent_worker_claims.claim_agent_task_for_worker:
-            claim(task_id="must-not-claim-from-sqlite", worker_id="worker")
+            claim(task_id=task.id, worker_id="worker")
         else:
             claim(worker_id="worker")
+
+    assert store.agent_tasks == before_tasks
+    assert {event.id for event in store.audit_events} == before_audit_ids
+    assert store.agent_tasks[task.id].worker_lease_owner is None
+    with store._connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM kv_store WHERE entity_type='agent_task'"
+        ).fetchone()[0] == before_task_rows
+        assert connection.execute(
+            "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event'"
+        ).fetchone()[0] == before_audit_rows
+
+
+def test_local_worker_claim_remains_available_in_probe_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_worker_claims,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=False,
+            postgres_auth_enabled=False,
+            postgres_runtime_probe_enabled=True,
+        ),
+    )
+    task = _approved_task()
+
+    result = claim_agent_task_for_worker(task_id=task.id, worker_id="worker-probe")
+
+    assert result.success is True
+    assert result.task is not None
+    assert result.task.worker_lease_owner == "worker-probe"
 
 
 def _approved_task(title: str = "Approved task") -> AgentTask:

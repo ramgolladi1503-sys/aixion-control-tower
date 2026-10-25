@@ -202,7 +202,7 @@ def test_lifespan_rejects_invalid_notification_repository_before_startup() -> No
 
 @pytest.mark.parametrize(
     "postgres_mode",
-    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+    ["postgres_auth_enabled"],
 )
 def test_local_push_loop_refuses_postgres_modes(monkeypatch, postgres_mode) -> None:
     monkeypatch.setattr(
@@ -221,7 +221,7 @@ def test_local_push_loop_refuses_postgres_modes(monkeypatch, postgres_mode) -> N
 
 @pytest.mark.parametrize(
     "postgres_mode",
-    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+    ["postgres_auth_enabled"],
 )
 def test_local_notification_creation_refuses_postgres_modes_without_mutating_store(
     monkeypatch, postgres_mode
@@ -243,6 +243,49 @@ def test_local_notification_creation_refuses_postgres_modes_without_mutating_sto
             workspace_id="workspace_guard_test",
         )
     assert set(store.notifications) == before
+
+
+def test_probe_only_mode_keeps_local_notification_helpers_available(monkeypatch) -> None:
+    from app.notifications import _require_sqlite_notification_runtime, create_notification
+    from app.store import store
+
+    monkeypatch.setattr(
+        "app.notifications.get_settings",
+        lambda: SimpleNamespace(
+            is_production=False,
+            postgres_auth_enabled=False,
+            postgres_runtime_probe_enabled=True,
+        ),
+    )
+    _require_sqlite_notification_runtime()
+    notification = create_notification(
+        title="Probe-only local notice",
+        body="SQLite remains the active store.",
+        entity_type="approval_request",
+        entity_id="probe_only_approval",
+        workspace_id="probe_only_workspace",
+    )
+
+    assert store.notifications[notification.id] == notification
+
+
+def test_probe_only_mode_keeps_local_notification_dispatch_loop_available(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.notifications.get_settings",
+        lambda: SimpleNamespace(
+            is_production=False,
+            postgres_auth_enabled=False,
+            postgres_runtime_probe_enabled=True,
+            push_dispatch_enabled=False,
+        ),
+    )
+
+    async def exercise() -> None:
+        from app.notifications import notification_dispatch_loop
+
+        await notification_dispatch_loop()
+
+    asyncio.run(exercise())
 
 
 def test_postgres_dispatch_loop_drains_inflight_thread_on_cancellation(monkeypatch) -> None:

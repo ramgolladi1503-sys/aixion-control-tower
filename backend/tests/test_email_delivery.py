@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import smtplib
 
@@ -132,6 +134,31 @@ def test_sqlite_email_helpers_fail_closed_in_production_profile(
 
     with pytest.raises(RuntimeError, match="PostgreSQL or production mode"):
         email_delivery.dispatch_one_due_email()
+
+
+def test_email_outbox_keeps_sqlite_active_in_probe_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "false")
+
+    outbox_id = email_delivery.enqueue_verification_email(
+        recipient="owner@example.com", code="123456"
+    )
+    assert _row(outbox_id)[0] == "PENDING"
+    assert email_delivery.dispatch_one_due_email(sender=lambda *_: None)
+
+    assert _row(outbox_id)[0] == "SENT"
+
+
+def test_email_dispatch_loop_keeps_local_mode_in_probe_only_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "false")
+    monkeypatch.setenv("AIXION_EMAIL_DISPATCH_ENABLED", "false")
+
+    asyncio.run(email_delivery.email_dispatch_loop())
 
 
 def test_smtp_transport_uses_starttls_and_does_not_contact_external_network(

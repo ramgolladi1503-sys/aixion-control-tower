@@ -87,14 +87,13 @@ def test_postgres_run_scheduler_does_not_fall_back_to_stale_process_local_run(
 
 
 @pytest.mark.parametrize(
-    ("is_production", "postgres_auth_enabled", "postgres_runtime_probe_enabled"),
-    [(True, False, False), (False, True, False), (False, False, True)],
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
 )
 def test_create_agent_run_requires_explicit_repositories_in_authoritative_modes(
     monkeypatch: pytest.MonkeyPatch,
     is_production: bool,
     postgres_auth_enabled: bool,
-    postgres_runtime_probe_enabled: bool,
 ) -> None:
     monkeypatch.setattr(
         agent_run_supervisor,
@@ -102,12 +101,31 @@ def test_create_agent_run_requires_explicit_repositories_in_authoritative_modes(
         lambda: SimpleNamespace(
             is_production=is_production,
             postgres_auth_enabled=postgres_auth_enabled,
-            postgres_runtime_probe_enabled=postgres_runtime_probe_enabled,
         ),
+    )
+    before_runs = {
+        key: value.model_copy(deep=True) for key, value in store.agent_runs.items()
+    }
+    before_steps = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_steps.items()
+    }
+    before_events = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_events.items()
+    }
+    before_audit_ids = {event.id for event in store.audit_events}
+    monkeypatch.setattr(
+        agent_run_supervisor.agent_task_repository,
+        "get",
+        lambda *_args, **_kwargs: pytest.fail("local task repository must not be read"),
     )
 
     with pytest.raises(AgentRunConflict, match="explicit durable repositories"):
         create_agent_run(AgentRunCreate(task_id="must-not-read-sqlite"))
+
+    assert store.agent_runs == before_runs
+    assert store.agent_run_steps == before_steps
+    assert store.agent_run_events == before_events
+    assert {event.id for event in store.audit_events} == before_audit_ids
 
 
 def test_create_agent_run_rejects_partial_repository_binding() -> None:
@@ -120,7 +138,7 @@ def test_create_agent_run_rejects_partial_repository_binding() -> None:
 
 @pytest.mark.parametrize(
     "postgres_mode",
-    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+    ["postgres_auth_enabled"],
 )
 def test_create_agent_run_rejects_explicit_sqlite_repositories_in_postgres_mode(
     monkeypatch: pytest.MonkeyPatch,
@@ -131,8 +149,7 @@ def test_create_agent_run_rejects_explicit_sqlite_repositories_in_postgres_mode(
         "get_settings",
         lambda: SimpleNamespace(
             is_production=False,
-            postgres_auth_enabled=postgres_mode == "postgres_auth_enabled",
-            postgres_runtime_probe_enabled=postgres_mode == "postgres_runtime_probe_enabled",
+            postgres_auth_enabled=True,
         ),
     )
 
@@ -146,14 +163,13 @@ def test_create_agent_run_rejects_explicit_sqlite_repositories_in_postgres_mode(
 
 
 @pytest.mark.parametrize(
-    ("is_production", "postgres_auth_enabled", "postgres_runtime_probe_enabled"),
-    [(True, False, False), (False, True, False), (False, False, True)],
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
 )
 def test_execute_next_step_requires_explicit_repository_in_authoritative_modes(
     monkeypatch: pytest.MonkeyPatch,
     is_production: bool,
     postgres_auth_enabled: bool,
-    postgres_runtime_probe_enabled: bool,
 ) -> None:
     monkeypatch.setattr(
         agent_run_supervisor,
@@ -161,17 +177,36 @@ def test_execute_next_step_requires_explicit_repository_in_authoritative_modes(
         lambda: SimpleNamespace(
             is_production=is_production,
             postgres_auth_enabled=postgres_auth_enabled,
-            postgres_runtime_probe_enabled=postgres_runtime_probe_enabled,
         ),
+    )
+    before_runs = {
+        key: value.model_copy(deep=True) for key, value in store.agent_runs.items()
+    }
+    before_steps = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_steps.items()
+    }
+    before_events = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_events.items()
+    }
+    before_audit_ids = {event.id for event in store.audit_events}
+    monkeypatch.setattr(
+        agent_run_supervisor.agent_run_repository,
+        "get",
+        lambda *_args, **_kwargs: pytest.fail("local run repository must not be read"),
     )
 
     with pytest.raises(AgentRunConflict, match="explicit durable repository"):
         execute_next_step("must-not-read-sqlite", worker_id="worker")
 
+    assert store.agent_runs == before_runs
+    assert store.agent_run_steps == before_steps
+    assert store.agent_run_events == before_events
+    assert {event.id for event in store.audit_events} == before_audit_ids
+
 
 @pytest.mark.parametrize(
     "postgres_mode",
-    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+    ["postgres_auth_enabled"],
 )
 def test_execute_next_step_rejects_explicit_sqlite_repository_in_postgres_mode(
     monkeypatch: pytest.MonkeyPatch,
@@ -182,8 +217,7 @@ def test_execute_next_step_rejects_explicit_sqlite_repository_in_postgres_mode(
         "get_settings",
         lambda: SimpleNamespace(
             is_production=False,
-            postgres_auth_enabled=postgres_mode == "postgres_auth_enabled",
-            postgres_runtime_probe_enabled=postgres_mode == "postgres_runtime_probe_enabled",
+            postgres_auth_enabled=True,
         ),
     )
 
@@ -193,6 +227,26 @@ def test_execute_next_step_rejects_explicit_sqlite_repository_in_postgres_mode(
             worker_id="worker",
             run_repository=agent_run_repository,
         )
+
+
+def test_local_agent_run_remains_available_in_probe_only_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_supervisor,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=False,
+            postgres_auth_enabled=False,
+            postgres_runtime_probe_enabled=True,
+        ),
+    )
+    task = _approved_task()
+    run = create_agent_run(AgentRunCreate(task_id=task.id), actor="owner@example.com")
+
+    result = execute_next_step(run.id, worker_id="worker-1", executor=_pass_executor)
+
+    assert result.decision == VerificationDecision.PASS
 
 
 def _approved_task() -> AgentTask:

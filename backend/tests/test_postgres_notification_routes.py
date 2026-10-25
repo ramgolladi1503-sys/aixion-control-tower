@@ -253,7 +253,7 @@ def test_postgres_device_unregister_does_not_delete_on_workspace_claim_mismatch(
 
 @pytest.mark.parametrize(
     "postgres_mode",
-    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+    ["postgres_auth_enabled"],
 )
 def test_notification_routes_fail_closed_without_postgres_repository_when_postgres_is_active(
     monkeypatch: pytest.MonkeyPatch,
@@ -293,7 +293,7 @@ def test_notification_routes_fail_closed_without_postgres_repository_when_postgr
 
 @pytest.mark.parametrize(
     "postgres_mode",
-    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+    ["postgres_auth_enabled"],
 )
 def test_device_registration_fails_closed_without_postgres_repository_in_postgres_mode(
     monkeypatch: pytest.MonkeyPatch,

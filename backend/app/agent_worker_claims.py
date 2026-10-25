@@ -47,14 +47,12 @@ def _claim(
 ) -> AgentWorkerClaimResult:
     settings = get_settings()
     active_repository = repository or agent_task_repository
-    if (
-        settings.is_production
-        or settings.postgres_auth_enabled
-        or settings.postgres_runtime_probe_enabled
-    ) and not isinstance(active_repository, PostgresAgentTaskRepository):
+    if (settings.is_production or settings.postgres_auth_enabled) and not isinstance(
+        active_repository, PostgresAgentTaskRepository
+    ):
         raise RuntimeError(
             "Agent worker claims require a PostgreSQL task repository in production "
-            "or PostgreSQL-owned mode"
+            "or PostgreSQL-auth mode"
         )
     task, reason, claim_audit = active_repository.claim(
         task_id=task_id,

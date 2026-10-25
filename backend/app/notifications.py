@@ -35,7 +35,6 @@ def _require_sqlite_notification_runtime() -> None:
     settings = get_settings()
     if (
         getattr(settings, "is_production", False)
-        or getattr(settings, "postgres_runtime_probe_enabled", False)
         or getattr(settings, "postgres_auth_enabled", False)
     ):
         raise RuntimeError(
@@ -54,7 +53,6 @@ def _postgres_notification_repository(
     # fallback to process-local SQLite in production.
     if (
         getattr(settings, "is_production", False)
-        or getattr(settings, "postgres_runtime_probe_enabled", False)
         or getattr(settings, "postgres_auth_enabled", False)
     ):
         if http_request is None:

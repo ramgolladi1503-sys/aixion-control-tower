@@ -62,7 +62,7 @@ def _require_sqlite_email_runtime() -> None:
     settings = get_settings()
     if settings.is_production or settings.postgres_auth_enabled:
         raise RuntimeError(
-            "SQLite email outbox operations are unavailable in PostgreSQL or production mode"
+            "SQLite email outbox operations are unavailable when PostgreSQL or production mode is selected"
         )
 
 
@@ -270,12 +270,12 @@ async def email_dispatch_loop(
     settings = get_settings()
     if not settings.email_dispatch_enabled:
         return
-    if settings.postgres_auth_enabled and postgres_repository is None:
+    if (settings.is_production or settings.postgres_auth_enabled) and postgres_repository is None:
         logging.getLogger(__name__).error(
-            "PostgreSQL email outbox repository is required in PostgreSQL auth mode"
+            "PostgreSQL email outbox repository is required when PostgreSQL or production mode is selected"
         )
         raise RuntimeError(
-            "PostgreSQL email outbox repository is required in PostgreSQL auth mode"
+            "PostgreSQL email outbox repository is required when PostgreSQL or production mode is selected"
         )
     while True:
         if postgres_repository is None:
