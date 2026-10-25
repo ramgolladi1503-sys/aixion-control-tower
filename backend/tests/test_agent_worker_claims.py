@@ -3,9 +3,13 @@ from __future__ import annotations
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
+from app import agent_worker_claims
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
 from app.models import (
@@ -26,6 +30,39 @@ def setup_function() -> None:
         conn.execute("DROP TRIGGER IF EXISTS reject_worker_lease")
         conn.execute("DROP TRIGGER IF EXISTS reject_worker_claim_audit")
     store.reset()
+
+
+@pytest.mark.parametrize(
+    "authoritative_mode",
+    ["production", "postgres_auth", "postgres_runtime_probe"],
+)
+@pytest.mark.parametrize(
+    "claim",
+    [
+        agent_worker_claims.claim_agent_task_for_worker,
+        agent_worker_claims.claim_first_approved_agent_task_for_worker,
+    ],
+)
+def test_worker_claims_fail_closed_without_postgres_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    authoritative_mode: str,
+    claim,
+) -> None:
+    monkeypatch.setattr(
+        agent_worker_claims,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=authoritative_mode == "production",
+            postgres_auth_enabled=authoritative_mode == "postgres_auth",
+            postgres_runtime_probe_enabled=authoritative_mode == "postgres_runtime_probe",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="require a PostgreSQL task repository"):
+        if claim is agent_worker_claims.claim_agent_task_for_worker:
+            claim(task_id="must-not-claim-from-sqlite", worker_id="worker")
+        else:
+            claim(worker_id="worker")
 
 
 def _approved_task(title: str = "Approved task") -> AgentTask:

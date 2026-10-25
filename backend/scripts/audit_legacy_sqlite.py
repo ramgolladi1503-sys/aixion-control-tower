@@ -6,6 +6,7 @@ Use a quiesced, independently backed-up database copy for migration planning.
 """
 from __future__ import annotations
 
+import hashlib
 import argparse
 import json
 import os
@@ -20,7 +21,7 @@ from app.agent_credential_models import AgentCredentialRecord
 from app.agent_run_models import AgentRun, AgentRunEvent, AgentRunFaultConfig, AgentRunStep
 from app.agent_task_models import AgentTask, AgentTaskEvent
 from app.connector_models import AgentConnector
-from app.database_migrations import MIGRATION_TABLE, known_migration_ids
+from app.database_migrations import MIGRATION_TABLE, known_migration_ids, run_migrations
 from app.models import (
     ApprovalRequest, AuditEvent, DeviceRegistration, ExternalAgent, Idea, Invite,
     MCPChildServer, MCPPendingRequest, Notification, Project, SessionToken,
@@ -50,6 +51,26 @@ MODEL_BY_ENTITY: dict[str, type[Any]] = {
 }
 
 SCOPED_ENTITIES = set(MODEL_BY_ENTITY) - {"workspace"}
+
+
+def _supported_source_tables() -> set[str]:
+    """Derive the supported SQLite table set from the current migration chain.
+
+    Running migrations against an in-memory database keeps this in sync with
+    the schema the application itself creates without touching the audited
+    source file.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        run_migrations(conn)
+        return {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    finally:
+        conn.close()
 
 
 def _json_object(raw: str) -> dict[str, Any] | None:
@@ -148,6 +169,11 @@ def audit(path: Path) -> dict[str, Any]:
         conn.execute("PRAGMA query_only = ON")
         conn.execute("BEGIN")
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        supported_tables = _supported_source_tables()
+        unknown_tables = sorted(
+            table for table in tables
+            if not table.startswith("sqlite_") and table not in supported_tables
+        )
         report: dict[str, Any] = {
             "status": "REVIEW_REQUIRED", "database_file": path.name,
             "migration_authorized": False,
@@ -158,7 +184,14 @@ def audit(path: Path) -> dict[str, Any]:
                 "This audit does not prove a quiesced or recoverable SQLite snapshot; "
                 "WAL sidecars must be handled by a coordinated backup procedure."
             ),
-            "read_only": True, "tables": sorted(tables),
+            "read_only": True,
+            # Do not echo arbitrary schema names from an untrusted snapshot.
+            "tables": sorted(table for table in tables if table in supported_tables),
+            "unknown_table_count": len(unknown_tables),
+            "unknown_table_sha256": sorted(
+                hashlib.sha256(table.encode("utf-8")).hexdigest()
+                for table in unknown_tables
+            ),
             "migration_rows": [], "entity_counts": {}, "unknown_entity_counts": {},
             "invalid_payload_counts": {}, "ownership_review_counts": {},
             "ownership_conflict_counts": {},
@@ -173,6 +206,8 @@ def audit(path: Path) -> dict[str, Any]:
             "record_findings": [],
             "findings": [],
         }
+        if unknown_tables:
+            report["findings"].append("unknown_source_tables")
         if "kv_store" not in tables:
             report["findings"].append("missing_kv_store_table")
             return report

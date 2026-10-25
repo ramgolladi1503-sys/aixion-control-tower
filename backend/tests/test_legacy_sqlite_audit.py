@@ -439,6 +439,34 @@ def test_audit_reports_unknown_entity_and_invalid_payload_without_exposing_paylo
     assert secret_marker not in rendered
 
 
+def test_audit_blocks_unknown_source_table_without_echoing_table_or_row_data(tmp_path):
+    path = tmp_path / "unknown_table.sqlite3"
+    _create_db(path, [
+        ("workspace", "ws1", {"id": "ws1", "name": "Account", "owner_user_id": "u1"}),
+    ])
+    unknown_table = "private_extension_state"
+    secret_marker = "DO_NOT_PRINT_EXTENSION_STATE"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            f'CREATE TABLE "{unknown_table}" '
+            '(id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL)'
+        )
+        conn.execute(f'INSERT INTO "{unknown_table}" (payload) VALUES (?)', (secret_marker,))
+
+    result = audit(path)
+    rendered = json.dumps(result)
+
+    assert result["status"] == "REVIEW_REQUIRED"
+    assert "unknown_source_tables" in result["findings"]
+    # sqlite_sequence is internal and excluded; the user table is still rejected.
+    assert result["unknown_table_count"] == 1
+    assert result["unknown_table_sha256"] == [
+        hashlib.sha256(unknown_table.encode("utf-8")).hexdigest()
+    ]
+    assert unknown_table not in rendered
+    assert secret_marker not in rendered
+
+
 def test_aggregate_migration_findings_are_represented_in_record_ledger(tmp_path):
     path = tmp_path / "finding_ledger.sqlite3"
     _create_db(path, [

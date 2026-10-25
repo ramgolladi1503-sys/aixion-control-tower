@@ -5,9 +5,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskStatus
-from .agent_task_repository import AgentTaskRepository, SQLiteAgentTaskRepository
+from .agent_task_repository import (
+    AgentTaskRepository,
+    PostgresAgentTaskRepository,
+    SQLiteAgentTaskRepository,
+)
 from .approval_decisions import agent_task_repository
 from .models import AuditEvent, now_utc
+from .settings import get_settings
 from .store import store
 
 
@@ -40,7 +45,17 @@ def _claim(
     lease_seconds: int,
     repository: AgentTaskRepository | None = None,
 ) -> AgentWorkerClaimResult:
+    settings = get_settings()
     active_repository = repository or agent_task_repository
+    if (
+        settings.is_production
+        or settings.postgres_auth_enabled
+        or settings.postgres_runtime_probe_enabled
+    ) and not isinstance(active_repository, PostgresAgentTaskRepository):
+        raise RuntimeError(
+            "Agent worker claims require a PostgreSQL task repository in production "
+            "or PostgreSQL-owned mode"
+        )
     task, reason, claim_audit = active_repository.claim(
         task_id=task_id,
         worker_id=worker_id,

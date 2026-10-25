@@ -544,6 +544,29 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     }
 
 
+def test_plan_refuses_unknown_sqlite_table_before_postgres_connection(tmp_path, monkeypatch):
+    path = tmp_path / "snapshot_with_unknown_table.sqlite3"
+    _snapshot(path)
+    unknown_table = "private_extension_state"
+    secret_marker = "DO_NOT_PRINT_EXTENSION_STATE"
+    with sqlite3.connect(path) as conn:
+        conn.execute(f'CREATE TABLE "{unknown_table}" (payload TEXT NOT NULL)')
+        conn.execute(f'INSERT INTO "{unknown_table}" VALUES (?)', (secret_marker,))
+
+    def forbidden_target_connection(*_args, **_kwargs):
+        pytest.fail("unknown source table must block planning before PostgreSQL access")
+
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.psycopg.connect",
+        forbidden_target_connection,
+    )
+    with pytest.raises(ImportBlocked, match="structural audit did not pass") as exc_info:
+        build_plan(path)
+
+    assert unknown_table not in str(exc_info.value)
+    assert secret_marker not in str(exc_info.value)
+
+
 @pytest.mark.parametrize("unsupported_type", ["unsupported_legacy_type"])
 def test_plan_blocks_unsupported_notification_before_target_access(
     tmp_path, monkeypatch, unsupported_type,
