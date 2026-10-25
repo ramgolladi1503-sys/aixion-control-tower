@@ -126,3 +126,31 @@ def test_auth_services_keep_local_sqlite_fallback(monkeypatch: pytest.MonkeyPatc
     assert user.workspace_id in store.workspaces
     assert len(store.sessions) == 1
     assert persisted == [True]
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [auth.postgres_auth_repository, auth.postgres_workspace_membership_repository],
+    ids=["auth", "workspace-membership"],
+)
+def test_production_auth_selectors_require_enabled_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    selector,
+) -> None:
+    monkeypatch.setattr(
+        auth,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+    monkeypatch.setattr(
+        auth,
+        "application_repositories_for_request",
+        lambda _request: pytest.fail("misconfigured production runtime must fail first"),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        selector(object())
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert "requires PostgreSQL" in error.value.detail

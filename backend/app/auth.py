@@ -155,24 +155,42 @@ def _request_from_context(request: Request) -> Request:
 
 def postgres_auth_repository(request: Request | None):
     settings = get_settings()
-    if request is None and (
-        getattr(settings, "is_production", False)
-        or getattr(settings, "postgres_auth_enabled", False)
-    ):
+    is_production = getattr(settings, "is_production", False)
+    postgres_auth_enabled = getattr(settings, "postgres_auth_enabled", False)
+    if is_production and not postgres_auth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Production requires PostgreSQL auth mode",
+            headers={"Retry-After": "1"},
+        )
+    if request is None and (is_production or postgres_auth_enabled):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="PostgreSQL auth repository requires an app-bound request",
             headers={"Retry-After": "1"},
         )
-    if not settings.postgres_auth_enabled:
+    if not postgres_auth_enabled:
         return None
     return application_repositories_for_request(request).auth
 
 
 def postgres_workspace_membership_repository(request: Request | None):
     """Return the membership adapter paired with PostgreSQL authentication."""
-    if not get_settings().postgres_auth_enabled:
+    settings = get_settings()
+    if settings.is_production and not settings.postgres_auth_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Production requires PostgreSQL workspace membership",
+            headers={"Retry-After": "1"},
+        )
+    if not settings.postgres_auth_enabled:
         return None
+    if request is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL workspace membership requires an app-bound request",
+            headers={"Retry-After": "1"},
+        )
     repositories = application_repositories_for_request(request)
     repository = repositories.workspace_membership
     if repository is None:

@@ -83,7 +83,7 @@ def test_account_security_routes_fail_closed_without_request_context(
 
     assert error.value.status_code == 503
     assert error.value.headers == {"Retry-After": "1"}
-    assert "app-bound request" in error.value.detail
+    assert "PostgreSQL" in error.value.detail
 
 
 def test_owner_can_promote_reviewer_to_maintainer() -> None:
