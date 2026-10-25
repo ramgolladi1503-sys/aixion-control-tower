@@ -158,6 +158,16 @@ def _work_order_repository_for_route(http_request: Request | None):
 
 
 def _agent_task_repository_for_route(http_request: Request | None):
+    settings = get_settings()
+    if http_request is None and (settings.is_production or settings.postgres_auth_enabled):
+        # A direct route invocation has no application lifespan bundle from
+        # which to select the authoritative PostgreSQL repository. Never let
+        # it inherit the module-level SQLite adapter in an authoritative mode.
+        raise HTTPException(
+            status_code=503,
+            detail="AgentTask repository is unavailable",
+            headers={"Retry-After": "1"},
+        )
     try:
         repository = (
             agent_task_repository

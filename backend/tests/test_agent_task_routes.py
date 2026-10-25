@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import agent_task_routes
@@ -18,6 +21,35 @@ client = TestClient(app)
 
 def setup_function() -> None:
     store.reset()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+)
+def test_missing_request_fails_closed_before_returning_sqlite_task_repository(
+    monkeypatch: pytest.MonkeyPatch, settings: SimpleNamespace
+) -> None:
+    before = (
+        dict(store.agent_tasks),
+        dict(store.agent_task_events),
+        dict(store.approval_requests),
+        list(store.audit_events),
+    )
+    monkeypatch.setattr(agent_task_routes, "get_settings", lambda: settings)
+
+    with pytest.raises(HTTPException) as raised:
+        agent_task_routes._task_repository_for_route(None)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert store.agent_tasks == before[0]
+    assert store.agent_task_events == before[1]
+    assert store.approval_requests == before[2]
+    assert store.audit_events == before[3]
 
 
 def test_create_agent_task_records_task_event_and_audit() -> None:

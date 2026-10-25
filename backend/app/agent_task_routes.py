@@ -70,6 +70,7 @@ from .models import (
     now_utc,
 )
 from .risk_engine import assess_approval_request
+from .settings import get_settings
 from .store import store
 from .workspace_access import (
     agent_task_scope_is_consistent,
@@ -104,6 +105,13 @@ def audit(
 
 def _task_repository_for_route(http_request: Request | None) -> AgentTaskRepository:
     if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL AgentTask repository requires an app-bound request",
+                headers={"Retry-After": "1"},
+            )
         # Direct function calls in unit tests use the explicit local adapter.
         return agent_task_repository
     return agent_task_repository_for_request(http_request)
