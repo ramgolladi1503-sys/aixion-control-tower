@@ -46,7 +46,13 @@ def _postgres_notification_repository(
     http_request: Request | None,
 ) -> PostgresNotificationOutboxRepository | None:
     settings = get_settings()
-    if getattr(settings, "postgres_auth_enabled", False):
+    # Production notification/device state must be owned by the same
+    # app-bound PostgreSQL runtime as the authenticated workspace. The auth
+    # rollout flag can be disabled independently, so it cannot authorize a
+    # fallback to process-local SQLite in production.
+    if getattr(settings, "is_production", False) or getattr(
+        settings, "postgres_auth_enabled", False
+    ):
         if http_request is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

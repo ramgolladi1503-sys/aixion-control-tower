@@ -851,6 +851,68 @@ def test_sqlite_notification_dispatch_helpers_refuse_postgres_authority(
     assert provider_calls == []
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "kwargs"),
+    [
+        ("get", "/notifications", {}),
+        ("post", "/notifications/notification_prod_guard/read", {}),
+        (
+            "post",
+            "/notifications/devices",
+            {"json": {"token": "prod-guard-token"}},
+        ),
+        ("delete", "/notifications/devices/device_prod_guard", {}),
+    ],
+)
+def test_production_notification_routes_fail_closed_without_postgres_runtime(
+    method: str,
+    path: str,
+    kwargs: dict[str, object],
+    monkeypatch: Any,
+) -> None:
+    """Production must not route notification or device calls into SQLite."""
+
+    class ForbiddenLocalMap(dict):
+        def values(self):
+            raise AssertionError("SQLite notification state must not be read")
+
+        def get(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("SQLite notification state must not be read")
+
+    user = AuthUser(
+        id="production_notification_owner",
+        email="production-notification@example.test",
+        display_name="Production owner",
+        role=UserRole.OWNER,
+        workspace_id="production_notification_workspace",
+    )
+    monkeypatch.setattr(
+        notifications,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+    monkeypatch.setattr(main.app.state, "postgres_runtime", None, raising=False)
+    monkeypatch.setattr(main.app.state, "postgres_repositories", None, raising=False)
+    monkeypatch.setattr(main.app.state, "notification_outbox_repository", None, raising=False)
+    monkeypatch.setattr(store, "notifications", ForbiddenLocalMap(), raising=False)
+    monkeypatch.setattr(store, "device_registrations", ForbiddenLocalMap(), raising=False)
+    monkeypatch.setattr(
+        store,
+        "atomic",
+        lambda: (_ for _ in ()).throw(AssertionError("SQLite mutation must not run")),
+    )
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        notifications.AuthDependency.dependency,
+        lambda: user,
+    )
+
+    response = getattr(TestClient(main.app), method)(path, **kwargs)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "PostgreSQL notification runtime is unavailable"
+
+
 def test_api_lifespan_starts_and_stops_push_dispatcher(monkeypatch: Any) -> None:
     from app import main
 
