@@ -196,6 +196,109 @@ def test_schema_verification_fails_closed_when_migrated_column_is_missing(
     assert status.missing_column_names == ("device_registrations.app_version",)
 
 
+def test_schema_verification_fails_closed_when_workspace_composite_fk_is_missing(
+    postgres_schema: tuple[str, Any],
+) -> None:
+    _schema, connect = postgres_schema
+    run_postgres_migrations(connect)
+
+    runtime = PostgresRuntime(
+        _dsn="hidden",
+        profile="test",
+        _connector=lambda _dsn, **_kwargs: connect(),
+    )
+    assert runtime.verify_schema().ready is True
+
+    with connect() as conn:
+        conn.execute(
+            "ALTER TABLE agent_tasks "
+            "DROP CONSTRAINT agent_tasks_project_id_workspace_id_fkey"
+        )
+
+    status = runtime.verify_schema()
+    assert status.ready is False
+    assert status.missing_constraint_names == (
+        "agent_tasks_project_id_workspace_id_fkey",
+    )
+    assert status.missing_index_names == ()
+
+
+def test_schema_verification_rejects_same_name_workspace_fk_with_wrong_columns(
+    postgres_schema: tuple[str, Any],
+) -> None:
+    _schema, connect = postgres_schema
+    run_postgres_migrations(connect)
+
+    runtime = PostgresRuntime(
+        _dsn="hidden",
+        profile="test",
+        _connector=lambda _dsn, **_kwargs: connect(),
+    )
+    with connect() as conn:
+        conn.execute(
+            "ALTER TABLE agent_tasks "
+            "DROP CONSTRAINT agent_tasks_project_id_workspace_id_fkey"
+        )
+        conn.execute(
+            "ALTER TABLE agent_tasks ADD CONSTRAINT "
+            "agent_tasks_project_id_workspace_id_fkey "
+            "FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) "
+            "ON DELETE RESTRICT"
+        )
+
+    status = runtime.verify_schema()
+    assert status.ready is False
+    assert status.missing_constraint_names == (
+        "agent_tasks_project_id_workspace_id_fkey",
+    )
+
+
+def test_schema_verification_fails_closed_when_approval_identity_index_is_missing(
+    postgres_schema: tuple[str, Any],
+) -> None:
+    _schema, connect = postgres_schema
+    run_postgres_migrations(connect)
+
+    runtime = PostgresRuntime(
+        _dsn="hidden",
+        profile="test",
+        _connector=lambda _dsn, **_kwargs: connect(),
+    )
+    assert runtime.verify_schema().ready is True
+
+    with connect() as conn:
+        conn.execute("DROP INDEX idx_approval_invocation_identity")
+
+    status = runtime.verify_schema()
+    assert status.ready is False
+    assert status.missing_index_names == ("idx_approval_invocation_identity",)
+    assert status.missing_constraint_names == ()
+
+
+def test_schema_verification_rejects_same_name_approval_index_with_wrong_definition(
+    postgres_schema: tuple[str, Any],
+) -> None:
+    _schema, connect = postgres_schema
+    run_postgres_migrations(connect)
+
+    runtime = PostgresRuntime(
+        _dsn="hidden",
+        profile="test",
+        _connector=lambda _dsn, **_kwargs: connect(),
+    )
+    with connect() as conn:
+        conn.execute("DROP INDEX idx_approval_invocation_identity")
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_approval_invocation_identity "
+            "ON approval_requests(source_agent_id,workspace_id,source_invocation_id) "
+            "WHERE source_invocation_id IS NOT NULL"
+        )
+
+    status = runtime.verify_schema()
+    assert status.ready is False
+    assert status.missing_index_names == ("idx_approval_invocation_identity",)
+
+
 def test_schema_verification_fails_closed_when_migration_ledger_is_absent(
     postgres_schema: tuple[str, Any],
 ) -> None:
@@ -482,7 +585,6 @@ def test_migration_command_upgrades_documented_pg0034_state_to_current_schema(
         index for index, migration in enumerate(migrations)
         if migration.migration_id == "pg_0036_device_session_binding"
     )
-    assert next_index == len(migrations) - 1
     assert migrations[next_index - 1].migration_id == "pg_0035_legacy_notification_targets"
     prior_migrations = migrations[:next_index]
 

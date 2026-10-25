@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -20,6 +21,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -28,7 +30,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.aixion.controltower.BuildConfig
-import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.notifications.PushDeviceRegistrationRepository
 import com.aixion.controltower.notifications.PushRegistrationResult
@@ -43,41 +44,93 @@ internal enum class PushRegistrationUiState {
     BACKEND_UNAVAILABLE
 }
 
-internal object PushRegistrationCopy {
-    fun status(state: PushRegistrationUiState): String = when (state) {
-        PushRegistrationUiState.CHECKING -> "Connecting this device to approval alerts…"
-        PushRegistrationUiState.REGISTERED -> "This device is registered to receive approval alerts."
-        PushRegistrationUiState.REGISTERED_CLEANUP_PENDING -> "Alerts are registered, but an older device registration could not be removed yet."
-        PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING -> "Notifications are off, and server cleanup is pending. Cleanup will retry when the owning account is available."
-        PushRegistrationUiState.FIREBASE_NOT_CONFIGURED -> "Firebase is not configured for this app build. Push alerts are unavailable."
-        PushRegistrationUiState.BACKEND_UNAVAILABLE -> "Could not register this device with the server. Reopen Account to retry."
-        PushRegistrationUiState.PERMISSION_REQUIRED -> "Allow notifications to register this device for approval alerts."
-    }
-}
-
 internal enum class NotificationPermissionState {
     GRANTED,
     DENIED,
     NOT_REQUIRED
 }
 
-internal object NotificationPermissionCopy {
-    fun status(state: NotificationPermissionState): String = when (state) {
-        NotificationPermissionState.GRANTED -> "Android allows notifications on this device."
-        NotificationPermissionState.DENIED -> "Android notifications are off. Push notifications cannot appear until you allow them."
-        NotificationPermissionState.NOT_REQUIRED -> "This Android version does not require a notification permission prompt."
-    }
+internal data class NotificationPanelMessage(
+    val headline: String,
+    val supportingDetail: String?
+)
 
-    fun badge(state: NotificationPermissionState): String = when (state) {
-        NotificationPermissionState.GRANTED -> "Permission allowed"
-        NotificationPermissionState.DENIED -> "Permission off"
-        NotificationPermissionState.NOT_REQUIRED -> "System managed"
+internal object NotificationPanelCopy {
+    fun message(
+        permissionState: NotificationPermissionState,
+        registrationState: PushRegistrationUiState
+    ): NotificationPanelMessage {
+        val permissionDetail = when (permissionState) {
+            NotificationPermissionState.GRANTED -> "Android allows notifications on this device."
+            NotificationPermissionState.DENIED -> "Android notifications are off, so alerts cannot appear until you allow them."
+            NotificationPermissionState.NOT_REQUIRED -> "This Android version does not require a notification permission prompt."
+        }
+        return when (registrationState) {
+            PushRegistrationUiState.CHECKING -> NotificationPanelMessage(
+                headline = "Checking approval alert setup…",
+                supportingDetail = permissionDetail
+            )
+            PushRegistrationUiState.REGISTERED -> if (permissionState == NotificationPermissionState.DENIED) {
+                NotificationPanelMessage(
+                    headline = "Android notifications are off.",
+                    supportingDetail = "A server registration exists, but Android cannot display alerts until you allow notifications."
+                )
+            } else {
+                NotificationPanelMessage(
+                    headline = "Device registered with the server.",
+                    supportingDetail = "$permissionDetail This confirms registration only, not delivery of a push alert."
+                )
+            }
+            PushRegistrationUiState.REGISTERED_CLEANUP_PENDING -> if (permissionState == NotificationPermissionState.DENIED) {
+                NotificationPanelMessage(
+                    headline = "Android notifications are off.",
+                    supportingDetail = "Allow notifications for approval alerts. Cleanup of an older device registration is pending and will retry when the owning account is available."
+                )
+            } else {
+                NotificationPanelMessage(
+                    headline = "Device registered with the server.",
+                    supportingDetail = "An older device registration could not be removed yet. Cleanup will retry when the owning account is available. This does not confirm push delivery."
+                )
+            }
+            PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING -> NotificationPanelMessage(
+                headline = "Android notifications are off.",
+                supportingDetail = "Allow notifications for approval alerts. Server cleanup is pending and will retry when the owning account is available."
+            )
+            PushRegistrationUiState.FIREBASE_NOT_CONFIGURED -> NotificationPanelMessage(
+                headline = "Push alerts are unavailable in this app build.",
+                supportingDetail = buildString {
+                    append("Firebase is not configured for this app build.")
+                    if (permissionState == NotificationPermissionState.DENIED) {
+                        append(" Android notifications are also off.")
+                    }
+                }
+            )
+            PushRegistrationUiState.BACKEND_UNAVAILABLE -> NotificationPanelMessage(
+                headline = "This device could not be registered for approval alerts.",
+                supportingDetail = buildString {
+                    append("Server registration failed. Reopen Account to retry.")
+                    if (permissionState == NotificationPermissionState.DENIED) {
+                        append(" Android notifications are also off.")
+                    }
+                }
+            )
+            PushRegistrationUiState.PERMISSION_REQUIRED -> if (permissionState == NotificationPermissionState.DENIED) {
+                NotificationPanelMessage(
+                    headline = "Android notifications are off.",
+                    supportingDetail = "Allow notifications to register this device for approval alerts."
+                )
+            } else {
+                NotificationPanelMessage(
+                    headline = "The server requires notification permission.",
+                    supportingDetail = "Check Android notification settings, then reopen Account to retry registration."
+                )
+            }
+        }
     }
 }
 
 @Composable
 internal fun NotificationPermissionPanel() {
-    val palette = LocalTowerPalette.current
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val requiresRuntimePermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -148,21 +201,7 @@ internal fun NotificationPermissionPanel() {
     }
 
     TowerPanel(elevated = true) {
-        StatusBadge(
-            label = NotificationPermissionCopy.badge(permissionState),
-            color = if (permissionState == NotificationPermissionState.GRANTED) palette.positive else palette.caution,
-            uppercase = false
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text("Approval notifications", color = palette.ink)
-        NotificationStatusAnnouncement(
-            text = NotificationPermissionCopy.status(permissionState),
-            color = palette.inkMuted
-        )
-        NotificationStatusAnnouncement(
-            text = PushRegistrationCopy.status(registrationState),
-            color = palette.inkMuted
-        )
+        NotificationStatusContent(permissionState, registrationState)
         if (shouldShowNotificationPermissionAction(
                 permissionState = permissionState,
                 registrationState = registrationState,
@@ -185,12 +224,28 @@ internal fun NotificationPermissionPanel() {
 }
 
 @Composable
-internal fun NotificationStatusAnnouncement(text: String, color: androidx.compose.ui.graphics.Color) {
+internal fun NotificationStatusContent(
+    permissionState: NotificationPermissionState,
+    registrationState: PushRegistrationUiState
+) {
+    val palette = LocalTowerPalette.current
+    val message = NotificationPanelCopy.message(permissionState, registrationState)
     Text(
-        text = text,
-        color = color,
+        text = "Approval notifications",
+        modifier = Modifier.semantics { heading() },
+        color = palette.ink,
+        style = MaterialTheme.typography.titleMedium
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    Text(
+        text = message.headline,
+        color = palette.ink,
+        style = MaterialTheme.typography.titleSmall,
         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
     )
+    message.supportingDetail?.let { detail ->
+        Text(text = detail, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
+    }
 }
 
 internal fun shouldShowNotificationPermissionAction(

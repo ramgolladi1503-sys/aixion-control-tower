@@ -20,6 +20,7 @@ class FakeRuntime:
             approval_decisions=object(),
             agent_tasks=object(),
             agent_runs=object(),
+            agent_run_faults=object(),
             agent_run_branch_intents=object(),
             agent_run_apply_change_intents=object(),
             agent_run_pull_request_intents=object(),
@@ -54,6 +55,7 @@ def _bind_notification_runtime(application: FastAPI, repositories: SimpleNamespa
     application.state.approval_decision_repository = repositories.approval_decisions
     application.state.agent_task_repository = repositories.agent_tasks
     application.state.agent_run_repository = repositories.agent_runs
+    application.state.agent_run_fault_repository = repositories.agent_run_faults
     application.state.project_repository = repositories.projects
     application.state.workspace_membership_repository = repositories.workspace_membership
     application.state.external_agent_auth_repository = repositories.external_agent_auth

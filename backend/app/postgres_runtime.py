@@ -27,6 +27,7 @@ from .recovery_repository import PostgresRecoverySnapshotRepository
 from .settings import Settings, get_settings
 from .workspace_membership_repository import PostgresWorkspaceMembershipRepository
 from .work_order_repository import PostgresWorkOrderRepository
+from .postgres_agent_run_fault_repository import PostgresAgentRunFaultRepository
 
 _APPLICATION_NAME = "aixion-control-tower"
 _CREATE_TABLE_PATTERN = re.compile(
@@ -46,6 +47,30 @@ _TABLE_CONSTRAINT_STARTS = {
     "PRIMARY",
     "UNIQUE",
 }
+
+# These are deliberately explicit, high-value tenant-isolation and approval
+# identity invariants. Migration checksums prove the recorded migration source,
+# while this manifest verifies that PostgreSQL still has the actual objects.
+_REQUIRED_FOREIGN_KEYS = (
+    {
+        "name": "agent_tasks_project_id_workspace_id_fkey",
+        "table": "agent_tasks",
+        "columns": ("project_id", "workspace_id"),
+        "referenced_table": "projects",
+        "referenced_columns": ("project_id", "workspace_id"),
+        "delete_action": "r",  # RESTRICT
+        "update_action": "a",  # NO ACTION
+        "match_type": "s",  # SIMPLE
+    },
+)
+_REQUIRED_UNIQUE_INDEXES = (
+    {
+        "name": "idx_approval_invocation_identity",
+        "table": "approval_requests",
+        "columns": ("workspace_id", "source_agent_id", "source_invocation_id"),
+        "predicate": "source_invocation_id IS NOT NULL",
+    },
+)
 
 
 def _required_postgres_relations() -> tuple[str, ...]:
@@ -159,6 +184,8 @@ class PostgresSchemaStatus:
     mismatched_migration_ids: tuple[str, ...]
     missing_relation_names: tuple[str, ...]
     missing_column_names: tuple[str, ...]
+    missing_constraint_names: tuple[str, ...]
+    missing_index_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -323,6 +350,10 @@ class PostgresRuntime:
         return PostgresAgentRunRepository(self.connect)
 
     @property
+    def agent_run_faults(self) -> PostgresAgentRunFaultRepository:
+        return PostgresAgentRunFaultRepository(self.connect)
+
+    @property
     def workspace_membership(self) -> PostgresWorkspaceMembershipRepository:
         return PostgresWorkspaceMembershipRepository(self.connect)
 
@@ -364,6 +395,12 @@ class PostgresRuntime:
                         for table, names in expected_columns.items()
                         for column in names
                     ),
+                    missing_constraint_names=tuple(
+                        invariant["name"] for invariant in _REQUIRED_FOREIGN_KEYS
+                    ),
+                    missing_index_names=tuple(
+                        invariant["name"] for invariant in _REQUIRED_UNIQUE_INDEXES
+                    ),
                 )
             rows = conn.execute(
                 "SELECT migration_id,name,migration_checksum FROM schema_migrations"
@@ -393,6 +430,7 @@ class PostgresRuntime:
                 for column in names
                 if (table, column) not in present_columns
             )
+            missing_constraints, missing_indexes = _missing_critical_schema_objects(conn)
 
         expected = {migration.migration_id: migration for migration in POSTGRES_MIGRATIONS}
         applied = {row[0]: row for row in rows}
@@ -417,6 +455,8 @@ class PostgresRuntime:
                 and not mismatched_ids
                 and not missing_relations
                 and not missing_columns
+                and not missing_constraints
+                and not missing_indexes
             ),
             migration_ledger_present=True,
             applied_migration_ids=applied_ids,
@@ -425,4 +465,116 @@ class PostgresRuntime:
             mismatched_migration_ids=mismatched_ids,
             missing_relation_names=missing_relations,
             missing_column_names=missing_columns,
+            missing_constraint_names=missing_constraints,
+            missing_index_names=missing_indexes,
         )
+
+
+def _missing_critical_schema_objects(conn: Connection) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return manifest objects that are absent or differ from their contract."""
+    missing_constraints: list[str] = []
+    for expected in _REQUIRED_FOREIGN_KEYS:
+        row = conn.execute(
+            """
+            SELECT constraint_row.convalidated,
+                   constraint_row.confdeltype,
+                   constraint_row.confupdtype,
+                   constraint_row.confmatchtype,
+                   constraint_row.condeferrable,
+                   constraint_row.condeferred,
+                   ARRAY(
+                       SELECT attribute.attname
+                       FROM unnest(constraint_row.conkey) WITH ORDINALITY AS key(attnum, position)
+                       JOIN pg_attribute AS attribute
+                         ON attribute.attrelid = constraint_row.conrelid
+                        AND attribute.attnum = key.attnum
+                       ORDER BY key.position
+                   ),
+                   referenced_relation.relname,
+                   ARRAY(
+                       SELECT attribute.attname
+                       FROM unnest(constraint_row.confkey) WITH ORDINALITY AS key(attnum, position)
+                       JOIN pg_attribute AS attribute
+                         ON attribute.attrelid = constraint_row.confrelid
+                        AND attribute.attnum = key.attnum
+                       ORDER BY key.position
+                   )
+            FROM pg_constraint AS constraint_row
+            JOIN pg_class AS local_relation
+              ON local_relation.oid = constraint_row.conrelid
+            JOIN pg_namespace AS local_namespace
+              ON local_namespace.oid = local_relation.relnamespace
+            JOIN pg_class AS referenced_relation
+              ON referenced_relation.oid = constraint_row.confrelid
+            JOIN pg_namespace AS referenced_namespace
+              ON referenced_namespace.oid = referenced_relation.relnamespace
+            WHERE local_namespace.nspname = current_schema()
+              AND referenced_namespace.nspname = current_schema()
+              AND local_relation.relname = %s
+              AND constraint_row.conname = %s
+              AND constraint_row.contype = 'f'
+            """,
+            (expected["table"], expected["name"]),
+        ).fetchone()
+        if row is None or row != (
+            True,
+            expected["delete_action"],
+            expected["update_action"],
+            expected["match_type"],
+            False,
+            False,
+            list(expected["columns"]),
+            expected["referenced_table"],
+            list(expected["referenced_columns"]),
+        ):
+            missing_constraints.append(expected["name"])
+
+    missing_indexes: list[str] = []
+    for expected in _REQUIRED_UNIQUE_INDEXES:
+        row = conn.execute(
+            """
+            SELECT index_row.indisunique,
+                   index_row.indimmediate,
+                   index_row.indisvalid,
+                   index_row.indisready,
+                   index_method.amname,
+                   index_row.indnkeyatts,
+                   index_row.indnatts,
+                   ARRAY(
+                       SELECT pg_get_indexdef(index_row.indexrelid, position, true)
+                       FROM generate_series(1, index_row.indnkeyatts) AS position
+                       ORDER BY position
+                   ),
+                   regexp_replace(
+                       pg_get_expr(index_row.indpred, index_row.indrelid),
+                       '\\s+', ' ', 'g'
+                   )
+            FROM pg_index AS index_row
+            JOIN pg_class AS index_relation
+              ON index_relation.oid = index_row.indexrelid
+            JOIN pg_am AS index_method
+              ON index_method.oid = index_relation.relam
+            JOIN pg_class AS table_relation
+              ON table_relation.oid = index_row.indrelid
+            JOIN pg_namespace AS table_namespace
+              ON table_namespace.oid = table_relation.relnamespace
+            WHERE table_namespace.nspname = current_schema()
+              AND table_relation.relname = %s
+              AND index_relation.relname = %s
+            """,
+            (expected["table"], expected["name"]),
+        ).fetchone()
+        predicate = " ".join((row[8] or "").replace("(", "").replace(")", "").split()) if row else ""
+        if row is None or row[:8] != (
+            True,
+            True,
+            True,
+            True,
+            "btree",
+            len(expected["columns"]),
+            len(expected["columns"]),
+            list(expected["columns"]),
+        ) or predicate != expected["predicate"]:
+            missing_indexes.append(expected["name"])
+
+    return tuple(missing_constraints), tuple(missing_indexes)

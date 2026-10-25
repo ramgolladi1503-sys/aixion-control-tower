@@ -31,38 +31,38 @@ class ConnectorsScreenTest {
         composeRule.setContent { ConnectorsContent() }
 
         composeRule.onNodeWithText("Set up a project").assertExists()
-        composeRule.onNodeWithText("Connect your coding agent").assertExists()
+        composeRule.onNodeWithText("Connect an agent").assertExists()
         composeRule.onNodeWithText("How connection works").performClick()
         composeRule.onNodeWithText("Before you connect").assertExists()
-        composeRule.onNodeWithText("Open the project on the agent computer").assertExists()
+        composeRule.onNodeWithText("Open the project").assertExists()
         composeRule.onNodeWithText(
             "Use the computer and agent session that should pause for approvals."
         ).assertExists()
-        composeRule.onNodeWithText("Keep it reachable").assertExists()
+        composeRule.onNodeWithText("Keep the computer available").assertExists()
         composeRule.onNodeWithText(
-            "The agent computer, agent session, and Control Tower API must stay available while a request is waiting."
+            "Keep it powered on and awake, with the agent session and Control Tower API reachable while a request is waiting."
         ).assertExists()
-        composeRule.onNodeWithText("Save the one-time token").assertExists()
+        composeRule.onNodeWithText("Save your one-time token").assertExists()
         composeRule.onNodeWithText(
             "Setup shows the connector token once. Store it like a password."
         ).assertExists()
         composeRule.onNodeWithText(
-            "The phone cannot wake or restart the agent computer. This screen does not verify hook installation."
+            "The phone cannot wake or restart the agent computer. This screen does not verify that the provider hook is installed."
         ).assertExists()
         composeRule.onAllNodesWithText("CONNECT ONCE").assertCountEquals(0)
         composeRule.onNodeWithText("Choose a provider").assertExists()
         composeRule.onNodeWithText(
-            "Choose the agent used by this project. Set up each project workspace on the computer where the agent runs."
+            "Choose the provider used by this project. Complete setup on the computer where the agent runs."
         ).assertExists()
         composeRule.onNodeWithText("Antigravity").assertExists()
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
-        composeRule.onNodeWithText("Set up Antigravity").assertExists()
+        composeRule.onNodeWithText("Open Antigravity setup").assertExists()
         composeRule.onNodeWithText(
-            "A local phone approval flow passed on an earlier build, but this build has not been tested on a phone. Approval delivery while away from the Mac is also unverified."
+            "A local phone approval passed on an earlier build. This build has not been phone-tested, and delivery while away from the Mac is unverified."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Set up Codex").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Open Codex setup").performScrollTo().assertExists()
         composeRule.onNodeWithText(
-            "Phone approvals from Codex Desktop and returning a decision to its same task have not been verified. Do not rely on Codex Desktop approvals yet."
+            "Codex Desktop phone approvals and returning a decision to the same task are unverified. Do not rely on this flow yet."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Not verified").assertExists()
         composeRule.onNodeWithText("Not verified").performScrollTo().assertIsDisplayed()
@@ -80,7 +80,7 @@ class ConnectorsScreenTest {
     fun approvalFlowExplainsReviewAndSameSessionRequirement() {
         val explanation =
             "The request appears in Approvals. Review the exact action, then approve or deny it. " +
-            "Your decision returns to the waiting task only while its agent computer, session, and API remain reachable."
+            "The decision returns to the same waiting task only while its computer, session, and API remain reachable."
         composeRule.setContent { ConnectorsContent() }
 
         composeRule.onNodeWithText("How connection works").performScrollTo().performClick()
@@ -97,17 +97,17 @@ class ConnectorsScreenTest {
     fun connectionGuidanceStartsCollapsedAndExpandsWithoutHidingProviderChoices() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("Set up Antigravity").assertExists()
+        composeRule.onNodeWithText("Open Antigravity setup").assertExists()
         composeRule.onNodeWithText("How connection works").assertExists()
         composeRule.onNodeWithText("Before you connect").assertDoesNotExist()
 
         composeRule.onNodeWithText("How connection works").performClick()
         composeRule.onNodeWithText("Before you connect").assertExists()
-        composeRule.onNodeWithText("Keep it reachable").assertExists()
+        composeRule.onNodeWithText("Keep the computer available").assertExists()
         composeRule.onNodeWithText("When an approval arrives").assertExists()
         composeRule.onNodeWithText("Hide connection details").performClick()
         composeRule.onNodeWithText("Before you connect").assertDoesNotExist()
-        composeRule.onNodeWithText("Set up Antigravity").assertExists()
+        composeRule.onNodeWithText("Open Antigravity setup").assertExists()
     }
 
     @Test
@@ -117,8 +117,8 @@ class ConnectorsScreenTest {
             ConnectorsContent(onOpenAgentAccess = { navigationRequests += it })
         }
 
-        composeRule.onNodeWithText("Set up Antigravity").performScrollTo().performClick()
-        composeRule.onNodeWithText("Set up Codex").performScrollTo().performClick()
+        composeRule.onNodeWithText("Open Antigravity setup").performScrollTo().performClick()
+        composeRule.onNodeWithText("Open Codex setup").performScrollTo().performClick()
 
         composeRule.runOnIdle {
             assertEquals(listOf("ANTIGRAVITY", "CODEX"), navigationRequests)
@@ -133,7 +133,7 @@ class ConnectorsScreenTest {
         composeRule.onAllNodesWithText("Not verified").assertCountEquals(1)
         composeRule.onNodeWithText("Earlier build tested").assertDoesNotExist()
         composeRule.onNodeWithText(
-            "A local phone approval flow passed on an earlier build, but this build has not been tested on a phone. Approval delivery while away from the Mac is also unverified."
+            "A local phone approval passed on an earlier build. This build has not been phone-tested, and delivery while away from the Mac is unverified."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Phone test passed locally").assertDoesNotExist()
         composeRule.onNodeWithText("Codex Desktop not verified").assertExists()
@@ -153,7 +153,7 @@ class ConnectorsScreenTest {
             }
         }
 
-        val heading = composeRule.onNodeWithText("Connect your coding agent")
+        val heading = composeRule.onNodeWithText("Connect an agent")
         heading.assertExists()
         assertTrue(
             "Connect page title should be exposed as a screen-reader heading",

@@ -629,6 +629,145 @@ def test_identified_codex_invocation_survives_postgres_api_restart_and_consumes_
                 admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
+def test_identified_codex_permission_callback_returns_reviewer_denial_without_claim(
+    tmp_path: Path,
+) -> None:
+    """A denied PostgreSQL decision returns deny to the exact waiting callback."""
+    base_dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not base_dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL Codex restart tests")
+
+    schema = f"ct_codex_deny_{uuid.uuid4().hex}"
+    schema_created = False
+    with psycopg.connect(base_dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        schema_created = True
+
+    connect = _schema_connector(base_dsn, schema)
+    api_process: subprocess.Popen[bytes] | None = None
+    hook_process: subprocess.Popen[str] | None = None
+    try:
+        run_postgres_migrations(connect)
+        _, project, user = _seed_workspace_project(connect)
+        bootstrap_dir = tmp_path / "api_bootstrap"
+        _write_bootstrap(bootstrap_dir)
+        fallback_dir = tmp_path / "sqlite-fallback"
+        fallback_dir.mkdir(mode=0o700)
+        port = _free_loopback_port()
+        api_process, base_url = _start_api(
+            runtime_dsn=base_dsn,
+            db_path=fallback_dir / "unused.sqlite3",
+            bootstrap_dir=bootstrap_dir,
+            user=user,
+            schema=schema,
+            port=port,
+        )
+        agent_id, token = _create_codex_agent(base_url, project.id)
+        environment = _hook_environment(base_url, project.id, agent_id, token)
+        callback_id = f"codex-postgres-denial-{uuid.uuid4().hex}"
+        event = {
+            "hook_event_name": "PermissionRequest",
+            "cwd": str(REPOSITORY_ROOT),
+            "permission_mode": "default",
+            "session_id": "codex-postgres-denial-session",
+            "turn_id": "codex-postgres-denial-turn",
+            "tool_use_id": callback_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo must-stop-after-phone-denial"},
+        }
+
+        hook_process = _launch_hook(event, environment)
+        approval = _wait_for_approval(connect, agent_id=agent_id, process=hook_process)
+        assert approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert approval["source_provider"] == "CODEX"
+        assert approval["source_agent_id"] == agent_id
+        assert approval["source_invocation_id"]
+        assert hook_process.poll() is None, "permission callback returned before reviewer decision"
+
+        with connect() as connection:
+            lease = connection.execute(
+                "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,"
+                "expires_at FROM approval_invocation_leases WHERE approval_id=%s",
+                (approval["id"],),
+            ).fetchone()
+            assert lease is not None
+            assert lease[:4] == (
+                approval["id"],
+                user.workspace_id,
+                agent_id,
+                approval["source_invocation_id"],
+            )
+            assert lease[4] > datetime.now(timezone.utc)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.decision'",
+                (approval["id"],),
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval["id"],),
+            ).fetchone()[0] == 0
+
+        reason = "Denied by reviewer in PostgreSQL callback regression"
+        with httpx.Client(base_url=base_url, timeout=5) as reviewer:
+            response = reviewer.post(
+                f"/approvals/{approval['id']}/decision",
+                json={"decision": "deny", "reason": reason},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "DENIED"
+
+        hook_decision, stderr = _finish_hook(hook_process)
+        hook_process = None
+        _assert_terminal_diagnostic(stderr, approval_id=approval["id"], decision="deny")
+        assert hook_decision == {
+            "behavior": "deny",
+            "message": "Control Tower decision: DENIED",
+        }
+
+        with connect() as connection:
+            row = connection.execute(
+                "SELECT status,payload->>'status',source_agent_id,source_invocation_id "
+                "FROM approval_requests WHERE approval_id=%s",
+                (approval["id"],),
+            ).fetchone()
+            assert row == (
+                "DENIED",
+                "DENIED",
+                agent_id,
+                approval["source_invocation_id"],
+            )
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.decision' AND details->>'decision'='deny'",
+                (approval["id"],),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.delivery_claimed'",
+                (approval["id"],),
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval["id"],),
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT COUNT(*) FROM notifications WHERE approval_id=%s "
+                "AND payload->>'title' LIKE 'Approval denied:%%' "
+                "AND payload->>'body'=%s",
+                (approval["id"], reason),
+            ).fetchone()[0] == 1
+    finally:
+        if hook_process is not None and hook_process.poll() is None:
+            hook_process.kill()
+            hook_process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)
+        if schema_created:
+            with psycopg.connect(base_dsn, autocommit=True) as admin:
+                admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 def test_codex_dead_hook_expired_lease_rejects_review_and_isolates_next_invocation(
     tmp_path: Path,
 ) -> None:

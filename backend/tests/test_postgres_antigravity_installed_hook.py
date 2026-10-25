@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 import shlex
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -148,6 +151,30 @@ def test_installed_antigravity_command_uses_postgres_for_phone_decision(
 
         approval_id, invocation_id = approval_row
         assert invocation_id
+        with connect() as connection:
+            pending_approval = connection.execute(
+                "SELECT status,source_invocation_id FROM approval_requests "
+                "WHERE approval_id=%s AND workspace_id=%s AND source_agent_id=%s",
+                (approval_id, workspace_record.id, agent.id),
+            ).fetchone()
+            creation_audits = connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.created_by_agent'",
+                (approval_id,),
+            ).fetchone()[0]
+            notifications_before_decision = connection.execute(
+                "SELECT notification_id,status,attempts,next_attempt_at,lease_expires_at,payload "
+                "FROM notifications WHERE approval_id=%s ORDER BY notification_id",
+                (approval_id,),
+            ).fetchall()
+        assert pending_approval == ("PENDING_REVIEW", invocation_id)
+        assert process.poll() is None, (
+            "Installed Antigravity hook must keep the exact invocation blocked "
+            "until the phone decision arrives"
+        )
+        assert creation_audits == 1
+        assert len(notifications_before_decision) == 1
+
         with httpx.Client(timeout=10) as client:
             response = client.post(
                 f"{api_base_url}/approvals/{approval_id}/decision",
@@ -192,6 +219,31 @@ def test_installed_antigravity_command_uses_postgres_for_phone_decision(
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
                 (approval_id,),
             ).fetchone()[0] == expected_claims
+            notifications_after_decision = connection.execute(
+                "SELECT notification_id,status,attempts,next_attempt_at,lease_expires_at,payload "
+                "FROM notifications WHERE approval_id=%s ORDER BY notification_id",
+                (approval_id,),
+            ).fetchall()
+            assert len(notifications_after_decision) == len(notifications_before_decision) + 1
+            notifications_by_id = {
+                row[0]: row for row in notifications_after_decision
+            }
+            assert all(
+                notifications_by_id.get(row[0]) == row
+                for row in notifications_before_decision
+            )
+            decision_notification_title = (
+                f"Approval {expected_status.lower()}: Antigravity approval: run_command"
+            )
+            assert connection.execute(
+                "SELECT COUNT(*) FROM notifications WHERE approval_id=%s "
+                "AND payload->>'title'=%s AND payload->>'body'=%s",
+                (
+                    approval_id,
+                    decision_notification_title,
+                    "installed Antigravity PostgreSQL integration test",
+                ),
+            ).fetchone()[0] == 1
     finally:
         if process is not None and process.poll() is None:
             process.terminate()
@@ -1243,3 +1295,293 @@ def test_installed_antigravity_hook_denies_after_postgres_credential_revocation(
                 hook_process.kill()
                 hook_process.wait(timeout=5)
         _stop_postgres_approval_http_api(server)
+
+
+def test_installed_antigravity_hook_denies_when_postgres_consume_response_is_lost(
+    tmp_path: Path,
+    postgres_approval_route_runtime,
+) -> None:
+    """A committed consume with a dropped response cannot authorize on replay."""
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    connect, workspace_record, project, reviewer, _repositories, agent, agent_token, schema = (
+        postgres_approval_route_runtime
+    )
+    api_server = _start_postgres_approval_http_api(
+        dsn=dsn,
+        schema=schema,
+        reviewer=reviewer,
+    )
+    api_base_url = api_server[2]
+    dropped_consume_response = threading.Event()
+    proxy_errors: list[str] = []
+    proxy_lock = threading.Lock()
+    consume_drop_state = {"dropped": False}
+
+    class ApprovalResponseDropProxy(BaseHTTPRequestHandler):
+        """Forward API traffic, then sever one successful consume response."""
+
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self._forward()
+
+        def do_POST(self) -> None:
+            self._forward()
+
+        def _forward(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            headers = {
+                name: value
+                for name, value in self.headers.items()
+                if name.lower() not in {"host", "content-length", "connection"}
+            }
+            try:
+                with httpx.Client(timeout=10) as client:
+                    upstream_response = client.request(
+                        self.command,
+                        f"{api_base_url}{self.path}",
+                        headers=headers,
+                        content=body,
+                    )
+                is_consume = self.command == "POST" and self.path.endswith("/consume")
+                should_drop = False
+                if is_consume and upstream_response.status_code == 200:
+                    with proxy_lock:
+                        if not consume_drop_state["dropped"]:
+                            consume_drop_state["dropped"] = True
+                            should_drop = True
+                if should_drop:
+                    approval_id = self.path.split("/")[-2]
+                    # The upstream response is returned only after the API
+                    # route has completed. Verify the claim and its audit are
+                    # visible from a separate PostgreSQL connection before
+                    # dropping the downstream response. This makes the fault
+                    # point deterministic and proves commit-before-drop.
+                    with connect() as connection:
+                        claim = connection.execute(
+                            "SELECT approval_id,workspace_id,source_agent_id "
+                            "FROM approval_delivery_claims WHERE approval_id=%s",
+                            (approval_id,),
+                        ).fetchone()
+                        claim_audits = connection.execute(
+                            "SELECT COUNT(*) FROM audit_events WHERE approval_id=%s "
+                            "AND event_type='approval.delivery_claimed'",
+                            (approval_id,),
+                        ).fetchone()[0]
+                    if (
+                        upstream_response.json() != {"consumed": True}
+                        or claim != (approval_id, workspace_record.id, agent.id)
+                        or claim_audits != 1
+                    ):
+                        proxy_errors.append(
+                            "upstream consume response arrived without one durable "
+                            f"claim and audit: body={upstream_response.text!r}, "
+                            f"claim={claim!r}, audits={claim_audits}"
+                        )
+                        self.send_response(502)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                    dropped_consume_response.set()
+                    self.close_connection = True
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    self.connection.close()
+                    return
+
+                response_body = upstream_response.content
+                self.send_response(upstream_response.status_code)
+                for name, value in upstream_response.headers.items():
+                    if name.lower() not in {
+                        "content-length",
+                        "connection",
+                        "transfer-encoding",
+                        "content-encoding",
+                    }:
+                        self.send_header(name, value)
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                if response_body:
+                    self.wfile.write(response_body)
+            except (httpx.HTTPError, OSError, ValueError) as exc:
+                proxy_errors.append(f"proxy forwarding failed: {exc!r}")
+                if not self.wfile.closed:
+                    try:
+                        self.send_response(502)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                    except OSError:
+                        pass
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), ApprovalResponseDropProxy)
+    proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    proxy_thread.start()
+    proxy_base_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+    process: subprocess.Popen[str] | None = None
+
+    try:
+        home = tmp_path / "lost consume response home"
+        workspace = tmp_path / "lost consume response workspace"
+        workspace.mkdir(mode=0o700)
+        config_path, hooks_path = setup_workspace.install_workspace(
+            workspace,
+            api_base_url=proxy_base_url,
+            agent_id=agent.id,
+            project_id=project.id,
+            home=home,
+            hook_script=HOOK_PATH,
+            python=sys.executable,
+        )
+        hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+        command = hooks[setup_workspace.HOOK_NAME]["PreToolUse"][0]["hooks"][0][
+            "command"
+        ]
+        argv = shlex.split(command)
+        assert argv == [
+            sys.executable,
+            str(HOOK_PATH.resolve()),
+            "--config",
+            str(config_path),
+        ]
+
+        session_id = f"installed-postgres-lost-consume-{time.time_ns()}"
+        payload = {
+            "conversationId": session_id,
+            "stepIdx": 83,
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "echo lost-consume-response-must-deny"},
+            },
+        }
+        child_environment = {
+            key: value
+            for key in ("PATH", "HOME", "TMPDIR", "SYSTEMROOT", "WINDIR")
+            if (value := os.environ.get(key))
+        }
+        child_environment.update(
+            {
+                "HOME": str(home),
+                "AIXION_AGENT_TOKEN": agent_token,
+                "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+                "AIXION_APPROVAL_TIMEOUT_SECONDS": "60",
+            }
+        )
+
+        process = subprocess.Popen(
+            argv,
+            cwd=workspace,
+            env=child_environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert process.stdin is not None
+        process.stdin.write(json.dumps(payload))
+        process.stdin.close()
+        process.stdin = None
+
+        approval_row: tuple[str, str, str] | None = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(
+                    "Installed hook exited before creating its PostgreSQL request "
+                    f"(exit={process.returncode}, stdout={stdout!r}, stderr={stderr!r})"
+                )
+            with connect() as connection:
+                rows = connection.execute(
+                    "SELECT approval_id,source_invocation_id,status FROM approval_requests "
+                    "WHERE workspace_id=%s AND source_agent_id=%s "
+                    "AND payload->>'source_session_id'=%s",
+                    (workspace_record.id, agent.id, session_id),
+                ).fetchall()
+            assert len(rows) <= 1, "installed hook created duplicate PostgreSQL approvals"
+            if rows:
+                approval_row = rows[0]
+                break
+            time.sleep(0.05)
+
+        assert approval_row is not None, "Installed hook created no PostgreSQL approval"
+        approval_id, invocation_id, status = approval_row
+        assert invocation_id
+        assert status == "PENDING_REVIEW"
+        assert process.poll() is None, "hook must remain blocked pending reviewer decision"
+
+        with httpx.Client(timeout=10) as reviewer_client:
+            decision = reviewer_client.post(
+                f"{api_base_url}/approvals/{approval_id}/decision",
+                json={"decision": "approve", "reason": "lost consume response test"},
+            )
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["status"] == "APPROVED"
+
+        stdout, stderr = process.communicate(timeout=20)
+        assert process.returncode == 0, stderr
+        assert dropped_consume_response.is_set(), (
+            "proxy did not observe a committed consume response before dropping it; "
+            f"proxy errors={proxy_errors!r}"
+        )
+        assert not proxy_errors, proxy_errors
+        assert json.loads(stdout)["decision"] == "deny"
+        assert "ambiguous" in json.loads(stdout)["reason"].lower()
+
+        # Replaying the exact provider callback must not turn the durable claim
+        # into a second allow. The proxy drops only the first successful consume
+        # response; a replay receives the real API's already-claimed conflict.
+        replay = subprocess.run(
+            argv,
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            cwd=workspace,
+            env=child_environment,
+            timeout=20,
+            check=False,
+        )
+        assert replay.returncode == 0, replay.stderr
+        replay_result = json.loads(replay.stdout)
+        assert replay_result["decision"] == "deny"
+
+        with connect() as connection:
+            approval_after = connection.execute(
+                "SELECT status,source_invocation_id FROM approval_requests "
+                "WHERE approval_id=%s AND workspace_id=%s AND source_agent_id=%s",
+                (approval_id, workspace_record.id, agent.id),
+            ).fetchone()
+            claimed_rows = connection.execute(
+                "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id "
+                "FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchall()
+            audit_counts = connection.execute(
+                "SELECT event_type,COUNT(*) FROM audit_events WHERE approval_id=%s "
+                "GROUP BY event_type ORDER BY event_type",
+                (approval_id,),
+            ).fetchall()
+        assert approval_after == ("APPROVED", invocation_id)
+        assert claimed_rows == [(approval_id, workspace_record.id, agent.id, invocation_id)]
+        assert dict(audit_counts) == {
+            "approval.created_by_agent": 1,
+            "approval.decision": 1,
+            "approval.delivery_claimed": 1,
+            "approval.delivery_failed": 1,
+        }
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        proxy.shutdown()
+        proxy.server_close()
+        proxy_thread.join(timeout=5)
+        _stop_postgres_approval_http_api(api_server)

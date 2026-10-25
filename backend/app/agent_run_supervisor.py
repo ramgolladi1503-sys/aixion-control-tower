@@ -71,6 +71,7 @@ from .postgres_agent_run_pull_request import (
     AgentRunPullRequestIntent,
     PostgresAgentRunPullRequestIntentRepository,
 )
+from .postgres_agent_run_fault_repository import PostgresAgentRunFaultRepository
 from .agent_task_repository import (
     AgentTaskRepository,
     PostgresAgentTaskRepository,
@@ -1633,6 +1634,7 @@ def execute_next_step(
     task_repository: AgentTaskRepository | None = None,
     approval_repository: ApprovalDecisionRepository | None = None,
     run_repository: AgentRunRepository | None = None,
+    fault_repository: PostgresAgentRunFaultRepository | None = None,
     audit_repository: PostgresAuditEventRepository | None = None,
     postgres_branch_coordinator: PostgresCreateBranchCoordinator | None = None,
     postgres_branch_request_factory: PostgresBranchRequestFactory | None = None,
@@ -2758,7 +2760,11 @@ def execute_next_step(
         ]
 
     try:
-        raise_if_fault_configured(run.id, step.step_type)
+        raise_if_fault_configured(
+            run.id,
+            step.step_type,
+            repository=fault_repository,
+        )
         if coordinated_apply_result is not None:
             result = coordinated_apply_result
         elif coordinated_branch_result is not None:

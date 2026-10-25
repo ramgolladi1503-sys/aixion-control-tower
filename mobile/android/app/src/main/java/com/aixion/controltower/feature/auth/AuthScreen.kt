@@ -210,9 +210,9 @@ internal fun AuthFormContent(
         Text(
             text = when {
                 state.verificationRequired -> "Verify your email to finish creating your account."
-                state.emailVerified -> "Log in to review and decide on pending approvals."
+                state.emailVerified -> "Sign in to review and decide on pending approvals."
                 registrationExpanded -> "Create an account once to use Control Tower."
-                else -> "Log in to review and decide on pending approvals."
+                else -> "Sign in to review and decide on pending approvals."
             },
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
@@ -222,6 +222,7 @@ internal fun AuthFormContent(
             OutlinedTextField(
                 value = state.email,
                 onValueChange = onEmailChange,
+                enabled = !state.loading,
                 label = { Text("Email address") },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -238,6 +239,7 @@ internal fun AuthFormContent(
             OutlinedTextField(
                 value = state.password,
                 onValueChange = onPasswordChange,
+                enabled = !state.loading,
                 label = { Text("Password") },
                 supportingText = if (registrationExpanded && !verificationStarted) {
                     { Text(AuthUxCopy.PASSWORD_REQUIREMENTS) }
@@ -310,12 +312,14 @@ internal fun AuthFormContent(
                     Text("Back to sign in")
                 }
             } else {
-                Button(
-                    onClick = onLogin,
-                    enabled = AuthUxCopy.canAttemptLogin(state),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(AuthUxCopy.primaryLoginLabel(state))
+                if (!state.verificationRequired && (state.devVerificationCode == null || state.emailVerified)) {
+                    Button(
+                        onClick = onLogin,
+                        enabled = AuthUxCopy.canAttemptLogin(state),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (state.loading) "Signing in…" else "Sign in")
+                    }
                 }
                 if (!verificationStarted) {
                     TextButton(
@@ -323,7 +327,7 @@ internal fun AuthFormContent(
                         enabled = !state.loading,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Create account")
+                        Text("Register")
                     }
                 }
             }
@@ -347,7 +351,7 @@ internal fun AuthFormContent(
                     Text("Verify your email", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Text(AuthUxCopy.verificationGuidance(state), color = palette.inkMuted, fontSize = 14.sp)
                     if (state.emailVerified) {
-                        Text("Email verified. Log in to continue.", color = palette.positive, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Email verified. Sign in to continue.", color = palette.positive, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                     }
                     developmentVerificationCodeForDisplay(
                         code = state.devVerificationCode,
@@ -364,6 +368,7 @@ internal fun AuthFormContent(
                         OutlinedTextField(
                             value = state.verificationCode,
                             onValueChange = onVerificationCodeChange,
+                            enabled = !state.loading,
                             label = { Text("Verification code") },
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true

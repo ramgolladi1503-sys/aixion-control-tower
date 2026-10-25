@@ -510,8 +510,22 @@ def test_postgres_execute_route_injects_bound_audit_repository(
 ) -> None:
     import app.agent_run_routes as agent_run_routes
 
-    connect, workspace, _project, _other_workspace, _other_project, state = (
+    connect, workspace, _project, other_workspace, _other_project, state = (
         postgres_agent_run_route_runtime
+    )
+    settings = SimpleNamespace(
+        auth_enabled=False,
+        is_production=False,
+        postgres_auth_enabled=True,
+    )
+    monkeypatch.setattr(agent_run_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.application_repository_access.get_settings", lambda: settings)
+    monkeypatch.setattr(agent_run_routes, "workspace_id_for_request", lambda user, _request: workspace.id)
+    monkeypatch.setattr(
+        main.app.state,
+        "agent_run_fault_repository",
+        state["repositories"].agent_run_faults,
+        raising=False,
     )
     task_id = state["task_ids_by_workspace"][workspace.id]
     client = TestClient(main.app)
@@ -534,6 +548,130 @@ def test_postgres_execute_route_injects_bound_audit_repository(
 
     assert response.status_code == 409
     assert captured["audit_repository"] is state["repositories"].audit_events
+    assert captured["fault_repository"] is state["repositories"].agent_run_faults
+
+
+def test_postgres_agent_run_fault_routes_and_consumption_use_durable_repository(
+    postgres_agent_run_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from app import agent_run_faults
+    from app.agent_run_models import AgentRunFaultConfig, AgentRunFaultKind
+
+    connect, workspace, _project, other_workspace, _other_project, state = (
+        postgres_agent_run_route_runtime
+    )
+    repositories = state["repositories"]
+    settings = SimpleNamespace(
+        auth_enabled=True,
+        is_production=False,
+        postgres_auth_enabled=True,
+    )
+    monkeypatch.setattr(agent_run_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.application_repository_access.get_settings", lambda: settings)
+    monkeypatch.setattr(agent_run_routes, "workspace_id_for_request", lambda user, _request: user.workspace_id)
+    monkeypatch.setattr(
+        main.app.state,
+        "agent_run_fault_repository",
+        repositories.agent_run_faults,
+        raising=False,
+    )
+    task_id = state["task_ids_by_workspace"][workspace.id]
+    client = TestClient(main.app)
+    created_run = client.post("/agent/runs", json={"task_id": task_id})
+    assert created_run.status_code == 200, created_run.text
+    run_id = created_run.json()["run"]["id"]
+    monkeypatch.setattr(
+        agent_run_routes,
+        "workspace_id_for_user",
+        lambda *_args, **_kwargs: pytest.fail(
+            "PostgreSQL fault routes must resolve scope through the request-bound repository"
+        ),
+    )
+
+    local_faults_before = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_faults.items()
+    }
+    local_audits_before = [event.model_copy(deep=True) for event in store.audit_events]
+    persist_calls: list[bool] = []
+    monkeypatch.setattr(store, "persist", lambda: persist_calls.append(True))
+
+    configured = client.post(
+        "/agent/runs/faults",
+        json={
+            "run_id": run_id,
+            "step_type": "CREATE_BRANCH",
+            "fault_kind": "GITHUB_TIMEOUT",
+            "remaining_uses": 3,
+        },
+    )
+    assert configured.status_code == 200, configured.text
+    fault_id = configured.json()["id"]
+    assert client.get("/agent/runs/faults").json()[0]["id"] == fault_id
+    assert repositories.agent_run_faults.list_for_workspace(other_workspace.id) == []
+    current_user = state["current_user"]
+    current_user["value"] = state["users"][1]
+    assert client.get("/agent/runs/faults").json() == []
+    other_workspace_delete = client.delete(f"/agent/runs/faults/{fault_id}")
+    assert other_workspace_delete.status_code == 404
+    current_user["value"] = state["users"][0]
+
+    local_decoy = AgentRunFaultConfig(
+        id="local_decoy_" + uuid.uuid4().hex,
+        run_id=run_id,
+        step_type=AgentRunStepType.CREATE_BRANCH,
+        fault_kind=AgentRunFaultKind.WORKER_CRASH,
+        remaining_uses=5,
+    )
+    store.agent_run_faults[local_decoy.id] = local_decoy
+    monkeypatch.setattr(
+        agent_run_faults,
+        "get_settings",
+        lambda: settings,
+    )
+
+    barrier = Barrier(8)
+
+    def consume_once():
+        barrier.wait(timeout=20)
+        return agent_run_faults.consume_fault(
+            run_id,
+            AgentRunStepType.CREATE_BRANCH,
+            repository=repositories.agent_run_faults,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        consumed = list(executor.map(lambda _index: consume_once(), range(8)))
+    assert sum(item is not None for item in consumed) == 3
+    durable = repositories.agent_run_faults.list_for_workspace(workspace.id)
+    stored = next(item for item in durable if item.id == fault_id)
+    assert stored.remaining_uses == 0
+    assert stored.enabled is False
+    assert store.agent_run_faults[local_decoy.id].remaining_uses == 5
+    assert all(store.agent_run_faults[key] == value for key, value in local_faults_before.items())
+    assert persist_calls == []
+
+    disabled = client.delete(f"/agent/runs/faults/{fault_id}")
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["enabled"] is False
+    assert local_audits_before == [event.model_copy(deep=True) for event in store.audit_events]
+    assert store.agent_run_faults[local_decoy.id].remaining_uses == 5
+    with connect() as conn:
+        audit_rows = conn.execute(
+            "SELECT event_type,details->>'fault_kind' FROM audit_events "
+            "WHERE workspace_id=%s AND entity_id=%s ORDER BY created_at,event_id",
+            (workspace.id, fault_id),
+        ).fetchall()
+    assert len(audit_rows) == 4
+    assert audit_rows[0] == ("agent_run.fault_configured", "GITHUB_TIMEOUT")
+    assert [row[0] for row in audit_rows[1:]] == [
+        "agent_run.fault_injected",
+        "agent_run.fault_injected",
+        "agent_run.fault_injected",
+    ]
 
 
 def test_postgres_agent_run_validation_fails_closed_without_audit_repository(

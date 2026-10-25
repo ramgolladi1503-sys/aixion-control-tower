@@ -1739,6 +1739,41 @@ POSTGRES_MIGRATIONS = (
             "ON device_registrations(session_id,user_id)",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0037_agent_run_fault_controls",
+        name="Persist workspace-scoped AgentRun diagnostic fault controls",
+        statements=(
+            """
+            CREATE TABLE IF NOT EXISTS agent_run_faults (
+                fault_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE RESTRICT,
+                run_id TEXT NOT NULL,
+                step_type TEXT,
+                fault_kind TEXT NOT NULL,
+                enabled BOOLEAN NOT NULL,
+                remaining_uses INTEGER NOT NULL CHECK (remaining_uses BETWEEN 0 AND 100),
+                message TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                payload JSONB NOT NULL,
+                FOREIGN KEY (run_id,workspace_id)
+                    REFERENCES agent_runs(run_id,workspace_id) ON DELETE RESTRICT,
+                CHECK (length(fault_id) BETWEEN 1 AND 256),
+                CHECK (payload ? 'id' AND payload->>'id'=fault_id),
+                CHECK (payload ? 'run_id' AND payload->>'run_id'=run_id),
+                CHECK (payload ? 'step_type' AND payload->>'step_type' IS NOT DISTINCT FROM step_type),
+                CHECK (payload ? 'fault_kind' AND payload->>'fault_kind'=fault_kind),
+                CHECK (payload ? 'enabled' AND (payload->>'enabled')::BOOLEAN=enabled),
+                CHECK (payload ? 'remaining_uses' AND (payload->>'remaining_uses')::INTEGER=remaining_uses),
+                CHECK (payload ? 'message' AND payload->>'message'=message),
+                CHECK (payload ? 'created_by' AND payload->>'created_by'=created_by),
+                CHECK (payload ? 'created_at' AND (payload->>'created_at')::TIMESTAMPTZ=created_at)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_agent_run_faults_due "
+            "ON agent_run_faults(run_id,enabled,remaining_uses,created_at,fault_id)",
+        ),
+    ),
 )
 
 

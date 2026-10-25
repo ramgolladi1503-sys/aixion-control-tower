@@ -1,112 +1,150 @@
 package com.aixion.controltower.feature.auth
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NotificationPermissionPanelTest {
     @Test
-    fun deniedStateClearlyExplainsPushIsBlocked() {
-        assertEquals("Permission off", NotificationPermissionCopy.badge(NotificationPermissionState.DENIED))
+    fun deniedPermissionAndRequiredRegistrationExplainThatAlertsAreBlocked() {
         assertEquals(
-            "Android notifications are off. Push notifications cannot appear until you allow them.",
-            NotificationPermissionCopy.status(NotificationPermissionState.DENIED)
+            NotificationPanelMessage(
+                headline = "Android notifications are off.",
+                supportingDetail = "Allow notifications to register this device for approval alerts."
+            ),
+            NotificationPanelCopy.message(
+                NotificationPermissionState.DENIED,
+                PushRegistrationUiState.PERMISSION_REQUIRED
+            )
         )
     }
 
     @Test
-    fun grantedStateConfirmsDevicePermission() {
-        assertEquals("Permission allowed", NotificationPermissionCopy.badge(NotificationPermissionState.GRANTED))
+    fun grantedPermissionAndRegistrationDoNotClaimPushDelivery() {
         assertEquals(
-            "Android allows notifications on this device.",
-            NotificationPermissionCopy.status(NotificationPermissionState.GRANTED)
+            NotificationPanelMessage(
+                headline = "Device registered with the server.",
+                supportingDetail =
+                    "Android allows notifications on this device. This confirms registration only, not delivery of a push alert."
+            ),
+            NotificationPanelCopy.message(
+                NotificationPermissionState.GRANTED,
+                PushRegistrationUiState.REGISTERED
+            )
         )
     }
 
     @Test
     fun olderAndroidStateDoesNotClaimPermissionWasGranted() {
-        assertEquals("System managed", NotificationPermissionCopy.badge(NotificationPermissionState.NOT_REQUIRED))
         assertEquals(
-            "This Android version does not require a notification permission prompt.",
-            NotificationPermissionCopy.status(NotificationPermissionState.NOT_REQUIRED)
-        )
-    }
-
-    @Test
-    fun successfulRegistrationIsReportedExplicitly() {
-        assertEquals(
-            "This device is registered to receive approval alerts.",
-            PushRegistrationCopy.status(PushRegistrationUiState.REGISTERED)
+            NotificationPanelMessage(
+                headline = "Device registered with the server.",
+                supportingDetail =
+                    "This Android version does not require a notification permission prompt. This confirms registration only, not delivery of a push alert."
+            ),
+            NotificationPanelCopy.message(
+                NotificationPermissionState.NOT_REQUIRED,
+                PushRegistrationUiState.REGISTERED
+            )
         )
     }
 
     @Test
     fun missingFirebaseConfigurationIsNotPresentedAsSuccess() {
         assertEquals(
-            "Firebase is not configured for this app build. Push alerts are unavailable.",
-            PushRegistrationCopy.status(PushRegistrationUiState.FIREBASE_NOT_CONFIGURED)
+            NotificationPanelMessage(
+                headline = "Push alerts are unavailable in this app build.",
+                supportingDetail = "Firebase is not configured for this app build."
+            ),
+            NotificationPanelCopy.message(
+                NotificationPermissionState.GRANTED,
+                PushRegistrationUiState.FIREBASE_NOT_CONFIGURED
+            )
         )
     }
 
     @Test
     fun backendFailureOffersRetryPath() {
         assertEquals(
-            "Could not register this device with the server. Reopen Account to retry.",
-            PushRegistrationCopy.status(PushRegistrationUiState.BACKEND_UNAVAILABLE)
+            NotificationPanelMessage(
+                headline = "This device could not be registered for approval alerts.",
+                supportingDetail = "Server registration failed. Reopen Account to retry."
+            ),
+            NotificationPanelCopy.message(
+                NotificationPermissionState.GRANTED,
+                PushRegistrationUiState.BACKEND_UNAVAILABLE
+            )
         )
     }
 
     @Test
     fun oldDeviceCleanupFailureIsNotHiddenAsFullyRegistered() {
+        val message = NotificationPanelCopy.message(
+            NotificationPermissionState.GRANTED,
+            PushRegistrationUiState.REGISTERED_CLEANUP_PENDING
+        )
+
+        assertEquals("Device registered with the server.", message.headline)
         assertEquals(
-            "Alerts are registered, but an older device registration could not be removed yet.",
-            PushRegistrationCopy.status(PushRegistrationUiState.REGISTERED_CLEANUP_PENDING)
+            "An older device registration could not be removed yet. Cleanup will retry when the owning account is available. This does not confirm push delivery.",
+            message.supportingDetail
         )
     }
 
     @Test
     fun revokedPermissionShowsPendingServerCleanup() {
         assertEquals(
-            "Notifications are off, and server cleanup is pending. Cleanup will retry when the owning account is available.",
-            PushRegistrationCopy.status(PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING)
+            NotificationPanelMessage(
+                headline = "Android notifications are off.",
+                supportingDetail =
+                    "Allow notifications for approval alerts. Server cleanup is pending and will retry when the owning account is available."
+            ),
+            NotificationPanelCopy.message(
+                NotificationPermissionState.DENIED,
+                PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING
+            )
         )
     }
 
     @Test
-    fun backgroundRegistrationDoesNotClaimSuccessWithoutNotificationPermission() {
+    fun checkingStateRetainsPermissionContext() {
         assertEquals(
-            "Allow notifications to register this device for approval alerts.",
-            PushRegistrationCopy.status(PushRegistrationUiState.PERMISSION_REQUIRED)
+            NotificationPanelMessage(
+                headline = "Checking approval alert setup…",
+                supportingDetail = "Android allows notifications on this device."
+            ),
+            NotificationPanelCopy.message(
+                NotificationPermissionState.GRANTED,
+                PushRegistrationUiState.CHECKING
+            )
         )
     }
 
     @Test
     fun permissionActionAppearsOnlyWhenFirebaseIsConfiguredAndPermissionIsTheBlocker() {
-        assertEquals(
-            true,
+        assertTrue(
             shouldShowNotificationPermissionAction(
                 NotificationPermissionState.DENIED,
                 PushRegistrationUiState.PERMISSION_REQUIRED,
                 firebaseConfigured = true
             )
         )
-        assertEquals(
-            false,
+        assertFalse(
             shouldShowNotificationPermissionAction(
                 NotificationPermissionState.DENIED,
                 PushRegistrationUiState.FIREBASE_NOT_CONFIGURED,
                 firebaseConfigured = false
             )
         )
-        assertEquals(
-            false,
+        assertFalse(
             shouldShowNotificationPermissionAction(
                 NotificationPermissionState.DENIED,
                 PushRegistrationUiState.CHECKING,
                 firebaseConfigured = true
             )
         )
-        assertEquals(
-            false,
+        assertFalse(
             shouldShowNotificationPermissionAction(
                 NotificationPermissionState.GRANTED,
                 PushRegistrationUiState.PERMISSION_REQUIRED,

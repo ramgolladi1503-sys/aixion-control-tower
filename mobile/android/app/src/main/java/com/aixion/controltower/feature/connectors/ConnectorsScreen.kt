@@ -104,22 +104,22 @@ private fun ConnectorPrerequisitesContent() {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ConnectorStep(
             number = "1",
-            title = "Open the project on the agent computer",
+            title = "Open the project",
             detail = "Use the computer and agent session that should pause for approvals."
         )
         ConnectorStep(
             number = "2",
-            title = "Keep it reachable",
-            detail = "The agent computer, agent session, and Control Tower API must stay available while a request is waiting."
+            title = "Keep the computer available",
+            detail = "Keep it powered on and awake, with the agent session and Control Tower API reachable while a request is waiting."
         )
         ConnectorStep(
             number = "3",
-            title = "Save the one-time token",
+            title = "Save your one-time token",
             detail = "Setup shows the connector token once. Store it like a password."
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            "The phone cannot wake or restart the agent computer. This screen does not verify hook installation.",
+            "The phone cannot wake or restart the agent computer. This screen does not verify that the provider hook is installed.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodySmall
         )
@@ -156,14 +156,14 @@ private fun ConnectorsHero() {
                 StatusBadge(label = "Set up a project", color = palette.brand, uppercase = false)
                 Spacer(modifier = Modifier.height(TowerSpacing.md))
                 Text(
-                    text = "Connect your coding agent",
+                    text = "Connect an agent",
                     modifier = Modifier.semantics { heading() },
                     color = palette.ink,
                     style = MaterialTheme.typography.headlineLarge
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = "Choose the agent used by this project. Set up each project workspace on the computer where the agent runs.",
+                    text = "Choose the provider used by this project. Complete setup on the computer where the agent runs.",
                     color = palette.inkMuted,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -189,8 +189,8 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             name = "Antigravity",
             status = "Not verified",
             statusColor = palette.caution,
-            description = "A local phone approval flow passed on an earlier build, but this build has not been tested on a phone. Approval delivery while away from the Mac is also unverified.",
-            buttonLabel = "Set up Antigravity",
+            description = "A local phone approval passed on an earlier build. This build has not been phone-tested, and delivery while away from the Mac is unverified.",
+            buttonLabel = "Open Antigravity setup",
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
@@ -198,8 +198,8 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             name = "Codex",
             status = "Codex Desktop not verified",
             statusColor = palette.caution,
-            description = "Phone approvals from Codex Desktop and returning a decision to its same task have not been verified. Do not rely on Codex Desktop approvals yet.",
-            buttonLabel = "Set up Codex",
+            description = "Codex Desktop phone approvals and returning a decision to the same task are unverified. Do not rely on this flow yet.",
+            buttonLabel = "Open Codex setup",
             onClick = { onOpenAgentAccess("CODEX") }
         )
     }
@@ -248,7 +248,7 @@ private fun ApprovalFlowNote() {
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            text = "The request appears in Approvals. Review the exact action, then approve or deny it. Your decision returns to the waiting task only while its agent computer, session, and API remain reachable.",
+            text = "The request appears in Approvals. Review the exact action, then approve or deny it. The decision returns to the same waiting task only while its computer, session, and API remain reachable.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )

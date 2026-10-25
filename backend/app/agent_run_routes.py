@@ -4,6 +4,7 @@ import logging
 from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from psycopg import Error as PsycopgError
 
 from .agent_run_faults import default_fault_reason
 from .agent_run_metrics import (
@@ -16,6 +17,7 @@ from .application_repository_access import (
     agent_task_repository_for_request,
     approval_decision_repository_for_request,
     agent_run_repository_for_request,
+    agent_run_fault_repository_for_request,
     workspace_id_for_request,
 )
 from .agent_run_models import (
@@ -383,25 +385,17 @@ def _require_non_production_fault_injection() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
-def _require_durable_fault_repository() -> None:
-    # Fault controls currently live only in the SQLite store. Whether a
-    # PostgreSQL probe object happens to be attached does not select that
-    # database as the application authority; probe-only mode intentionally
-    # retains the local SQLite adapter. Conversely, PostgreSQL auth mode must
-    # fail closed even when called without a Request or before runtime state is
-    # available, rather than silently using process-local fault state.
-    settings = get_settings()
-    if (
-        getattr(settings, "is_production", False)
-        or getattr(settings, "postgres_auth_enabled", False)
-    ):
+def _fault_repository_for_request(request: Request | None):
+    if not getattr(get_settings(), "postgres_auth_enabled", False):
+        return None
+    try:
+        return agent_run_fault_repository_for_request(request)
+    except RuntimeError as error:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Agent-run fault controls require a durable PostgreSQL repository "
-                "and are unavailable while PostgreSQL is selected"
-            ),
-        )
+            detail="PostgreSQL AgentRun fault repository is unavailable",
+            headers={"Retry-After": "1"},
+        ) from error
 
 
 @router.get("/summary", response_model=AgentRunSummary)
@@ -587,7 +581,16 @@ def list_faults(
     request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentRunFaultConfig]:
     _require_non_production_fault_injection()
-    _require_durable_fault_repository()
+    fault_repository = _fault_repository_for_request(request)
+    if fault_repository is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if not workspace_id:
+            raise HTTPException(status_code=404, detail="Agent run not found")
+        try:
+            return fault_repository.list_for_workspace(workspace_id)
+        except (RuntimeError, PsycopgError) as error:
+            logger.exception("AgentRun fault list failed error_type=%s", type(error).__name__)
+            raise HTTPException(status_code=503, detail="AgentRun fault state is unavailable") from error
     workspace_id = workspace_id_for_user(user)
     return sorted(
         [
@@ -613,12 +616,29 @@ def create_fault(
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunFaultConfig:
     _require_non_production_fault_injection()
-    _require_durable_fault_repository()
-    workspace_id = workspace_id_for_user(user)
+    fault_repository = _fault_repository_for_request(request)
     if not payload.run_id:
         raise HTTPException(
             status_code=422, detail="A run_id is required for workspace-scoped fault injection"
         )
+    fault = AgentRunFaultConfig(
+        **payload.model_dump(exclude={"message"}),
+        message=payload.message or default_fault_reason(payload.fault_kind),
+        created_by=user.email,
+    )
+    if fault_repository is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if not workspace_id:
+            raise HTTPException(status_code=404, detail="Agent run not found")
+        try:
+            created = fault_repository.create(fault, workspace_id=workspace_id)
+        except (RuntimeError, PsycopgError) as error:
+            logger.exception("AgentRun fault create failed error_type=%s", type(error).__name__)
+            raise HTTPException(status_code=503, detail="AgentRun fault state is unavailable") from error
+        if created is None:
+            raise HTTPException(status_code=404, detail="Agent run not found")
+        return created
+    workspace_id = workspace_id_for_user(user)
     if payload.run_id not in store.agent_runs:
         raise HTTPException(status_code=404, detail="Agent run not found")
     run = store.agent_runs[payload.run_id]
@@ -626,11 +646,6 @@ def create_fault(
         workspace_id is not None and _run_workspace_id(run) != workspace_id
     ):
         raise HTTPException(status_code=404, detail="Agent run not found")
-    fault = AgentRunFaultConfig(
-        **payload.model_dump(exclude={"message"}),
-        message=payload.message or default_fault_reason(payload.fault_kind),
-        created_by=user.email,
-    )
     store.agent_run_faults[fault.id] = fault
     _audit(
         "agent_run.fault_configured",
@@ -654,7 +669,23 @@ def disable_fault(
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunFaultConfig:
     _require_non_production_fault_injection()
-    _require_durable_fault_repository()
+    fault_repository = _fault_repository_for_request(request)
+    if fault_repository is not None:
+        workspace_id = workspace_id_for_request(user, request)
+        if not workspace_id:
+            raise HTTPException(status_code=404, detail="Fault configuration not found")
+        try:
+            fault = fault_repository.disable(
+                fault_id,
+                workspace_id=workspace_id,
+                actor=user.email,
+            )
+        except (RuntimeError, PsycopgError) as error:
+            logger.exception("AgentRun fault disable failed error_type=%s", type(error).__name__)
+            raise HTTPException(status_code=503, detail="AgentRun fault state is unavailable") from error
+        if fault is None:
+            raise HTTPException(status_code=404, detail="Fault configuration not found")
+        return fault
     fault = store.agent_run_faults.get(fault_id)
     workspace_id = workspace_id_for_user(user)
     if (
@@ -829,6 +860,11 @@ def execute_run_next_step(
     else:
         run = _run_or_404(run_id, user)
     task_repository = agent_task_repository_for_request(request) if request is not None else None
+    fault_repository = (
+        _fault_repository_for_request(request)
+        if isinstance(run_repository, PostgresAgentRunRepository)
+        else None
+    )
     approval_repository = (
         approval_decision_repository_for_request(request) if request is not None else None
     )
@@ -1000,6 +1036,11 @@ def execute_run_next_step(
                 task_repository=task_repository,
                 approval_repository=approval_repository,
                 run_repository=run_repository,
+                fault_repository=(
+                    fault_repository
+                    if isinstance(run_repository, PostgresAgentRunRepository)
+                    else None
+                ),
                 audit_repository=(
                     application_repositories_for_request(request).audit_events
                     if isinstance(run_repository, PostgresAgentRunRepository)

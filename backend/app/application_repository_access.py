@@ -8,6 +8,7 @@ from .application_repositories import ApplicationRepositories
 from .audit_repository import AuditEventRepository
 from .agent_task_repository import AgentTaskRepository, PostgresAgentTaskRepository
 from .agent_run_repository import AgentRunRepository, PostgresAgentRunRepository
+from .postgres_agent_run_fault_repository import PostgresAgentRunFaultRepository
 from .agent_auth_repository import ExternalAgentAuthenticationRepository
 from .agent_auth_repository import SQLiteExternalAgentAuthRepository
 from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
@@ -149,6 +150,27 @@ def agent_run_repository_for_request(request: _RequestState | None) -> AgentRunR
     repository = getattr(state, "agent_run_repository", None)
     if repository is None:
         raise RuntimeError("Application AgentRun repository is unavailable")
+    return repository
+
+
+def agent_run_fault_repository_for_request(
+    request: _RequestState | None,
+) -> PostgresAgentRunFaultRepository:
+    """Return the fault-control repository from the selected PostgreSQL runtime."""
+    app = getattr(request, "app", None)
+    state = getattr(app, "state", None)
+    if not _postgres_auth_selected("AgentRun fault repository access"):
+        raise RuntimeError("PostgreSQL AgentRun fault repository was not selected")
+    repositories = application_repositories_for_request(request)
+    repository = getattr(repositories, "agent_run_faults", None)
+    runtime = getattr(state, "postgres_runtime", None)
+    if (
+        runtime is None
+        or getattr(runtime, "repositories", None) is not repositories
+        or not isinstance(repository, PostgresAgentRunFaultRepository)
+        or getattr(state, "agent_run_fault_repository", None) is not repository
+    ):
+        raise RuntimeError("PostgreSQL AgentRun fault repository is unavailable or mismatched")
     return repository
 
 

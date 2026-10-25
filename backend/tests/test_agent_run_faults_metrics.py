@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 os.environ.setdefault("AIXION_PROFILE", "test")
 
@@ -83,10 +85,8 @@ def test_postgres_auth_run_never_consumes_process_local_fault_configuration(monk
         lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
     )
 
-    assert (
+    with pytest.raises(RuntimeError, match="PostgreSQL AgentRun fault repository is required"):
         consume_fault("run_postgres_auth", AgentRunStepType.CREATE_BRANCH)
-        is None
-    )
     assert fault.remaining_uses == 1
     assert fault.enabled is True
 

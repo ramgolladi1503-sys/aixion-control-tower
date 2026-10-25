@@ -7,6 +7,8 @@ import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
@@ -50,8 +52,8 @@ class AuthFormContentTest {
 
         composeRule.onNodeWithText("Email address").assertExists()
         composeRule.onNodeWithText("Password").assertExists()
-        composeRule.onNodeWithText("Log in").assertExists()
-        composeRule.onNodeWithText("Create account").assertExists()
+        composeRule.onNodeWithText("Sign in").assertExists()
+        composeRule.onNodeWithText("Register").assertExists()
         assertTrue(
             "Sign-in title should be exposed as a screen-reader heading",
             composeRule.onNodeWithText("Welcome back")
@@ -60,7 +62,7 @@ class AuthFormContentTest {
         composeRule.onNodeWithText("Name").assertDoesNotExist()
         composeRule.onNodeWithText("Invite code (optional)").assertDoesNotExist()
 
-        composeRule.onNodeWithText("Create account").performScrollTo().performClick()
+        composeRule.onNodeWithText("Register").performScrollTo().performClick()
 
         composeRule.onNodeWithText("Name").assertDoesNotExist()
         composeRule.onNodeWithText("Invite code (optional)").assertDoesNotExist()
@@ -208,6 +210,62 @@ class AuthFormContentTest {
             .assertExists()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Information"))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+        composeRule.onNodeWithText("Email address").assertIsNotEnabled()
+        composeRule.onNodeWithText("Password").assertIsNotEnabled()
+        composeRule.onNodeWithText("Sign in").assertIsNotEnabled()
+        composeRule.onNodeWithText("Register").assertIsNotEnabled()
+    }
+
+    @Test
+    fun verificationInputsStayLockedAndProgressRemainsExplicitWhileSubmitting() {
+        composeRule.setContent {
+            AuthFormContent(
+                state = AuthUiState(
+                    email = "owner@example.com",
+                    verificationRequired = true,
+                    verificationCode = "123456",
+                    loading = true
+                ),
+                onEmailChange = {},
+                onPasswordChange = {},
+                onVerificationCodeChange = {},
+                onLogin = {},
+                onRegister = {},
+                onVerify = {},
+                onResendVerification = {}
+            )
+        }
+
+        composeRule.onNodeWithText("Email address").assertIsNotEnabled()
+        composeRule.onNodeWithText("Verification code").assertIsNotEnabled()
+        composeRule.onNodeWithText("Verify email").assertIsNotEnabled()
+        composeRule.onNodeWithText("Resend code").assertIsNotEnabled()
+        composeRule.onNodeWithText("Sign in").assertDoesNotExist()
+        composeRule.onNodeWithText("Register").assertDoesNotExist()
+        composeRule.onNodeWithText("Working…")
+            .assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+    }
+
+    @Test
+    fun credentialFieldsAndPrimaryActionAreAvailableWhenNotSubmitting() {
+        composeRule.setContent {
+            AuthFormContent(
+                state = AuthUiState(email = "owner@example.com", password = "StrongPass123!"),
+                onEmailChange = {},
+                onPasswordChange = {},
+                onVerificationCodeChange = {},
+                onLogin = {},
+                onRegister = {},
+                onVerify = {},
+                onResendVerification = {}
+            )
+        }
+
+        composeRule.onNodeWithText("Email address").assertIsEnabled()
+        composeRule.onNodeWithText("Password").assertIsEnabled()
+        composeRule.onNodeWithText("Sign in").assertIsEnabled()
+        composeRule.onNodeWithText("Register").assertIsEnabled()
     }
 
     @Test
@@ -238,8 +296,8 @@ class AuthFormContentTest {
             assertTrue("Sign-in heading must stay within narrow viewport", bounds.right <= 240f)
             assertTrue("Sign-in heading must wrap at 200% text", bounds.height > 48f)
         }
-        composeRule.onNodeWithText("Log in").performScrollTo().assertExists()
-        composeRule.onNodeWithText("Create account").performScrollTo().performClick()
+        composeRule.onNodeWithText("Sign in").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Register").performScrollTo().performClick()
         composeRule.onNodeWithText("Create your account").assertExists()
         composeRule.onNodeWithText("Create account").performScrollTo().assertExists()
         composeRule.onNodeWithText("Back to sign in").performScrollTo().assertExists()

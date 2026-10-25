@@ -29,6 +29,7 @@ from .postgres_agent_run_apply_changes import PostgresAgentRunApplyChangeIntentR
 from .postgres_agent_run_validation import PostgresAgentRunValidationIntentRepository
 from .postgres_agent_run_pull_request import PostgresAgentRunPullRequestIntentRepository
 from .recovery_repository import PostgresRecoverySnapshotRepository
+from .postgres_agent_run_fault_repository import PostgresAgentRunFaultRepository
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class ApplicationRepositories:
     agent_tasks: PostgresAgentTaskRepository
     projects: PostgresProjectRepository
     agent_runs: PostgresAgentRunRepository
+    agent_run_faults: PostgresAgentRunFaultRepository
     workspace_membership: PostgresWorkspaceMembershipRepository
     external_agent_auth: PostgresExternalAgentAuthRepository
     work_orders: PostgresWorkOrderRepository
@@ -81,6 +83,7 @@ class ApplicationRepositories:
             agent_tasks=PostgresAgentTaskRepository(connect),
             projects=PostgresProjectRepository(connect),
             agent_runs=PostgresAgentRunRepository(connect),
+            agent_run_faults=PostgresAgentRunFaultRepository(connect),
             workspace_membership=PostgresWorkspaceMembershipRepository(connect),
             external_agent_auth=PostgresExternalAgentAuthRepository(connect),
             work_orders=PostgresWorkOrderRepository(connect),
