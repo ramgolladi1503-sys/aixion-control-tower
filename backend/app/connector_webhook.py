@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -54,6 +55,7 @@ MAX_WEBHOOK_METADATA_KEYS = 50
 HMAC_SIGNATURE_VERSION = "v1"
 HMAC_TIMESTAMP_TOLERANCE_SECONDS = 300
 HMAC_NONCE_TTL_SECONDS = 600
+HMAC_NONCE_CONFIG_KEYS = frozenset({"hmac_nonce_history", "hmac_nonce_results"})
 
 
 @dataclass(frozen=True)
@@ -225,6 +227,27 @@ def _clean_hmac_nonce_results(
         if expires_at > now_epoch:
             cleaned[str(nonce)] = value
     return cleaned
+
+
+def _snapshot_hmac_nonce_state(connector: AgentConnector) -> dict[str, Any]:
+    """Capture nonce state so an explicit 429 does not consume a request."""
+    return {
+        key: deepcopy(connector.config[key])
+        for key in HMAC_NONCE_CONFIG_KEYS
+        if key in connector.config
+    }
+
+
+def _restore_hmac_nonce_state(
+    connector: AgentConnector, snapshot: dict[str, Any]
+) -> None:
+    config = {
+        key: value
+        for key, value in connector.config.items()
+        if key not in HMAC_NONCE_CONFIG_KEYS
+    }
+    config.update(snapshot)
+    connector.config = config
 
 
 def _assert_hmac_v1_not_replayed(
@@ -587,6 +610,7 @@ async def handle_connector_webhook(
         raise HTTPException(status_code=404, detail="Connector not found")
     body = await _read_webhook_body(request)
     expected_updated_at = connector.updated_at
+    original_hmac_nonce_state = _snapshot_hmac_nonce_state(connector)
     try:
         hmac_identity = _authenticate_connector(
             connector,
@@ -611,8 +635,10 @@ async def handle_connector_webhook(
     if hmac_identity is not None and hmac_identity.replay_response is not None:
         return hmac_identity.replay_response
     try:
-        _enforce_connector_rate_limit(connector, persist_local=not repository_mode)
+        _enforce_connector_rate_limit(connector, persist_local=False)
     except HTTPException:
+        if hmac_identity is not None:
+            _restore_hmac_nonce_state(connector, original_hmac_nonce_state)
         if repository_mode:
             _commit_webhook_connector_update(
                 connector_repository,
@@ -621,6 +647,19 @@ async def handle_connector_webhook(
                 event_type="connector.webhook_rate_limited",
                 details={"limit": connector.rate_limit_per_minute},
             )
+        else:
+            count = int(connector.config.get("rate_limit_request_count") or 0)
+            _audit(
+                "connector.webhook_rate_limited",
+                connector.id,
+                {
+                    "connector_id": connector.id,
+                    "limit": connector.rate_limit_per_minute,
+                    "request_count": count,
+                },
+                actor=f"connector:{connector.id}",
+            )
+            store.persist()
         raise
     try:
         raw_payload = json.loads(body)

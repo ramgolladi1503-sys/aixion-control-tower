@@ -318,7 +318,7 @@ internal fun AuthFormContent(
                         enabled = AuthUxCopy.canAttemptLogin(state),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(if (state.loading) "Signing in…" else "Sign in")
+                        Text(if (state.loading) "Logging in…" else "Log in")
                     }
                 }
                 if (!verificationStarted) {

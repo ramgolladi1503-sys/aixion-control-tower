@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -374,6 +375,61 @@ def test_connector_webhook_rate_limit_blocks_excess_requests() -> None:
     assert second.status_code == 429
     assert second.json()["detail"] == "Connector webhook rate limit exceeded"
     assert any(event.event_type == "connector.webhook_rate_limited" for event in store.audit_events)
+
+
+def test_hmac_webhook_rate_limit_does_not_consume_nonce_for_same_request_retry() -> None:
+    project = _project()
+    connector_json, secret = _connector(project.id, auth_type="HMAC", rate_limit=1)
+    connector_id = connector_json["id"]
+    first_body = _compact_json(_task_payload(project.id))
+    first_headers = {
+        **_hmac_v1_headers(secret, first_body, nonce="accepted_before_limit"),
+        "Content-Type": "application/json",
+    }
+    assert client.post(
+        f"/connectors/{connector_id}/webhook", content=first_body, headers=first_headers
+    ).status_code == 200
+
+    retry_body = _compact_json(
+        {**_task_payload(project.id), "title": "Retry after rate limit"}
+    )
+    retry_headers = {
+        **_hmac_v1_headers(secret, retry_body, nonce="retry_after_limit"),
+        "Content-Type": "application/json",
+    }
+    rejected = client.post(
+        f"/connectors/{connector_id}/webhook", content=retry_body, headers=retry_headers
+    )
+
+    connector = store.agent_connectors[connector_id]
+    assert rejected.status_code == 429
+    assert "retry_after_limit" not in connector.config["hmac_nonce_history"]
+    assert "retry_after_limit" not in connector.config["hmac_nonce_results"]
+    assert len(store.agent_tasks) == 1
+    assert sum(
+        event.event_type == "connector.webhook_task_created"
+        for event in store.audit_events
+    ) == 1
+    connector.config = {
+        **connector.config,
+        "rate_limit_window_started_at": (
+            datetime.now(timezone.utc) - timedelta(minutes=2)
+        ).isoformat(),
+    }
+    store.persist()
+
+    retried = client.post(
+        f"/connectors/{connector_id}/webhook", content=retry_body, headers=retry_headers
+    )
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["accepted"] is True
+    assert retried.json()["task_id"] in store.agent_tasks
+    assert len(store.agent_tasks) == 2
+    connector = store.agent_connectors[connector_id]
+    assert "retry_after_limit" in connector.config["hmac_nonce_history"]
+    assert connector.config["hmac_nonce_results"]["retry_after_limit"]["response"] == retried.json()
+    assert sum(event.event_type == "connector.webhook_rate_limited" for event in store.audit_events) == 1
 
 
 @pytest.mark.parametrize("chunked", [False, True])

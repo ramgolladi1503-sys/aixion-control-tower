@@ -38,7 +38,6 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -224,7 +223,10 @@ fun ApprovalInboxContent(
                     modifier = Modifier
                         .weight(1f)
                         .testTag("approval-inbox-sync-status")
-                        .semantics { liveRegion = LiveRegionMode.Polite },
+                        .then(
+                            if (state.hasError) Modifier
+                            else Modifier.semantics { liveRegion = LiveRegionMode.Polite }
+                        ),
                     color = palette.inkMuted,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -261,8 +263,7 @@ fun ApprovalInboxContent(
                             Text(
                                 text = "Last successful check · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(syncedAt))}",
                                 modifier = Modifier
-                                    .testTag("approval-inbox-last-successful-check")
-                                    .semantics { liveRegion = LiveRegionMode.Polite },
+                                    .testTag("approval-inbox-last-successful-check"),
                                 color = palette.inkMuted,
                                 style = MaterialTheme.typography.bodySmall
                             )
@@ -566,8 +567,7 @@ fun ApprovalInboxContent(
                         Text(
                             text = message,
                             color = palette.danger,
-                            fontSize = 14.sp,
-                            lineHeight = 21.sp,
+                            style = MaterialTheme.typography.bodySmall,
                             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
                         )
                     }
@@ -634,7 +634,11 @@ internal fun ApprovalDeliveryStatusContent(
     loading: Boolean = false
 ) {
     val palette = LocalTowerPalette.current
-    Text("Delivery status", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    Text(
+        "Delivery status",
+        color = palette.ink,
+        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold)
+    )
     val (deliveryLabel, deliveryExplanation, deliveryColor) = when {
         loading -> Triple(
             "Checking delivery status…",
@@ -683,7 +687,7 @@ internal fun ApprovalDeliveryStatusContent(
         deliveryLabel,
         modifier = Modifier.testTag("approval-delivery-status-label"),
         color = deliveryColor,
-        fontSize = 14.sp,
+        fontSize = MaterialTheme.typography.labelLarge.fontSize,
         uppercase = false
     )
     Text(deliveryExplanation, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
@@ -704,21 +708,26 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
                 "reject", "rejected", "deny", "denied" -> palette.danger
                 else -> palette.caution
             },
-            fontSize = 14.sp,
+            fontSize = MaterialTheme.typography.labelLarge.fontSize,
             uppercase = false
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         ApprovalDeliveryStatusContent(deliveryStatus = event.deliveryStatus)
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, fontSize = 14.sp)
-        Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, fontSize = 14.sp)
+        Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, style = MaterialTheme.typography.bodySmall)
+        Text(
+            "Reviewer · ${event.reviewerLabel}",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.testTag("approval-history-reviewer")
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Reason", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("Reason", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
         Text(event.reason ?: "No reason was provided.", color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         val snapshot = event.requestSnapshot.takeIf { event.requestSnapshotVerified }
         if (snapshot == null) {
-            Text("Request details unavailable", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Request details unavailable", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
             Text(
                 "This older or unverifiable record is shown without request details.",
                 color = palette.inkMuted,
@@ -734,34 +743,39 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
 @Composable
 private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
     val palette = LocalTowerPalette.current
-    Text("Verified request", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-    Text(snapshot.title?.takeIf(String::isNotBlank) ?: "Untitled request", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    Text("Verified request", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
+    Text(
+        snapshot.title?.takeIf(String::isNotBlank) ?: "Untitled request",
+        color = palette.ink,
+        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+        modifier = Modifier.testTag("approval-history-request-title")
+    )
     Text(snapshot.summary?.takeIf(String::isNotBlank) ?: "Request summary unavailable", color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
     val provider = listOfNotNull(
         snapshot.sourceAgentName?.takeIf(String::isNotBlank) ?: snapshot.agentName?.takeIf(String::isNotBlank),
         snapshot.sourceProvider?.takeIf(String::isNotBlank)
     ).distinct().joinToString(" · ")
-    if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, fontSize = 14.sp)
+    if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, style = MaterialTheme.typography.bodySmall)
     val risk = snapshot.riskLevel.name.lowercase().replaceFirstChar { it.uppercase() }
     StatusBadge(
         if (snapshot.riskLevel == RiskLevel.UNKNOWN) "Risk unavailable" else "$risk risk",
         color = if (snapshot.riskLevel == RiskLevel.UNKNOWN) palette.caution else palette.brand,
-        fontSize = 14.sp,
+        fontSize = MaterialTheme.typography.labelLarge.fontSize,
         uppercase = false
     )
     snapshot.targetBranch?.takeIf(String::isNotBlank)?.let { branch ->
-        Text("Target branch · $branch", color = palette.inkMuted, fontSize = 14.sp)
+        Text("Target branch · $branch", color = palette.inkMuted, style = MaterialTheme.typography.bodySmall)
     }
     if (snapshot.files.isNotEmpty()) {
-        Text("Affected files", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp) }
+        Text("Affected files", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
+        snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, style = MaterialTheme.typography.bodySmall) }
     }
     if (snapshot.testPlan.isNotEmpty()) {
-        Text("Test plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("Test plan", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
         snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge) }
     }
     snapshot.rollbackPlan?.takeIf(String::isNotBlank)?.let { plan ->
-        Text("Rollback plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("Rollback plan", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
         Text(plan, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
     }
 }

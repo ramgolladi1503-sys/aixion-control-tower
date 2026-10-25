@@ -858,9 +858,44 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
     assert limited.status_code == 429
     task_id = accepted.json()["task_id"]
     with connect() as conn:
+        limited_connector_payload = conn.execute(
+            "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+        ).fetchone()[0]
+        assert limited_nonce not in limited_connector_payload["config"]["hmac_nonce_history"]
+        assert limited_nonce not in limited_connector_payload["config"]["hmac_nonce_results"]
+        assert conn.execute(
+            "SELECT count(*) FROM agent_tasks WHERE workspace_id=%s", (workspace.id,)
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s "
+            "AND event_type='connector.webhook_task_created'",
+            (workspace.id,),
+        ).fetchone()[0] == 1
+        limited_connector_payload["config"]["rate_limit_window_started_at"] = (
+            now_utc() - timedelta(minutes=2)
+        ).isoformat()
+        conn.execute(
+            "UPDATE agent_connectors SET payload=%s WHERE connector_id=%s",
+            (Jsonb(limited_connector_payload), connector_id),
+        )
+    retried_limited = client.post(
+        f"/connectors/{connector_id}/webhook", content=body, headers=limited_headers
+    )
+    assert retried_limited.status_code == 200, retried_limited.text
+    assert retried_limited.json()["accepted"] is True
+    with connect() as conn:
         task_rows = conn.execute(
-            "SELECT task_id,workspace_id,payload FROM agent_tasks WHERE task_id=%s", (task_id,)
+            "SELECT task_id,workspace_id,payload FROM agent_tasks WHERE workspace_id=%s",
+            (workspace.id,),
         ).fetchall()
+        task_event_count = conn.execute(
+            "SELECT count(*) FROM agent_task_events WHERE workspace_id=%s", (workspace.id,)
+        ).fetchone()[0]
+        task_created_audit_count = conn.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s "
+            "AND event_type='connector.webhook_task_created'",
+            (workspace.id,),
+        ).fetchone()[0]
         connector_payload = conn.execute(
             "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
         ).fetchone()[0]
@@ -868,15 +903,18 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
             "SELECT event_type FROM audit_events WHERE entity_id=%s ORDER BY created_at,event_id",
             (connector_id,),
         ).fetchall()
-    assert len(task_rows) == 1
-    assert task_rows[0][0:2] == (task_id, workspace.id)
+    assert len(task_rows) == 2
+    assert {row[0] for row in task_rows} == {task_id, retried_limited.json()["task_id"]}
+    assert all(row[1] == workspace.id for row in task_rows)
     assert task_rows[0][2]["provider"] == "ANTIGRAVITY"
     assert task_rows[0][2]["external_agent_id"] is None
     assert task_rows[0][2]["metadata"]["connector_id"] == connector_id
+    assert task_event_count == 2
+    assert task_created_audit_count == 2
     assert connector_payload["last_used_at"] is not None
     assert replay_nonce in connector_payload["config"]["hmac_nonce_history"]
     assert limited_nonce in connector_payload["config"]["hmac_nonce_history"]
-    assert connector_payload["config"]["rate_limit_request_count"] == 2
+    assert connector_payload["config"]["rate_limit_request_count"] == 1
     receipt = connector_payload["config"]["hmac_nonce_results"][replay_nonce]
     assert receipt["body_sha256"] == hashlib.sha256(body).hexdigest()
     assert receipt["timestamp"] == int(timestamp)
@@ -885,7 +923,7 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
     assert public_connector.status_code == 200
     assert "hmac_nonce_history" not in public_connector.json()["config"]
     assert "hmac_nonce_results" not in public_connector.json()["config"]
-    assert [row[0] for row in connector_audits].count("connector.webhook_authenticated") == 1
+    assert [row[0] for row in connector_audits].count("connector.webhook_authenticated") == 2
     assert [row[0] for row in connector_audits].count("connector.webhook_auth_failed") == 1
     assert [row[0] for row in connector_audits].count("connector.webhook_rate_limited") == 1
     assert set(store.agent_tasks) == before_task_ids

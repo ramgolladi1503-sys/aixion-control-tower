@@ -34,7 +34,7 @@ class AuthFormContentTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun signInStartsWithOnlyEmailPasswordAndLoginAndRevealsRegistrationOnRequest() {
+    fun loginStartsWithEmailPasswordAndRegisterAndRevealsRegistrationOnRequest() {
         composeRule.setContent {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 AuthFormContent(
@@ -52,7 +52,7 @@ class AuthFormContentTest {
 
         composeRule.onNodeWithText("Email address").assertExists()
         composeRule.onNodeWithText("Password").assertExists()
-        composeRule.onNodeWithText("Sign in").assertExists()
+        composeRule.onNodeWithText("Log in").assertExists()
         composeRule.onNodeWithText("Register").assertExists()
         assertTrue(
             "Sign-in title should be exposed as a screen-reader heading",
@@ -206,13 +206,13 @@ class AuthFormContentTest {
             )
         }
 
-        composeRule.onNodeWithText("Signing in…")
+        composeRule.onNodeWithText("Logging in…")
             .assertExists()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Information"))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
         composeRule.onNodeWithText("Email address").assertIsNotEnabled()
         composeRule.onNodeWithText("Password").assertIsNotEnabled()
-        composeRule.onNodeWithText("Sign in").assertIsNotEnabled()
+        composeRule.onNodeWithText("Log in").assertIsNotEnabled()
         composeRule.onNodeWithText("Register").assertIsNotEnabled()
     }
 
@@ -240,7 +240,7 @@ class AuthFormContentTest {
         composeRule.onNodeWithText("Verification code").assertIsNotEnabled()
         composeRule.onNodeWithText("Verify email").assertIsNotEnabled()
         composeRule.onNodeWithText("Resend code").assertIsNotEnabled()
-        composeRule.onNodeWithText("Sign in").assertDoesNotExist()
+        composeRule.onNodeWithText("Log in").assertDoesNotExist()
         composeRule.onNodeWithText("Register").assertDoesNotExist()
         composeRule.onNodeWithText("Working…")
             .assertExists()
@@ -264,7 +264,7 @@ class AuthFormContentTest {
 
         composeRule.onNodeWithText("Email address").assertIsEnabled()
         composeRule.onNodeWithText("Password").assertIsEnabled()
-        composeRule.onNodeWithText("Sign in").assertIsEnabled()
+        composeRule.onNodeWithText("Log in").assertIsEnabled()
         composeRule.onNodeWithText("Register").assertIsEnabled()
     }
 
@@ -296,7 +296,7 @@ class AuthFormContentTest {
             assertTrue("Sign-in heading must stay within narrow viewport", bounds.right <= 240f)
             assertTrue("Sign-in heading must wrap at 200% text", bounds.height > 48f)
         }
-        composeRule.onNodeWithText("Sign in").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Log in").performScrollTo().assertExists()
         composeRule.onNodeWithText("Register").performScrollTo().performClick()
         composeRule.onNodeWithText("Create your account").assertExists()
         composeRule.onNodeWithText("Create account").performScrollTo().assertExists()
