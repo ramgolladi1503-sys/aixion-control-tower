@@ -183,7 +183,7 @@ def test_missing_request_fails_closed_for_all_sqlite_repository_fallbacks(
     helper_name: str,
 ) -> None:
     class _MustNotBeAccessed:
-        def __getattribute__(self, _name: str):
+        def __getattr__(self, _name: str):
             raise AssertionError("SQLite compatibility repository accessed in PostgreSQL mode")
 
     before = (

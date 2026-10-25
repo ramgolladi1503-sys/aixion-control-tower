@@ -61,6 +61,7 @@ from .workspace_access import (
 )
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
+_CONNECTOR_INTERNAL_CONFIG_KEYS = frozenset({"hmac_nonce_history", "hmac_nonce_results"})
 OwnerDependency = Depends(require_owner)
 
 
@@ -81,8 +82,20 @@ def _safe_config(config: dict) -> dict:
     return {
         key: value
         for key, value in config.items()
-        if key not in {"secret_hash", "secret_hint", "secret_revoked_at", "secret_rotated_at"}
+        if key not in {
+            "secret_hash",
+            "secret_hint",
+            "secret_revoked_at",
+            "secret_rotated_at",
+            "hmac_nonce_history",
+            "hmac_nonce_results",
+        }
     }
+
+
+def _validate_public_config(config: dict | None) -> None:
+    if config and _CONNECTOR_INTERNAL_CONFIG_KEYS.intersection(config):
+        raise HTTPException(status_code=422, detail="Connector config contains reserved fields")
 
 
 def _to_public(connector: AgentConnector) -> ConnectorPublic:
@@ -257,6 +270,7 @@ def create_connector(
     user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
+    _validate_public_config(payload.config)
     workspace_id = (
         workspace_id_for_user(user)
         if http_request is None
@@ -511,6 +525,7 @@ def update_connector(
     connector_id: str, payload: ConnectorUpdate, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
+    _validate_public_config(payload.config)
     bound = _get_bound_connector_or_404(connector_id, user, http_request)
     workspace_id = (
         workspace_id_for_request(user, http_request) or user.workspace_id

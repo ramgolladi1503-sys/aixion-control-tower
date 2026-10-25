@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
@@ -47,6 +48,7 @@ class ConnectorRepository(Protocol):
         *,
         connector: AgentConnector,
         request_nonce: str | None,
+        request_receipt: dict[str, object] | None,
         expected_updated_at: datetime,
         audit_event: AuditEvent,
         write_action: Callable[[Connection], object],
@@ -272,6 +274,7 @@ class PostgresConnectorRepository:
         *,
         connector: AgentConnector,
         request_nonce: str | None,
+        request_receipt: dict[str, object] | None,
         expected_updated_at: datetime,
         audit_event: AuditEvent,
         write_action: Callable[[Connection], object],
@@ -289,7 +292,14 @@ class PostgresConnectorRepository:
                 raise ConnectorRepositoryConflict("Connector changed or was removed")
             if stored.updated_at != expected_updated_at:
                 if _webhook_nonce_replayed(stored, request_nonce):
-                    raise ConnectorWebhookReplay("Connector HMAC nonce has already been used")
+                    receipt_response = _matching_webhook_receipt(
+                        stored,
+                        request_nonce=request_nonce,
+                        request_receipt=request_receipt,
+                    )
+                    raise ConnectorWebhookReplay(
+                        response=receipt_response,
+                    )
                 raise ConnectorRepositoryConflict("Connector changed before webhook action committed")
             if (
                 connector.created_by_user_id != stored.created_by_user_id
@@ -303,6 +313,12 @@ class PostgresConnectorRepository:
                 project_ids=connector.allowed_project_ids,
             )
             result = write_action(conn)
+            _persist_webhook_receipt(
+                connector,
+                request_nonce=request_nonce,
+                request_receipt=request_receipt,
+                response=result,
+            )
             changed = conn.execute(
                 "UPDATE agent_connectors SET provider_label=%s,auth_type=%s,status=%s,"
                 "updated_at=%s,payload=%s WHERE connector_id=%s AND workspace_id=%s "
@@ -388,7 +404,108 @@ class PostgresConnectorRepository:
 class ConnectorWebhookReplay(ConnectorRepositoryError):
     """A concurrently committed webhook already consumed the supplied nonce."""
 
+    def __init__(
+        self,
+        message: str = "Connector HMAC nonce has already been used",
+        *,
+        response: object | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.response = response
+
 
 def _webhook_nonce_replayed(stored: AgentConnector, request_nonce: str | None) -> bool:
     history = stored.config.get("hmac_nonce_history")
     return bool(request_nonce and isinstance(history, dict) and request_nonce in history)
+
+
+def _matching_webhook_receipt(
+    stored: AgentConnector,
+    *,
+    request_nonce: str | None,
+    request_receipt: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if not request_nonce or request_receipt is None:
+        return None
+    results = stored.config.get("hmac_nonce_results")
+    receipt = results.get(request_nonce) if isinstance(results, dict) else None
+    if not isinstance(receipt, dict):
+        return None
+    try:
+        now_epoch = int(time.time())
+        expires_at = int(receipt["expires_at"])
+        expected_timestamp = int(request_receipt["timestamp"])
+        expected_expiry = int(request_receipt["expires_at"])
+        expected_received_at = int(request_receipt["received_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        expires_at <= now_epoch
+        or receipt.get("timestamp") != expected_timestamp
+        or receipt.get("body_sha256") != request_receipt.get("body_sha256")
+        or receipt.get("received_at") != expected_received_at
+        or expires_at != expected_expiry
+        or expires_at != min(expected_received_at + 600, expected_timestamp + 300)
+        or expected_received_at >= expires_at
+    ):
+        return None
+    history = stored.config.get("hmac_nonce_history")
+    if not isinstance(history, dict) or request_nonce not in history:
+        return None
+    response = receipt.get("response")
+    return response if isinstance(response, dict) else None
+
+
+def _persist_webhook_receipt(
+    connector: AgentConnector,
+    *,
+    request_nonce: str | None,
+    request_receipt: dict[str, object] | None,
+    response: object,
+) -> None:
+    if request_receipt is None:
+        return
+    if not request_nonce:
+        raise ConnectorRepositoryScopeError("Webhook receipt requires its nonce")
+    try:
+        timestamp = int(request_receipt["timestamp"])
+        received_at = int(request_receipt["received_at"])
+        expires_at = int(request_receipt["expires_at"])
+        body_sha256 = str(request_receipt["body_sha256"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ConnectorRepositoryScopeError("Webhook receipt identity is invalid") from error
+    if (
+        not body_sha256
+        or len(body_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in body_sha256)
+        or expires_at > min(received_at + 600, timestamp + 300)
+    ):
+        raise ConnectorRepositoryScopeError("Webhook receipt lifetime or digest is invalid")
+    if received_at >= expires_at:
+        return
+    history = connector.config.get("hmac_nonce_history")
+    if (
+        not isinstance(history, dict)
+        or request_nonce not in history
+        or int(history[request_nonce]) != received_at
+    ):
+        raise ConnectorRepositoryScopeError("Webhook receipt nonce claim is missing")
+    serialize = getattr(response, "model_dump", None)
+    if not callable(serialize):
+        raise ConnectorRepositoryError("Webhook response cannot be serialized for retry recovery")
+    try:
+        response_payload = serialize(mode="json")
+    except (TypeError, ValueError) as error:
+        raise ConnectorRepositoryError("Webhook response cannot be serialized for retry recovery") from error
+    if not isinstance(response_payload, dict):
+        raise ConnectorRepositoryError("Webhook response has an invalid serialized shape")
+    results = connector.config.get("hmac_nonce_results")
+    results = dict(results) if isinstance(results, dict) else {}
+    results[request_nonce] = {
+        "timestamp": timestamp,
+        "body_sha256": body_sha256,
+        "received_at": received_at,
+        "expires_at": expires_at,
+        "response": response_payload,
+    }
+    connector.config = {**connector.config, "hmac_nonce_results": results}

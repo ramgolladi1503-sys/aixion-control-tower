@@ -190,11 +190,23 @@ def _validate_event_commit(
     )
     if terminal_approval_event:
         decision = approval_decision_task_states.get(event.event_type)
+        recovery_event_only = (
+            decision is not None
+            and event.actor == "approval-recovery"
+            and audit.actor == event.actor
+            and event.metadata.get("reconciled") is True
+            and audit.details.get("reconciled") is True
+            and expected.status == decision[0]
+            and updated.status == expected.status
+        )
         if (
             audit.event_type != "agent_task.approval_decision_propagated"
             or decision is None
             or not expected.approval_request_id
-            or expected.status != AgentTaskStatus.WAITING_FOR_APPROVAL
+            or (
+                expected.status != AgentTaskStatus.WAITING_FOR_APPROVAL
+                and not recovery_event_only
+            )
             or event.status != decision[0]
             or updated.status != decision[0]
             or event.metadata.get("approval_request_id") != expected.approval_request_id

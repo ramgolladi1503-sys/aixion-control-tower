@@ -145,7 +145,7 @@ def test_hmac_connector_webhook_creates_agent_task_with_v1_signature() -> None:
     assert response.json()["task_id"] in store.agent_tasks
 
 
-def test_hmac_connector_webhook_rejects_replayed_nonce() -> None:
+def test_hmac_connector_webhook_returns_saved_response_for_exact_retry() -> None:
     project = _project()
     connector, secret = _connector(project.id, auth_type="HMAC")
     payload = _task_payload(project.id)
@@ -153,11 +153,99 @@ def test_hmac_connector_webhook_rejects_replayed_nonce() -> None:
     headers = {**_hmac_v1_headers(secret, body, nonce="replay_nonce"), "Content-Type": "application/json"}
 
     first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    audit_count_after_first = len(store.audit_events)
+    attempt_internal_config_write = client.patch(
+        f"/connectors/{connector['id']}",
+        json={"config": {"hmac_nonce_results": {"replay_nonce": {"response": {}}}}},
+    )
     second = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
 
     assert first.status_code == 200
-    assert second.status_code == 401
-    assert second.json()["detail"] == "Connector HMAC nonce has already been used"
+    assert attempt_internal_config_write.status_code == 422
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert len(store.agent_tasks) == 1
+    assert len(store.audit_events) == audit_count_after_first
+    stored_connector = store.agent_connectors[connector["id"]]
+    assert stored_connector.config["rate_limit_request_count"] == 1
+    public_connector = client.get(f"/connectors/{connector['id']}").json()
+    assert "hmac_nonce_history" not in public_connector["config"]
+    assert "hmac_nonce_results" not in public_connector["config"]
+
+
+def test_hmac_connector_webhook_rejects_changed_body_for_consumed_nonce() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    body = _compact_json(_task_payload(project.id))
+    nonce = "changed_body_nonce"
+    first_headers = {**_hmac_v1_headers(secret, body, nonce=nonce), "Content-Type": "application/json"}
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=first_headers)
+    changed_body = _compact_json({**_task_payload(project.id), "title": "Changed after commit"})
+    changed_headers = {
+        **_hmac_v1_headers(secret, changed_body, nonce=nonce, timestamp=int(first_headers["X-Aixion-Timestamp"])),
+        "Content-Type": "application/json",
+    }
+
+    changed = client.post(
+        f"/connectors/{connector['id']}/webhook", content=changed_body, headers=changed_headers
+    )
+
+    assert first.status_code == 200
+    assert changed.status_code == 401
+    assert len(store.agent_tasks) == 1
+
+
+def test_hmac_connector_webhook_rejects_legacy_nonce_without_receipt() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    body = _compact_json(_task_payload(project.id))
+    nonce = "legacy_receipt_nonce"
+    stored = store.agent_connectors[connector["id"]]
+    stored.config["hmac_nonce_history"] = {nonce: int(time.time())}
+    store.persist()
+
+    response = client.post(
+        f"/connectors/{connector['id']}/webhook",
+        content=body,
+        headers={**_hmac_v1_headers(secret, body, nonce=nonce), "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Connector HMAC nonce has already been used"
+    assert store.agent_tasks == {}
+
+
+def test_hmac_connector_webhook_rejects_expired_receipt_without_reexecution() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    body = _compact_json(_task_payload(project.id))
+    headers = {**_hmac_v1_headers(secret, body, nonce="expired_receipt_nonce"), "Content-Type": "application/json"}
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    stored = store.agent_connectors[connector["id"]]
+    stored.config["hmac_nonce_results"]["expired_receipt_nonce"]["expires_at"] = int(time.time()) - 1
+    store.persist()
+
+    retry = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert retry.status_code == 401
+    assert len(store.agent_tasks) == 1
+
+
+def test_hmac_connector_webhook_revocation_invalidates_saved_retry_receipt() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    body = _compact_json(_task_payload(project.id))
+    headers = {**_hmac_v1_headers(secret, body, nonce="revoked_receipt_nonce"), "Content-Type": "application/json"}
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    revoked = client.post(f"/connectors/{connector['id']}/secret/revoke")
+
+    retry = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert revoked.status_code == 200
+    assert retry.status_code == 401
+    assert len(store.agent_tasks) == 1
 
 
 def test_hmac_connector_webhook_rejects_stale_timestamp() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import json
 import time
 import uuid
@@ -59,11 +60,23 @@ def test_hmac_nonce_history_retains_unexpired_nonce_beyond_200_entries() -> None
     )
 
     for index in range(201):
-        _assert_hmac_v1_not_replayed(connector, f"fresh_{index}_{uuid.uuid4().hex}", now_epoch)
+        _assert_hmac_v1_not_replayed(
+            connector,
+            nonce=f"fresh_{index}_{uuid.uuid4().hex}",
+            timestamp=now_epoch,
+            body_sha256="0" * 64,
+            now_epoch=now_epoch,
+        )
 
     assert first_nonce in connector.config["hmac_nonce_history"]
     with pytest.raises(HTTPException) as replay_error:
-        _assert_hmac_v1_not_replayed(connector, first_nonce, now_epoch)
+        _assert_hmac_v1_not_replayed(
+            connector,
+            nonce=first_nonce,
+            timestamp=now_epoch,
+            body_sha256="0" * 64,
+            now_epoch=now_epoch,
+        )
 
     assert replay_error.value.status_code == 401
 
@@ -838,8 +851,8 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
     )
 
     assert accepted.status_code == 200, accepted.text
-    assert replayed.status_code == 401
-    assert replayed.json()["detail"] == "Connector HMAC nonce has already been used"
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json() == accepted.json()
     assert mismatched.status_code == 401
     assert mismatched.json()["detail"] == "Connector HMAC nonce has already been used"
     assert limited.status_code == 429
@@ -864,12 +877,112 @@ def test_postgres_webhook_consumes_nonce_and_rate_limit_before_task_creation(
     assert replay_nonce in connector_payload["config"]["hmac_nonce_history"]
     assert limited_nonce in connector_payload["config"]["hmac_nonce_history"]
     assert connector_payload["config"]["rate_limit_request_count"] == 2
+    receipt = connector_payload["config"]["hmac_nonce_results"][replay_nonce]
+    assert receipt["body_sha256"] == hashlib.sha256(body).hexdigest()
+    assert receipt["timestamp"] == int(timestamp)
+    assert receipt["response"] == accepted.json()
+    public_connector = client.get(f"/connectors/{connector_id}")
+    assert public_connector.status_code == 200
+    assert "hmac_nonce_history" not in public_connector.json()["config"]
+    assert "hmac_nonce_results" not in public_connector.json()["config"]
     assert [row[0] for row in connector_audits].count("connector.webhook_authenticated") == 1
-    assert [row[0] for row in connector_audits].count("connector.webhook_auth_failed") == 2
+    assert [row[0] for row in connector_audits].count("connector.webhook_auth_failed") == 1
     assert [row[0] for row in connector_audits].count("connector.webhook_rate_limited") == 1
     assert set(store.agent_tasks) == before_task_ids
     assert connector_id not in store.agent_connectors
     assert set(store.agent_connectors) == before_connector_ids
+
+
+@pytest.mark.parametrize("case", ["legacy", "expired", "revoked"])
+def test_postgres_webhook_receipt_retry_fails_closed_for_legacy_expired_or_revoked(
+    postgres_connector_route_runtime, case: str
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name=f"{case} receipt project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+    client = TestClient(main.app)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": f"{case} receipt connector",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+    body = json.dumps(
+        {
+            "action": "CREATE_AGENT_TASK",
+            "project_id": project.id,
+            "title": f"{case} receipt task",
+            "goal": "An unusable retry receipt must never repeat the connector action.",
+        },
+        separators=(",", ":"),
+    ).encode()
+    nonce = f"receipt_{case}_{uuid.uuid4().hex}"
+    timestamp = str(int(time.time()))
+    headers = {
+        "X-Aixion-Signature-Version": "v1",
+        "X-Aixion-Timestamp": timestamp,
+        "X-Aixion-Nonce": nonce,
+        "X-Aixion-Connector-Signature": "v1=" + expected_hmac_v1_signature(
+            hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+        ),
+        "Content-Type": "application/json",
+    }
+    initial_status = None
+    if case == "legacy":
+        with connect() as conn:
+            payload = conn.execute(
+                "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+            ).fetchone()[0]
+            payload["config"]["hmac_nonce_history"] = {nonce: int(time.time())}
+            conn.execute(
+                "UPDATE agent_connectors SET payload=%s WHERE connector_id=%s",
+                (Jsonb(payload), connector_id),
+            )
+    else:
+        initial = client.post(f"/connectors/{connector_id}/webhook", content=body, headers=headers)
+        assert initial.status_code == 200, initial.text
+        initial_status = initial.status_code
+        if case == "expired":
+            with connect() as conn:
+                payload = conn.execute(
+                    "SELECT payload FROM agent_connectors WHERE connector_id=%s", (connector_id,)
+                ).fetchone()[0]
+                payload["config"]["hmac_nonce_results"][nonce]["expires_at"] = int(time.time()) - 1
+                conn.execute(
+                    "UPDATE agent_connectors SET payload=%s WHERE connector_id=%s",
+                    (Jsonb(payload), connector_id),
+                )
+        else:
+            revoked = client.post(f"/connectors/{connector_id}/secret/revoke")
+            assert revoked.status_code == 200, revoked.text
+
+    retry = client.post(f"/connectors/{connector_id}/webhook", content=body, headers=headers)
+
+    assert retry.status_code == 401, retry.text
+    assert initial_status in {None, 200}
+    with connect() as conn:
+        task_count = conn.execute(
+            "SELECT count(*) FROM agent_tasks WHERE workspace_id=%s", (workspace.id,)
+        ).fetchone()[0]
+    assert task_count == (0 if case == "legacy" else 1)
 
 
 @pytest.mark.parametrize(
@@ -968,6 +1081,7 @@ def test_postgres_webhook_create_rolls_back_auth_nonce_task_and_audits_on_write_
     assert task_count == 0
     assert webhook_audits == 0
     assert nonce not in stored_connector_payload["config"].get("hmac_nonce_history", {})
+    assert nonce not in stored_connector_payload["config"].get("hmac_nonce_results", {})
 
 
 def test_postgres_webhook_append_failure_rolls_back_connector_and_task_event(
@@ -1417,17 +1531,18 @@ def test_postgres_webhook_concurrent_duplicate_nonce_accepts_at_most_once(
     start = Barrier(2)
     clients = [TestClient(main.app), TestClient(main.app)]
 
-    def request_once(client: TestClient) -> int:
+    def request_once(client: TestClient) -> tuple[int, dict[str, object]]:
         start.wait(timeout=5)
-        return client.post(
+        response = client.post(
             f"/connectors/{connector_id}/webhook", content=body, headers=headers
-        ).status_code
+        )
+        return response.status_code, response.json()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         responses = list(pool.map(request_once, clients))
 
-    assert responses.count(200) == 1
-    assert responses.count(401) == 1
+    assert [status_code for status_code, _ in responses] == [200, 200]
+    assert responses[0][1] == responses[1][1]
     with connect() as conn:
         tasks = conn.execute(
             "SELECT task_id FROM agent_tasks WHERE workspace_id=%s", (workspace.id,)
@@ -1512,6 +1627,7 @@ def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict
     previously_consumed_nonce = f"prior_{uuid.uuid4().hex}"
     accepted = send("Previously committed task", previously_consumed_nonce)
     assert accepted.status_code == 200, accepted.text
+    accepted_body = accepted.json()
 
     original_commit = PostgresConnectorRepository.commit_webhook_action
 
@@ -1520,6 +1636,7 @@ def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict
         *,
         connector: AgentConnector,
         request_nonce: str | None,
+        request_receipt: dict[str, object] | None,
         expected_updated_at,
         audit_event: AuditEvent,
         write_action,
@@ -1548,6 +1665,7 @@ def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict
             repository,
             connector=connector,
             request_nonce=request_nonce,
+            request_receipt=request_receipt,
             expected_updated_at=expected_updated_at,
             audit_event=audit_event,
             write_action=write_action,
@@ -1574,7 +1692,8 @@ def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict
     assert task_count == 1
 
     replay = send("Previously committed task", previously_consumed_nonce)
-    assert replay.status_code == 401, replay.text
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == accepted_body
 
 
 def test_postgres_hmac_failure_updates_postgres_without_sqlite_persist(

@@ -282,10 +282,20 @@ def propagate_approval_decision_to_agent_task(
     approval_repository: ApprovalDecisionRepository | None = None,
     run_repository: AgentRunRepository | None = None,
 ) -> AgentTask | None:
-    if committed is None and isinstance(task_repository, PostgresAgentTaskRepository):
+    settings = get_settings()
+    postgres_authority_selected = bool(
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_auth_enabled", False)
+    )
+    if committed is None and (
+        postgres_authority_selected
+        or isinstance(task_repository, PostgresAgentTaskRepository)
+    ):
         # PostgreSQL approval decisions must propagate only from the atomic
         # repository commit result. Falling through to the legacy store map
-        # would let process-local task state become authoritative.
+        # would let process-local task state become authoritative. Check the
+        # selected authority as well as the adapter argument: callers must not
+        # bypass this guard by omitting the repository or passing SQLite.
         raise ApprovalDecisionConflict(
             "PostgreSQL AgentTask approval propagation requires its committed transaction result."
         )

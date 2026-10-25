@@ -429,7 +429,14 @@ fun ApprovalInboxContent(
                 ApprovalLoadingSkeletons(testTag = "approval-inbox-loading-skeletons")
             }
         }
-        if (!state.hasError && selectedSection == ApprovalInboxSection.NEEDS_REVIEW && !state.loading && !state.refreshing && visibleApprovals.isEmpty()) {
+        if (
+            !state.hasError &&
+            selectedSection == ApprovalInboxSection.NEEDS_REVIEW &&
+            !state.loading &&
+            !state.refreshing &&
+            state.lastSuccessfulSyncAt != null &&
+            visibleApprovals.isEmpty()
+        ) {
             item {
                 TowerPanel(elevated = true) {
                     Text(

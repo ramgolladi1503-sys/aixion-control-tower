@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -53,6 +54,16 @@ MAX_WEBHOOK_METADATA_KEYS = 50
 HMAC_SIGNATURE_VERSION = "v1"
 HMAC_TIMESTAMP_TOLERANCE_SECONDS = 300
 HMAC_NONCE_TTL_SECONDS = 600
+
+
+@dataclass(frozen=True)
+class HmacWebhookIdentity:
+    nonce: str
+    timestamp: int
+    body_sha256: str
+    received_at: int
+    receipt_expires_at: int
+    replay_response: ConnectorWebhookResponse | None = None
 
 
 class ConnectorWebhookPayload(BaseModel):
@@ -198,15 +209,112 @@ def _clean_hmac_nonce_history(connector: AgentConnector, now_epoch: int) -> dict
     return cleaned
 
 
-def _assert_hmac_v1_not_replayed(connector: AgentConnector, nonce: str, now_epoch: int) -> None:
+def _clean_hmac_nonce_results(
+    connector: AgentConnector, *, now_epoch: int, valid_nonces: set[str]
+) -> dict[str, dict[str, Any]]:
+    raw_results = connector.config.get("hmac_nonce_results")
+    results = raw_results if isinstance(raw_results, dict) else {}
+    cleaned: dict[str, dict[str, Any]] = {}
+    for nonce, value in results.items():
+        if str(nonce) not in valid_nonces or not isinstance(value, dict):
+            continue
+        try:
+            expires_at = int(value["expires_at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if expires_at > now_epoch:
+            cleaned[str(nonce)] = value
+    return cleaned
+
+
+def _assert_hmac_v1_not_replayed(
+    connector: AgentConnector,
+    *,
+    nonce: str,
+    timestamp: int,
+    body_sha256: str,
+    now_epoch: int,
+) -> HmacWebhookIdentity:
     history = _clean_hmac_nonce_history(connector, now_epoch)
+    results = _clean_hmac_nonce_results(
+        connector, now_epoch=now_epoch, valid_nonces=set(history)
+    )
     if nonce in history:
-        connector.config = {**connector.config, "hmac_nonce_history": history}
+        receipt = results.get(nonce)
+        response: ConnectorWebhookResponse | None = None
+        if (
+            receipt is not None
+            and receipt.get("timestamp") == timestamp
+            and receipt.get("body_sha256") == body_sha256
+            and receipt.get("received_at") == history[nonce]
+            and int(receipt["expires_at"])
+            == min(history[nonce] + HMAC_NONCE_TTL_SECONDS, timestamp + HMAC_TIMESTAMP_TOLERANCE_SECONDS)
+            and int(receipt["expires_at"]) > now_epoch
+        ):
+            try:
+                response = ConnectorWebhookResponse.model_validate(receipt["response"])
+            except (KeyError, TypeError, ValueError):
+                response = None
+        if response is not None:
+            return HmacWebhookIdentity(
+                nonce=nonce,
+                timestamp=timestamp,
+                body_sha256=body_sha256,
+                received_at=history[nonce],
+                receipt_expires_at=int(receipt["expires_at"]),
+                replay_response=response,
+            )
+        connector.config = {
+            **connector.config,
+            "hmac_nonce_history": history,
+            "hmac_nonce_results": results,
+        }
         connector.updated_at = now_utc()
         raise HTTPException(status_code=401, detail="Connector HMAC nonce has already been used")
     history[nonce] = now_epoch
-    connector.config = {**connector.config, "hmac_nonce_history": history}
+    connector.config = {
+        **connector.config,
+        "hmac_nonce_history": history,
+        "hmac_nonce_results": results,
+    }
     connector.updated_at = now_utc()
+    return HmacWebhookIdentity(
+        nonce=nonce,
+        timestamp=timestamp,
+        body_sha256=body_sha256,
+        received_at=now_epoch,
+        receipt_expires_at=min(
+            now_epoch + HMAC_NONCE_TTL_SECONDS,
+            timestamp + HMAC_TIMESTAMP_TOLERANCE_SECONDS,
+        ),
+    )
+
+
+def _save_hmac_webhook_result(
+    connector: AgentConnector,
+    identity: HmacWebhookIdentity | None,
+    response: ConnectorWebhookResponse,
+) -> None:
+    if identity is None or identity.received_at >= identity.receipt_expires_at:
+        return
+    history = _clean_hmac_nonce_history(connector, identity.received_at)
+    if identity.nonce not in history:
+        raise RuntimeError("Cannot persist a webhook receipt without its nonce claim")
+    results = _clean_hmac_nonce_results(
+        connector, now_epoch=identity.received_at, valid_nonces=set(history)
+    )
+    results[identity.nonce] = {
+        "timestamp": identity.timestamp,
+        "body_sha256": identity.body_sha256,
+        "received_at": identity.received_at,
+        "expires_at": identity.receipt_expires_at,
+        "response": response.model_dump(mode="json"),
+    }
+    connector.config = {
+        **connector.config,
+        "hmac_nonce_history": history,
+        "hmac_nonce_results": results,
+    }
 
 
 def _authenticate_hmac_v1(
@@ -218,7 +326,7 @@ def _authenticate_hmac_v1(
     signature_version: str | None,
     timestamp: str | None,
     nonce: str | None,
-) -> None:
+) -> HmacWebhookIdentity:
     if signature_version != HMAC_SIGNATURE_VERSION:
         raise HTTPException(status_code=401, detail="Unsupported connector HMAC signature version")
     if not signature:
@@ -232,7 +340,13 @@ def _authenticate_hmac_v1(
     expected = expected_hmac_v1_signature(stored_hash, timestamp=str(timestamp_epoch), nonce=nonce, body=body)
     if not safe_equal(_extract_hmac_signature(signature), expected):
         raise HTTPException(status_code=401, detail="Invalid connector HMAC signature")
-    _assert_hmac_v1_not_replayed(connector, nonce, now_epoch)
+    return _assert_hmac_v1_not_replayed(
+        connector,
+        nonce=nonce,
+        timestamp=timestamp_epoch,
+        body_sha256=_body_hash(body),
+        now_epoch=now_epoch,
+    )
 
 
 def _authenticate_connector(
@@ -245,7 +359,7 @@ def _authenticate_connector(
     x_aixion_timestamp: str | None,
     x_aixion_nonce: str | None,
     persist_local: bool = True,
-) -> None:
+) -> HmacWebhookIdentity | None:
     if connector.status != ConnectorStatus.ENABLED:
         record_connector_auth_failure(connector, "connector disabled")
         if persist_local:
@@ -259,6 +373,7 @@ def _authenticate_connector(
         if persist_local:
             store.persist()
         raise HTTPException(status_code=401, detail="Connector secret is not configured")
+    hmac_identity: HmacWebhookIdentity | None = None
     if connector.auth_type in {ConnectorAuthType.BEARER, ConnectorAuthType.API_KEY}:
         prefix = "Bearer "
         if not authorization or not authorization.startswith(prefix):
@@ -274,7 +389,7 @@ def _authenticate_connector(
             raise HTTPException(status_code=401, detail="Invalid connector bearer token")
     elif connector.auth_type == ConnectorAuthType.HMAC:
         try:
-            _authenticate_hmac_v1(
+            hmac_identity = _authenticate_hmac_v1(
                 connector,
                 stored_hash=str(stored_hash),
                 body=body,
@@ -290,7 +405,9 @@ def _authenticate_connector(
             raise
     else:
         raise HTTPException(status_code=401, detail="Unsupported connector auth type")
-    record_connector_auth_success(connector)
+    if hmac_identity is None or hmac_identity.replay_response is None:
+        record_connector_auth_success(connector)
+    return hmac_identity
 
 
 def _safe_metadata(connector: AgentConnector, payload: ConnectorWebhookPayload) -> dict[str, Any]:
@@ -471,7 +588,7 @@ async def handle_connector_webhook(
     body = await _read_webhook_body(request)
     expected_updated_at = connector.updated_at
     try:
-        _authenticate_connector(
+        hmac_identity = _authenticate_connector(
             connector,
             body=body,
             authorization=authorization,
@@ -491,6 +608,8 @@ async def handle_connector_webhook(
                 details={"reason": str(error.detail)},
             )
         raise
+    if hmac_identity is not None and hmac_identity.replay_response is not None:
+        return hmac_identity.replay_response
     try:
         _enforce_connector_rate_limit(connector, persist_local=not repository_mode)
     except HTTPException:
@@ -559,11 +678,26 @@ async def handle_connector_webhook(
             return connector_repository.commit_webhook_action(
                 connector=connector,
                 request_nonce=x_aixion_nonce,
+                request_receipt=(
+                    {
+                        "timestamp": hmac_identity.timestamp,
+                        "body_sha256": hmac_identity.body_sha256,
+                        "received_at": hmac_identity.received_at,
+                        "expires_at": hmac_identity.receipt_expires_at,
+                    }
+                    if hmac_identity is not None
+                    else None
+                ),
                 expected_updated_at=expected_updated_at,
                 audit_event=connector_audit,
                 write_action=write_action,
             )
         except ConnectorWebhookReplay as error:
+            if error.response is not None:
+                try:
+                    return ConnectorWebhookResponse.model_validate(error.response)
+                except ValueError:
+                    pass
             raise HTTPException(status_code=401, detail=str(error)) from error
         except ConnectorRepositoryConflict as error:
             raise HTTPException(status_code=409, detail="Connector state changed; retry webhook") from error
@@ -609,6 +743,7 @@ async def handle_connector_webhook(
             _audit("connector.webhook_refused", connector.id, details, actor=f"connector:{connector.id}")
             store.persist()
         raise
+    _save_hmac_webhook_result(connector, hmac_identity, response)
     if not repository_mode:
         store.persist()
     return response

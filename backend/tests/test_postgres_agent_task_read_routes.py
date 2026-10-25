@@ -15,7 +15,7 @@ from psycopg.types.json import Jsonb
 from app import approval_recovery, main
 from app.approval_decisions import agent_task_repository as sqlite_agent_task_repository
 from app.agent_task_models import AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
-from app.agent_task_repository import PostgresAgentTaskRepository
+from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
 from app.agent_task_routes import (
     MaintainerDependency,
     ReviewerDependency,
@@ -52,6 +52,39 @@ def test_postgres_approval_propagation_fails_closed_without_commit_result(
     monkeypatch.setattr(store, "agent_tasks", ProcessLocalTaskMap())
     repository = PostgresAgentTaskRepository(
         lambda: pytest.fail("PostgreSQL repository must not be queried without commit result")
+    )
+
+    with pytest.raises(ApprovalDecisionConflict, match="committed transaction result"):
+        propagate_approval_decision_to_agent_task(
+            approval_request=object(),  # type: ignore[arg-type]
+            previous_status=ApprovalStatus.REQUESTED,
+            actor="owner@example.test",
+            task_repository=repository,
+        )
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=["production", "postgres-auth"],
+)
+@pytest.mark.parametrize("repository_mode", ["missing", "sqlite"])
+def test_authoritative_approval_propagation_rejects_missing_commit_before_store_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+    repository_mode: str,
+) -> None:
+    class ProcessLocalTaskMap:
+        def values(self):
+            raise AssertionError("authoritative approval propagation read process-local tasks")
+
+    monkeypatch.setattr("app.agent_task_routes.get_settings", lambda: settings)
+    monkeypatch.setattr(store, "agent_tasks", ProcessLocalTaskMap())
+    repository = (
+        SQLiteAgentTaskRepository(store._connect) if repository_mode == "sqlite" else None
     )
 
     with pytest.raises(ApprovalDecisionConflict, match="committed transaction result"):

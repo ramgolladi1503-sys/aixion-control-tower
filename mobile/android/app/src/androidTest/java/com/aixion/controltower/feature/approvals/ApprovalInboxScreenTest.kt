@@ -664,6 +664,34 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
+    fun emptyInboxWithoutSuccessfulSyncDoesNotClaimItIsCaughtUp() {
+        composeRule.setContent {
+            ApprovalInboxContent(state = ApprovalsUiState(loading = false))
+        }
+
+        composeRule.onNodeWithText("Status not verified").assertExists()
+        composeRule.onAllNodesWithText("You’re all caught up").assertCountEquals(0)
+        composeRule.onNodeWithText("Refresh").assertExists()
+    }
+
+    @Test
+    fun successfulEmptyInboxExplainsThatNewRequestsWillAppear() {
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    lastSuccessfulSyncAt = Instant.parse("2026-10-25T10:00:00Z")
+                )
+            )
+        }
+
+        composeRule.onNodeWithText("You’re all caught up").assertExists()
+        composeRule.onNodeWithText(
+            "New approval requests will appear here when an agent needs your decision."
+        ).assertExists()
+    }
+
+    @Test
     fun unknownRiskRemainsVisibleWithDecisionsDisabled() {
         val unrecognized = approval(
             id = "approval_unknown_risk",
