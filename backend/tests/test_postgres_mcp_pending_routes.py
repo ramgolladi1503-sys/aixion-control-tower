@@ -1341,12 +1341,14 @@ def test_configured_postgres_auth_without_runtime_does_not_select_sqlite(
     assert store.mcp_pending_requests == before_pending
 
 
+@pytest.mark.parametrize("mode", ["production", "postgres_auth"])
 @pytest.mark.parametrize(
     "route_name",
     ["submit", "list", "health", "get", "retry", "resolve"],
 )
-def test_postgres_auth_direct_mcp_routes_require_app_request_before_local_store_access(
+def test_durable_mode_direct_mcp_routes_require_app_request_before_local_store_access(
     route_name: str,
+    mode: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Optional Request defaults must not expose the local store to in-process callers."""
@@ -1366,7 +1368,10 @@ def test_postgres_auth_direct_mcp_routes_require_app_request_before_local_store_
     monkeypatch.setattr(
         mcp_gateway_routes,
         "get_settings",
-        lambda: SimpleNamespace(postgres_auth_enabled=True),
+        lambda: SimpleNamespace(
+            is_production=mode == "production",
+            postgres_auth_enabled=mode == "postgres_auth",
+        ),
     )
     for field in ("projects", "mcp_pending_requests", "approval_requests", "audit_events"):
         monkeypatch.setattr(store, field, ForbiddenLocalMap(), raising=True)
@@ -1402,8 +1407,19 @@ def test_postgres_auth_direct_mcp_routes_require_app_request_before_local_store_
             mcp_gateway_routes.resolve_gateway_request("missing", user=user)
 
     assert error.value.status_code == 503
-    assert error.value.detail == "PostgreSQL MCP route requires an app-bound request context"
+    assert error.value.detail == "MCP route requires an app-bound request context in production/PostgreSQL mode"
     assert error.value.headers == {"Retry-After": "1"}
+
+
+def test_local_direct_mcp_route_keeps_compatibility_store_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mcp_gateway_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    mcp_gateway_routes._require_mcp_request_context(None)
 
 
 def test_postgres_pending_binding_is_rejected_without_postgres_auth(

@@ -764,9 +764,10 @@ def execute_run_next_step(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
-    if request is None and get_settings().postgres_auth_enabled:
+    settings = get_settings()
+    if request is None and (settings.is_production or settings.postgres_auth_enabled):
         # A missing request must not select the module-level SQLite adapter in
-        # PostgreSQL-auth mode. HTTP requests always provide Request; this
+        # production or PostgreSQL-auth mode. HTTP requests always provide Request; this
         # guard also protects direct/internal invocation paths from silently
         # executing against process-local state.
         raise HTTPException(

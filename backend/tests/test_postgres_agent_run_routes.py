@@ -79,25 +79,44 @@ from app.postgres_trust_repository import PostgresTrustRepository, PostgresTrust
 from app.trust_policy import lease_receipt_payload
 
 
-def test_postgres_execute_next_requires_request_before_local_fallback(
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_execute_next_requires_request_before_local_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
 ) -> None:
     monkeypatch.setattr(
         agent_run_routes,
         "get_settings",
-        lambda: SimpleNamespace(postgres_auth_enabled=True),
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
     )
 
     def reject_local_lookup(*_args, **_kwargs):
         raise AssertionError("PostgreSQL execution must not read process-local runs")
 
     monkeypatch.setattr(agent_run_routes, "_run_or_404", reject_local_lookup)
+    monkeypatch.setattr(agent_run_routes, "execute_next_step", reject_local_lookup)
     user = AuthUser(
         id="postgres-route-test-user",
         email="route-test@example.invalid",
         display_name="Route Test",
         role=UserRole.MAINTAINER,
     )
+    before_runs = {key: value.model_copy(deep=True) for key, value in store.agent_runs.items()}
+    before_steps = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_steps.items()
+    }
+    before_events = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_events.items()
+    }
+    before_audits = [value.model_copy(deep=True) for value in store.audit_events]
 
     with pytest.raises(HTTPException) as raised:
         agent_run_routes.execute_run_next_step(
@@ -109,6 +128,10 @@ def test_postgres_execute_next_requires_request_before_local_fallback(
 
     assert raised.value.status_code == 503
     assert raised.value.headers == {"Retry-After": "1"}
+    assert store.agent_runs == before_runs
+    assert store.agent_run_steps == before_steps
+    assert store.agent_run_events == before_events
+    assert store.audit_events == before_audits
 
 
 @pytest.mark.parametrize(

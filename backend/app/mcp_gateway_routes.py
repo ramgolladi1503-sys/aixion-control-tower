@@ -231,17 +231,18 @@ def _require_local_mcp_write_runtime(request: Request) -> None:
 
 
 def _require_mcp_request_context(request: Request | None) -> None:
-    """Prevent direct route invocation from selecting SQLite in PostgreSQL mode.
+    """Prevent direct route invocation from selecting SQLite in durable modes.
 
     FastAPI supplies ``Request`` for HTTP calls. Route functions are also
     callable from in-process integrations, though, and their optional request
     parameter must not silently turn a PostgreSQL-authenticated deployment
     into the process-local compatibility store.
     """
-    if request is None and get_settings().postgres_auth_enabled:
+    settings = get_settings()
+    if request is None and (settings.is_production or settings.postgres_auth_enabled):
         raise HTTPException(
             status_code=503,
-            detail="PostgreSQL MCP route requires an app-bound request context",
+            detail="MCP route requires an app-bound request context in production/PostgreSQL mode",
             headers={"Retry-After": "1"},
         )
 
