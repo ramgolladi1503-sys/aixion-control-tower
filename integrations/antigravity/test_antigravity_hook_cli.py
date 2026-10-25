@@ -1195,6 +1195,8 @@ def test_deadline_transport_status_mapping(
         (" 7", hook.POLL_INTERVAL_SECONDS),
         ("7 ", hook.POLL_INTERVAL_SECONDS),
         ("1_0", hook.POLL_INTERVAL_SECONDS),
+        ("+1", hook.POLL_INTERVAL_SECONDS),
+        ("١", hook.POLL_INTERVAL_SECONDS),
         ("not a date", hook.POLL_INTERVAL_SECONDS),
         (None, hook.POLL_INTERVAL_SECONDS),
     ],

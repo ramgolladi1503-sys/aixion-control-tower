@@ -65,6 +65,47 @@ loopback HTTP for development). The hook rejects secret-like argument keys,
 common inline secret patterns, and argument payloads larger than 48 KiB. No
 tool arguments are written to logs.
 
+## Physical Android device over USB (local development only)
+
+The Android debug app and Antigravity hook on the Mac can use the same local
+backend without exposing it to the LAN. Run the isolated backend on the Mac
+bound to `127.0.0.1:8003`, using a dedicated test database. Configure the host
+hook with `http://127.0.0.1:8003` and build the Android debug app with that same
+API URL. Both clients must reach the same backend instance and database for a
+phone decision to unblock the pending hook call.
+
+With the phone connected over USB and USB debugging authorized, find its serial
+and create a reverse port mapping from the phone to the Mac:
+
+```sh
+adb devices -l
+export ANDROID_SERIAL="<serial shown above>"
+adb -s "$ANDROID_SERIAL" reverse tcp:8003 tcp:8003
+adb -s "$ANDROID_SERIAL" reverse --list
+```
+
+Build and install a debug APK configured for the forwarded phone loopback URL:
+
+```sh
+cd /ABSOLUTE/PATH/mobile/android
+./gradlew assembleDebug -PAIXION_API_BASE_URL=http://127.0.0.1:8003/
+adb -s "$ANDROID_SERIAL" install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+On the phone, `127.0.0.1:8003` reaches the Mac's `127.0.0.1:8003` through the
+USB reverse mapping. The host hook also calls that Mac loopback URL directly.
+Keep the backend bound to loopback; this setup does not expose port 8003 to the
+LAN. Remove the mapping when finished:
+
+```sh
+adb -s "$ANDROID_SERIAL" reverse --remove tcp:8003
+```
+
+This path works only while the Mac backend and USB debugging connection are
+available. It is for local device verification, not away-from-Mac operation or
+production reachability. Those require a deployed HTTPS API reachable by both
+the phone and host, plus production notification and host-availability setup.
+
 ## Workspace installation
 
 1. Register an Antigravity external agent in Control Tower with one project and

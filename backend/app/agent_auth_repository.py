@@ -51,6 +51,10 @@ class ExternalAgentAuthenticationRepository(Protocol):
     ) -> AgentAuthenticationResult: ...
 
 
+class SQLiteExternalAgentIntegrityError(ValueError):
+    """A persisted SQLite agent row is missing or mismatches its credential."""
+
+
 class SQLiteExternalAgentAuthRepository:
     """Authenticate and account for an agent request against durable SQLite rows."""
 
@@ -77,7 +81,9 @@ class SQLiteExternalAgentAuthRepository:
         result: list[tuple[ExternalAgent, AgentCredentialRecord]] = []
         for agent_id, agent_payload, credential_id, credential_payload in rows:
             if credential_payload is None or credential_id != agent_id:
-                raise ValueError("External agent is missing its credential record")
+                raise SQLiteExternalAgentIntegrityError(
+                    "External agent is missing its credential record"
+                )
             agent = ExternalAgent.model_validate_json(agent_payload)
             credential = AgentCredentialRecord.model_validate_json(credential_payload)
             if (
@@ -85,7 +91,9 @@ class SQLiteExternalAgentAuthRepository:
                 or agent.workspace_id != workspace_id
                 or credential.agent_id != agent.id
             ):
-                raise ValueError("External-agent listing crossed workspace scope")
+                raise SQLiteExternalAgentIntegrityError(
+                    "External-agent listing crossed workspace scope"
+                )
             result.append((agent, credential))
         return result
 

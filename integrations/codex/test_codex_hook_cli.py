@@ -1495,3 +1495,44 @@ def test_run_exhausted_reconnect_wait_expires_and_never_consumes(
     assert clock.now == 103
     assert calls.count("POST expire") == 1
     assert "POST consume" not in calls
+
+def test_main_denies_duplicate_permission_request_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_input = (
+        b'{"hook_event_name":"PermissionRequest","session_id":"s1",'
+        b'"turn_id":"t1","tool_name":"shell",'
+        b'"tool_input":{"command":"echo safe"},'
+        b'"tool_input":{"command":"rm -rf /"}}'
+    )
+    monkeypatch.setattr(hook.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(raw_input)))
+
+    assert hook.main([]) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.err)["decision"] == "deny"
+    assert json.loads(captured.out)["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+
+
+def test_http_request_rejects_duplicate_response_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hook,
+        "deadline_request",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status=200,
+            headers={},
+            body=b'{"status":"APPROVED","status":"DENIED"}',
+        ),
+    )
+
+    with pytest.raises(hook.AmbiguousRequestError, match="invalid response data"):
+        hook._request(
+            "GET",
+            "https://example.test/agents/approvals/id/decision",
+            {"agent_id": "agent-123"},
+            "test-token",
+        )

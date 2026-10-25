@@ -17,6 +17,7 @@ from psycopg.types.json import Jsonb
 
 from app.agent_auth_repository import AgentAuthenticationResult
 from app.agent_auth_repository import SQLiteExternalAgentAuthRepository
+from app.agent_auth_repository import SQLiteExternalAgentIntegrityError
 from app.agent_auth import revoke_external_agent_token
 from app.agent_credential_models import AgentCredentialRecord
 from app.models import (
@@ -698,6 +699,55 @@ def test_sqlite_known_agent_credential_failures_are_audited(
     ]
     assert len(failed_events) == 1
     assert failed_events[0].details["reason"] == expected_reason
+
+
+def test_sqlite_list_for_workspace_returns_only_matching_credentialed_agents(tmp_path) -> None:
+    database = tmp_path / "sqlite-agent-list.sqlite3"
+
+    def connect() -> sqlite3.Connection:
+        return sqlite3.connect(database, timeout=10)
+
+    with connect() as connection:
+        run_migrations(connection)
+    in_scope, in_scope_credential, _ = _agent_and_credential("workspace-a", "owner-a")
+    out_of_scope, out_of_scope_credential, _ = _agent_and_credential("workspace-b", "owner-b")
+    with connect() as connection:
+        connection.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            (
+                ("external_agent", in_scope.id, in_scope.model_dump_json()),
+                ("external_agent_credential", in_scope.id, in_scope_credential.model_dump_json()),
+                ("external_agent", out_of_scope.id, out_of_scope.model_dump_json()),
+                (
+                    "external_agent_credential",
+                    out_of_scope.id,
+                    out_of_scope_credential.model_dump_json(),
+                ),
+            ),
+        )
+
+    listed = SQLiteExternalAgentAuthRepository(connect).list_for_workspace("workspace-a")
+
+    assert listed == [(in_scope, in_scope_credential)]
+
+
+def test_sqlite_list_for_workspace_fails_closed_for_missing_credential(tmp_path) -> None:
+    database = tmp_path / "sqlite-agent-list-missing-credential.sqlite3"
+
+    def connect() -> sqlite3.Connection:
+        return sqlite3.connect(database, timeout=10)
+
+    with connect() as connection:
+        run_migrations(connection)
+    agent, _, _ = _agent_and_credential("workspace-a", "owner-a")
+    with connect() as connection:
+        connection.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("external_agent", agent.id, agent.model_dump_json()),
+        )
+
+    with pytest.raises(SQLiteExternalAgentIntegrityError, match="missing its credential"):
+        SQLiteExternalAgentAuthRepository(connect).list_for_workspace("workspace-a")
 
 
 def test_unknown_agent_does_not_invent_workspace_audit_scope(agent_repository) -> None:

@@ -10,6 +10,9 @@ that Codex considers safe enough to run without a permission prompt.
 The event schema and decision response follow the [official Codex hooks
 documentation](https://learn.chatgpt.com/docs/hooks), including its
 `PermissionRequest` event and `hookSpecificOutput.decision.behavior` values.
+The connector rejects duplicate JSON object keys in both the hook event and
+Control Tower responses, so request and decision fields cannot depend on a
+parser's duplicate-key handling.
 
 The hook uses only `PermissionRequest`. Do not change it to `PreToolUse`: the
 Codex hook documentation says a failed or timed-out `PreToolUse` callback can
