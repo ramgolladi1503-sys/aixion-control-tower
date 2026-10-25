@@ -92,6 +92,25 @@ validator mappings therefore remain a human-reviewed topology inventory. A
 passing result means only that the detected services have explicit cost-model
 rows; owner inputs and a dated regional calculator export remain required.
 
+### Offline owner handoff preflight
+
+Before requesting an owner review, run the consolidated, read-only preflight from
+the repository root:
+
+```sh
+python backend/scripts/validate_staging_owner_handoff.py
+python backend/scripts/validate_staging_owner_handoff.py --json
+```
+
+The report summarizes pending owner-input rows, unresolved implementation gates,
+live-action rows still marked `NOT AUTHORIZED`, and local Cloud Run/Jobs/Scheduler
+manifest plus topology-to-cost coverage findings. Exit status `1` means at least
+one blocker or malformed/missing required input remains; status `0` means only
+that the checked record and static checks have no detected blockers. It never
+contacts Google Cloud and cannot authorize billing, APIs, IAM, plans, resources,
+or deployment. A clear report still requires a fresh, separately recorded
+authorization for each live action and all applicable engineering gates.
+
 ### Workload inputs for the dated calculator estimate
 
 Do not convert an unknown input to zero. Complete this worksheet with the project owner and attach evidence (measurement, test plan, or an explicitly approved estimate) before exporting a price calculation. The calculator export must record its timestamp, currency, region, selected SKUs, free-tier assumptions, and billing-account scope.
