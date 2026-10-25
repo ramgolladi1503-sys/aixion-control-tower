@@ -262,6 +262,10 @@ class AgentTaskRepository(Protocol):
         self, *, task_id: str | None, worker_id: str, lease_seconds: int,
     ) -> tuple[AgentTask | None, str, AuditEvent | None]: ...
 
+    def renew_validation_lease(
+        self, *, task: AgentTask, worker_id: str, lease_token: str, lease_seconds: int,
+    ) -> AgentTask: ...
+
     def commit_worker_outcome(
         self, *, expected: AgentTask, updated: AgentTask,
         event: AgentTaskEvent | None, audit: AuditEvent,
@@ -1367,7 +1371,7 @@ class PostgresAgentTaskRepository:
         if not expected.workspace_id or not expected.project_id:
             raise ValueError("PostgreSQL AgentTask event requires persisted workspace ownership.")
         row = conn.execute(
-            "SELECT workspace_id,project_id,payload FROM agent_tasks "
+            "SELECT workspace_id,project_id,payload,clock_timestamp() FROM agent_tasks "
             "WHERE task_id=%s FOR UPDATE",
             (expected.id,),
         ).fetchone()
@@ -1376,6 +1380,17 @@ class PostgresAgentTaskRepository:
         durable = AgentTask.model_validate(row[2])
         if durable != expected:
             raise AgentTaskRepositoryConflict("AgentTask changed before event committed.")
+        if (
+            event.event_type == AgentTaskEventType.TESTS_STARTED
+            and event.metadata.get("runner_type") == "validation_command_runner"
+            and (
+                durable.worker_lease_owner != event.metadata.get("worker_id")
+                or durable.worker_lease_token != event.metadata.get("lease_token")
+                or durable.worker_lease_expires_at is None
+                or durable.worker_lease_expires_at <= row[3]
+            )
+        ):
+            raise AgentTaskRepositoryConflict("Validation lease expired before its start event committed.")
         try:
             changed = conn.execute(
                 "UPDATE agent_tasks SET status=%s,updated_at=%s,payload=%s "
@@ -1420,7 +1435,7 @@ class PostgresAgentTaskRepository:
         try:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT workspace_id,project_id,payload FROM agent_tasks "
+                    "SELECT workspace_id,project_id,payload,clock_timestamp() FROM agent_tasks "
                     "WHERE task_id=%s FOR UPDATE",
                     (expected.id,),
                 ).fetchone()
@@ -1429,6 +1444,11 @@ class PostgresAgentTaskRepository:
                 durable = AgentTask.model_validate(row[2])
                 if durable != expected:
                     raise AgentTaskRepositoryConflict("AgentTask changed before worker outcome commit.")
+                if (
+                    durable.worker_lease_expires_at is None
+                    or durable.worker_lease_expires_at <= row[3]
+                ):
+                    raise AgentTaskRepositoryConflict("Worker lease expired before outcome commit.")
                 changed = conn.execute(
                     "UPDATE agent_tasks SET status=%s,updated_at=%s,payload=%s "
                     "WHERE task_id=%s AND workspace_id=%s AND payload=%s",
@@ -1467,14 +1487,14 @@ class PostgresAgentTaskRepository:
             if task_id is None:
                 rows = conn.execute(
                     "SELECT task_id,workspace_id,project_id,payload FROM agent_tasks "
-                    "WHERE status='TESTING' "
+                    "WHERE status IN ('APPROVED','TESTING') "
                     "AND (payload->>'worker_lease_expires_at')::timestamptz <= clock_timestamp() "
                     "ORDER BY updated_at,task_id FOR UPDATE SKIP LOCKED"
                 ).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT task_id,workspace_id,project_id,payload FROM agent_tasks "
-                    "WHERE task_id=%s AND status='TESTING' "
+                    "WHERE task_id=%s AND status IN ('APPROVED','TESTING') "
                     "AND (payload->>'worker_lease_expires_at')::timestamptz <= clock_timestamp() "
                     "FOR UPDATE",
                     (task_id,),
@@ -1682,3 +1702,64 @@ class PostgresAgentTaskRepository:
                 return updated, "", claim_audit
         except psycopg.errors.UniqueViolation as exc:
             raise AgentTaskRepositoryConflict("Worker claim refusal audit already exists.") from exc
+
+    def renew_validation_lease(
+        self, *, task: AgentTask, worker_id: str, lease_token: str, lease_seconds: int,
+    ) -> AgentTask:
+        if not task.workspace_id or not task.project_id:
+            raise ValueError("Validation lease renewal requires persisted workspace ownership.")
+        if not worker_id.strip() or not lease_token:
+            raise ValueError("Validation lease renewal requires worker and lease identities.")
+        if not isinstance(lease_seconds, int) or isinstance(lease_seconds, bool) or lease_seconds < 1:
+            raise ValueError("Worker lease duration must be a positive integer number of seconds.")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT workspace_id,project_id,payload,clock_timestamp() FROM agent_tasks "
+                "WHERE task_id=%s FOR UPDATE",
+                (task.id,),
+            ).fetchone()
+            if row is None or row[0] != task.workspace_id or row[1] != task.project_id:
+                raise AgentTaskRepositoryConflict("AgentTask is missing or outside its workspace.")
+            durable = AgentTask.model_validate(row[2])
+            db_now = row[3]
+            if (
+                durable != task
+                or durable.status not in {AgentTaskStatus.APPROVED, AgentTaskStatus.TESTING}
+                or durable.worker_lease_owner != worker_id
+                or durable.worker_lease_token != lease_token
+                or durable.worker_lease_expires_at is None
+                or durable.worker_lease_expires_at <= db_now
+            ):
+                raise AgentTaskRepositoryConflict(
+                    "Validation lease is stale, expired, or owned by another worker."
+                )
+            updated = durable.model_copy(deep=True)
+            updated.worker_lease_expires_at = db_now + timedelta(seconds=lease_seconds)
+            updated.updated_at = db_now
+            changed = conn.execute(
+                "UPDATE agent_tasks SET updated_at=%s,payload=%s WHERE task_id=%s "
+                "AND workspace_id=%s AND payload=%s",
+                (updated.updated_at, Jsonb(updated.model_dump(mode="json")), updated.id,
+                 updated.workspace_id, Jsonb(durable.model_dump(mode="json"))),
+            )
+            if changed.rowcount != 1:
+                raise AgentTaskRepositoryConflict("AgentTask changed during validation lease renewal.")
+            audit = AuditEvent(
+                event_type="agent_worker.validation_lease_renewed",
+                entity_id=updated.id,
+                workspace_id=updated.workspace_id,
+                actor=worker_id,
+                details={
+                    "worker_id": worker_id,
+                    "lease_expires_at": updated.worker_lease_expires_at.isoformat(),
+                    "lease_token_validated": True,
+                },
+                created_at=db_now,
+            )
+            conn.execute(
+                "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
+                "actor,details,created_at,payload) VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                (audit.id, audit.workspace_id, audit.entity_id, audit.event_type, audit.actor,
+                 Jsonb(audit.details), audit.created_at, Jsonb(audit.model_dump(mode="json"))),
+            )
+            return updated

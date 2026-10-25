@@ -215,14 +215,13 @@ def test_postgres_validation_recovery_terminalizes_expired_started_task_once(age
     )
     assert reason == ""
     assert claimed is not None
-    expired = claimed.model_copy(update={
-        "status": AgentTaskStatus.TESTING,
-        "worker_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=5),
-    })
+    # The production runner persists TESTS_STARTED without changing the task
+    # status: it remains APPROVED while the validation lease is held.
+    started_task = claimed.model_copy(update={"updated_at": datetime.now(timezone.utc)})
     started = AgentTaskEvent(
         task_id=task.id,
         event_type=AgentTaskEventType.TESTS_STARTED,
-        status=AgentTaskStatus.TESTING,
+        status=None,
         actor="validation-worker",
         message="Worker started allowlisted validation commands.",
         metadata={
@@ -230,6 +229,7 @@ def test_postgres_validation_recovery_terminalizes_expired_started_task_once(age
             "lease_token": claimed.worker_lease_token,
             "approval_request_id": task.approval_request_id,
             "runner_type": "validation_command_runner",
+            "command_count": 1,
             "validation_policy": {"policy_version": "test"},
         },
     )
@@ -240,12 +240,20 @@ def test_postgres_validation_recovery_terminalizes_expired_started_task_once(age
         actor="validation-worker",
         details={
             "event_id": started.id,
-            "status": AgentTaskStatus.TESTING,
+            "status": None,
             "message": started.message,
             "notification_id": None,
         },
     )
-    repository.commit_event(expected=claimed, updated=expired, event=started, audit=started_audit)
+    repository.commit_event(expected=claimed, updated=started_task, event=started, audit=started_audit)
+    expired = started_task.model_copy(update={
+        "worker_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=5),
+    })
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_tasks SET updated_at=%s,payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (expired.updated_at, Jsonb(expired.model_dump(mode="json")), task.id, task.workspace_id),
+        )
 
     recovered = repository.recover_abandoned_validation_tasks(task_id=task.id)
 
@@ -277,6 +285,87 @@ def test_postgres_validation_recovery_terminalizes_expired_started_task_once(age
     assert audit[1]["execution_outcome"] == "UNKNOWN"
     assert audit[1]["commands_completed"] is None
     assert repository.recover_abandoned_validation_tasks(task_id=task.id) == []
+
+
+def test_postgres_validation_recovery_ignores_expired_lease_without_started_event(agent_task_repository) -> None:
+    repository, connect = agent_task_repository
+    task = _seed_approved_task(connect)
+    claimed, reason, _ = repository.claim(
+        task_id=task.id, worker_id="validation-worker", lease_seconds=60,
+    )
+    assert reason == ""
+    assert claimed is not None
+    expired = claimed.model_copy(update={
+        "worker_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=5),
+    })
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_tasks SET updated_at=%s,payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (expired.updated_at, Jsonb(expired.model_dump(mode="json")), task.id, task.workspace_id),
+        )
+
+    assert repository.recover_abandoned_validation_tasks(task_id=task.id) == []
+    persisted = repository.get(task.id)
+    assert persisted == expired
+
+
+def test_postgres_validation_lease_renewal_requires_live_matching_owner(agent_task_repository) -> None:
+    repository, connect = agent_task_repository
+    task = _seed_approved_task(connect)
+    claimed, reason, _ = repository.claim(
+        task_id=task.id, worker_id="validation-worker", lease_seconds=60,
+    )
+    assert reason == ""
+    assert claimed is not None
+
+    renewed = repository.renew_validation_lease(
+        task=claimed,
+        worker_id="validation-worker",
+        lease_token=claimed.worker_lease_token or "",
+        lease_seconds=120,
+    )
+    assert renewed.worker_lease_expires_at is not None
+    assert claimed.worker_lease_expires_at is not None
+    assert renewed.worker_lease_expires_at > claimed.worker_lease_expires_at
+    with connect() as conn:
+        audit = conn.execute(
+            "SELECT details FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_worker.validation_lease_renewed'",
+            (task.id,),
+        ).fetchone()
+    assert audit is not None
+    assert audit[0]["lease_token_validated"] is True
+
+    with pytest.raises(AgentTaskRepositoryConflict):
+        repository.renew_validation_lease(
+            task=renewed,
+            worker_id="different-worker",
+            lease_token=renewed.worker_lease_token or "",
+            lease_seconds=120,
+        )
+    with pytest.raises(AgentTaskRepositoryConflict):
+        repository.renew_validation_lease(
+            task=renewed,
+            worker_id="validation-worker",
+            lease_token="wrong-token",
+            lease_seconds=120,
+        )
+
+    expired = renewed.model_copy(update={
+        "worker_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1),
+    })
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_tasks SET updated_at=%s,payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (expired.updated_at, Jsonb(expired.model_dump(mode="json")), task.id, task.workspace_id),
+        )
+    with pytest.raises(AgentTaskRepositoryConflict):
+        repository.renew_validation_lease(
+            task=expired,
+            worker_id="validation-worker",
+            lease_token=expired.worker_lease_token or "",
+            lease_seconds=120,
+        )
 
 
 def test_postgres_agent_task_creation_rolls_back_on_duplicate_audit_id(agent_task_repository) -> None:

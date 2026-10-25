@@ -387,6 +387,87 @@ def test_postgres_validation_runner_persists_events_atomically_without_sqlite_pr
     assert "agent_worker.validation_run_completed" in {row[0] for row in audits}
 
 
+def test_postgres_validation_lease_covers_configured_command_timeout(
+    postgres_validation_repositories,
+) -> None:
+    connect, task_repository, approval_repository, task, _approval = postgres_validation_repositories
+
+    def inspect_live_lease(command: str) -> CommandExecutionResult:
+        with connect() as conn:
+            payload = conn.execute(
+                "SELECT payload FROM agent_tasks WHERE task_id=%s",
+                (task.id,),
+            ).fetchone()[0]
+        expires_at = datetime.fromisoformat(payload["worker_lease_expires_at"])
+        assert expires_at > datetime.now(timezone.utc) + timedelta(seconds=580)
+        return CommandExecutionResult(command=command, exit_code=0)
+
+    result = run_agent_worker_validation_commands(
+        task_id=task.id,
+        worker_id="mission-control:run_pg:validation",
+        lease_seconds=300,
+        timeout_seconds=600,
+        executor=inspect_live_lease,
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+    )
+
+    assert result.success is True
+    with connect() as conn:
+        renewal_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_worker.validation_lease_renewed'",
+            (task.id,),
+        ).fetchone()[0]
+    assert renewal_count == 1
+
+
+def test_postgres_validation_runner_stops_when_lease_renewal_cannot_be_confirmed(
+    postgres_validation_repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect, task_repository, approval_repository, task, approval = postgres_validation_repositories
+    executed: list[str] = []
+    renewals = 0
+    original_renewal = task_repository.renew_validation_lease
+
+    def fail_second_renewal(**kwargs: object) -> AgentTask:
+        nonlocal renewals
+        renewals += 1
+        if renewals == 2:
+            raise RuntimeError("lease authority unavailable")
+        return original_renewal(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(task_repository, "renew_validation_lease", fail_second_renewal)
+    monkeypatch.setattr(
+        approval_repository,
+        "get",
+        lambda _approval_id: approval.model_copy(
+            update={"test_plan": ["python -m pytest", "python -m pytest -q"]}
+        ),
+    )
+    result = run_agent_worker_validation_commands(
+        task_id=task.id,
+        worker_id="mission-control:run_pg:validation",
+        executor=lambda command: executed.append(command) or CommandExecutionResult(
+            command=command, exit_code=0,
+        ),
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+    )
+
+    assert executed == ["python -m pytest"]
+    assert result.success is False
+    assert result.command_count == 1
+    assert len(result.results) == 1
+    assert result.final_status is None
+    assert "no further command was started" in result.reason
+    durable_task = task_repository.get(task.id)
+    assert durable_task is not None
+    assert durable_task.status == AgentTaskStatus.APPROVED
+    assert durable_task.worker_lease_token is not None
+
+
 def test_postgres_validation_failure_marks_task_failed_and_releases_lease_atomically(
     postgres_validation_repositories,
 ) -> None:
@@ -483,14 +564,11 @@ def test_postgres_validation_runner_recovers_expired_started_task_without_rerunn
     )
     assert reason == ""
     assert claimed is not None
-    expired = claimed.model_copy(update={
-        "status": AgentTaskStatus.TESTING,
-        "worker_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=5),
-    })
+    started_task = claimed.model_copy(update={"updated_at": datetime.now(timezone.utc)})
     started = AgentTaskEvent(
         task_id=task.id,
         event_type=AgentTaskEventType.TESTS_STARTED,
-        status=AgentTaskStatus.TESTING,
+        status=None,
         actor="abruptly-killed-worker",
         message="Worker started allowlisted validation commands.",
         metadata={
@@ -498,6 +576,7 @@ def test_postgres_validation_runner_recovers_expired_started_task_without_rerunn
             "lease_token": claimed.worker_lease_token,
             "approval_request_id": task.approval_request_id,
             "runner_type": "validation_command_runner",
+            "command_count": 1,
         },
     )
     started_audit = AuditEvent(
@@ -507,14 +586,22 @@ def test_postgres_validation_runner_recovers_expired_started_task_without_rerunn
         actor="abruptly-killed-worker",
         details={
             "event_id": started.id,
-            "status": AgentTaskStatus.TESTING,
+            "status": None,
             "message": started.message,
             "notification_id": None,
         },
     )
     task_repository.commit_event(
-        expected=claimed, updated=expired, event=started, audit=started_audit,
+        expected=claimed, updated=started_task, event=started, audit=started_audit,
     )
+    expired = started_task.model_copy(update={
+        "worker_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=5),
+    })
+    with connect() as conn:
+        conn.execute(
+            "UPDATE agent_tasks SET updated_at=%s,payload=%s WHERE task_id=%s AND workspace_id=%s",
+            (expired.updated_at, Jsonb(expired.model_dump(mode="json")), task.id, task.workspace_id),
+        )
     executed: list[str] = []
 
     result = run_agent_worker_validation_commands(

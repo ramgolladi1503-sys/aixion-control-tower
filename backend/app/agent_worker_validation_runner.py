@@ -31,6 +31,7 @@ from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDec
 from .store import store
 
 DEFAULT_TIMEOUT_SECONDS = 120
+VALIDATION_LEASE_SAFETY_MARGIN_SECONDS = 30
 MAX_OUTPUT_CHARS = 4000
 
 
@@ -330,6 +331,31 @@ def run_agent_worker_validation_commands(
             reason="Provide task_id or set first_approved=true.",
         )
 
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or timeout_seconds < 1
+    ):
+        return AgentWorkerValidationRunResult(
+            success=False,
+            worker_id=worker_id,
+            reason="Validation command timeout must be a positive integer number of seconds.",
+        )
+    if (
+        not isinstance(lease_seconds, int)
+        or isinstance(lease_seconds, bool)
+        or lease_seconds < 1
+    ):
+        return AgentWorkerValidationRunResult(
+            success=False,
+            worker_id=worker_id,
+            reason="Worker lease duration must be a positive integer number of seconds.",
+        )
+    command_lease_seconds = max(
+        lease_seconds,
+        timeout_seconds + VALIDATION_LEASE_SAFETY_MARGIN_SECONDS,
+    )
+
     postgres_mode = validate_agent_worker_repository_pair(
         task_repository,
         approval_repository,
@@ -355,13 +381,13 @@ def run_agent_worker_validation_commands(
 
     claim = (
         claim_first_approved_agent_task_for_worker(
-            worker_id=worker_id, lease_seconds=lease_seconds, repository=task_repository
+            worker_id=worker_id, lease_seconds=command_lease_seconds, repository=task_repository
         )
         if first_approved and not task_id
         else claim_agent_task_for_worker(
             task_id=str(task_id),
             worker_id=worker_id,
-            lease_seconds=lease_seconds,
+            lease_seconds=command_lease_seconds,
             repository=task_repository,
         )
     )
@@ -476,8 +502,24 @@ def run_agent_worker_validation_commands(
 
     results: list[CommandExecutionResult] = []
     runner_failure: Exception | None = None
+    lease_renewal_failed = False
     try:
         for command in approval.test_plan:
+            if postgres_mode and isinstance(task_repository, PostgresAgentTaskRepository):
+                try:
+                    task = task_repository.renew_validation_lease(
+                        task=task,
+                        worker_id=worker_id,
+                        lease_token=lease_token,
+                        lease_seconds=command_lease_seconds,
+                    )
+                except Exception:
+                    # A renewal that cannot be confirmed means this worker
+                    # must not start another external command. Keep the start
+                    # event and lease for later recovery instead of committing
+                    # an outcome with stale ownership.
+                    lease_renewal_failed = True
+                    break
             runner = executor or (
                 lambda cmd: execute_validation_command(
                     cmd, cwd=run_cwd, timeout_seconds=timeout_seconds
@@ -492,6 +534,23 @@ def run_agent_worker_validation_commands(
         # Persist a terminal failure without inventing an execution result or
         # retaining exception text that could contain sensitive data.
         runner_failure = error
+
+    if lease_renewal_failed:
+        return AgentWorkerValidationRunResult(
+            success=False,
+            task_id=task.id,
+            approval_request_id=task.approval_request_id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            command_count=len(results),
+            results=results,
+            started_event_id=started.id,
+            final_status=None,
+            reason=(
+                "Validation lease renewal could not be confirmed; no further command was started. "
+                "The execution outcome remains unknown."
+            ),
+        )
 
     if runner_failure is not None:
         finished = _build_validation_event(
