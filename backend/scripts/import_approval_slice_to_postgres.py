@@ -28,7 +28,7 @@ from psycopg.types.json import Jsonb
 from app.agent_task_models import AgentTask
 from app.agent_task_models import AgentTaskEvent
 from app.agent_credential_models import AgentCredentialRecord
-from app.agent_run_models import AgentRun, AgentRunEvent, AgentRunStep
+from app.agent_run_models import AgentRun, AgentRunEvent, AgentRunFaultConfig, AgentRunStep
 from app.approval_integrity import compute_approval_payload_hash
 from app.connector_models import AgentConnector
 from app.email_delivery import _decrypt_code
@@ -269,7 +269,8 @@ def _agent_run_fault_summary(
     active: list[str] = []
     inactive: list[str] = []
     for fault_id, payload in records.get("agent_run_fault", {}).items():
-        if payload.get("enabled") is True and payload.get("remaining_uses", 1) > 0:
+        fault = AgentRunFaultConfig.model_validate(payload)
+        if fault.enabled and fault.remaining_uses > 0:
             active.append(hashlib.sha256(fault_id.encode("utf-8")).hexdigest())
         else:
             inactive.append(hashlib.sha256(fault_id.encode("utf-8")).hexdigest())

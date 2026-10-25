@@ -1940,6 +1940,24 @@ def test_active_agent_run_fault_blocks_apply_even_with_partial_acknowledgement(
     assert writes == []
 
 
+def test_integer_encoded_enabled_agent_run_fault_blocks_import(tmp_path):
+    path = tmp_path / "integer_enabled_fault_snapshot.sqlite3"
+    _snapshot(path, include_omitted=False, agent_run_faults=[{
+        "id": "integer-enabled-fault",
+        "run_id": "fault-run",
+        "step_type": None,
+        "fault_kind": "WORKER_CRASH",
+        "enabled": 1,
+        "remaining_uses": 1,
+        "message": "legacy SQLite boolean representation",
+        "created_by": "test",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }])
+
+    with pytest.raises(ImportBlocked, match="active AgentRun fault injection settings"):
+        build_plan(path)
+
+
 def test_inactive_agent_run_faults_are_reported_as_excluded(tmp_path):
     path = tmp_path / "inactive_fault_snapshot.sqlite3"
     fault_id = "inactive-diagnostic-fault"
