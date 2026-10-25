@@ -477,16 +477,92 @@ def run_agent_worker_validation_commands(
         )
 
     results: list[CommandExecutionResult] = []
-    for command in approval.test_plan:
-        runner = executor or (
-            lambda cmd: execute_validation_command(
-                cmd, cwd=run_cwd, timeout_seconds=timeout_seconds
+    runner_failure: Exception | None = None
+    try:
+        for command in approval.test_plan:
+            runner = executor or (
+                lambda cmd: execute_validation_command(
+                    cmd, cwd=run_cwd, timeout_seconds=timeout_seconds
+                )
             )
+            result = _normalize_result_artifact(runner(command))
+            results.append(result)
+            if not result.passed:
+                break
+    except Exception as error:
+        # A runner exception does not prove whether the external command started.
+        # Persist a terminal failure without inventing an execution result or
+        # retaining exception text that could contain sensitive data.
+        runner_failure = error
+
+    if runner_failure is not None:
+        finished = _build_validation_event(
+            task,
+            approval,
+            worker_id,
+            lease_token,
+            AgentTaskEventType.FAILED,
+            AgentTaskStatus.FAILED,
+            "Validation runner failed; command execution outcome is unknown.",
+            results=None,
         )
-        result = _normalize_result_artifact(runner(command))
-        results.append(result)
-        if not result.passed:
-            break
+        finished.metadata.update(
+            {
+                "failure_class": type(runner_failure).__name__,
+                "execution_outcome": "UNKNOWN",
+            }
+        )
+        updated_task = task.model_copy(deep=True)
+        updated_task.worker_lease_owner = None
+        updated_task.worker_lease_expires_at = None
+        updated_task.worker_lease_token = None
+        updated_task.status = AgentTaskStatus.FAILED
+        updated_task.updated_at = _now()
+        failure_audit = AuditEvent(
+            event_type="agent_worker.validation_runner_failed",
+            entity_id=task.id,
+            workspace_id=task.workspace_id,
+            actor=worker_id,
+            details={
+                "event_id": finished.id,
+                "worker_id": worker_id,
+                "lease_token": lease_token,
+                "approval_request_id": approval.id,
+                "failure_class": type(runner_failure).__name__,
+                "execution_outcome": "UNKNOWN",
+            },
+        )
+        if postgres_mode and isinstance(task_repository, PostgresAgentTaskRepository):
+            task_repository.commit_worker_outcome(
+                expected=task,
+                updated=updated_task,
+                event=finished,
+                audit=failure_audit,
+            )
+        else:
+            store.agent_task_events[finished.id] = finished
+            _audit(
+                failure_audit.event_type,
+                task.id,
+                failure_audit.details,
+                actor=worker_id,
+            )
+            task.status = AgentTaskStatus.FAILED
+            _release_task(task, lease_token, worker_id)
+            store.persist()
+        return AgentWorkerValidationRunResult(
+            success=False,
+            task_id=task.id,
+            approval_request_id=approval.id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            command_count=len(results),
+            results=results,
+            started_event_id=started.id,
+            finished_event_id=finished.id,
+            final_status=AgentTaskStatus.FAILED,
+            reason="Validation runner failed; command execution outcome is unknown.",
+        )
 
     all_passed = all(result.passed for result in results) and len(results) == len(
         approval.test_plan

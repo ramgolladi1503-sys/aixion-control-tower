@@ -420,6 +420,53 @@ def test_postgres_validation_failure_marks_task_failed_and_releases_lease_atomic
     assert not any(event.task_id == task.id for event in store.agent_task_events.values())
 
 
+def test_postgres_validation_runner_exception_records_unknown_outcome_and_releases_lease(
+    postgres_validation_repositories,
+) -> None:
+    connect, task_repository, approval_repository, task, _approval = (
+        postgres_validation_repositories
+    )
+
+    def raise_before_result(_command: str) -> CommandExecutionResult:
+        raise OSError("private command output must not be persisted")
+
+    result = run_agent_worker_validation_commands(
+        task_id=task.id,
+        worker_id="mission-control:run_pg:validation",
+        executor=raise_before_result,
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+    )
+
+    assert result.success is False
+    assert result.final_status == AgentTaskStatus.FAILED
+    assert result.reason.endswith("outcome is unknown.")
+    assert result.results == []
+    durable_task = task_repository.get(task.id)
+    assert durable_task is not None
+    assert durable_task.status == AgentTaskStatus.FAILED
+    assert durable_task.worker_lease_owner is None
+    assert durable_task.worker_lease_expires_at is None
+    assert durable_task.worker_lease_token is None
+    events = task_repository.list_events(task.id, workspace_id=task.workspace_id)
+    failed = next(event for event in events if event.event_type == AgentTaskEventType.FAILED)
+    assert failed.status == AgentTaskStatus.FAILED
+    assert failed.metadata["execution_outcome"] == "UNKNOWN"
+    assert failed.metadata["commands_executed"] is False
+    assert failed.metadata["results"] == []
+    assert "private command output" not in str(failed.model_dump())
+    with connect() as conn:
+        audit = conn.execute(
+            "SELECT event_type,details FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_worker.validation_runner_failed'",
+            (task.id,),
+        ).fetchone()
+    assert audit is not None
+    assert audit[1]["event_id"] == failed.id
+    assert audit[1]["execution_outcome"] == "UNKNOWN"
+    assert not any(event.task_id == task.id for event in store.agent_task_events.values())
+
+
 def test_postgres_validation_runner_rolls_back_pass_event_when_audit_fails(
     postgres_validation_repositories,
 ) -> None:
