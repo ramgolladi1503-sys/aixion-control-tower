@@ -120,6 +120,33 @@ class ControlTowerMessagingServiceNotificationTest {
             assertNotNull(second)
             assertNotEquals("Hash-colliding approvals must not share a tap target", first, second)
 
+            val activityMonitor = Instrumentation.ActivityMonitor(
+                MainActivity::class.java.name,
+                null,
+                false
+            )
+            instrumentation.addMonitor(activityMonitor)
+            try {
+                first.send()
+                val activity = activityMonitor.waitForActivityWithTimeout(ACTIVITY_START_TIMEOUT_MS)
+                assertNotNull("First colliding notification should launch MainActivity", activity)
+                val mainActivity = requireNotNull(activity)
+                assertEquals(
+                    NotificationDeepLink.ApprovalRequest(approvalIds[0], notificationIds[0]),
+                    NotificationDeepLink.fromIntent(mainActivity.intent)
+                )
+
+                second.send()
+                instrumentation.waitForIdleSync()
+                assertEquals(
+                    "Second colliding notification should deliver its own approval reference",
+                    NotificationDeepLink.ApprovalRequest(approvalIds[1], notificationIds[1]),
+                    NotificationDeepLink.fromIntent(mainActivity.intent)
+                )
+            } finally {
+                instrumentation.removeMonitor(activityMonitor)
+            }
+
             // Redelivery is idempotent for the same notification: replace its card,
             // while keeping the other colliding notification and its target intact.
             deliver(1)
