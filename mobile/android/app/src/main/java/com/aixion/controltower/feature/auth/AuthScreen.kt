@@ -327,7 +327,7 @@ internal fun AuthFormContent(
             }
 
             state.message?.let { message ->
-                AuthFeedbackMessage(message, state.messageSeverity)
+                AuthFeedbackMessage(AuthUxCopy.feedbackMessage(message), state.messageSeverity)
             }
 
             if (verificationStarted) {
@@ -394,15 +394,19 @@ internal fun AuthProgressMessage(text: String) {
 @Composable
 internal fun AuthFeedbackMessage(message: String, severity: AuthMessageSeverity) {
     val palette = LocalTowerPalette.current
-    Text(
-        text = message,
-        color = authFeedbackColor(severity, palette),
-        style = MaterialTheme.typography.bodyMedium,
-        modifier = Modifier.semantics {
-            liveRegion = LiveRegionMode.Polite
-            stateDescription = severity.accessibilityLabel
-        }
-    )
+    TowerPanel(elevated = false) {
+        Text(
+            text = message,
+            color = authFeedbackColor(severity, palette),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    liveRegion = LiveRegionMode.Polite
+                    stateDescription = severity.accessibilityLabel
+                }
+        )
+    }
 }
 
 internal fun authFeedbackColor(severity: AuthMessageSeverity, palette: TowerPalette): Color =

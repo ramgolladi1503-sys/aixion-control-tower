@@ -114,11 +114,12 @@ class AuthFormContentTest {
 
     @Test
     fun loginFailureIsAnnouncedAsErrorInsteadOfNeutralStatus() {
-        val message = "Login failed: Check your email and password."
+        val legacySessionMessage = "Login failed: Session expired or invalid. Open Acct and log in again."
+        val message = "Your session expired. Log in again to continue."
         composeRule.setContent {
             AuthFormContent(
                 state = AuthUiState(
-                    message = message,
+                    message = legacySessionMessage,
                     messageSeverity = AuthMessageSeverity.ERROR
                 ),
                 onEmailChange = {},
@@ -134,6 +135,26 @@ class AuthFormContentTest {
         composeRule.onNodeWithText(message).assertExists()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Error"))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+    }
+
+    @Test
+    fun longAuthFailureCopyWrapsInsideAvailableWidth() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                AuthFeedbackMessage(
+                    message = "Your session expired. Log in again to continue.",
+                    severity = AuthMessageSeverity.ERROR
+                )
+            }
+        }
+
+        val feedback = composeRule.onNodeWithText("Your session expired. Log in again to continue.")
+        feedback.assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Error"))
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+        val bounds = feedback.fetchSemanticsNode().boundsInRoot
+        assertTrue("Feedback should stay within the narrow screen width", bounds.width <= 240f)
+        assertTrue("Feedback should wrap into a readable multi-line block", bounds.height >= 36f)
     }
 
     @Test

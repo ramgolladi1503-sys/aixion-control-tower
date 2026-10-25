@@ -3,6 +3,13 @@ package com.aixion.controltower.feature.auth
 object AuthUxCopy {
     const val PASSWORD_REQUIREMENTS = "Use 12+ characters with uppercase, lowercase, number, and symbol. Do not use your email, spaces, or obvious sequences."
 
+    fun feedbackMessage(message: String): String = when (message) {
+        "Login failed: Session expired or invalid. Open Acct and log in again." ->
+            "Your session expired. Log in again to continue."
+
+        else -> message
+    }
+
     fun heroTitle(state: AuthUiState): String {
         return when {
             state.authenticated -> "Your account"
