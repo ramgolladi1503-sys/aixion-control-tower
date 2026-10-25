@@ -223,8 +223,13 @@ def test_unknown_hash_version_fails_closed() -> None:
         hook._payload_hash({"approved_payload_hash_version": 3})
 
 
-def test_explicit_read_only_tool_passes_through() -> None:
-    result = _call_hook({"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/tmp/a"}}}, {})
+def test_explicit_read_only_tool_passes_through(tmp_path: Path) -> None:
+    readable_file = tmp_path / "a"
+    readable_file.write_text("safe", encoding="utf-8")
+    result = _call_hook(
+        {"toolCall": {"name": "view_file", "args": {"AbsolutePath": str(readable_file)}}},
+        {},
+    )
     assert result["decision"] == "allow"
 
 
@@ -307,12 +312,29 @@ def test_read_only_tool_targets_secret_path_and_requires_mobile_approval(tool_na
     assert "DENIED" in result["reason"]
 
 
-@pytest.mark.parametrize("tool_name,args", [
-    ("view_file", {"AbsolutePath": "/workspace/.env.example"}),
-    ("view_file", {"AbsolutePath": "/workspace/src/main.py"}),
-    ("find_by_name", {"SearchDirectory": "/workspace", "Pattern": "*.py"}),
+@pytest.mark.parametrize("tool_name,path_kind", [
+    ("view_file", "env-example"),
+    ("view_file", "source-file"),
+    ("find_by_name", "workspace-search"),
 ])
-def test_read_only_tool_with_non_secret_path_still_passes_through(tool_name: str, args: dict) -> None:
+def test_read_only_tool_with_non_secret_path_still_passes_through(
+    tool_name: str,
+    path_kind: str,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_file = workspace / "src" / "main.py"
+    source_file.parent.mkdir()
+    source_file.write_text("print('safe')", encoding="utf-8")
+    env_example = workspace / ".env.example"
+    env_example.write_text("API_KEY=example", encoding="utf-8")
+    if path_kind == "env-example":
+        args = {"AbsolutePath": str(env_example)}
+    elif path_kind == "source-file":
+        args = {"AbsolutePath": str(source_file)}
+    else:
+        args = {"SearchDirectory": str(workspace), "Pattern": "*.py"}
     with patch.object(hook, "_request") as request:
         result = _call_hook({"toolCall": {"name": tool_name, "args": args}}, {})
     assert result["decision"] == "allow"
