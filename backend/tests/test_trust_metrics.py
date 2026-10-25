@@ -170,6 +170,76 @@ def test_trust_metrics_refuses_partial_postgres_binding_without_sqlite_fallback(
     assert error.value.status_code == 503
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=["production-profile", "postgres-auth"],
+)
+def test_trust_metrics_refuses_local_projection_when_postgres_is_selected(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr("app.trust_metrics_routes.get_settings", lambda: settings)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        "app.trust_metrics_routes.prometheus_trust_metrics",
+        lambda *_args, **_kwargs: pytest.fail("must not render process-local trust metrics"),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        get_trust_metrics(request, _user())
+
+    assert error.value.status_code == 503
+
+
+def test_trust_metrics_refuses_unbound_postgres_runtime_without_local_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.trust_metrics_routes.get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=SimpleNamespace()),
+                postgres_repositories=SimpleNamespace(),
+            )
+        )
+    )
+    monkeypatch.setattr(
+        "app.trust_metrics_routes.prometheus_trust_metrics",
+        lambda *_args, **_kwargs: pytest.fail("must not render process-local trust metrics"),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        get_trust_metrics(request, _user())
+
+    assert error.value.status_code == 503
+
+
+def test_local_trust_metrics_keep_process_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.trust_metrics_routes.get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        "app.trust_metrics_routes.prometheus_trust_metrics",
+        lambda workspace_id: f"workspace={workspace_id}\n",
+    )
+
+    response = get_trust_metrics(request, _user())
+
+    assert response.status_code == 200
+    assert response.body == b"workspace=workspace-a\n"
+
+
 def test_trust_metrics_uses_the_app_bound_postgres_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

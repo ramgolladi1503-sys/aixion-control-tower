@@ -8,6 +8,7 @@ from .postgres_trust_event_repository import PostgresTrustEventRepositoryError
 from .postgres_trust_repository import PostgresTrustRepositoryError
 from .models import AuthUser, now_utc
 from .trust_metrics import prometheus_trust_metrics
+from .settings import get_settings
 from .workspace_access import workspace_id_for_user
 
 router = APIRouter(prefix="/trust", tags=["agent-trust"])
@@ -21,6 +22,13 @@ def get_trust_metrics(
 ) -> Response:
     runtime = getattr(request.app.state, "postgres_runtime", None)
     repositories = getattr(request.app.state, "postgres_repositories", None)
+    settings = get_settings()
+    postgres_selected = bool(
+        settings.is_production
+        or settings.postgres_auth_enabled
+        or runtime is not None
+        or repositories is not None
+    )
     selected_bindings = False
     if runtime is not None and repositories is not None:
         required_bindings = {
@@ -58,7 +66,7 @@ def get_trust_metrics(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="PostgreSQL trust metrics require all trust and notification authorities to share one runtime",
             )
-    elif runtime is not None or repositories is not None:
+    if postgres_selected and not selected_bindings:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="PostgreSQL trust metrics require the complete app-bound repository bundle",
