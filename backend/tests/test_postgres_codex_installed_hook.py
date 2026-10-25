@@ -13,7 +13,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
+from app import agent_routes, main
 from app.agent_credential_models import AgentCredentialRecord
 from app.models import AgentProvider, AuditEvent, ApprovalStatus, new_id
 from test_postgres_approval_route_flow import (
@@ -294,6 +296,177 @@ def test_installed_codex_permission_request_uses_postgres_for_exact_decision_and
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait(timeout=5)
+        _stop_postgres_approval_http_api(server)
+
+
+def test_installed_codex_hook_denies_after_postgres_credential_revocation(
+    tmp_path: Path,
+    postgres_approval_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revoked Codex credential cannot resume its pending tool invocation."""
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    connect, workspace, project, reviewer, _repositories, _fixture_agent, _token, schema = (
+        postgres_approval_route_runtime
+    )
+    workspace, project, reviewer, _repositories, agent, token = _codex_connector(
+        postgres_approval_route_runtime
+    )
+    server = _start_postgres_approval_http_api(
+        dsn=dsn,
+        schema=schema,
+        reviewer=reviewer,
+    )
+    hook_process: subprocess.Popen[str] | None = None
+
+    try:
+        home = tmp_path / "revoked installed Codex home"
+        workspace_path = tmp_path / "revoked installed Codex workspace"
+        home.mkdir(mode=0o700)
+        workspace_path.mkdir(mode=0o700)
+        config_path, hooks_path = setup_workspace.install_workspace(
+            workspace_path,
+            api_base_url=server[2],
+            agent_id=agent.id,
+            project_id=project.id,
+            home=home,
+            hook_script=HOOK_PATH,
+            python=sys.executable,
+        )
+        command = json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"][
+            "PermissionRequest"
+        ][0]["hooks"][0]["command"]
+        assert shlex.split(command) == [
+            sys.executable,
+            str(HOOK_PATH.resolve()),
+            "--config",
+            str(config_path),
+        ]
+        event = {
+            "hook_event_name": "PermissionRequest",
+            "session_id": f"revoked-codex-session-{uuid.uuid4().hex}",
+            "turn_id": f"revoked-codex-turn-{uuid.uuid4().hex}",
+            "tool_use_id": f"revoked-codex-call-{uuid.uuid4().hex}",
+            "cwd": str(workspace_path),
+            "permission_mode": "default",
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "printf 'revoked credential must not allow this'",
+                "description": "Isolated PostgreSQL revocation test",
+            },
+        }
+        child_environment = {
+            key: value
+            for key in ("PATH", "HOME", "TMPDIR", "SYSTEMROOT", "WINDIR")
+            if (value := os.environ.get(key))
+        }
+        child_environment.update(
+            {
+                "HOME": str(home),
+                "AIXION_AGENT_TOKEN": token,
+                "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+                "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "60",
+            }
+        )
+        argv = shlex.split(command)
+        hook_process = subprocess.Popen(
+            argv,
+            cwd=workspace_path,
+            env=child_environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert hook_process.stdin is not None
+        hook_process.stdin.write(json.dumps(event))
+        hook_process.stdin.close()
+        hook_process.stdin = None
+
+        approval_row: tuple[str, str, str] | None = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if hook_process.poll() is not None:
+                stdout, stderr = hook_process.communicate()
+                pytest.fail(
+                    "Installed Codex hook exited before its PostgreSQL approval "
+                    f"was durable (exit={hook_process.returncode}, stdout={stdout!r}, "
+                    f"stderr={stderr!r})"
+                )
+            with connect() as connection:
+                rows = connection.execute(
+                    "SELECT approval_id,source_invocation_id,status "
+                    "FROM approval_requests WHERE workspace_id=%s "
+                    "AND source_agent_id=%s AND payload->>'source_provider'=%s "
+                    "AND payload->>'source_session_id' IS NOT NULL",
+                    (workspace.id, agent.id, AgentProvider.CODEX.value),
+                ).fetchall()
+            assert len(rows) <= 1, "Installed Codex hook created duplicate approval rows"
+            if rows:
+                approval_row = rows[0]
+                break
+            time.sleep(0.05)
+
+        assert approval_row is not None, "Installed Codex hook created no PostgreSQL approval"
+        approval_id, invocation_id, approval_status = approval_row
+        assert invocation_id
+        assert approval_status == ApprovalStatus.PENDING_REVIEW.value
+        assert hook_process.poll() is None, "Installed Codex hook should be waiting for review"
+
+        monkeypatch.setitem(
+            main.app.dependency_overrides,
+            agent_routes.OwnerDependency.dependency,
+            lambda: reviewer,
+        )
+        owner_client = TestClient(main.app)
+        try:
+            response = owner_client.post(f"/agents/{agent.id}/token/revoke")
+        finally:
+            owner_client.close()
+        assert response.status_code == 200, response.text
+
+        stdout, stderr = hook_process.communicate(timeout=15)
+        assert token not in stdout
+        assert token not in stderr
+        assert hook_process.returncode == 0, stderr
+        result = json.loads(stdout)
+        assert result["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"
+        assert result["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+
+        with connect() as connection:
+            approval_after = connection.execute(
+                "SELECT status,source_invocation_id FROM approval_requests "
+                "WHERE approval_id=%s AND workspace_id=%s AND source_agent_id=%s",
+                (approval_id, workspace.id, agent.id),
+            ).fetchone()
+            revoked = connection.execute(
+                "SELECT token_revoked_at FROM external_agent_credentials "
+                "WHERE agent_id=%s AND workspace_id=%s",
+                (agent.id, workspace.id),
+            ).fetchone()
+            audits = connection.execute(
+                "SELECT event_type FROM audit_events WHERE "
+                "(entity_id=%s AND event_type='agent.token_revoked') OR "
+                "(entity_id=%s AND event_type='approval.delivery_claimed')",
+                (agent.id, approval_id),
+            ).fetchall()
+            claims = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0]
+
+        assert approval_after == (ApprovalStatus.PENDING_REVIEW.value, invocation_id)
+        assert revoked is not None and revoked[0] is not None
+        assert [row[0] for row in audits] == ["agent.token_revoked"]
+        assert claims == 0
+    finally:
+        if hook_process is not None and hook_process.poll() is None:
+            hook_process.terminate()
+            try:
+                hook_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                hook_process.kill()
+                hook_process.wait(timeout=5)
         _stop_postgres_approval_http_api(server)
 
 
