@@ -232,7 +232,7 @@ document.
 - Keep staging data synthetic or explicitly approved test data. Do not import production or personal approval history in the first staging deployment.
 - Define database backup retention and demonstrate restore to an isolated instance before staging can be used for real approvals. A backup job without a restore drill is insufficient.
 - Redact hook tokens, passwords, raw push tokens, and tool argument payloads from logs. Keep only correlation IDs and approved operational metadata.
-- Rollback means stop API/worker traffic, preserve a final encrypted database backup and migration ledger, revert the container to the prior immutable image, and restore the previous schema only through a reviewed forward/backward migration plan. Never drop the database as a routine application rollback.
+- Application rollback is safe only when the prior immutable image is compatible with the schema already applied. Stop API/worker traffic, preserve a verified encrypted backup and migration ledger, then revert the image only under that compatibility check. PostgreSQL migrations are forward-only: there is no supported schema downgrade or ad-hoc reverse DDL. If the prior image is not compatible, keep traffic stopped and use a reviewed forward repair migration or restore the verified backup to a separate recovery target; do not overwrite the current database as a routine application rollback. The procedure must be rehearsed before staging deployment.
 - Retain audit and approval records according to the repository's retention policy; confirm deletion/export behavior and legal review before inviting external users.
 
 ## Required pre-billing follow-up
