@@ -43,6 +43,26 @@ class ApprovalDetailScreenTest {
     val composeRule = createComposeRule()
 
     @Test
+    fun approvalTitleIsExposedAsAHeadingForScreenReaderNavigation() {
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = approval(ApprovalStatus.REQUESTED),
+                lastActionMessage = null,
+                onOpenDiff = {},
+                onApprove = {},
+                onReject = {}
+            )
+        }
+
+        val title = composeRule.onNodeWithText("Approval detail test")
+            .fetchSemanticsNode()
+        assertTrue(
+            "The approval title should be available through TalkBack heading navigation",
+            title.config.contains(SemanticsProperties.Heading)
+        )
+    }
+
+    @Test
     fun recordedDecisionIsShownSeparatelyFromConnectorDelivery() {
         composeRule.setContent {
             ApprovalDetailContent(

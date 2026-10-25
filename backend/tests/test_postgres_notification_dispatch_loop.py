@@ -343,8 +343,10 @@ def test_postgres_dispatch_loop_drains_inflight_thread_on_cancellation(monkeypat
 @pytest.mark.parametrize("failed_target_index", [0, 1])
 def test_postgres_dispatcher_isolates_sender_exception_per_target(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     failed_target_index: int,
 ) -> None:
+    caplog.set_level("INFO", logger="app.postgres_notification_dispatcher")
     notification = Notification(
         id="notification_dispatch_unit",
         title="Approval needed",
@@ -413,3 +415,12 @@ def test_postgres_dispatcher_isolates_sender_exception_per_target(
     assert recorded[0]["next_attempt_at"] is None
     assert recorded[0]["invalid_devices"] == ()
     assert "provider exception" not in repr(recorded[0])
+    delivery_log = caplog.text
+    assert f"notification_id={notification.id}" in delivery_log
+    assert "attempt=1" in delivery_log
+    assert "state=SENT" in delivery_log
+    assert "accepted_targets=1" in delivery_log
+    assert "failed_targets=1" in delivery_log
+    assert "token_a" not in delivery_log
+    assert "token_b" not in delivery_log
+    assert notification.entity_id not in delivery_log

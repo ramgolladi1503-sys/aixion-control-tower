@@ -220,7 +220,7 @@ def dispatch_one_postgres_push(
     # A None result means this lease expired or a newer claim replaced it. The
     # stale worker must not overwrite the newer attempt's durable state.
     try:
-        repository.record_outcome(
+        persisted = repository.record_outcome(
             notification_id=notification.id,
             expected_attempts=notification.push_attempts,
             push_status=outcome_status,
@@ -235,10 +235,30 @@ def dispatch_one_postgres_push(
         # leased for recovery rather than attempting a second fan-out here.
         # The outcome and any invalid-token audits share one DB transaction.
         logger.warning(
-            "PostgreSQL push outcome persistence failed for notification id=%s",
+            "PostgreSQL push outcome persistence failed notification_id=%s attempt=%s",
             notification.id,
+            notification.push_attempts,
         )
         raise
+    if persisted is None:
+        # A lease may be replaced while the provider call is in flight. Record
+        # the stale result as a correlation event without exposing payloads,
+        # device tokens, or provider response text.
+        logger.warning(
+            "PostgreSQL push outcome discarded notification_id=%s attempt=%s state=STALE_CLAIM",
+            notification.id,
+            notification.push_attempts,
+        )
+    else:
+        logger.info(
+            "PostgreSQL push delivery outcome notification_id=%s attempt=%s state=%s "
+            "accepted_targets=%s failed_targets=%s",
+            notification.id,
+            notification.push_attempts,
+            outcome_status,
+            accepted,
+            len(errors),
+        )
     return notification.id
 
 

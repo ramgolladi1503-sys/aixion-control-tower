@@ -881,6 +881,7 @@ private fun ApprovalHeroPanel(
             Spacer(modifier = Modifier.height(TowerSpacing.md))
             Text(
                 text = approval.title,
+                modifier = Modifier.semantics { heading() },
                 color = palette.ink,
                 fontSize = 25.sp,
                 fontWeight = FontWeight.SemiBold,

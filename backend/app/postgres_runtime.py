@@ -33,6 +33,19 @@ _CREATE_TABLE_PATTERN = re.compile(
     r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([a-z_][a-z0-9_]*)\b",
     re.IGNORECASE,
 )
+_ALTER_ADD_COLUMN_PATTERN = re.compile(
+    r"\bALTER\s+TABLE\s+(?:ONLY\s+)?([a-z_][a-z0-9_]*)\s+"
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\b",
+    re.IGNORECASE,
+)
+_TABLE_CONSTRAINT_STARTS = {
+    "CHECK",
+    "CONSTRAINT",
+    "EXCLUDE",
+    "FOREIGN",
+    "PRIMARY",
+    "UNIQUE",
+}
 
 
 def _required_postgres_relations() -> tuple[str, ...]:
@@ -44,6 +57,98 @@ def _required_postgres_relations() -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def _matching_parenthesis_end(source: str, opening: int) -> int | None:
+    """Return the closing parenthesis for migration DDL, ignoring quoted text."""
+    depth = 0
+    quote: str | None = None
+    index = opening
+    while index < len(source):
+        char = source[index]
+        if quote is not None:
+            if char == quote:
+                if index + 1 < len(source) and source[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _top_level_definitions(source: str) -> tuple[str, ...]:
+    """Split a CREATE TABLE body at commas outside nested/quoted expressions."""
+    definitions: list[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if quote is not None:
+            if char == quote:
+                if index + 1 < len(source) and source[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            definitions.append(source[start:index])
+            start = index + 1
+        index += 1
+    definitions.append(source[start:])
+    return tuple(definitions)
+
+
+def _required_postgres_columns() -> dict[str, tuple[str, ...]]:
+    """Derive required table columns from the checked-in migration DDL.
+
+    This checks column presence only. Migration checksums remain authoritative
+    for declared DDL; the probe additionally detects out-of-band column loss.
+    """
+    columns: dict[str, set[str]] = {
+        PG_MIGRATION_TABLE: {
+            "migration_id",
+            "name",
+            "migration_checksum",
+            "applied_at",
+        }
+    }
+    for migration in POSTGRES_MIGRATIONS:
+        for statement in migration.statements:
+            for match in _CREATE_TABLE_PATTERN.finditer(statement):
+                table = match.group(1).lower()
+                opening = statement.find("(", match.end())
+                if opening < 0:
+                    continue
+                closing = _matching_parenthesis_end(statement, opening)
+                if closing is None:
+                    continue
+                table_columns = columns.setdefault(table, set())
+                for definition in _top_level_definitions(statement[opening + 1 : closing]):
+                    first_token = re.match(r"\s*([a-z_][a-z0-9_]*)\b", definition, re.I)
+                    if first_token is None:
+                        continue
+                    name = first_token.group(1).lower()
+                    if name.upper() not in _TABLE_CONSTRAINT_STARTS:
+                        table_columns.add(name)
+            for match in _ALTER_ADD_COLUMN_PATTERN.finditer(statement):
+                table, column = match.groups()
+                columns.setdefault(table.lower(), set()).add(column.lower())
+    return {table: tuple(sorted(names)) for table, names in sorted(columns.items())}
+
+
 @dataclass(frozen=True)
 class PostgresSchemaStatus:
     ready: bool
@@ -53,6 +158,7 @@ class PostgresSchemaStatus:
     unknown_migration_ids: tuple[str, ...]
     mismatched_migration_ids: tuple[str, ...]
     missing_relation_names: tuple[str, ...]
+    missing_column_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -239,6 +345,7 @@ class PostgresRuntime:
 
     def verify_schema(self) -> PostgresSchemaStatus:
         """Read migration state without applying or changing database schema."""
+        expected_columns = _required_postgres_columns()
         with self.connect() as conn:
             ledger = conn.execute("SELECT to_regclass('schema_migrations')").fetchone()
             if ledger is None or ledger[0] is None:
@@ -252,6 +359,11 @@ class PostgresRuntime:
                     unknown_migration_ids=(),
                     mismatched_migration_ids=(),
                     missing_relation_names=_required_postgres_relations(),
+                    missing_column_names=tuple(
+                        f"{table}.{column}"
+                        for table, names in expected_columns.items()
+                        for column in names
+                    ),
                 )
             rows = conn.execute(
                 "SELECT migration_id,name,migration_checksum FROM schema_migrations"
@@ -266,6 +378,20 @@ class PostgresRuntime:
                         (list(_required_postgres_relations()),),
                     ).fetchall()
                 )
+            )
+            present_columns = {
+                (row[0], row[1])
+                for row in conn.execute(
+                    "SELECT table_name,column_name FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() AND table_name=ANY(%s)",
+                    (list(expected_columns),),
+                ).fetchall()
+            }
+            missing_columns = tuple(
+                f"{table}.{column}"
+                for table, names in expected_columns.items()
+                for column in names
+                if (table, column) not in present_columns
             )
 
         expected = {migration.migration_id: migration for migration in POSTGRES_MIGRATIONS}
@@ -290,6 +416,7 @@ class PostgresRuntime:
                 and not unknown_ids
                 and not mismatched_ids
                 and not missing_relations
+                and not missing_columns
             ),
             migration_ledger_present=True,
             applied_migration_ids=applied_ids,
@@ -297,4 +424,5 @@ class PostgresRuntime:
             unknown_migration_ids=unknown_ids,
             mismatched_migration_ids=mismatched_ids,
             missing_relation_names=missing_relations,
+            missing_column_names=missing_columns,
         )

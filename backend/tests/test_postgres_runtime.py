@@ -11,7 +11,7 @@ from psycopg.errors import UndefinedTable
 
 from app import postgres_database
 from app.postgres_database import _migration_checksum, run_postgres_migrations
-from app.postgres_runtime import PostgresRuntime
+from app.postgres_runtime import PostgresRuntime, _required_postgres_columns
 from scripts.migrate_postgres import MigrationCommandError, inspect_or_apply
 
 
@@ -161,6 +161,39 @@ def test_schema_verification_fails_closed_when_migrated_relation_is_missing(
     assert status.ready is False
     assert status.missing_migration_ids == ()
     assert status.missing_relation_names == ("test_runs",)
+
+
+def test_required_column_inventory_includes_create_and_upgrade_ddl() -> None:
+    columns = _required_postgres_columns()
+
+    assert "migration_checksum" in columns["schema_migrations"]
+    assert "session_id" in columns["device_registrations"]
+    assert "project_id" in columns["notifications"]
+    assert "source_invocation_id" in columns["approval_requests"]
+
+
+def test_schema_verification_fails_closed_when_migrated_column_is_missing(
+    postgres_schema: tuple[str, Any],
+) -> None:
+    _schema, connect = postgres_schema
+    run_postgres_migrations(connect)
+
+    def runtime_connect(_dsn: str, **_kwargs: Any):
+        return connect()
+
+    runtime = PostgresRuntime(_dsn="hidden", profile="test", _connector=runtime_connect)
+    assert runtime.verify_schema().ready is True
+
+    # This column is part of the migration contract but is not itself used as
+    # a key or constraint, so the simulated out-of-band loss is isolated.
+    with connect() as conn:
+        conn.execute("ALTER TABLE device_registrations DROP COLUMN app_version")
+
+    status = runtime.verify_schema()
+    assert status.ready is False
+    assert status.missing_migration_ids == ()
+    assert status.missing_relation_names == ()
+    assert status.missing_column_names == ("device_registrations.app_version",)
 
 
 def test_schema_verification_fails_closed_when_migration_ledger_is_absent(

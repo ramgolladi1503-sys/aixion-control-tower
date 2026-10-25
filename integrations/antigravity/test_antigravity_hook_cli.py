@@ -1586,6 +1586,54 @@ def test_ambiguous_consume_report_uses_only_remaining_cleanup_grace(
         ]
 
 
+@pytest.mark.parametrize(
+    "report_error",
+    [hook.GateError("report endpoint unavailable"), hook.AmbiguousRequestError("report response lost")],
+)
+def test_failed_ambiguous_delivery_report_never_retries_claim_or_allows(
+    monkeypatch: pytest.MonkeyPatch, report_error: Exception
+) -> None:
+    """Failure to persist cleanup evidence must not turn an unknown claim into allow."""
+    _patch_clock(monkeypatch)
+    created: dict = {}
+    calls: list[str] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(
+        method: str,
+        url: str,
+        _agent_id: str,
+        _token: str,
+        body: dict | None = None,
+        **_kwargs: object,
+    ) -> dict:
+        endpoint = url.rsplit("/", 1)[-1]
+        calls.append(f"{method} {endpoint}")
+        if method == "POST" and endpoint == "approvals":
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and endpoint == "decision":
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._payload_hash(approved)
+            return approved
+        if method == "POST" and endpoint == "consume":
+            # The server may already have committed the at-most-once claim.
+            raise hook.AmbiguousRequestError("claim response lost")
+        if method == "POST" and endpoint == "delivery-failure":
+            raise report_error
+        raise AssertionError(f"Unexpected approval protocol request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert "ambiguous" in result["reason"]
+    assert calls.count("POST consume") == 1
+    assert calls.count("POST delivery-failure") == 1
+
+
 def test_run_exhausted_reconnect_wait_expires_and_never_consumes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
