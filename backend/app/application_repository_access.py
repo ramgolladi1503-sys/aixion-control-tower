@@ -35,6 +35,22 @@ class _RequestState(Protocol):
     app: object
 
 
+def _postgres_auth_selected(operation: str) -> bool:
+    """Reject production repository selection unless PostgreSQL auth is active.
+
+    Probe-only PostgreSQL intentionally keeps the explicitly bound local
+    repositories. Production must never inherit that fallback, even when a
+    selector is called outside the guarded application lifespan.
+    """
+    settings = get_settings()
+    postgres_auth_enabled = bool(getattr(settings, "postgres_auth_enabled", False))
+    if getattr(settings, "is_production", False) and not postgres_auth_enabled:
+        raise RuntimeError(
+            f"Production {operation} requires PostgreSQL auth mode"
+        )
+    return postgres_auth_enabled
+
+
 def application_repositories_for_request(request: _RequestState | None) -> ApplicationRepositories:
     """Return the lifespan-owned PostgreSQL bundle or fail closed.
 
@@ -68,7 +84,7 @@ def approval_decision_repository_for_request(
     """
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("approval repository access"):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "approval_decisions", None)
@@ -96,7 +112,7 @@ def agent_task_repository_for_request(request: _RequestState | None) -> AgentTas
     """
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("AgentTask repository access"):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "agent_tasks", None)
@@ -118,7 +134,7 @@ def agent_run_repository_for_request(request: _RequestState | None) -> AgentRunR
     """Return the AgentRun adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("AgentRun repository access"):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "agent_runs", None)
@@ -140,7 +156,7 @@ def audit_event_repository_for_request(request: _RequestState | None) -> AuditEv
     """Return the audit reader selected by this app's persistence authority."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("audit repository access"):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "audit_events", None)
@@ -169,7 +185,7 @@ def project_repository_for_request(request: _RequestState | None) -> ProjectRepo
     still point at SQLite. Local and test configurations continue to use their
     explicitly app-bound adapter.
     """
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("project repository access"):
         repositories = application_repositories_for_request(request)
         repository = getattr(repositories, "projects", None)
         if not isinstance(repository, PostgresProjectRepository):
@@ -192,7 +208,7 @@ def connector_repository_for_request(request: _RequestState | None) -> Connector
     process-local store. Local and test modes continue to use the explicit
     app-bound adapter.
     """
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("connector repository access"):
         repositories = application_repositories_for_request(request)
         app = getattr(request, "app", None)
         state = getattr(app, "state", None)
@@ -222,7 +238,7 @@ def idea_repository_for_request(request: _RequestState | None) -> IdeaRepository
     """Return the idea adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("idea repository access"):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "ideas", None)
@@ -244,7 +260,7 @@ def work_order_repository_for_request(request: _RequestState | None) -> WorkOrde
     """Return the WorkOrder adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("WorkOrder repository access"):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "work_orders", None)
@@ -268,7 +284,7 @@ def test_run_repository_for_request(request: _RequestState | None) -> TestRunRep
     """Return the test-run adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("test-run repository access"):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "test_runs", None)
@@ -294,12 +310,7 @@ def mcp_child_server_repository_for_request(
     """Return the MCP registry adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    settings = get_settings()
-    if getattr(settings, "is_production", False) and not getattr(
-        settings, "postgres_auth_enabled", False
-    ):
-        raise RuntimeError("Production MCP registry requires PostgreSQL auth mode")
-    if getattr(settings, "postgres_auth_enabled", False):
+    if _postgres_auth_selected("MCP registry repository access"):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "mcp_child_servers", None)
@@ -323,7 +334,7 @@ def external_agent_auth_repository_for_request(
     request: _RequestState | None,
 ) -> ExternalAgentAuthenticationRepository:
     """Return the external-agent auth adapter bound to this FastAPI app."""
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("external-agent repository access"):
         repositories = application_repositories_for_request(request)
         app = getattr(request, "app", None)
         state = getattr(app, "state", None)
@@ -361,7 +372,7 @@ def workspace_membership_repository_for_request(
     request: _RequestState | None,
 ) -> WorkspaceMembershipRepository:
     """Return membership reads from the active authentication authority."""
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    if _postgres_auth_selected("workspace-membership repository access"):
         repositories = application_repositories_for_request(request)
         repository = getattr(repositories, "workspace_membership", None)
         if not isinstance(repository, PostgresWorkspaceMembershipRepository):
@@ -381,7 +392,7 @@ def workspace_membership_repository_for_request(
 def workspace_id_for_request(user: AuthUser, request: _RequestState | None) -> str | None:
     """Resolve membership from PostgreSQL auth or the local app binding."""
     settings = get_settings()
-    if getattr(settings, "postgres_auth_enabled", False):
+    if _postgres_auth_selected("workspace resolution"):
         if request is None:
             raise RuntimeError("PostgreSQL workspace membership requires an app-bound request")
         try:

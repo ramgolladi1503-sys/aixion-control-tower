@@ -576,8 +576,28 @@ def test_mcp_child_server_repository_rejects_mismatched_postgres_runtime(
         repository_access.mcp_child_server_repository_for_request(request)
 
 
-def test_mcp_child_server_repository_rejects_sqlite_binding_in_production(
+@pytest.mark.parametrize(
+    ("accessor_name", "binding_name"),
+    [
+        ("approval_decision_repository_for_request", "approval_decision_repository"),
+        ("agent_task_repository_for_request", "agent_task_repository"),
+        ("agent_run_repository_for_request", "agent_run_repository"),
+        ("audit_event_repository_for_request", "audit_event_repository"),
+        ("project_repository_for_request", "project_repository"),
+        ("connector_repository_for_request", "connector_repository"),
+        ("idea_repository_for_request", "idea_repository"),
+        ("work_order_repository_for_request", "work_order_repository"),
+        ("test_run_repository_for_request", "test_run_repository"),
+        ("mcp_child_server_repository_for_request", "mcp_child_server_repository"),
+        ("external_agent_auth_repository_for_request", "external_agent_auth_repository"),
+        ("workspace_membership_repository_for_request", "workspace_membership_repository"),
+        ("workspace_id_for_request", "workspace_membership_repository"),
+    ],
+)
+def test_repository_selectors_reject_production_sqlite_fallback(
     monkeypatch: pytest.MonkeyPatch,
+    accessor_name: str,
+    binding_name: str,
 ) -> None:
     local_repository = object()
     request = SimpleNamespace(
@@ -585,40 +605,101 @@ def test_mcp_child_server_repository_rejects_sqlite_binding_in_production(
             state=SimpleNamespace(
                 postgres_runtime=None,
                 postgres_repositories=None,
-                mcp_child_server_repository=local_repository,
+                **{binding_name: local_repository},
             ),
         ),
     )
     monkeypatch.setattr(
         repository_access,
         "get_settings",
-        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        lambda: SimpleNamespace(
+            is_production=True,
+            postgres_auth_enabled=False,
+            auth_enabled=True,
+        ),
     )
+    accessor = getattr(repository_access, accessor_name)
 
-    with pytest.raises(RuntimeError, match="Production MCP registry requires PostgreSQL auth mode"):
-        repository_access.mcp_child_server_repository_for_request(request)
+    with pytest.raises(RuntimeError, match="Production .* requires PostgreSQL auth mode"):
+        if accessor_name == "workspace_id_for_request":
+            accessor(
+                AuthUser(
+                    id="production-user",
+                    email="production@example.test",
+                    display_name="Production User",
+                    role=UserRole.OWNER,
+                    workspace_id="production-workspace",
+                ),
+                request,
+            )
+        else:
+            accessor(request)
 
 
-def test_mcp_child_server_repository_keeps_probe_only_local_binding(
+@pytest.mark.parametrize(
+    ("accessor_name", "binding_name"),
+    [
+        ("approval_decision_repository_for_request", "approval_decision_repository"),
+        ("agent_task_repository_for_request", "agent_task_repository"),
+        ("agent_run_repository_for_request", "agent_run_repository"),
+        ("audit_event_repository_for_request", "audit_event_repository"),
+        ("project_repository_for_request", "project_repository"),
+        ("connector_repository_for_request", "connector_repository"),
+        ("idea_repository_for_request", "idea_repository"),
+        ("work_order_repository_for_request", "work_order_repository"),
+        ("test_run_repository_for_request", "test_run_repository"),
+        ("mcp_child_server_repository_for_request", "mcp_child_server_repository"),
+        ("external_agent_auth_repository_for_request", "external_agent_auth_repository"),
+        ("workspace_membership_repository_for_request", "workspace_membership_repository"),
+        ("workspace_id_for_request", "workspace_membership_repository"),
+    ],
+)
+def test_repository_selectors_keep_probe_only_local_bindings(
     monkeypatch: pytest.MonkeyPatch,
+    accessor_name: str,
+    binding_name: str,
 ) -> None:
     local_repository = object()
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
+                # A diagnostic PostgreSQL probe is intentionally non-authoritative.
                 postgres_runtime=object(),
                 postgres_repositories=object(),
-                mcp_child_server_repository=local_repository,
+                **{binding_name: local_repository},
             ),
         ),
     )
     monkeypatch.setattr(
         repository_access,
         "get_settings",
-        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+        lambda: SimpleNamespace(
+            is_production=False,
+            postgres_auth_enabled=False,
+            auth_enabled=True,
+        ),
     )
+    monkeypatch.setattr(
+        repository_access,
+        "resolve_workspace_id_for_user",
+        lambda _user, **_kwargs: "workspace-local",
+    )
+    accessor = getattr(repository_access, accessor_name)
 
-    assert repository_access.mcp_child_server_repository_for_request(request) is local_repository
+    if accessor_name == "workspace_id_for_request":
+        result = accessor(
+            AuthUser(
+                id="local-user",
+                email="local@example.test",
+                display_name="Local User",
+                role=UserRole.OWNER,
+                workspace_id="workspace-local",
+            ),
+            request,
+        )
+        assert result == "workspace-local"
+    else:
+        assert accessor(request) is local_repository
 
 
 def test_test_run_repository_uses_matching_postgres_runtime_bundle(
