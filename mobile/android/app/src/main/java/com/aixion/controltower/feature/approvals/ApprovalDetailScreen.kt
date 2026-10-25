@@ -109,6 +109,7 @@ fun ApprovalDetailScreen(
         decisionOutcomeDecision = state.decisionOutcomeDecision,
         decisionOutcomeEvent = state.decisionOutcomeEvent,
         decisionDeliveryLoading = state.decisionDeliveryLoading,
+        approvalSyncError = state.errorMessage,
         onReconcileDecision = viewModel::reconcileDecisionStatus,
         onOpenDiff = onOpenDiff,
         onApprove = {
@@ -190,7 +191,8 @@ fun ApprovalDetailContent(
     decisionOutcomeDecision: String? = null,
     decisionOutcomeEvent: ApprovalHistoryEvent? = null,
     decisionDeliveryLoading: Boolean = false,
-    onReconcileDecision: () -> Unit = {}
+    onReconcileDecision: () -> Unit = {},
+    approvalSyncError: String? = null
 ) {
     val palette = LocalTowerPalette.current
     val requestListState = rememberLazyListState()
@@ -210,6 +212,9 @@ fun ApprovalDetailContent(
         }
     }
     val decisionBlockReason = ApprovalDecisionPolicy.blockReason(approval, decisionClock)
+        ?: approvalSyncError?.let {
+            "Latest approval status could not be confirmed. Reconnect and refresh before deciding; the request shown here may be out of date."
+        }
     val hasUnsupportedData = approval.status == ApprovalStatus.UNKNOWN || approval.risk == RiskLevel.UNKNOWN
     val isBlocked = approval.status == ApprovalStatus.BLOCKED || approval.risk == RiskLevel.BLOCKED
     val canDecide = !decisionInFlight && !decisionNeedsReconciliation &&
@@ -316,6 +321,13 @@ fun ApprovalDetailContent(
                         WarningPanel(
                             title = "Approval blocked",
                             body = "This request violates a hard safety rule. It cannot be approved from mobile."
+                        )
+                    }
+                } else if (approvalSyncError != null) {
+                    item {
+                        WarningPanel(
+                            title = "Latest status unavailable",
+                            body = decisionBlockReason.orEmpty()
                         )
                     }
                 } else if (decisionBlockReason != null) {

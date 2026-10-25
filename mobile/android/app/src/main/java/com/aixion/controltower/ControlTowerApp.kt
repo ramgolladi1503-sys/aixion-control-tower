@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -191,10 +192,7 @@ fun ControlTowerApp(
                                 }
                             },
                             title = {
-                                Text(
-                                    routeTitleFor(currentRoute),
-                                    style = MaterialTheme.typography.titleLarge
-                                )
+                                ControlTowerAppBarTitle(routeTitleFor(currentRoute))
                             },
                             colors = TopAppBarDefaults.topAppBarColors(
                                 containerColor = MaterialTheme.colorScheme.background,
@@ -365,6 +363,15 @@ fun ControlTowerApp(
             }
         }
     }
+}
+
+@Composable
+internal fun ControlTowerAppBarTitle(title: String) {
+    Text(
+        title,
+        modifier = Modifier.semantics { heading() },
+        style = MaterialTheme.typography.titleLarge
+    )
 }
 
 @Composable

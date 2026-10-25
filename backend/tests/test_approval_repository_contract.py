@@ -1638,6 +1638,153 @@ def test_sqlite_claim_waiting_on_database_lock_rechecks_approval_and_lease_expir
         ).fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("expiry_target", ("approval", "lease"))
+def test_postgres_claim_waiting_on_row_lock_rechecks_expiration(
+    approval_case, expiry_target: str
+) -> None:
+    """A blocked PostgreSQL claim must not use pre-lock liveness after expiry."""
+    if approval_case.backend != "postgres":
+        pytest.skip("Controlled row-lock wait is exercised by the PostgreSQL parity test")
+
+    agent = ExternalAgent(
+        id=f"agent_pg_claim_lock_expiry_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="PostgreSQL claim lock-expiry connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=approval_case.workspace.id,
+    )
+    presented_token_hash = _store_external_agent(approval_case, agent)
+    invocation_id = f"pg-claim-lock-expiry:{uuid.uuid4().hex}"
+    approval = _approval(
+        approval_case,
+        source_provider=AgentProvider.ANTIGRAVITY,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+        status=ApprovalStatus.PENDING_REVIEW,
+        expires_at=now_utc() + timedelta(minutes=5),
+    )
+    _create(approval_case, approval)
+    approved = approval.model_copy(
+        update={"status": ApprovalStatus.APPROVED, "approved_payload_hash_version": 2}
+    )
+    approved = approved.model_copy(
+        update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+    )
+    approval_case.repository.commit_decision(
+        approval_id=approval.id,
+        expected_status=ApprovalStatus.PENDING_REVIEW,
+        expected_approval=approval,
+        updated_approval=approved,
+        audit_event=_decision_audit(approval, approved, f"pg-lock-decision-{uuid.uuid4().hex}"),
+        decision_notification=Notification(
+            title="Decision recorded",
+            body="The connector may claim this invocation once.",
+            entity_type="approval_request",
+            entity_id=approval.id,
+            workspace_id=approval.workspace_id,
+        ),
+    )
+
+    deadline = now_utc() + timedelta(seconds=2)
+    if expiry_target == "approval":
+        approved = approved.model_copy(update={"expires_at": deadline})
+        approved = approved.model_copy(
+            update={"approved_payload_hash": compute_approval_payload_hash(approved)}
+        )
+    with approval_case.connect() as connection:
+        if expiry_target == "approval":
+            connection.execute(
+                "UPDATE approval_requests SET expires_at=%s,payload=%s WHERE approval_id=%s",
+                (deadline, Jsonb(approved.model_dump(mode="json")), approval.id),
+            )
+        else:
+            connection.execute(
+                "UPDATE approval_invocation_leases SET expires_at=%s WHERE approval_id=%s",
+                (deadline, approval.id),
+            )
+
+    blocker = approval_case.connect()
+    blocker.execute(
+        "SELECT approval_id FROM approval_requests WHERE approval_id=%s FOR UPDATE",
+        (approval.id,),
+    ).fetchone()
+    claim_pid: list[int] = []
+    claim_started = Event()
+
+    def connect_for_claim() -> Connection:
+        connection = approval_case.connect()
+        claim_pid.append(connection.info.backend_pid)
+        return connection
+
+    waiting_repository = PostgresApprovalDecisionRepository(connect_for_claim)
+    claim_event = AuditEvent(
+        id=f"audit_pg_claim_lock_expiry_{uuid.uuid4().hex}",
+        event_type="approval.delivery_claimed",
+        entity_id=approval.id,
+        workspace_id=approval.workspace_id,
+        actor=f"agent:{agent.id}",
+        created_at=now_utc(),
+        details={"source_invocation_id": invocation_id},
+    )
+
+    def claim() -> bool:
+        claim_started.set()
+        return waiting_repository.claim_approved_delivery(
+            approval_id=approval.id,
+            workspace_id=approval.workspace_id,
+            source_agent_id=agent.id,
+            source_invocation_id=invocation_id,
+            expected_payload_hash=approved.approved_payload_hash,
+            presented_token_hash=presented_token_hash,
+            audit_event=claim_event,
+        )
+
+    with approval_case.connect() as connection:
+        before_claim_audits = connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_claimed'",
+            (approval.id,),
+        ).fetchone()[0]
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(claim)
+            assert claim_started.wait(timeout=2)
+            lock_wait_deadline = time.monotonic() + 5
+            while time.monotonic() < lock_wait_deadline:
+                if claim_pid:
+                    with approval_case.connect() as connection:
+                        waiting = connection.execute(
+                            "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s",
+                            (claim_pid[0],),
+                        ).fetchone()
+                    if waiting is not None and waiting[0] == "Lock":
+                        break
+                time.sleep(0.02)
+            else:
+                pytest.fail("PostgreSQL claim did not block on the held approval row lock")
+            assert not future.done()
+            time.sleep(max(0.0, (deadline - now_utc()).total_seconds()) + 0.05)
+            assert now_utc() >= deadline
+            blocker.rollback()
+            with pytest.raises(ApprovalInvocationLeaseRejected, match="expired"):
+                future.result(timeout=5)
+    finally:
+        blocker.close()
+
+    with approval_case.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            (approval.id,),
+        ).fetchone()[0] == 0
+        after_claim_audits = connection.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_claimed'",
+            (approval.id,),
+        ).fetchone()[0]
+    assert after_claim_audits == before_claim_audits
+
+
 @pytest.mark.parametrize(
     "decision_status",
     (

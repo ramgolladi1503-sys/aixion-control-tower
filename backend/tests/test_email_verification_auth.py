@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import pytest
+from types import SimpleNamespace
 
 
 
@@ -156,3 +157,36 @@ def test_outbox_insert_failure_rolls_back_verification_hash_and_memory(monkeypat
         queued = conn.execute("SELECT COUNT(*) FROM auth_email_outbox").fetchone()[0]
     assert json.loads(user_payload)["email_verification_hash"] is None
     assert queued == 0
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_registration_response_requires_postgres_repository_in_authoritative_modes(
+    monkeypatch, is_production: bool, postgres_auth_enabled: bool
+) -> None:
+    user = create_user("owner@example.com", PASSWORD, email_verified=False)
+    user_before = user.model_copy(deep=True)
+    with store._connect() as conn:
+        outbox_before = conn.execute("SELECT COUNT(*) FROM auth_email_outbox").fetchone()[0]
+
+    monkeypatch.setattr(
+        "app.auth.get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as error:
+        create_registration_response(user)
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "30"}
+    assert store.users[user.id] == user_before
+    with store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM auth_email_outbox").fetchone()[0] == outbox_before

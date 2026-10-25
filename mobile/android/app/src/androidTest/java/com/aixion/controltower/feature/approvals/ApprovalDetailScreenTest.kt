@@ -180,6 +180,27 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun failedInboxRefreshKeepsOpenApprovalVisibleButBlocksDecisions() {
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = approval(ApprovalStatus.REQUESTED),
+                lastActionMessage = null,
+                onOpenDiff = {},
+                onApprove = {},
+                onReject = {},
+                approvalSyncError = "Backend approval sync failed. Check your connection and retry."
+            )
+        }
+
+        composeRule.onNodeWithText("Latest status unavailable").assertExists()
+        composeRule.onNodeWithText(
+            "Latest approval status could not be confirmed. Reconnect and refresh before deciding; the request shown here may be out of date."
+        ).assertExists()
+        composeRule.onNodeWithText("Approve request").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
+    }
+
+    @Test
     fun expiredApprovalShowsClosedStateAndDisablesEveryDecision() {
         composeRule.setContent { ApprovalDetailContent(approval(ApprovalStatus.EXPIRED), null, {}, {}, {}) }
 
