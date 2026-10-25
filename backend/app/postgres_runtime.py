@@ -53,6 +53,16 @@ _TABLE_CONSTRAINT_STARTS = {
 # while this manifest verifies that PostgreSQL still has the actual objects.
 _REQUIRED_FOREIGN_KEYS = (
     {
+        "name": "users_workspace_id_fkey",
+        "table": "users",
+        "columns": ("workspace_id",),
+        "referenced_table": "workspaces",
+        "referenced_columns": ("workspace_id",),
+        "delete_action": "r",  # RESTRICT
+        "update_action": "a",  # NO ACTION
+        "match_type": "s",  # SIMPLE
+    },
+    {
         "name": "agent_tasks_project_id_workspace_id_fkey",
         "table": "agent_tasks",
         "columns": ("project_id", "workspace_id"),

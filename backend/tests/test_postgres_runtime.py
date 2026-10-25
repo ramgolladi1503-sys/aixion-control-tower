@@ -223,6 +223,27 @@ def test_schema_verification_fails_closed_when_workspace_composite_fk_is_missing
     assert status.missing_index_names == ()
 
 
+def test_schema_verification_fails_closed_when_workspace_membership_fk_is_missing(
+    postgres_schema: tuple[str, Any],
+) -> None:
+    _schema, connect = postgres_schema
+    run_postgres_migrations(connect)
+
+    runtime = PostgresRuntime(
+        _dsn="hidden",
+        profile="test",
+        _connector=lambda _dsn, **_kwargs: connect(),
+    )
+    assert runtime.verify_schema().ready is True
+
+    with connect() as conn:
+        conn.execute("ALTER TABLE users DROP CONSTRAINT users_workspace_id_fkey")
+
+    status = runtime.verify_schema()
+    assert status.ready is False
+    assert status.missing_constraint_names == ("users_workspace_id_fkey",)
+
+
 def test_schema_verification_rejects_same_name_workspace_fk_with_wrong_columns(
     postgres_schema: tuple[str, Any],
 ) -> None:

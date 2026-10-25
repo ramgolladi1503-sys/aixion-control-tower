@@ -166,6 +166,30 @@ SOURCE_TABLE_DISPOSITIONS: dict[str, tuple[str, str | None]] = {
     "approval_invocation_leases": ("imported", "approval_invocation_leases"),
 }
 
+# Explicit coverage for serialized rows in SQLiteBackedStore.kv_store. The
+# Store's persistence calls and the repository write paths are the source of
+# truth; tests compare those source-defined types with this inventory. The
+# importer intentionally filters unsupported audit parents and records that
+# partial disposition instead of silently implying a full audit migration.
+SOURCE_KV_ENTITY_DISPOSITIONS: dict[str, tuple[str, str, str | None]] = {
+    kind: (
+        "partial_import" if kind == "audit_event" else "imported",
+        IMPORT_TABLES[kind][0],
+        (
+            "Only events with a supported parent and verified workspace scope are imported; "
+            "unsupported-parent events are omitted."
+            if kind == "audit_event"
+            else None
+        ),
+    )
+    for kind in ENTITY_TYPES
+}
+SOURCE_KV_ENTITY_DISPOSITIONS["action_consumption"] = (
+    "derived_import",
+    IMPORT_TABLES["action_consumption"][0],
+    "Validated against its action, lease, and exactly one matching verified trust event.",
+)
+
 
 class ImportBlocked(RuntimeError):
     pass
@@ -196,6 +220,49 @@ def _source_table_coverage(path: Path) -> dict[str, dict[str, str | None]]:
         }
         for name in sorted(tables)
     }
+
+
+def _source_kv_entity_type_counts(path: Path) -> dict[str, int]:
+    """Return observed kv_store entity counts, refusing unreviewed row types.
+
+    This is deliberately run during source preflight, before any PostgreSQL
+    connection. It prevents a newly introduced SQLite persistence type from
+    disappearing through the importer's supported-type selection filter.
+    """
+    uri = f"file:{quote(path.resolve().as_posix(), safe='/')}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+        conn.execute("PRAGMA query_only = ON")
+        rows = conn.execute(
+            "SELECT entity_type, count(*) FROM kv_store GROUP BY entity_type ORDER BY entity_type"
+        ).fetchall()
+    counts = {str(entity_type): int(count) for entity_type, count in rows}
+    if counts.keys() - SOURCE_KV_ENTITY_DISPOSITIONS.keys():
+        raise ImportBlocked(
+            "SQLite kv_store contains entity types without an importer disposition"
+        )
+    return counts
+
+
+def _source_kv_entity_coverage(
+    source_counts: dict[str, int], imported_counts: dict[str, int]
+) -> dict[str, dict[str, str | int | None]]:
+    """Describe source and target coverage for the complete recognized inventory."""
+    coverage: dict[str, dict[str, str | int | None]] = {}
+    for kind, (disposition, target, reason) in sorted(SOURCE_KV_ENTITY_DISPOSITIONS.items()):
+        source_count = source_counts.get(kind, 0)
+        imported_count = imported_counts.get(kind, 0)
+        omitted_count = source_count - imported_count
+        if omitted_count < 0:
+            raise ImportBlocked(f"imported {kind} count exceeds its SQLite source count")
+        coverage[kind] = {
+            "disposition": disposition,
+            "target": target,
+            "reason": reason,
+            "source_count": source_count,
+            "imported_count": imported_count,
+            "omitted_count": omitted_count,
+        }
+    return coverage
 
 
 def _native_invocation_drain_summary(
@@ -764,6 +831,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     initial_stat = path.stat()
     digest = _sha256_file(path)
     source_table_coverage = _source_table_coverage(path)
+    kv_source_counts = _source_kv_entity_type_counts(path)
     report = audit(path)
     if report.get("status") != "STRUCTURAL_REVIEW_PASSED":
         unresolved_worker_audits = [
@@ -1520,7 +1588,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     selected["notification"] = supported_notifications
 
     imported_counts = {kind: len(selected.get(kind, {})) for kind in sorted(CORE_TYPES)}
-    source_counts = dict(sorted(report.get("entity_counts", {}).items()))
+    source_counts = dict(sorted(kv_source_counts.items()))
     source_counts["auth_email_outbox"] = len(email_outbox)
     source_counts["approval_delivery_claim"] = len(delivery_claims)
     source_counts["approval_delivery_failure"] = len(delivery_failures)
@@ -1545,6 +1613,9 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         "scope": SCOPE,
         "source_sha256": digest,
         "source_table_coverage": source_table_coverage,
+        "source_kv_entity_coverage": _source_kv_entity_coverage(
+            kv_source_counts, imported_counts
+        ),
         "source_counts": source_counts,
         "planned_counts": imported_counts,
         "derived_workspace_scope_counts": dict(sorted(derived_workspace_scope_counts.items())),

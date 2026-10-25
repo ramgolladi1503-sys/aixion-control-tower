@@ -47,9 +47,8 @@ from app.trust_models import (
 from app.trust_policy import lease_receipt_payload
 from app.postgres_trust_event_repository import PostgresTrustEventRepository
 from scripts.import_approval_slice_to_postgres import (
-    CORE_TYPES,
-    ENTITY_TYPES,
     ImportBlocked,
+    SOURCE_KV_ENTITY_DISPOSITIONS,
     SOURCE_TABLE_DISPOSITIONS,
     _target_is_remote,
     _source_table_coverage,
@@ -94,16 +93,37 @@ def test_sqlite_persistent_entities_are_accounted_for_by_import_inventory():
     persistent_types = _sqlite_store_persistent_entity_types()
 
     documented_exclusions: set[str] = set()
-    importer_accounted_types = set(ENTITY_TYPES) | set(CORE_TYPES)
+    importer_accounted_types = set(SOURCE_KV_ENTITY_DISPOSITIONS)
 
     assert persistent_types, "SQLite persist() entity inventory unexpectedly empty"
     assert persistent_types <= importer_accounted_types | documented_exclusions, (
         "SQLite-backed entity types are missing from the PostgreSQL importer "
-        "inventory and its documented exclusions: "
+        "per-entity disposition inventory and its documented exclusions: "
         f"{sorted(persistent_types - importer_accounted_types - documented_exclusions)}"
     )
     assert "agent_run_fault" in importer_accounted_types
+    assert SOURCE_KV_ENTITY_DISPOSITIONS["audit_event"][0] == "partial_import"
+    assert SOURCE_KV_ENTITY_DISPOSITIONS["action_consumption"][0] == "derived_import"
     assert documented_exclusions.isdisjoint(importer_accounted_types)
+
+
+def test_entity_coverage_reports_exact_partial_audit_counts():
+    from scripts.import_approval_slice_to_postgres import _source_kv_entity_coverage
+
+    coverage = _source_kv_entity_coverage(
+        {"audit_event": 5, "approval_request": 1},
+        {"audit_event": 3, "approval_request": 1},
+    )
+
+    assert coverage["audit_event"] == {
+        "disposition": "partial_import",
+        "target": "audit_events",
+        "reason": SOURCE_KV_ENTITY_DISPOSITIONS["audit_event"][2],
+        "source_count": 5,
+        "imported_count": 3,
+        "omitted_count": 2,
+    }
+    assert coverage["approval_request"]["omitted_count"] == 0
 
 
 def test_every_migration_created_sqlite_table_has_an_explicit_import_disposition(tmp_path):
@@ -139,6 +159,33 @@ def test_source_table_coverage_fails_closed_for_unclassified_table(tmp_path):
 
     with pytest.raises(ImportBlocked, match="without an importer disposition"):
         _source_table_coverage(path)
+
+
+def test_unknown_kv_entity_type_blocks_before_postgres_connection(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "unknown-entity.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("future_secret_record", "future1", json.dumps({"id": "future1"})),
+        )
+
+    connect_calls = []
+
+    def forbidden_connect(*args, **kwargs):
+        connect_calls.append((args, kwargs))
+        raise AssertionError("unknown source entity reached PostgreSQL")
+
+    monkeypatch.setattr(psycopg, "connect", forbidden_connect)
+    monkeypatch.setenv("AIXION_TEST_POSTGRES_DSN", "dbname=control_tower_test host=localhost")
+    result = main([
+        "--source", str(path), "--apply", "--confirm-source-snapshot",
+        "--allow-partial-slice",
+    ])
+
+    assert result == 2
+    assert connect_calls == []
+    assert "without an importer disposition" in capsys.readouterr().err
 
 
 @pytest.fixture(autouse=True)
@@ -598,6 +645,17 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
         "target": "CORE_TYPES -> entity-specific PostgreSQL tables",
     }
     assert plan["source_table_coverage"]["schema_migrations"]["disposition"] == "metadata_only"
+    entity_coverage = plan["source_kv_entity_coverage"]
+    assert set(entity_coverage) == set(SOURCE_KV_ENTITY_DISPOSITIONS)
+    assert entity_coverage["audit_event"]["disposition"] == "partial_import"
+    assert entity_coverage["audit_event"]["target"] == "audit_events"
+    assert entity_coverage["audit_event"]["reason"]
+    for kind, coverage in entity_coverage.items():
+        source_count = plan["source_counts"].get(kind, 0)
+        imported_count = plan["planned_counts"].get(kind, 0)
+        assert coverage["source_count"] == source_count
+        assert coverage["imported_count"] == imported_count
+        assert coverage["omitted_count"] == source_count - imported_count
     assert plan["partial"] is False
     assert plan["omitted_counts"].get("notification", 0) == 0
     assert plan["planned_counts"]["approval_request"] == 1
