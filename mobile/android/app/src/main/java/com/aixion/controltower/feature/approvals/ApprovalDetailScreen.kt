@@ -291,7 +291,7 @@ fun ApprovalDetailContent(
                 }
 
                 if (lastActionMessage != null && lastActionApprovalId == approval.id) {
-                    item { DetailPanel(title = "Last Action", body = lastActionMessage) }
+                    item { DetailPanel(title = "Last action", body = lastActionMessage) }
                 }
 
                 if (decisionOutcomeApprovalId == approval.id) {
@@ -373,8 +373,8 @@ fun ApprovalDetailContent(
                         onToggle = { showTechnicalDetails = !showTechnicalDetails }
                     )
                 }
-                item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
-                item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
+                item { DetailPanel(title = "Test plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
+                item { DetailPanel(title = "Rollback plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
 
                 item {
                     Button(
@@ -387,13 +387,13 @@ fun ApprovalDetailContent(
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.canvas),
                         modifier = Modifier.fillMaxWidth().testTag("approval-full-diff-review")
-                    ) { Text("Review Full Diff") }
+                    ) { Text("Review full diff") }
                 }
 
                 if (!hasExactToolRequest) {
                     item {
                         TowerSectionHeader(
-                            title = "File Changes",
+                            title = "File changes",
                             subtitle = "Inline preview only. Open the full diff before approving risky changes.",
                             modifier = Modifier.testTag("approval-file-changes")
                         )
@@ -1028,7 +1028,7 @@ private fun RequiredActionsPanel(actions: List<String>) {
             .border(1.dp, palette.danger.copy(alpha = 0.28f), RoundedCornerShape(24.dp))
             .padding(16.dp)
     ) {
-        Text("Required Before Approval", color = palette.danger, style = MaterialTheme.typography.titleSmall)
+        Text("Required before approval", color = palette.danger, style = MaterialTheme.typography.titleSmall)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         actions.forEach { action -> Text("• $action", color = palette.ink, style = MaterialTheme.typography.bodyLarge) }
     }
@@ -1127,7 +1127,7 @@ private fun DecisionPanel(
         }
         if (!compactLayout) {
             Text(
-                text = "Decision Gate",
+                text = "Decision gate",
                 color = palette.ink,
                 style = MaterialTheme.typography.titleMedium
             )

@@ -27,6 +27,7 @@ def test_email_loop_uses_only_the_explicitly_selected_dispatcher(
         lambda: SimpleNamespace(
             email_dispatch_enabled=True,
             email_dispatch_poll_seconds=1,
+            is_production=False,
             postgres_auth_enabled=False,
         ),
     )
@@ -62,6 +63,7 @@ def test_disabled_email_loop_returns_without_dispatch(monkeypatch: pytest.Monkey
         lambda: SimpleNamespace(
             email_dispatch_enabled=False,
             email_dispatch_poll_seconds=1,
+            is_production=False,
             postgres_auth_enabled=True,
         ),
     )
@@ -69,8 +71,15 @@ def test_disabled_email_loop_returns_without_dispatch(monkeypatch: pytest.Monkey
     asyncio.run(email_delivery.email_dispatch_loop(postgres_repository=object()))
 
 
-def test_postgres_auth_email_loop_fails_closed_without_repository(
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(False, True), (True, False)],
+    ids=["postgres-auth", "production"],
+)
+def test_authoritative_email_loop_fails_closed_without_repository(
     monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
 ) -> None:
     monkeypatch.setattr(
         email_delivery,
@@ -78,7 +87,8 @@ def test_postgres_auth_email_loop_fails_closed_without_repository(
         lambda: SimpleNamespace(
             email_dispatch_enabled=True,
             email_dispatch_poll_seconds=1,
-            postgres_auth_enabled=True,
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
         ),
     )
 
@@ -112,6 +122,7 @@ def test_email_dispatch_loop_drains_inflight_thread_on_cancellation(
         lambda: SimpleNamespace(
             email_dispatch_enabled=True,
             email_dispatch_poll_seconds=30,
+            is_production=False,
             postgres_auth_enabled=True,
         ),
     )

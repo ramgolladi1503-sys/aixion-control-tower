@@ -342,3 +342,35 @@ def test_audit_repository_keeps_local_direct_behavior_without_production_or_post
     )
 
     assert audit_routes._audit_repository_for_route(None) is audit_routes._local_audit_repository
+
+
+def test_production_audit_reads_fail_closed_without_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from app import audit_routes
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(postgres_runtime=None))
+    )
+    monkeypatch.setattr(
+        audit_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+
+    def unexpected_audit_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Production audit reads must not fall back to SQLite")
+
+    monkeypatch.setattr(
+        audit_routes._local_audit_repository,
+        "list_for_workspace",
+        unexpected_audit_read,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        audit_routes._audit_repository_for_route(request, allow_postgres_reads=True)  # type: ignore[arg-type]
+
+    assert raised.value.status_code == 503
+    assert "unified audit writer" in raised.value.detail

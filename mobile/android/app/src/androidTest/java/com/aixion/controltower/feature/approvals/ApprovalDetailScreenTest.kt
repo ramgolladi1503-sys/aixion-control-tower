@@ -419,6 +419,7 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
         composeRule.onNodeWithText("Deny").assertIsEnabled()
+        composeRule.onNodeWithText("Review full diff").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement")
             .performScrollTo()
             .assertIsNotEnabled()
@@ -558,7 +559,7 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithTag("approval-exact-tool-request").assertDoesNotExist()
         composeRule.onNodeWithTag("approval-file-changes").performScrollTo().assertExists()
-        composeRule.onNodeWithText("File Changes").assertExists()
+        composeRule.onNodeWithText("File changes").assertExists()
         composeRule.onNodeWithText("+test").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
     }
@@ -620,8 +621,8 @@ class ApprovalDetailScreenTest {
         assertTrue("Approve action should stay inside the short viewport", approve.top >= viewport.top && approve.bottom <= viewport.bottom)
 
         composeRule.onNodeWithTag("approval-detail-list")
-            .performScrollToNode(hasText("Rollback Plan"))
-        composeRule.onNodeWithText("Rollback Plan").assertIsDisplayed()
+            .performScrollToNode(hasText("Rollback plan"))
+        composeRule.onNodeWithText("Rollback plan").assertIsDisplayed()
         composeRule.onNodeWithText("Deny").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
         identity.assertIsDisplayed()

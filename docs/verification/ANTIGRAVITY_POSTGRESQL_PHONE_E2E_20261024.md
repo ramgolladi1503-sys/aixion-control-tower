@@ -26,6 +26,47 @@
 
 The observed invocation identity was `antigravity:v1:a47214061821708cb4b42219ba675625e11f240786bb76f46a40849a0d0e3087`. Audit events were `approval.created_by_agent`, `approval.decision`, and `approval.delivery_claimed`.
 
+## Repeatable certification on a future exact revision
+
+The dated result above is historical evidence for the listed revision and
+environment. Use the verifier below when repeating the physical flow on a new
+revision; do not carry this PASS forward to code that has not been exercised.
+
+1. Use a disposable local PostgreSQL database whose name includes `e2e`,
+   `test`, or `disposable`. Configure the Android app and Antigravity hook to
+   reach the same API/database. For USB, confirm the exact ADB reverse mapping
+   and keep the backend bound to loopback.
+2. Run the hook's authenticated preflight with the workspace config. Confirm
+   `adb devices -l` shows the intended unlocked device as `device`.
+3. Choose a unique marker path and verify it does not exist. Record a UTC start
+   timestamp immediately before the call. In Antigravity, invoke exactly
+   `run_command` with `{"command":"mkdir /tmp/aixion-ct-phone-e2e-<unique-id>"}`.
+   Approve that exact request from the Control Tower Android app, then observe
+   the same Antigravity call finish successfully and the marker appear.
+4. Run the verifier against that disposable database. It opens a read-only
+   PostgreSQL transaction, rejects remote/non-test databases, and requires an
+   exact tool payload, one matching approval decision, a matching at-most-once
+   claim and audit event, and a marker newer than the recorded start time:
+
+   ```sh
+   export AIXION_E2E_POSTGRES_DSN='<disposable-local-postgres-dsn>'
+   python3 integrations/antigravity/certify_phone_e2e.py \
+     --approval-id 'approval_<id-shown-in-phone-or-hook-log>' \
+     --agent-id 'agent_<registered-agent>' \
+     --project-id 'project_<registered-project>' \
+     --tool-name run_command \
+     --expected-arguments '{"command":"mkdir /tmp/aixion-ct-phone-e2e-<unique-id>"}' \
+     --marker '/tmp/aixion-ct-phone-e2e-<unique-id>' \
+     --started-at '2026-10-25T00:00:00Z'
+   ```
+
+The verifier is evidence support, not the physical E2E itself. A PASS confirms
+durable approval/claim identity and a fresh marker; the operator must also
+record that the phone displayed and approved this exact request and that the
+same pending Antigravity call resumed. No phone or Antigravity UI is automated
+by the verifier. Any missing row, duplicate event, mismatched invocation/hash,
+stale marker, remote database, or unreadable state fails nonzero.
+
 ## Limits
 
 This certifies one local PostgreSQL-backed approval round-trip on the tested device and Antigravity version. It does not certify hosted/off-LAN reachability, push wake-up, production deployment, restart/revocation/timeout failure cases, or Codex native-session approval. Those gates remain open.

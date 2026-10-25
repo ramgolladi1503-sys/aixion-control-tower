@@ -98,6 +98,7 @@ def _require_authoritative_audit_runtime(request: Request) -> None:
     """Fail closed when PostgreSQL is selected without a complete audit cutover."""
     if (
         get_settings().postgres_auth_enabled
+        or get_settings().is_production
         or getattr(request.app.state, "postgres_runtime", None) is not None
     ):
         raise HTTPException(

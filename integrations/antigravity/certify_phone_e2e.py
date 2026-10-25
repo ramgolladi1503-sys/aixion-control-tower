@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Read-only verifier for a live Antigravity-to-phone approval round trip.
+
+This tool does not create approvals or alter data. Run it after approving a
+fresh, unique harmless command in the phone app and observing that Antigravity
+resumed that same command. It validates the durable PostgreSQL records and the
+command's fresh filesystem marker; it cannot replace the human/device proof.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import sys
+from typing import Any
+
+
+class EvidenceError(Exception):
+    """The supplied live evidence is incomplete or inconsistent."""
+
+
+def _parse_timestamp(value: str) -> datetime:
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timestamp must be ISO-8601 with timezone") from exc
+    if result.tzinfo is None:
+        raise argparse.ArgumentTypeError("timestamp must include a timezone")
+    return result.astimezone(timezone.utc)
+
+
+def _json_object(value: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError("expected arguments must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("expected arguments must be a JSON object")
+    return parsed
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _verify_payload(
+    payload: dict[str, Any], *, tool_name: str, expected_arguments: dict[str, Any]
+) -> None:
+    files = payload.get("files")
+    if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict):
+        raise EvidenceError("Approval does not contain exactly one Antigravity tool payload")
+    file_change = files[0]
+    if file_change.get("path") != f"antigravity://tool/{tool_name[:120]}":
+        raise EvidenceError("Approval tool name does not match the requested tool")
+    if file_change.get("change_type") != "tool_call":
+        raise EvidenceError("Approval is not marked as an Antigravity tool call")
+    try:
+        actual_arguments = json.loads(file_change.get("diff", ""))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise EvidenceError("Approval tool arguments are not valid JSON") from exc
+    if not isinstance(actual_arguments, dict) or _canonical_json(actual_arguments) != _canonical_json(
+        expected_arguments
+    ):
+        raise EvidenceError("Approved arguments do not exactly match the expected command")
+
+
+def verify_records(
+    *,
+    approval: dict[str, Any],
+    decision_events: list[dict[str, Any]],
+    claim: dict[str, Any] | None,
+    claim_events: list[dict[str, Any]],
+    expected_approval_id: str,
+    expected_agent_id: str,
+    expected_project_id: str,
+    tool_name: str,
+    expected_arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate DB rows after fetching them from one PostgreSQL snapshot."""
+    payload = approval.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise EvidenceError("Approval payload is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise EvidenceError("Approval payload is missing")
+    if approval.get("approval_id") != expected_approval_id or payload.get("id") != expected_approval_id:
+        raise EvidenceError("Approval identity does not match")
+    if approval.get("status") != "APPROVED" or payload.get("status") != "APPROVED":
+        raise EvidenceError("Approval is not durably approved")
+    if payload.get("source_provider") != "ANTIGRAVITY":
+        raise EvidenceError("Approval provider is not ANTIGRAVITY")
+    if approval.get("source_agent_id") != expected_agent_id or payload.get("source_agent_id") != expected_agent_id:
+        raise EvidenceError("Approval agent identity does not match")
+    if payload.get("project_id") != expected_project_id:
+        raise EvidenceError("Approval project scope does not match")
+    invocation_id = payload.get("source_invocation_id")
+    if not isinstance(invocation_id, str) or not invocation_id.startswith("antigravity:v1:"):
+        raise EvidenceError("Approval has no valid Antigravity invocation identity")
+    approved_hash = payload.get("approved_payload_hash")
+    if not isinstance(approved_hash, str) or not approved_hash:
+        raise EvidenceError("Approval has no approved payload hash")
+    _verify_payload(payload, tool_name=tool_name, expected_arguments=expected_arguments)
+
+    if len(decision_events) != 1:
+        raise EvidenceError("Expected exactly one approval decision audit event")
+    decision = decision_events[0]
+    details = decision.get("details")
+    if isinstance(details, str):
+        details = json.loads(details)
+    if (
+        decision.get("event_type") != "approval.decision"
+        or decision.get("approval_id") != expected_approval_id
+        or not isinstance(details, dict)
+        or details.get("new_status") != "APPROVED"
+        or details.get("approved_payload_hash") != approved_hash
+    ):
+        raise EvidenceError("Decision audit event does not bind the approved payload hash")
+
+    if not isinstance(claim, dict):
+        raise EvidenceError("No durable at-most-once delivery claim exists")
+    if (
+        claim.get("approval_id") != expected_approval_id
+        or claim.get("source_agent_id") != expected_agent_id
+        or claim.get("source_invocation_id") != invocation_id
+    ):
+        raise EvidenceError("Delivery claim does not match this exact approval invocation")
+    if len(claim_events) != 1:
+        raise EvidenceError("Expected exactly one approval.delivery_claimed audit event")
+    claim_event = claim_events[0]
+    claim_details = claim_event.get("details")
+    if isinstance(claim_details, str):
+        claim_details = json.loads(claim_details)
+    if (
+        claim_event.get("event_type") != "approval.delivery_claimed"
+        or claim_event.get("approval_id") != expected_approval_id
+        or not isinstance(claim_details, dict)
+        or claim_details.get("source_agent_id") != expected_agent_id
+        or claim_details.get("source_invocation_id") != invocation_id
+        or claim_details.get("approved_payload_hash") != approved_hash
+    ):
+        raise EvidenceError("Delivery audit event does not match the approved invocation")
+    return {
+        "approval_id": expected_approval_id,
+        "agent_id": expected_agent_id,
+        "project_id": expected_project_id,
+        "source_invocation_id": invocation_id,
+        "approved_payload_hash": approved_hash,
+        "decision_events": len(decision_events),
+        "delivery_claim_events": len(claim_events),
+    }
+
+
+def _connect(dsn: str):
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise EvidenceError("Install backend requirements to use the PostgreSQL verifier") from exc
+    return psycopg.connect(dsn, connect_timeout=5, autocommit=False)
+
+
+def verify_database(args: argparse.Namespace) -> dict[str, Any]:
+    dsn = args.dsn or os.environ.get("AIXION_E2E_POSTGRES_DSN")
+    if not dsn:
+        raise EvidenceError("Set --dsn or AIXION_E2E_POSTGRES_DSN for the disposable PostgreSQL database")
+    conn = _connect(dsn)
+    try:
+        host = (conn.info.host or "").lower()
+        database = (conn.info.dbname or "").lower()
+        if host and host not in {"localhost", "127.0.0.1", "::1"} and not host.startswith("/"):
+            raise EvidenceError("Verifier accepts only loopback or Unix-socket PostgreSQL hosts")
+        if not any(label in database for label in ("e2e", "test", "disposable")):
+            raise EvidenceError("Database name must identify an E2E, test, or disposable database")
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT approval_id, source_agent_id, status, payload "
+                "FROM approval_requests WHERE approval_id=%s",
+                (args.approval_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise EvidenceError("Approval was not found in the configured PostgreSQL database")
+            approval = {
+                "approval_id": row[0], "source_agent_id": row[1], "status": row[2], "payload": row[3]
+            }
+            cursor.execute(
+                "SELECT approval_id, event_type, details FROM audit_events "
+                "WHERE approval_id=%s AND event_type='approval.decision' "
+                "AND details->>'new_status'='APPROVED'",
+                (args.approval_id,),
+            )
+            decision_events = [
+                {"approval_id": r[0], "event_type": r[1], "details": r[2]}
+                for r in cursor.fetchall()
+            ]
+            cursor.execute(
+                "SELECT approval_id, source_agent_id, source_invocation_id "
+                "FROM approval_delivery_claims WHERE approval_id=%s",
+                (args.approval_id,),
+            )
+            claim_row = cursor.fetchone()
+            claim = None if claim_row is None else {
+                "approval_id": claim_row[0], "source_agent_id": claim_row[1],
+                "source_invocation_id": claim_row[2],
+            }
+            cursor.execute(
+                "SELECT approval_id, event_type, details FROM audit_events "
+                "WHERE approval_id=%s AND event_type='approval.delivery_claimed'",
+                (args.approval_id,),
+            )
+            claim_events = [
+                {"approval_id": r[0], "event_type": r[1], "details": r[2]}
+                for r in cursor.fetchall()
+            ]
+        conn.rollback()  # Explicitly read-only; never commit from the verifier.
+    finally:
+        conn.close()
+    result = verify_records(
+        approval=approval,
+        decision_events=decision_events,
+        claim=claim,
+        claim_events=claim_events,
+        expected_approval_id=args.approval_id,
+        expected_agent_id=args.agent_id,
+        expected_project_id=args.project_id,
+        tool_name=args.tool_name,
+        expected_arguments=args.expected_arguments,
+    )
+    marker = Path(args.marker).expanduser()
+    try:
+        marker_stat = marker.stat()
+    except OSError as exc:
+        raise EvidenceError("Expected command-created marker does not exist") from exc
+    if marker_stat.st_mtime < args.started_at.timestamp():
+        raise EvidenceError("Marker predates this certification run; use a fresh unique marker path")
+    result["marker_path"] = str(marker.resolve())
+    result["marker_mtime_utc"] = datetime.fromtimestamp(
+        marker_stat.st_mtime, timezone.utc
+    ).isoformat()
+    result["result"] = "PASS_DURABLE_APPROVAL_AND_FRESH_MARKER"
+    result["human_observation_required"] = (
+        "Confirm Antigravity resumed the same pending call after the phone decision; "
+        "this script cannot observe the provider UI."
+    )
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--approval-id", required=True)
+    parser.add_argument("--agent-id", required=True)
+    parser.add_argument("--project-id", required=True)
+    parser.add_argument("--tool-name", required=True)
+    parser.add_argument("--expected-arguments", type=_json_object, required=True)
+    parser.add_argument("--marker", required=True, help="Unique path created only by the approved tool call")
+    parser.add_argument("--started-at", required=True, type=_parse_timestamp)
+    parser.add_argument("--dsn", help="Disposable PostgreSQL DSN; may instead use AIXION_E2E_POSTGRES_DSN")
+    args = parser.parse_args(argv)
+    try:
+        result = verify_database(args)
+    except Exception as exc:
+        sys.stderr.write(f"E2E evidence verification failed: {exc.__class__.__name__}: {exc}\n")
+        return 1
+    sys.stdout.write(json.dumps(result, sort_keys=True, indent=2) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

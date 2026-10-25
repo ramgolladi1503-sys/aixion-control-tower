@@ -142,6 +142,14 @@ tool arguments are written to logs.
    Deny, timeout, network loss, and revoked credentials; each must keep the tool
    blocked.
 
+For the live Android/PostgreSQL certification flow, use the dated evidence and
+repeatable read-only verifier in
+[`docs/verification/ANTIGRAVITY_POSTGRESQL_PHONE_E2E_20261024.md`](../../docs/verification/ANTIGRAVITY_POSTGRESQL_PHONE_E2E_20261024.md).
+The verifier checks durable approval, payload hash, invocation identity,
+at-most-once delivery claim, and a fresh command marker. It cannot observe the
+phone UI or Antigravity resuming; the operator must record those two live
+observations separately.
+
 To roll back, run `setup_workspace.py --workspace "/absolute/path/to/project"
 --remove`. It removes only this installer's hook entry and associated non-secret
 config, preserving unrelated hooks. Revoke the agent token from the phone if it
