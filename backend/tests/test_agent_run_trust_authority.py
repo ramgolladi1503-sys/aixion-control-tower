@@ -6,6 +6,7 @@ import pytest
 
 from app import agent_run_trust
 from app.agent_run_models import AgentRunStepStatus, AgentRunStepType
+from app import trust_run_capability
 
 
 class _PoisonProcessLocalStore:
@@ -54,3 +55,25 @@ def test_agent_run_trust_helpers_fail_before_process_local_store_access(
                 ),
                 actor="owner@example.test",
             )
+
+
+@pytest.mark.parametrize(
+    "authority_settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False, trust_enforcement=True),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True, trust_enforcement=True),
+    ],
+    ids=["production", "postgres-auth"],
+)
+def test_ensure_run_capability_fails_before_process_local_store_access(
+    monkeypatch: pytest.MonkeyPatch,
+    authority_settings: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(trust_run_capability, "get_settings", lambda: authority_settings)
+    monkeypatch.setattr(trust_run_capability, "store", _PoisonProcessLocalStore())
+
+    with pytest.raises(
+        trust_run_capability.RunCapabilityConflict,
+        match="app-bound durable PostgreSQL path",
+    ):
+        trust_run_capability.ensure_run_capability(object(), user=object())

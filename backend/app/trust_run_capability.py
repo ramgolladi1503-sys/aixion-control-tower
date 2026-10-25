@@ -31,7 +31,12 @@ def ensure_run_capability(
     trust enforcement derives scope only from the sealed approval and linked AgentTask;
     no paths or commands are invented by the scheduler.
     """
-    if not get_settings().trust_enforcement:
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        raise RunCapabilityConflict(
+            "Automatic run capability issuance requires the app-bound durable PostgreSQL path."
+        )
+    if not settings.trust_enforcement:
         return None
 
     if run.capability_lease_id:
