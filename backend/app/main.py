@@ -669,6 +669,21 @@ def _work_order_repository_for_route(http_request: Request | None):
     return work_order_repository_for_request(http_request)
 
 
+def _test_run_repository_for_route(http_request: Request | None):
+    if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            # Direct calls cannot select the lifespan-owned, workspace-scoped
+            # repository. Refuse instead of falling back to the SQLite adapter.
+            raise HTTPException(
+                status_code=503,
+                detail="Test-run storage context is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            )
+        return app.state.test_run_repository
+    return test_run_repository_for_request(http_request)
+
+
 def audit(event_type: str, entity_id: str, details: dict, actor: str = "system") -> AuditEvent:
     event = AuditEvent(event_type=event_type, entity_id=entity_id, details=details, actor=actor)
     store.audit_events.append(event)
@@ -1674,11 +1689,7 @@ def create_test_run(
         },
         actor=user.email,
     )
-    repository = (
-        test_run_repository_for_request(http_request)
-        if http_request is not None
-        else app.state.test_run_repository
-    )
+    repository = _test_run_repository_for_route(http_request)
     repository.create(test_run=test_run, workspace_id=workspace_id, audit_event=audit_event)
     if isinstance(repository, SQLiteTestRunRepository):
         store.test_runs[test_run.id] = test_run
@@ -1691,12 +1702,8 @@ def list_test_runs(
     user: AuthUser = ReviewerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[TestRun]:
+    repository = _test_run_repository_for_route(http_request)
     workspace_id = _workspace_id_for_route(user, http_request)
-    repository = (
-        test_run_repository_for_request(http_request)
-        if http_request is not None
-        else app.state.test_run_repository
-    )
     return repository.list_for_workspace(workspace_id)
 
 

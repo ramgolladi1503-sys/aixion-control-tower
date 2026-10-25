@@ -37,6 +37,59 @@ from app.test_run_repository import PostgresTestRunRepository
 from app.test_run_repository import TestRunRepositoryScopeError as _TestRunRepositoryScopeError
 
 
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_direct_test_run_list_fails_closed_before_sqlite_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    class PoisonTestRunRepository:
+        def list_for_workspace(self, _workspace_id: str | None) -> list[object]:
+            raise AssertionError("SQLite test-run repository must not be selected")
+
+    monkeypatch.setattr(
+        main.app.state,
+        "test_run_repository",
+        PoisonTestRunRepository(),
+        raising=False,
+    )
+    with pytest.raises(main.HTTPException) as raised:
+        main.list_test_runs(
+            user=SimpleNamespace(id="user_test", workspace_id="workspace_test"),
+            http_request=None,
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+
+
+def test_direct_test_run_repository_keeps_explicit_local_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    repository = object()
+    monkeypatch.setattr(main.app.state, "test_run_repository", repository, raising=False)
+
+    assert main._test_run_repository_for_route(None) is repository
+
+
 @pytest.fixture
 def postgres_test_run_runtime(
     monkeypatch: pytest.MonkeyPatch,
