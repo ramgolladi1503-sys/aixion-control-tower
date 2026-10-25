@@ -711,6 +711,17 @@ def _project_repository_for_route(http_request: Request | None) -> ProjectReposi
 
 def _idea_repository_for_route(http_request: Request | None) -> IdeaRepository:
     if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            # The legacy global repository is SQLite-backed. Without the HTTP
+            # request there is no workspace-scoped PostgreSQL repository to
+            # select, so fail closed instead of silently writing to SQLite.
+            raise HTTPException(
+                status_code=503,
+                detail="Idea storage context is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            )
+        # Direct function calls in local tests use the explicit local adapter.
         return idea_repository
     return idea_repository_for_request(http_request)
 

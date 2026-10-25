@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -17,6 +18,7 @@ from app.auth import require_maintainer, require_owner, require_reviewer
 from app.models import (
     AuthUser,
     Idea,
+    IdeaCreate,
     Project,
     User,
     UserRole,
@@ -25,6 +27,73 @@ from app.models import (
 from app.postgres_database import run_postgres_migrations
 from app.store import store
 from app.work_order_repository import PostgresWorkOrderRepository, WorkOrderRepositoryScopeError
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_idea_create_without_request_fails_closed_without_sqlite_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+    user = AuthUser(
+        id="idea-route-user",
+        email="idea-route@example.test",
+        display_name="Idea Route User",
+        role=UserRole.OWNER,
+        workspace_id="idea-route-workspace",
+    )
+    before_ideas = set(store.ideas)
+    before_audits = {event.id for event in store.audit_events}
+    with store._connect() as connection:
+        before_sqlite_rows = set(
+            connection.execute(
+                "SELECT entity_type, entity_id FROM kv_store "
+                "WHERE entity_type IN ('idea', 'audit_event')"
+            ).fetchall()
+        )
+
+    with pytest.raises(HTTPException) as raised:
+        main.create_idea(
+            IdeaCreate(title="Must not reach SQLite", raw_text="Fail closed."),
+            user,
+            None,
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert set(store.ideas) == before_ideas
+    assert {event.id for event in store.audit_events} == before_audits
+    with store._connect() as connection:
+        after_sqlite_rows = set(
+            connection.execute(
+                "SELECT entity_type, entity_id FROM kv_store "
+                "WHERE entity_type IN ('idea', 'audit_event')"
+            ).fetchall()
+        )
+    assert after_sqlite_rows == before_sqlite_rows
+
+
+def test_idea_repository_without_request_retains_local_direct_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    assert main._idea_repository_for_route(None) is main.idea_repository
 
 
 @pytest.fixture

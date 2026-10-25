@@ -17,6 +17,20 @@ from .store import store
 PENDING_STATUSES = {ApprovalStatus.REQUESTED, ApprovalStatus.PENDING_REVIEW}
 
 
+def _resolve_approval_repository(
+    repository: ApprovalDecisionRepository | None,
+) -> ApprovalDecisionRepository:
+    if repository is not None:
+        return repository
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        raise RuntimeError(
+            "Approval expiry requires an explicit durable repository in production "
+            "or PostgreSQL-auth mode"
+        )
+    return approval_decision_repository
+
+
 def approval_repository_scope(repository: ApprovalDecisionRepository):
     """Use the process lock only for the SQLite compatibility adapter."""
     if isinstance(repository, SQLiteApprovalDecisionRepository):
@@ -41,9 +55,7 @@ def expire_approval(
     repository: ApprovalDecisionRepository | None = None,
 ) -> bool:
     """Expire one pending approval, optionally before its configured deadline."""
-    active_repository = (
-        repository if repository is not None else approval_decision_repository
-    )
+    active_repository = _resolve_approval_repository(repository)
     publish_compatibility_state = approval_repository_publishes_compatibility_state(
         active_repository
     )
@@ -167,9 +179,7 @@ def expire_due_approval(
     actor: str = "system",
     repository: ApprovalDecisionRepository | None = None,
 ) -> bool:
-    active_repository = (
-        repository if repository is not None else approval_decision_repository
-    )
+    active_repository = _resolve_approval_repository(repository)
     with approval_repository_scope(active_repository):
         return expire_approval(
             approval,
@@ -186,9 +196,7 @@ def expire_due_approvals(
     workspace_id: str | None = None,
     limit: int = 250,
 ) -> int:
-    active_repository = (
-        repository if repository is not None else approval_decision_repository
-    )
+    active_repository = _resolve_approval_repository(repository)
     with approval_repository_scope(active_repository):
         changed = 0
         # Selection is bounded and repository-backed. Expiration itself stays

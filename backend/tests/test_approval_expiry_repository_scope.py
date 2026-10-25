@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 import uuid
 
 import pytest
 
-from app.approval_expiry import expire_approval, expire_due_approvals
+from app import approval_expiry
+from app.approval_expiry import (
+    expire_approval,
+    expire_due_approval,
+    expire_due_approvals,
+)
 from app.approval_repository import ApprovalExpirationCommit
 from app.models import (
     ApprovalRequest,
@@ -46,6 +52,104 @@ class RecordingExpiryRepository:
     def list_due_pending(self, **kwargs: object) -> list[ApprovalRequest]:
         self.list_calls.append(kwargs)
         return []
+
+    def get(self, approval_id: str) -> ApprovalRequest | None:
+        return None
+
+
+@pytest.mark.parametrize("expiry_call", (expire_approval, expire_due_approval, expire_due_approvals))
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    ((True, False), (False, True)),
+)
+def test_expiry_entrypoints_require_explicit_repository_in_production_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+    expiry_call,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    def unexpected_sqlite_default():
+        pytest.fail("Production expiry must reject before selecting SQLite")
+
+    monkeypatch.setattr(
+        approval_expiry,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+    monkeypatch.setattr(
+        approval_expiry, "approval_decision_repository", unexpected_sqlite_default
+    )
+    monkeypatch.setattr(store, "atomic", unexpected_sqlite_default)
+    approval = ApprovalRequest(
+        id="approval_missing_repository",
+        project_id="project-expiry",
+        workspace_id="workspace-expiry",
+        title="Expiry repository required",
+        summary="Production expiry must use the configured durable repository.",
+        agent_name="test-agent",
+        target_branch="main",
+        files=[FileChange(path="README.md", diff="+change")],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.REQUESTED,
+    )
+
+    with pytest.raises(RuntimeError, match="explicit durable repository"):
+        if expiry_call is expire_approval:
+            expiry_call(
+                approval,
+                actor="test",
+                reason="test",
+            )
+        elif expiry_call is expire_due_approval:
+            expiry_call(approval)
+        else:
+            expiry_call()
+
+
+def test_local_expiry_entrypoints_keep_default_repository_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = RecordingExpiryRepository()
+    monkeypatch.setattr(approval_expiry, "approval_decision_repository", repository)
+    monkeypatch.setattr(
+        approval_expiry,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=False,
+            postgres_auth_enabled=False,
+            agent_approval_ttl_seconds=3600,
+        ),
+    )
+
+    approval = ApprovalRequest(
+        id="approval_local_default_repository",
+        project_id="project-expiry",
+        workspace_id="workspace-expiry",
+        title="Local compatibility",
+        summary="Local development retains its configured default repository.",
+        agent_name="test-agent",
+        target_branch="main",
+        files=[FileChange(path="README.md", diff="+change")],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        status=ApprovalStatus.REQUESTED,
+    )
+
+    assert expire_approval(
+        approval, actor="test", reason="test", force=True
+    ) is False
+    assert expire_due_approval(approval) is False
+    assert expire_due_approvals() == 0
+    assert repository.list_calls == [
+        {
+            "now": repository.list_calls[0]["now"],
+            "legacy_ttl_seconds": 3600,
+            "limit": 250,
+            "workspace_id": None,
+        }
+    ]
 
 
 def test_due_approval_sweep_preserves_explicit_workspace_scope_and_global_maintenance_default() -> None:
