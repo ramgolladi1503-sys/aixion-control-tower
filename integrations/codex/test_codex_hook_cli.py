@@ -570,6 +570,35 @@ def test_run_denies_credential_bearing_command_options_before_api_request(
 
 
 @pytest.mark.parametrize(
+    "tool_name",
+    [
+        "",
+        "   ",
+        "x" * 257,
+        "Bash\nDENIED",
+        "Bash\u202e txt",
+        "Bash\u2066tool\u2069",
+    ],
+)
+def test_run_denies_tool_names_that_can_spoof_approval_display_before_api_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    event = _codex_event()
+    event["tool_name"] = tool_name
+
+    def unexpected_configuration(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("unsafe display name must be denied before credential or API access")
+
+    monkeypatch.setattr(hook, "_configuration", unexpected_configuration)
+
+    assert hook.run(event, _codex_environment()) == (
+        "deny",
+        "Codex tool name cannot be displayed safely for approval",
+    )
+
+
+@pytest.mark.parametrize(
     "command",
     [
         "mysql --password-policy=strict",

@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 from typing import Any
 from urllib.parse import urlencode, urlsplit
@@ -263,6 +264,14 @@ def _permission_reason(tool_input: Any) -> str | None:
     if len(normalized) > MAX_PERMISSION_REASON_CHARS:
         return normalized[:MAX_PERMISSION_REASON_CHARS - 1].rstrip() + "…"
     return normalized or None
+
+
+def _tool_name_is_display_safe(value: str) -> bool:
+    """Reject names that can inject lines or invisible direction changes in approval UI."""
+    if not value.strip() or len(value) > 256:
+        return False
+    return not any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+                   for character in value)
 
 
 def _validated_api_base(value: str) -> str:
@@ -804,8 +813,10 @@ def _run(
         raise GateError("Codex permission request has an unsupported permission mode")
     tool_name = event.get("tool_name")
     args = event.get("tool_input")
-    if not isinstance(tool_name, str) or not tool_name.strip() or not isinstance(args, (dict, list, str, int, float, bool, type(None))):
+    if not isinstance(tool_name, str) or not isinstance(args, (dict, list, str, int, float, bool, type(None))):
         raise GateError("Codex permission request is missing tool identity or JSON arguments")
+    if not _tool_name_is_display_safe(tool_name):
+        return "deny", "Codex tool name cannot be displayed safely for approval"
     if _contains_sensitive(args):
         return "deny", "Tool arguments contain secret-like material; redact it before approval"
     try:
