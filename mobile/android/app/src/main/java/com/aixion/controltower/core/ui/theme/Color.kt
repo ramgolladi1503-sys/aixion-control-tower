@@ -30,7 +30,8 @@ internal val LightTowerPalette = TowerPalette(
     inkMuted = Color(0xFF596057),
     // Keep disabled labels readable while pairing them with a state label/icon.
     inkDisabled = Color(0xFF646A60),
-    line = Color(0xFFD4D5CC),
+    // Control outlines must remain distinguishable on every light surface.
+    line = Color(0xFF777D73),
     brand = Color(0xFF53664D),
     onBrand = Color(0xFFFFFFFF),
     positive = Color(0xFF286348),
@@ -48,7 +49,8 @@ internal val DarkTowerPalette = TowerPalette(
     ink = Color(0xFFE9EEE5),
     inkMuted = Color(0xFFC2C9BE),
     inkDisabled = Color(0xFFAAB2A5),
-    line = Color(0xFF515A4F),
+    // Control outlines must remain distinguishable on every dark surface.
+    line = Color(0xFF7F8A7B),
     brand = Color(0xFFA9C19B),
     onBrand = Color(0xFF1C261A),
     positive = Color(0xFF79D5A4),

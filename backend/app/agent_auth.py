@@ -44,6 +44,23 @@ AGENT_RATE_LIMIT_WINDOW = timedelta(minutes=1)
 agent_auth_repository = SQLiteExternalAgentAuthRepository(store._connect)
 
 
+def _require_authoritative_repository(repository, operation: str) -> None:
+    """Reject service calls that would use local-only credential state in authoritative modes."""
+    settings = get_settings()
+    if (
+        (
+            getattr(settings, "is_production", False)
+            or getattr(settings, "postgres_auth_enabled", False)
+        )
+        and (repository is None or is_sqlite_external_agent_auth_repository(repository))
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"External agent {operation} requires the PostgreSQL auth repository",
+            headers={"Retry-After": "1"},
+        )
+
+
 def _hash_agent_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -133,6 +150,7 @@ def register_external_agent(
         agent_auth_repository if http_request is None
         else external_agent_auth_repository_for_request(http_request)
     )
+    _require_authoritative_repository(repository, "registration")
     workspace_id = (
         workspace_id_for_user(user) if http_request is None
         else workspace_id_for_request(user, http_request)
@@ -215,6 +233,7 @@ def rotate_external_agent_token(
     token_expires_at=None,
     rate_limit_per_minute: int | None = None,
 ) -> AgentRegistrationResponse:
+    _require_authoritative_repository(repository, "token rotation")
     if agent.auth_type == AgentAuthType.MANUAL:
         raise HTTPException(status_code=400, detail="Manual agents do not have rotatable tokens")
     now = now_utc()
@@ -270,6 +289,7 @@ def revoke_external_agent_token(
     agent: ExternalAgent, *, credential: AgentCredentialRecord | None = None,
     repository=None, actor: str = "system",
 ) -> ExternalAgentPublic:
+    _require_authoritative_repository(repository, "token revocation")
     if agent.auth_type == AgentAuthType.MANUAL:
         raise HTTPException(status_code=400, detail="Manual agents do not have revokable tokens")
     now = now_utc()

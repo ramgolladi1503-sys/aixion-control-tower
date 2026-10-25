@@ -7,6 +7,26 @@ import org.junit.Test
 
 class TowerPaletteContrastTest {
     @Test
+    fun controlOutlineTokensMeetThreeToOneAcrossEveryThemeSurface() {
+        listOf(LightTowerPalette, DarkTowerPalette).forEach { palette ->
+            val surfaces = listOf(
+                "canvas" to palette.canvas,
+                "surface" to palette.surface,
+                "raised surface" to palette.surfaceRaised,
+                "subtle surface" to palette.surfaceSubtle
+            )
+
+            surfaces.forEach { (surfaceName, background) ->
+                val ratio = contrastRatio(palette.line, background)
+                assertTrue(
+                    "Control outline on $surfaceName should meet 3:1 non-text contrast, got ${"%.2f".format(ratio)}",
+                    ratio >= 3.0
+                )
+            }
+        }
+    }
+
+    @Test
     fun primaryAndSemanticTextColorsMeetWcagAaOnTheirSurfaces() {
         listOf(LightTowerPalette, DarkTowerPalette).forEach { palette ->
             assertAaContrast("primary action", palette.onBrand, palette.brand)

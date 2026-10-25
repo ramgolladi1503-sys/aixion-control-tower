@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 
 from app import agent_auth
 from app import agent_routes
-from app.agent_credential_models import AgentCreateWithCredentialPolicy
-from app.models import AgentProvider, AuthUser, UserRole
+from app.agent_credential_models import AgentCreateWithCredentialPolicy, AgentCredentialRecord
+from app.models import AgentAuthType, AgentProvider, AuthUser, ExternalAgent, UserRole
 
 
 @pytest.mark.parametrize(
@@ -185,3 +185,93 @@ def test_direct_agent_lookup_remains_available_in_local_mode(
 
     assert selected is agent
     assert credential is None
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=["production", "postgres-auth"],
+)
+@pytest.mark.parametrize("operation", ["register", "rotate", "revoke"])
+def test_external_agent_credential_services_reject_sqlite_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+    operation: str,
+) -> None:
+    class ForbiddenStore:
+        def __getattr__(self, name: str):
+            pytest.fail(f"local store must not be accessed: {name}")
+
+    monkeypatch.setattr(agent_auth, "get_settings", lambda: settings)
+    monkeypatch.setattr(agent_auth, "store", ForbiddenStore())
+    actor = AuthUser(
+        id="owner-1", email="owner@example.test", display_name="Owner", role=UserRole.OWNER
+    )
+    agent = ExternalAgent(
+        id="agent-1",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Antigravity",
+        auth_type=AgentAuthType.API_KEY,
+        created_by_user_id=actor.id,
+        workspace_id="workspace-1",
+        secret_hash="old-hash",
+    )
+    credential = AgentCredentialRecord(agent_id=agent.id)
+    before_agent = agent.model_copy(deep=True)
+    before_credential = credential.model_copy(deep=True)
+    local_repository = agent_auth.agent_auth_repository
+
+    with pytest.raises(HTTPException) as error:
+        if operation == "register":
+            agent_auth.register_external_agent(
+                AgentCreateWithCredentialPolicy(
+                    provider=AgentProvider.ANTIGRAVITY,
+                    display_name="New agent",
+                ),
+                actor,
+            )
+        elif operation == "rotate":
+            agent_auth.rotate_external_agent_token(
+                agent, credential=credential, repository=local_repository
+            )
+        else:
+            agent_auth.revoke_external_agent_token(
+                agent, credential=credential, repository=local_repository
+            )
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert agent == before_agent
+    assert credential == before_credential
+
+
+def test_external_agent_credential_services_keep_local_profile_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_auth,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    agent = ExternalAgent(
+        id="agent-1",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Antigravity",
+        auth_type=AgentAuthType.API_KEY,
+        secret_hash="old-hash",
+    )
+    credential = AgentCredentialRecord(agent_id=agent.id)
+
+    rotated = agent_auth.rotate_external_agent_token(
+        agent, credential=credential, repository=None
+    )
+
+    assert rotated.agent_token
+    assert agent.secret_hash != "old-hash"
+    assert agent_auth.revoke_external_agent_token(
+        agent, credential=credential, repository=None
+    ).enabled
+    assert agent.secret_hash is None
