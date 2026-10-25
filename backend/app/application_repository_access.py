@@ -294,7 +294,12 @@ def mcp_child_server_repository_for_request(
     """Return the MCP registry adapter selected by this application's store mode."""
     app = getattr(request, "app", None)
     state = getattr(app, "state", None)
-    if getattr(get_settings(), "postgres_auth_enabled", False):
+    settings = get_settings()
+    if getattr(settings, "is_production", False) and not getattr(
+        settings, "postgres_auth_enabled", False
+    ):
+        raise RuntimeError("Production MCP registry requires PostgreSQL auth mode")
+    if getattr(settings, "postgres_auth_enabled", False):
         repositories = application_repositories_for_request(request)
         runtime = getattr(state, "postgres_runtime", None)
         repository = getattr(repositories, "mcp_child_servers", None)

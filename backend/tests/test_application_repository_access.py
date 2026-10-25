@@ -576,6 +576,51 @@ def test_mcp_child_server_repository_rejects_mismatched_postgres_runtime(
         repository_access.mcp_child_server_repository_for_request(request)
 
 
+def test_mcp_child_server_repository_rejects_sqlite_binding_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_repository = object()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=None,
+                postgres_repositories=None,
+                mcp_child_server_repository=local_repository,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+
+    with pytest.raises(RuntimeError, match="Production MCP registry requires PostgreSQL auth mode"):
+        repository_access.mcp_child_server_repository_for_request(request)
+
+
+def test_mcp_child_server_repository_keeps_probe_only_local_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_repository = object()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=object(),
+                postgres_repositories=object(),
+                mcp_child_server_repository=local_repository,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+
+    assert repository_access.mcp_child_server_repository_for_request(request) is local_repository
+
+
 def test_test_run_repository_uses_matching_postgres_runtime_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
