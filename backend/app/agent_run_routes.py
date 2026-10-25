@@ -349,6 +349,7 @@ def list_runs(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentRun]:
+    _require_app_bound_request(request, "listing")
     if request is None:
         # Direct route-function calls are retained for focused unit tests; FastAPI
         # always supplies Request for HTTP traffic, which uses durable storage.
@@ -402,6 +403,7 @@ def get_run_summary(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunSummary:
+    _require_app_bound_request(request, "summary")
     if request is None:
         return build_agent_run_summary(workspace_id_for_user(user))
     workspace_id = workspace_id_for_request(user, request)
@@ -681,6 +683,7 @@ def get_run(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
+    _require_app_bound_request(request, "detail")
     if request is None:
         return _detail(_run_or_404(run_id, user))
     return _durable_detail(_durable_run_or_404(run_id, user=user, request=request), request)
@@ -692,6 +695,7 @@ def list_run_steps(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentRunStep]:
+    _require_app_bound_request(request, "step listing")
     if request is None:
         _run_or_404(run_id, user)
         return _steps(run_id)
@@ -705,6 +709,7 @@ def list_run_events(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> list[AgentRunEvent]:
+    _require_app_bound_request(request, "event listing")
     if request is None:
         _run_or_404(run_id, user)
         return _events(run_id)

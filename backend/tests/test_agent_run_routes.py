@@ -135,6 +135,11 @@ def test_create_list_detail_summary_and_metrics_routes() -> None:
 @pytest.mark.parametrize(
     "invoke",
     [
+        lambda user: agent_run_routes.list_runs(user=user),
+        lambda user: agent_run_routes.get_run_summary(user=user),
+        lambda user: agent_run_routes.get_run("missing-run", user=user),
+        lambda user: agent_run_routes.list_run_steps("missing-run", user=user),
+        lambda user: agent_run_routes.list_run_events("missing-run", user=user),
         lambda user: agent_run_routes.recover_stale_run_leases(user=user),
         lambda user: agent_run_routes.bind_run_capability_lease(
             "missing-run",
@@ -159,9 +164,22 @@ def test_create_list_detail_summary_and_metrics_routes() -> None:
             "missing-run", agent_run_routes.AgentRunRetryRequest(), user=user
         ),
     ],
-    ids=["lease-recovery", "capability", "heartbeat", "pause", "resume", "cancel", "retry"],
+    ids=[
+        "list",
+        "summary",
+        "detail",
+        "steps",
+        "events",
+        "lease-recovery",
+        "capability",
+        "heartbeat",
+        "pause",
+        "resume",
+        "cancel",
+        "retry",
+    ],
 )
-def test_mutating_run_routes_require_app_request_in_authoritative_modes(
+def test_run_routes_require_app_request_in_authoritative_modes(
     monkeypatch: pytest.MonkeyPatch,
     authoritative_mode: str,
     invoke,
@@ -189,6 +207,17 @@ def test_mutating_run_routes_require_app_request_in_authoritative_modes(
         "recover_stale_leases",
         lambda **_kwargs: pytest.fail("SQLite lease recovery must not run"),
     )
+    monkeypatch.setattr(
+        agent_run_routes,
+        "build_agent_run_summary",
+        lambda *_args, **_kwargs: pytest.fail("SQLite summary read must not run"),
+    )
+
+    class ForbiddenLocalMap(dict):
+        def values(self):
+            pytest.fail("SQLite AgentRun listing must not run")
+
+    monkeypatch.setattr(agent_run_routes.store, "agent_runs", ForbiddenLocalMap())
     user = AuthUser(
         id="owner",
         email="owner@example.test",
