@@ -114,6 +114,48 @@ def test_install_refuses_shared_writable_hooks_without_partial_config_or_mutatio
     assert not (home / ".config").exists()
 
 
+def test_install_restores_legacy_config_bytes_and_mode_if_hook_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+
+    # Recreate the exact pre-workspace-binding config supported by the
+    # installer's one-time upgrade path, using a restrictive operator mode.
+    legacy_config = {
+        "api_base_url": "http://127.0.0.1:8004",
+        "agent_id": "agent_test_codex",
+        "project_id": "project_test_codex",
+    }
+    legacy_bytes = (json.dumps(legacy_config, indent=2) + "\n").encode()
+    config_path.write_bytes(legacy_bytes)
+    config_path.chmod(0o400)
+    original_hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+    original_hooks["hooks"]["PermissionRequest"] = []
+    hooks_path.write_text(json.dumps(original_hooks), encoding="utf-8")
+    hooks_path.chmod(0o600)
+
+    atomic_write = setup._atomic_write
+
+    def fail_hook_write(path: Path, data: bytes, mode: int) -> None:
+        if path == hooks_path:
+            raise OSError("simulated Codex hooks write failure")
+        atomic_write(path, data, mode)
+
+    monkeypatch.setattr(setup, "_atomic_write", fail_hook_write)
+
+    with pytest.raises(OSError, match="simulated Codex hooks write failure"):
+        _install(workspace, home)
+
+    assert config_path.read_bytes() == legacy_bytes
+    assert config_path.stat().st_mode & 0o777 == 0o400
+    assert json.loads(hooks_path.read_text(encoding="utf-8")) == original_hooks
+
+
 @pytest.mark.parametrize("mode", [0o770, 0o707])
 def test_install_refuses_shared_writable_codex_directory_without_partial_mutation(
     tmp_path: Path, mode: int,
