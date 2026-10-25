@@ -842,6 +842,12 @@ def _run(
         )
         if not lease_live:
             return _decision("deny", "Connector liveness could not be confirmed")
+        # A heartbeat can consume part of the remaining wait. Recompute the
+        # request budget afterward so the decision read cannot use a stale
+        # pre-heartbeat timeout and extend the host deadline.
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            break
         try:
             current = _request(
                 "GET",

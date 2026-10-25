@@ -1219,6 +1219,63 @@ def test_run_honors_retry_after_only_until_host_deadline(
     assert request_timeouts == [3, hook.EXPIRY_CLEANUP_TIMEOUT_SECONDS]
 
 
+def test_slow_heartbeat_reduces_next_decision_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heartbeat latency must not be added on top of the configured wait."""
+    clock = _patch_clock(monkeypatch)
+    monkeypatch.setattr(hook, "INVOCATION_HEARTBEAT_INTERVAL_SECONDS", 1)
+    created: dict = {}
+    decision_timeouts: list[float] = []
+    endpoints: list[str] = []
+    decision_reads = 0
+    environment = _codex_environment()
+    environment["AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(
+        method: str,
+        url: str,
+        _config: dict,
+        _token: str,
+        body: dict | None = None,
+        **kwargs: object,
+    ) -> dict:
+        nonlocal decision_reads
+        endpoints.append(url.rsplit("/", 1)[-1])
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_codex_approval(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            decision_reads += 1
+            timeout = kwargs.get("timeout_seconds")
+            assert isinstance(timeout, float)
+            decision_timeouts.append(timeout)
+            if decision_reads == 1:
+                return {**created, "status": "PENDING_REVIEW"}
+            clock.now += timeout
+            return {**created, "status": "PENDING_REVIEW"}
+        if method == "POST" and url.endswith("/heartbeat"):
+            timeout = kwargs.get("timeout_seconds")
+            assert isinstance(timeout, float)
+            # The successful heartbeat uses 0.75 of the remaining second.
+            clock.now += 0.75
+            return _invocation_heartbeat(created)
+        if method == "POST" and url.endswith("/expire"):
+            return {**created, "status": "EXPIRED"}
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_codex_event(), environment)
+
+    assert result[0] == "deny"
+    assert decision_reads == 2
+    assert decision_timeouts[0] == pytest.approx(3.0)
+    assert decision_timeouts[1] == pytest.approx(0.25)
+    assert clock.now == pytest.approx(103.0)
+    assert "consume" not in endpoints
+
+
 def test_long_retry_after_renews_invocation_lease_before_retrying(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1098,6 +1098,63 @@ def test_pending_poll_sleep_does_not_extend_configured_wait_deadline(
     assert not any(method == "POST" and suffix == "consume" for method, suffix, _ in calls)
 
 
+def test_slow_heartbeat_reduces_next_decision_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heartbeat latency must not be added on top of a stale poll timeout."""
+    clock = _patch_clock(monkeypatch)
+    monkeypatch.setattr(hook, "INVOCATION_HEARTBEAT_INTERVAL_SECONDS", 1)
+    created: dict = {}
+    decision_timeouts: list[float] = []
+    endpoints: list[str] = []
+    decision_reads = 0
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(
+        method: str,
+        url: str,
+        _agent_id: str,
+        _token: str,
+        body: dict | None = None,
+        **kwargs: object,
+    ) -> dict:
+        nonlocal decision_reads
+        endpoints.append(url.rsplit("/", 1)[-1])
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            decision_reads += 1
+            timeout = kwargs.get("timeout_seconds")
+            assert isinstance(timeout, float)
+            decision_timeouts.append(timeout)
+            if decision_reads == 1:
+                return {**created, "status": "PENDING_REVIEW"}
+            clock.now += timeout
+            return {**created, "status": "PENDING_REVIEW"}
+        if method == "POST" and url.endswith("/heartbeat"):
+            timeout = kwargs.get("timeout_seconds")
+            assert isinstance(timeout, float)
+            # The successful heartbeat uses 0.75 of the remaining second.
+            clock.now += 0.75
+            return _invocation_heartbeat(created)
+        if method == "POST" and url.endswith("/expire"):
+            return {**created, "status": "EXPIRED"}
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert decision_reads == 2
+    assert decision_timeouts[0] == 3.0
+    assert decision_timeouts[1] == pytest.approx(0.25)
+    assert clock.now == pytest.approx(103.0)
+    assert "consume" not in endpoints
+
+
 def test_request_uses_the_supplied_transport_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     observed: list[tuple[object, ...]] = []
 
