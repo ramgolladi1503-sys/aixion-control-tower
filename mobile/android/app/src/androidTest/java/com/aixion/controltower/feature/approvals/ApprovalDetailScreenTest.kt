@@ -158,7 +158,22 @@ class ApprovalDetailScreenTest {
     fun expiredApprovalShowsClosedStateAndDisablesEveryDecision() {
         composeRule.setContent { ApprovalDetailContent(approval(ApprovalStatus.EXPIRED), null, {}, {}, {}) }
 
-        composeRule.onNodeWithText("Decision closed").assertExists()
+        composeRule.onNodeWithText("Request expired").assertExists()
+        composeRule.onNodeWithText(
+            "This request expired and can no longer be approved or denied."
+        ).assertExists()
+        composeRule.onNodeWithText("Approve request").assertDoesNotExist()
+        composeRule.onNodeWithText("Deny").assertDoesNotExist()
+    }
+
+    @Test
+    fun cancelledApprovalExplainsThatTheRequestWasCancelled() {
+        composeRule.setContent { ApprovalDetailContent(approval(ApprovalStatus.CANCELLED), null, {}, {}, {}) }
+
+        composeRule.onNodeWithText("Request cancelled").assertExists()
+        composeRule.onNodeWithText(
+            "This request was cancelled and can no longer be approved or denied."
+        ).assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
         composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
@@ -176,7 +191,7 @@ class ApprovalDetailScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("Decision closed").assertExists()
+        composeRule.onNodeWithText("Request expired").assertExists()
         composeRule.onNodeWithText("Decision sent: approve. Request moved out of the active queue.")
             .assertDoesNotExist()
     }
@@ -594,7 +609,7 @@ class ApprovalDetailScreenTest {
         )
         composeRule.onNodeWithText("Request ail-test").assertIsDisplayed()
         composeRule.onNodeWithTag("approval-decision-identity-title")
-            .assertTextContains("Review full request")
+            .assertTextContains("Review request")
         val viewport = composeRule.onNodeWithTag("approval-short-viewport").fetchSemanticsNode().boundsInRoot
         val panel = composeRule.onNodeWithTag("approval-decision-panel").fetchSemanticsNode().boundsInRoot
         val deny = composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot
@@ -612,7 +627,7 @@ class ApprovalDetailScreenTest {
         identity.assertIsDisplayed()
         composeRule.onNodeWithText("Request ail-test").assertIsDisplayed()
         composeRule.onNodeWithTag("approval-decision-identity-title")
-            .assertTextContains("Review full request")
+            .assertTextContains("Review request")
         assertEquals(deny.top, composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot.top)
         assertEquals(approve.top, composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot.top)
     }
@@ -703,15 +718,14 @@ class ApprovalDetailScreenTest {
         }
 
         val compactTitle = composeRule.onNodeWithTag("approval-decision-identity-title")
-        compactTitle.assertTextContains(request.title)
+        compactTitle.assertTextContains("Review request")
         compactTitle.assertIsDisplayed()
-        assertTrue(
-            "The compact approval title should wrap instead of hiding the request identity",
-            compactTitle.fetchSemanticsNode().boundsInRoot.height > 48f
-        )
         composeRule.onNodeWithContentDescription(
-            "Review full request: Run the requested production shell command from CODEX, request 87654321."
+            "Review request: Run the requested production shell command from Codex, request 87654321, risk high."
         ).assertExists()
+        compactTitle.performClick()
+        composeRule.onNodeWithText("Action: Run the requested production shell command").assertIsDisplayed()
+        composeRule.onNodeWithText("Close").performClick()
         composeRule.onNodeWithTag("approval-decision-identity")
             .assertIsDisplayed()
         composeRule.onNodeWithText("CODEX", useUnmergedTree = true).assertIsDisplayed()

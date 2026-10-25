@@ -52,7 +52,6 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -323,10 +322,22 @@ fun ApprovalDetailContent(
                         )
                     }
                 } else if (!canDecide && !decisionNeedsReconciliation && !decisionInFlight) {
+                    val terminalCopy = when (approval.status) {
+                        ApprovalStatus.EXPIRED -> "This request expired and can no longer be approved or denied."
+                        ApprovalStatus.CANCELLED -> "This request was cancelled and can no longer be approved or denied."
+                        ApprovalStatus.DENIED, ApprovalStatus.REJECTED ->
+                            "This request was denied. Its decision cannot be changed."
+                        else -> "This approval is ${approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}. Decisions are available only while it is pending."
+                    }
                     item {
                         WarningPanel(
-                            title = "Decision closed",
-                            body = "This approval is ${approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}. Decisions are available only while it is pending."
+                            title = when (approval.status) {
+                                ApprovalStatus.EXPIRED -> "Request expired"
+                                ApprovalStatus.CANCELLED -> "Request cancelled"
+                                ApprovalStatus.DENIED, ApprovalStatus.REJECTED -> "Request denied"
+                                else -> "Decision closed"
+                            },
+                            body = terminalCopy
                         )
                     }
                 }
@@ -1041,28 +1052,31 @@ private fun DecisionPanel(
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
-        Text(
-            text = approvalTitle,
-            color = if (compactLayout) palette.brand else palette.ink,
-            style = if (compactLayout) {
-                MaterialTheme.typography.labelLarge.copy(textDecoration = TextDecoration.Underline)
-            } else {
-                MaterialTheme.typography.titleSmall
-            },
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = if (compactLayout) {
-                Modifier
+        if (compactLayout) {
+            TextButton(
+                onClick = onReviewFullRequest,
+                modifier = Modifier
+                    .fillMaxWidth()
                     .heightIn(min = 48.dp)
                     .semantics(mergeDescendants = true) {
-                        contentDescription = "Review full request: $approvalTitle from $approvalProvider, request ${shortSafeApprovalId(approvalId)}."
+                        contentDescription = "Review request: $approvalTitle from ${approvalProviderName(approvalProvider)}, request ${shortSafeApprovalId(approvalId)}, risk ${approvalRisk.name.lowercase().replace('_', ' ')}."
                     }
-                    .clickable(role = Role.Button, onClick = onReviewFullRequest)
                     .testTag("approval-decision-identity-title")
-            } else {
-                Modifier.testTag("approval-decision-identity-title")
+            ) {
+                Text(
+                    text = "Review request",
+                    color = palette.brand,
+                    style = MaterialTheme.typography.labelLarge
+                )
             }
-        )
+        } else {
+            Text(
+                text = approvalTitle,
+                color = palette.ink,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.testTag("approval-decision-identity-title")
+            )
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
