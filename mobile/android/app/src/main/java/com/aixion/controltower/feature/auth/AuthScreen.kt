@@ -2,6 +2,7 @@ package com.aixion.controltower.feature.auth
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -104,15 +105,21 @@ internal fun AuthFormViewport(content: @Composable () -> Unit) {
             .fillMaxSize()
             .background(palette.canvas)
     ) {
+        val viewportHeight = maxHeight
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = maxHeight)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-            verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg, Alignment.CenterVertically)
         ) {
-            content()
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = viewportHeight)
+                    .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+                contentAlignment = Alignment.Center
+            ) {
+                content()
+            }
         }
     }
 }
@@ -222,7 +229,10 @@ internal fun AuthFormContent(
         if (verificationStarted) registrationExpanded = true
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
+    Column(
+        modifier = Modifier.testTag("auth-form-content"),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+    ) {
         Text(
             text = when {
                 state.verificationRequired -> "Verify your email"

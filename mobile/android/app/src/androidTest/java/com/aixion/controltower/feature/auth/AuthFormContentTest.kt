@@ -348,16 +348,16 @@ class AuthFormContentTest {
         register.assertExists()
         val viewportBounds = composeRule.onNodeWithTag("auth-form-viewport")
             .fetchSemanticsNode().boundsInRoot
-        val headingBounds = heading.fetchSemanticsNode().boundsInRoot
-        val registerBounds = register.fetchSemanticsNode().boundsInRoot
-        val clusterCenter = (headingBounds.top + registerBounds.bottom) / 2f
+        val clusterBounds = composeRule.onNodeWithTag("auth-form-content")
+            .fetchSemanticsNode().boundsInRoot
+        val clusterCenter = (clusterBounds.top + clusterBounds.bottom) / 2f
         val viewportCenter = (viewportBounds.top + viewportBounds.bottom) / 2f
-        val centerTolerance = viewportBounds.height * 0.015f
+        val centerTolerance = with(composeRule.density) { 2.dp.toPx() }
 
-        assertTrue("The login cluster should fit within the available viewport", headingBounds.top >= viewportBounds.top)
-        assertTrue("The login cluster should fit within the available viewport", registerBounds.bottom <= viewportBounds.bottom)
+        assertTrue("The login cluster should fit within the available viewport", clusterBounds.top >= viewportBounds.top)
+        assertTrue("The login cluster should fit within the available viewport", clusterBounds.bottom <= viewportBounds.bottom)
         assertTrue(
-            "A fitting login cluster should be centered vertically: center=$clusterCenter viewport=$viewportCenter bounds=$viewportBounds/$headingBounds/$registerBounds",
+            "A fitting login cluster should be centered vertically: center=$clusterCenter viewport=$viewportCenter bounds=$viewportBounds/$clusterBounds",
             kotlin.math.abs(clusterCenter - viewportCenter) <= centerTolerance
         )
     }
