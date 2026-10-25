@@ -226,6 +226,37 @@ def test_production_connector_routes_without_request_context_do_not_fall_back_to
     assert store.audit_events == before_audits
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        connector_routes.issue_connector_secret_route,
+        connector_routes.rotate_connector_secret_route,
+    ],
+    ids=["issue-secret", "rotate-secret"],
+)
+def test_production_connector_secret_routes_without_request_context_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    operation,
+) -> None:
+    monkeypatch.setattr(
+        connector_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+    connector = AgentConnector(name="Must remain unchanged")
+    monkeypatch.setitem(store.agent_connectors, connector.id, connector)
+    before_connector = connector.model_copy(deep=True)
+    before_audits = list(store.audit_events)
+
+    with pytest.raises(HTTPException) as error:
+        operation(connector.id, user=None)
+
+    assert error.value.status_code == 503
+    assert store.agent_connectors[connector.id] == before_connector
+    assert connector.config == before_connector.config
+    assert store.audit_events == before_audits
+
+
 def test_connector_route_rejects_repository_bundle_from_another_runtime_without_mutation(
     postgres_connector_route_runtime,
     monkeypatch: pytest.MonkeyPatch,

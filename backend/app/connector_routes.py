@@ -128,7 +128,7 @@ def _get_connector_or_404(connector_id: str, user: AuthUser | None = None) -> Ag
 
 
 def _get_bound_connector_or_404(
-    connector_id: str, user: AuthUser, request: Request
+    connector_id: str, user: AuthUser, request: Request | None
 ) -> AgentConnector | None:
     """Read from the explicitly bound repository, or signal local adapter use."""
     repository = _connector_repository_or_none(request)
@@ -421,7 +421,7 @@ def simulate_connector_webhook_route(
     user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSimulationResponse:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     if bound is None:
         # Keep the existing explicitly local/demo compatibility path. When a
         # connector repository is app-bound, simulation must use the same
@@ -463,7 +463,7 @@ def get_connector_mapper(
     connector_id: str, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSchemaMapperStatus:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     return get_connector_schema_mapper_status(bound if bound is not None else _get_connector_or_404(connector_id, user))
 
 
@@ -472,7 +472,7 @@ def update_connector_mapper(
     connector_id: str, payload: ConnectorSchemaMapperConfig, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSchemaMapperStatus:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
     expected_updated_at = connector.updated_at
     status = set_connector_schema_mapper(connector, payload)
@@ -492,7 +492,7 @@ def preview_connector_mapper(
     connector_id: str, payload: ConnectorSchemaMapperPreviewRequest, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSchemaMapperPreviewResponse:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
     return preview_connector_schema_mapping(connector, payload)
 
@@ -502,7 +502,7 @@ def get_connector(
     connector_id: str, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     return _to_public(bound if bound is not None else _get_connector_or_404(connector_id, user))
 
 
@@ -511,7 +511,7 @@ def update_connector(
     connector_id: str, payload: ConnectorUpdate, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     workspace_id = (
         workspace_id_for_request(user, http_request) or user.workspace_id
         if http_request is not None else workspace_id_for_user(user)
@@ -556,7 +556,7 @@ def disable_connector(
     connector_id: str, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
     expected_updated_at = connector.updated_at
     previous_status = connector.status
@@ -578,7 +578,7 @@ def enable_connector(
     connector_id: str, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
     expected_updated_at = connector.updated_at
     previous_status = connector.status
@@ -601,7 +601,7 @@ def get_connector_credentials(
     http_request: Request = None,  # type: ignore[assignment]
     source_invocation_id: str | None = Query(default=None, min_length=1, max_length=256),
 ) -> ConnectorCredentialStatus:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
     if source_invocation_id is None:
         return connector_credential_status(connector)
@@ -649,7 +649,7 @@ def issue_connector_secret_route(
     user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSecretIssueResponse:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
     expected_updated_at = connector.updated_at
     secret, secret_ref, secret_hint = issue_connector_secret(connector)
@@ -670,7 +670,7 @@ def rotate_connector_secret_route(
     user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorSecretIssueResponse:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
     expected_updated_at = connector.updated_at
     secret, secret_ref, secret_hint = issue_connector_secret(connector)
@@ -689,7 +689,7 @@ def revoke_connector_secret_route(
     connector_id: str, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ConnectorPublic:
-    bound = None if http_request is None else _get_bound_connector_or_404(connector_id, user, http_request)
+    bound = _get_bound_connector_or_404(connector_id, user, http_request)
     connector = bound if bound is not None else _get_connector_or_404(connector_id, user)
     expected_updated_at = connector.updated_at
     revoke_connector_secret(connector)
