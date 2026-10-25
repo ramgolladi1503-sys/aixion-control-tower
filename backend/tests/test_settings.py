@@ -403,6 +403,18 @@ def test_auth_rate_limit_configuration_is_explicit_and_bounded(
     assert settings.auth_resend_limit_per_email == 2
 
 
+def test_connector_webhook_body_limit_is_configurable_and_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AIXION_CONNECTOR_WEBHOOK_MAX_BODY_BYTES", "2048")
+    assert get_settings().connector_webhook_max_body_bytes == 2048
+
+    for value in ("1023", "10485761", "not-an-integer"):
+        monkeypatch.setenv("AIXION_CONNECTOR_WEBHOOK_MAX_BODY_BYTES", value)
+        with pytest.raises(ValueError, match="AIXION_CONNECTOR_WEBHOOK_MAX_BODY_BYTES"):
+            get_settings()
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

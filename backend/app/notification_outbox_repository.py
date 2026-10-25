@@ -39,6 +39,18 @@ class PostgresNotificationOutboxRepository:
     def __init__(self, connect: Callable[[], Connection]) -> None:
         self._connect = connect
 
+    @staticmethod
+    def _operation_time(conn: Connection, supplied: datetime | None) -> datetime:
+        """Use an injected test time or PostgreSQL's clock for runtime leases."""
+        if supplied is not None:
+            if supplied.utcoffset() is None:
+                raise ValueError("Notification outbox time must be timezone-aware")
+            return supplied
+        row = conn.execute("SELECT clock_timestamp()").fetchone()
+        if row is None or row[0].utcoffset() is None:
+            raise RuntimeError("PostgreSQL did not provide a timezone-aware outbox clock")
+        return row[0]
+
     def metrics_snapshot(
         self,
         *,
@@ -99,9 +111,8 @@ class PostgresNotificationOutboxRepository:
             raise ValueError("max_attempts must be positive")
         if lease_seconds < 1:
             raise ValueError("lease_seconds must be positive")
-        current_time = now or now_utc()
-
         with self._connect() as conn:
+            current_time = self._operation_time(conn, now)
             row = conn.execute(
                 "SELECT payload, notification_id, workspace_id, user_id, approval_id, "
                 "task_id, entity_type, status, attempts, next_attempt_at, lease_expires_at "
@@ -150,6 +161,7 @@ class PostgresNotificationOutboxRepository:
         push_error: str | None,
         next_attempt_at: datetime | None,
         completed_at: datetime | None = None,
+        next_attempt_delay_seconds: int | None = None,
         invalid_devices: tuple[tuple[str, str], ...] = (),
     ) -> Notification | None:
         """Persist one claim result and matching dead-token cleanup atomically.
@@ -163,9 +175,17 @@ class PostgresNotificationOutboxRepository:
             raise ValueError("expected_attempts must be positive")
         if push_status not in _FINAL_PUSH_STATES:
             raise ValueError("Outbox outcome must be a terminal or retry-wait state")
-        current_time = completed_at or now_utc()
+        if next_attempt_delay_seconds is not None and next_attempt_delay_seconds < 1:
+            raise ValueError("Retry delay must be positive")
+        if next_attempt_delay_seconds is not None and next_attempt_at is not None:
+            raise ValueError("Specify either a retry time or a retry delay")
+        if next_attempt_delay_seconds is not None and push_status != "RETRY_WAIT":
+            raise ValueError("Only retry-wait outcomes may specify a retry delay")
+        if next_attempt_at is not None and next_attempt_at.utcoffset() is None:
+            raise ValueError("Notification retry time must be timezone-aware")
+        current_time = completed_at
         if push_status == "RETRY_WAIT":
-            if next_attempt_at is None or next_attempt_at <= current_time:
+            if next_attempt_at is None and next_attempt_delay_seconds is None:
                 raise ValueError("Retry-wait outcome requires a future retry time")
             if not push_error:
                 raise ValueError("Retry-wait outcome requires a bounded failure category")
@@ -186,11 +206,17 @@ class PostgresNotificationOutboxRepository:
             raise ValueError("Invalid-device cleanup requires bounded device and token values")
 
         with self._connect() as conn:
+            current_time = self._operation_time(conn, current_time)
+            if next_attempt_delay_seconds is not None:
+                next_attempt_at = current_time + timedelta(seconds=next_attempt_delay_seconds)
+            if push_status == "RETRY_WAIT" and next_attempt_at <= current_time:
+                raise ValueError("Retry-wait outcome requires a future retry time")
             row = conn.execute(
                 "SELECT payload, notification_id, workspace_id, user_id, approval_id, "
                 "task_id, entity_type, status, attempts, next_attempt_at, lease_expires_at "
                 "FROM notifications WHERE notification_id=%s AND status='SENDING' "
-                "AND attempts=%s AND lease_expires_at > %s FOR UPDATE",
+                "AND attempts=%s AND lease_expires_at > %s "
+                "AND lease_expires_at > clock_timestamp() FOR UPDATE",
                 (notification_id, expected_attempts, current_time),
             ).fetchone()
             if row is None:
@@ -215,7 +241,8 @@ class PostgresNotificationOutboxRepository:
             update = conn.execute(
                 "UPDATE notifications SET status=%s, next_attempt_at=%s, "
                 "lease_expires_at=NULL, payload=%s WHERE notification_id=%s "
-                "AND status='SENDING' AND attempts=%s AND lease_expires_at > %s",
+                "AND status='SENDING' AND attempts=%s AND lease_expires_at > %s "
+                "AND lease_expires_at > clock_timestamp()",
                 (
                     updated.push_status,
                     updated.push_next_attempt_at,
@@ -244,16 +271,14 @@ class PostgresNotificationOutboxRepository:
             raise ValueError("Expected attempts must be positive")
         if lease_seconds < 1:
             raise ValueError("Lease duration must be positive")
-        current_time = now or now_utc()
-        if current_time.utcoffset() is None:
-            raise ValueError("Notification claim time must be timezone-aware")
-
         with self._connect() as conn:
+            current_time = self._operation_time(conn, now)
             row = conn.execute(
                 "SELECT payload, notification_id, workspace_id, user_id, approval_id, "
                 "task_id, entity_type, status, attempts, next_attempt_at, lease_expires_at "
                 "FROM notifications WHERE notification_id=%s AND status='SENDING' "
-                "AND attempts=%s AND lease_expires_at > %s FOR UPDATE",
+                "AND attempts=%s AND lease_expires_at > %s "
+                "AND lease_expires_at > clock_timestamp() FOR UPDATE",
                 (notification_id, expected_attempts, current_time),
             ).fetchone()
             if row is None:
@@ -268,7 +293,7 @@ class PostgresNotificationOutboxRepository:
             update = conn.execute(
                 "UPDATE notifications SET lease_expires_at=%s, payload=%s "
                 "WHERE notification_id=%s AND status='SENDING' AND attempts=%s "
-                "AND lease_expires_at > %s",
+                "AND lease_expires_at > %s AND lease_expires_at > clock_timestamp()",
                 (
                     renewed.push_lease_expires_at,
                     Jsonb(renewed.model_dump(mode="json")),

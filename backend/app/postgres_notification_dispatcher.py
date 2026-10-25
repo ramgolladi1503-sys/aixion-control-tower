@@ -6,7 +6,6 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from threading import Event, Thread
 
-from .models import now_utc
 from .notification_outbox_repository import PostgresNotificationOutboxRepository
 from .notifications import (
     _is_retryable_push_failure,
@@ -108,9 +107,10 @@ def dispatch_one_postgres_push(
     if not settings.push_dispatch_enabled:
         return None
 
-    claimed_at = now or now_utc()
     notification = repository.claim_next_due(
-        now=claimed_at,
+        # Leave runtime time selection to PostgreSQL so a host clock offset
+        # cannot shorten or extend the durable claim lease.
+        now=now,
         max_attempts=settings.push_max_attempts,
         lease_seconds=settings.push_lease_seconds,
     )
@@ -200,8 +200,8 @@ def dispatch_one_postgres_push(
         outcome_status = "NO_DEVICE"
         outcome_error = None
 
-    completed_at = now or now_utc()
     next_attempt_at = None
+    next_attempt_delay_seconds = None
     if outcome_status == "FAILED" and _is_retryable_push_failure(outcome_error):
         if notification.push_attempts < settings.push_max_attempts:
             delay = _push_retry_delay_seconds(
@@ -210,7 +210,10 @@ def dispatch_one_postgres_push(
                 maximum_seconds=settings.push_retry_max_seconds,
             )
             outcome_status = "RETRY_WAIT"
-            next_attempt_at = completed_at + timedelta(seconds=delay)
+            if now is not None:
+                next_attempt_at = now + timedelta(seconds=delay)
+            else:
+                next_attempt_delay_seconds = delay
         else:
             outcome_error = "FCM_RETRIES_EXHAUSTED"
 
@@ -223,7 +226,8 @@ def dispatch_one_postgres_push(
             push_status=outcome_status,
             push_error=outcome_error,
             next_attempt_at=next_attempt_at,
-            completed_at=completed_at,
+            completed_at=now,
+            next_attempt_delay_seconds=next_attempt_delay_seconds,
             invalid_devices=tuple(invalid_devices),
         )
     except Exception:

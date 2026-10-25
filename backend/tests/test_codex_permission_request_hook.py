@@ -981,6 +981,54 @@ def test_setup_and_remove_preserve_unrelated_codex_hooks(tmp_path: Path) -> None
     assert remaining == {"hooks": {"SessionStart": [{"matcher": "startup", "hooks": []}]}}
 
 
+@pytest.mark.parametrize("operation", ["install", "remove"])
+def test_setup_refuses_duplicate_hook_json_keys_without_mutation(
+    tmp_path: Path, operation: str
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    config_path: Path | None = None
+    hooks_path = workspace / ".codex" / "hooks.json"
+    hooks_path.parent.mkdir()
+    if operation == "remove":
+        config_path, hooks_path = setup.install_workspace(
+            workspace,
+            api_base_url="https://api.example.test",
+            agent_id="agent-codex-test",
+            project_id="project-codex-test",
+            home=home,
+        )
+    # Two conflicting top-level hook maps would otherwise be silently reduced
+    # to the last map, potentially deleting operator-owned hook definitions.
+    hooks_path.write_text(
+        '{"hooks":{"SessionStart":[{"matcher":"one","hooks":[]}]},'
+        '"hooks":{"Stop":[{"matcher":"two","hooks":[]}]}}',
+        encoding="utf-8",
+    )
+    original_hooks = hooks_path.read_bytes()
+
+    with pytest.raises(setup.SetupError, match="Cannot safely read JSON file"):
+        if operation == "install":
+            setup.install_workspace(
+                workspace,
+                api_base_url="https://api.example.test",
+                agent_id="agent-codex-test",
+                project_id="project-codex-test",
+                home=home,
+            )
+        else:
+            setup.remove_workspace(workspace, home=home)
+
+    assert hooks_path.read_bytes() == original_hooks
+    if operation == "install":
+        assert config_path is None
+        assert not (home / ".config" / "aixion" / "workspaces").exists()
+    else:
+        assert config_path is not None and config_path.is_file()
+
+
 def test_setup_persists_canonical_workspace_and_upgrades_legacy_config(tmp_path: Path) -> None:
     real_parent = tmp_path / "real-parent"
     workspace = real_parent / "project"

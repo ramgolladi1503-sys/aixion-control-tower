@@ -23,6 +23,16 @@ class SetupError(Exception):
     """A setup precondition failed without modifying unrelated hooks."""
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Refuse ambiguous managed JSON instead of silently discarding entries."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def _api_url(value: str) -> str:
     value = value.strip().rstrip("/")
     try:
@@ -67,8 +77,8 @@ def _read_json(path: Path, *, allow_missing: bool, require_private: bool = False
             raw = stream.read(MAX_JSON_BYTES + 1)
         if len(raw) > MAX_JSON_BYTES:
             raise SetupError(f"Managed JSON file exceeds {MAX_JSON_BYTES} bytes: {path}")
-        value = json.loads(raw)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        value = json.loads(raw, object_pairs_hook=_reject_duplicate_json_keys)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise SetupError(f"Cannot safely read JSON file: {path}") from exc
     if not isinstance(value, dict):
         raise SetupError(f"Expected a JSON object: {path}")

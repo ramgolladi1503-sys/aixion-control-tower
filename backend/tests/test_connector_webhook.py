@@ -6,6 +6,8 @@ import json
 import os
 import time
 
+import pytest
+
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
@@ -284,3 +286,40 @@ def test_connector_webhook_rate_limit_blocks_excess_requests() -> None:
     assert second.status_code == 429
     assert second.json()["detail"] == "Connector webhook rate limit exceeded"
     assert any(event.event_type == "connector.webhook_rate_limited" for event in store.audit_events)
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_oversized_connector_webhook_is_rejected_before_auth_state_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    chunked: bool,
+) -> None:
+    monkeypatch.setenv("AIXION_CONNECTOR_WEBHOOK_MAX_BODY_BYTES", "1024")
+    project = _project()
+    connector_json, secret = _connector(project.id, auth_type="HMAC")
+    connector = store.agent_connectors[connector_json["id"]]
+    initial_config = dict(connector.config)
+    initial_failure_count = connector.failed_auth_count
+    initial_audit_count = len(store.audit_events)
+    initial_task_ids = set(store.agent_tasks)
+
+    body = "x" * 1025
+    body_bytes = body.encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(_hmac_v1_headers(secret, body, nonce="oversized-body-nonce"))
+    response = client.post(
+        f"/connectors/{connector.id}/webhook",
+        content=(
+            iter((body_bytes[:512], body_bytes[512:1024], body_bytes[1024:]))
+            if chunked
+            else body_bytes
+        ),
+        headers=headers,
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Connector webhook payload is too large"
+    assert connector.config == initial_config
+    assert connector.failed_auth_count == initial_failure_count
+    assert len(store.audit_events) == initial_audit_count
+    assert set(store.agent_tasks) == initial_task_ids
+    assert "oversized-body-nonce" not in connector.config.get("hmac_nonce_history", {})

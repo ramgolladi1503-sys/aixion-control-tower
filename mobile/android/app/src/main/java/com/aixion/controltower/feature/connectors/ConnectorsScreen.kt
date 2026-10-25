@@ -1,6 +1,11 @@
 package com.aixion.controltower.feature.connectors
 
 import androidx.compose.foundation.background
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,7 +18,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
@@ -48,15 +58,43 @@ fun ConnectorsContent(
     ) {
         item { ConnectorsHero() }
         item { ProviderSetupPanel(onOpenAgentAccess = onOpenAgentAccess) }
-        item { ConnectorPrerequisitesPanel() }
-        item { ApprovalFlowNote() }
+        item { ConnectionGuidanceDisclosure() }
     }
 }
 
 @Composable
-private fun ConnectorPrerequisitesPanel() {
+private fun ConnectionGuidanceDisclosure() {
+    var expanded by remember { mutableStateOf(false) }
     val palette = LocalTowerPalette.current
     TowerPanel {
+        TextButton(
+            onClick = { expanded = !expanded },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = if (expanded) "Hide connection details" else "How connection works",
+                color = palette.brand,
+                style = MaterialTheme.typography.titleMedium
+            )
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically()
+        ) {
+            Column {
+                ConnectorPrerequisitesContent()
+                Spacer(modifier = Modifier.height(TowerSpacing.md))
+                ApprovalFlowNote()
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConnectorPrerequisitesContent() {
+    val palette = LocalTowerPalette.current
+    Column {
         Text(
             "Before you connect",
             modifier = Modifier.semantics { heading() },
@@ -202,7 +240,7 @@ private fun ProviderSetupCard(
 @Composable
 private fun ApprovalFlowNote() {
     val palette = LocalTowerPalette.current
-    TowerPanel {
+    Column {
         Text(
             text = "When an approval arrives",
             color = palette.ink,

@@ -266,6 +266,38 @@ def test_claim_uses_attempt_fencing_and_rejects_stale_worker_result(
     assert accepted_result.push_lease_expires_at is None
 
 
+@pytest.mark.parametrize("clock_offset", [timedelta(days=1), -timedelta(days=1)])
+def test_runtime_claim_and_outcome_use_postgres_clock_not_worker_clock(
+    outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
+    monkeypatch: pytest.MonkeyPatch,
+    clock_offset: timedelta,
+) -> None:
+    repository, connect = outbox_repository
+    _, _, notification = _seed_notification(connect)
+    with connect() as conn:
+        database_now = conn.execute("SELECT clock_timestamp()").fetchone()[0]
+
+    # Simulate a worker whose wall clock is far ahead or behind. Runtime calls
+    # omit the explicit test-time override and must still use database time.
+    monkeypatch.setattr(
+        "app.notification_outbox_repository.now_utc",
+        lambda: database_now + clock_offset,
+    )
+    claimed = repository.claim_next_due(max_attempts=3, lease_seconds=30)
+
+    assert claimed is not None and claimed.id == notification.id
+    assert claimed.push_lease_expires_at is not None
+    assert database_now < claimed.push_lease_expires_at <= database_now + timedelta(seconds=45)
+    outcome = repository.record_outcome(
+        notification_id=claimed.id,
+        expected_attempts=claimed.push_attempts,
+        push_status="SENT",
+        push_error=None,
+        next_attempt_at=None,
+    )
+    assert outcome is not None and outcome.push_status == "SENT"
+
+
 def test_retry_outcome_requires_future_retry_time_and_bounded_error_category(
     outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
 ) -> None:

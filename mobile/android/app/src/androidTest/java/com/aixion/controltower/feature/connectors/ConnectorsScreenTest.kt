@@ -32,6 +32,7 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Set up a project").assertExists()
         composeRule.onNodeWithText("Connect your coding agent").assertExists()
+        composeRule.onNodeWithText("How connection works").performClick()
         composeRule.onNodeWithText("Before you connect").assertExists()
         composeRule.onNodeWithText("Open the project on the agent computer").assertExists()
         composeRule.onNodeWithText(
@@ -82,6 +83,7 @@ class ConnectorsScreenTest {
             "Your decision returns to the waiting task only while its agent computer, session, and API remain reachable."
         composeRule.setContent { ConnectorsContent() }
 
+        composeRule.onNodeWithText("How connection works").performScrollTo().performClick()
         composeRule.onNodeWithText("When an approval arrives")
             .performScrollTo()
             .assertIsDisplayed()
@@ -89,6 +91,23 @@ class ConnectorsScreenTest {
             .assertExists()
             .assertTextEquals(explanation)
             .assertIsDisplayed()
+    }
+
+    @Test
+    fun connectionGuidanceStartsCollapsedAndExpandsWithoutHidingProviderChoices() {
+        composeRule.setContent { ConnectorsContent() }
+
+        composeRule.onNodeWithText("Set up Antigravity").assertExists()
+        composeRule.onNodeWithText("How connection works").assertExists()
+        composeRule.onNodeWithText("Before you connect").assertDoesNotExist()
+
+        composeRule.onNodeWithText("How connection works").performClick()
+        composeRule.onNodeWithText("Before you connect").assertExists()
+        composeRule.onNodeWithText("Keep it reachable").assertExists()
+        composeRule.onNodeWithText("When an approval arrives").assertExists()
+        composeRule.onNodeWithText("Hide connection details").performClick()
+        composeRule.onNodeWithText("Before you connect").assertDoesNotExist()
+        composeRule.onNodeWithText("Set up Antigravity").assertExists()
     }
 
     @Test
@@ -154,6 +173,7 @@ class ConnectorsScreenTest {
         }
 
         val providerHeading = composeRule.onNodeWithText("Choose a provider")
+        composeRule.onNodeWithText("How connection works").performClick()
         val prerequisiteHeading = composeRule.onNodeWithText("Before you connect")
         providerHeading.assertIsDisplayed()
         prerequisiteHeading.assertIsDisplayed()

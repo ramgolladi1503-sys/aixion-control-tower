@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -35,6 +36,7 @@ from .connector_repository import (
     ConnectorWebhookReplay,
 )
 from .project_repository import ProjectRepository
+from .settings import get_settings
 from .workspace_membership_repository import WorkspaceMembershipRepository
 from .approval_decisions import agent_task_repository
 from .models import AgentAction, AgentProvider, AuditEvent, RiskLevel, now_utc
@@ -458,7 +460,7 @@ async def handle_connector_webhook(
         connector, projects=project_repository, memberships=workspace_memberships
     ):
         raise HTTPException(status_code=404, detail="Connector not found")
-    body = await request.body()
+    body = await _read_webhook_body(request)
     expected_updated_at = connector.updated_at
     try:
         _authenticate_connector(
@@ -494,7 +496,7 @@ async def handle_connector_webhook(
             )
         raise
     try:
-        raw_payload = await request.json()
+        raw_payload = json.loads(body)
         normalized_payload = normalize_connector_payload(connector, raw_payload)
         payload = ConnectorWebhookPayload.model_validate(normalized_payload)
     except Exception as error:
@@ -602,6 +604,30 @@ async def handle_connector_webhook(
     if not repository_mode:
         store.persist()
     return response
+
+
+async def _read_webhook_body(request: Request) -> bytes:
+    """Read at most the configured number of bytes before authentication/parsing."""
+    maximum = get_settings().connector_webhook_max_body_bytes
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Invalid connector webhook content length") from error
+        if declared_length < 0:
+            raise HTTPException(status_code=400, detail="Invalid connector webhook content length")
+        if declared_length > maximum:
+            raise HTTPException(status_code=413, detail="Connector webhook payload is too large")
+
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > maximum:
+            raise HTTPException(status_code=413, detail="Connector webhook payload is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _commit_webhook_connector_update(
