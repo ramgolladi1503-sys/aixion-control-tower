@@ -388,6 +388,51 @@ def test_readiness_recognizes_sqlite_repository_subclasses() -> None:
     assert readiness.app_state_repository_bindings["approval_decisions"] == "sqlite"
 
 
+def test_readiness_reports_all_high_risk_postgres_lifespan_bindings() -> None:
+    binding_fields = {
+        "agent_run_branch_intents": (
+            "agent_run_branch_intent_repository",
+            "agent_run_branch_intents",
+        ),
+        "agent_run_apply_change_intents": (
+            "agent_run_apply_change_intent_repository",
+            "agent_run_apply_change_intents",
+        ),
+        "agent_run_validation_intents": (
+            "agent_run_validation_intent_repository",
+            "agent_run_validation_intents",
+        ),
+        "agent_run_pull_request_intents": (
+            "agent_run_pull_request_intent_repository",
+            "agent_run_pull_request_intents",
+        ),
+        "trust": ("trust_repository", "trust"),
+        "trust_events": ("trust_event_repository", "trust_events"),
+    }
+    runtime_repositories = SimpleNamespace()
+    application_state = SimpleNamespace()
+    for state_name, repository_name in binding_fields.values():
+        repository = object()
+        setattr(runtime_repositories, repository_name, repository)
+        setattr(application_state, state_name, repository)
+
+    bindings = ops_routes._application_repository_bindings(
+        application_state=application_state,
+        postgres_runtime=SimpleNamespace(repositories=runtime_repositories),
+    )
+
+    assert {name: bindings[name] for name in binding_fields} == {
+        name: "postgresql" for name in binding_fields
+    }
+
+    application_state.trust_event_repository = object()
+    bindings = ops_routes._application_repository_bindings(
+        application_state=application_state,
+        postgres_runtime=SimpleNamespace(repositories=runtime_repositories),
+    )
+    assert bindings["trust_events"] == "other"
+
+
 def test_production_readiness_rejects_sqlite_application_store(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_PROFILE", "production")
     monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")

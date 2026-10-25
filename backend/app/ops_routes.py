@@ -105,6 +105,22 @@ _APP_STATE_REPOSITORIES = {
     "approval_decisions": ("approval_decision_repository", "approval_decisions"),
     "agent_tasks": ("agent_task_repository", "agent_tasks"),
     "agent_runs": ("agent_run_repository", "agent_runs"),
+    "agent_run_branch_intents": (
+        "agent_run_branch_intent_repository",
+        "agent_run_branch_intents",
+    ),
+    "agent_run_apply_change_intents": (
+        "agent_run_apply_change_intent_repository",
+        "agent_run_apply_change_intents",
+    ),
+    "agent_run_validation_intents": (
+        "agent_run_validation_intent_repository",
+        "agent_run_validation_intents",
+    ),
+    "agent_run_pull_request_intents": (
+        "agent_run_pull_request_intent_repository",
+        "agent_run_pull_request_intents",
+    ),
     "projects": ("project_repository", "projects"),
     "workspace_membership": ("workspace_membership_repository", "workspace_membership"),
     "external_agent_auth": ("external_agent_auth_repository", "external_agent_auth"),
@@ -116,6 +132,8 @@ _APP_STATE_REPOSITORIES = {
     "notification_outbox": ("notification_outbox_repository", "notification_outbox"),
     "mcp_child_servers": ("mcp_child_server_repository", "mcp_child_servers"),
     "mcp_pending_requests": ("mcp_pending_repository", "mcp_pending_requests"),
+    "trust": ("trust_repository", "trust"),
+    "trust_events": ("trust_event_repository", "trust_events"),
 }
 
 

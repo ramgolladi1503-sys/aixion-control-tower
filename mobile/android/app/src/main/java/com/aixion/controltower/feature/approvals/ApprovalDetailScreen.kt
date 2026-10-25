@@ -46,6 +46,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -271,6 +272,18 @@ fun ApprovalDetailContent(
                     .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
                 verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
             ) {
+                item {
+                    ApprovalHeroPanel(
+                        approval = approval,
+                        canApprove = canApprove,
+                        canDecide = canDecide,
+                        isBlocked = isBlocked,
+                        hasUnsupportedData = hasUnsupportedData,
+                        hasRequiredActions = hasRequiredActions,
+                        showDecisionContext = true
+                    )
+                }
+
                 if (hasExactToolRequest) {
                     item {
                         ExactToolRequestHeader(approval)
@@ -285,18 +298,6 @@ fun ApprovalDetailContent(
                             onCheckedChange = { exactToolRequestReviewed = it }
                         )
                     }
-                }
-
-                item {
-                    ApprovalHeroPanel(
-                        approval = approval,
-                        canApprove = canApprove,
-                        canDecide = canDecide,
-                        isBlocked = isBlocked,
-                        hasUnsupportedData = hasUnsupportedData,
-                        hasRequiredActions = hasRequiredActions,
-                        showDecisionContext = !hasExactToolRequest
-                    )
                 }
 
                 if (lastActionMessage != null && lastActionApprovalId == approval.id) {
@@ -843,7 +844,7 @@ private fun ApprovalHeroPanel(
     showDecisionContext: Boolean
 ) {
     val palette = LocalTowerPalette.current
-    TowerHeroPanel {
+    TowerHeroPanel(modifier = Modifier.testTag("approval-detail-request-identity")) {
         Column(modifier = Modifier.fillMaxWidth()) {
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
@@ -917,28 +918,22 @@ private fun ExactToolDecisionContext(
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier.testTag("approval-exact-tool-decision-context"), elevated = true) {
-        Text("Before you decide", color = palette.ink, style = MaterialTheme.typography.titleSmall)
-        DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Risk", color = palette.inkMuted, style = MaterialTheme.typography.labelLarge)
-            RiskBadge(approval.risk, readable = true)
-        }
-        DecisionContextLine(
-            "Why flagged",
+        Text(
+            "Risk evidence",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.titleSmall
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text(
             approval.riskReasons
                 .map(String::trim)
                 .filter(String::isNotEmpty)
-                .joinToString("; ")
-                .ifBlank { "No risk rationale was supplied by the backend." }
+                .joinToString("\n")
+                .ifBlank { "No risk rationale was supplied by the backend." },
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
         )
-        DecisionContextLine("Expires", formatApprovalExpiry(approval.expiresAt))
-        approval.sourceInvocationId
-            ?.takeIf(String::isNotBlank)
-            ?.let { DecisionContextLine("Invocation", shortSafeApprovalId(it)) }
     }
 }
 

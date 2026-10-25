@@ -350,6 +350,30 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun exactToolApprovalIncludesRequestIdentityAndRiskEvidence() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            files = listOf(
+                FileChangeSummary(
+                    path = "antigravity://tool/run_command",
+                    changeType = "tool_call",
+                    diff = "{\"command\":\"git status\"}",
+                    risk = RiskLevel.HIGH
+                )
+            )
+        )
+
+        composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
+
+        composeRule.onNodeWithTag("approval-detail-request-identity").assertIsDisplayed()
+        composeRule.onNodeWithText("Test project").assertExists()
+        composeRule.onNodeWithText("Session").assertExists()
+        composeRule.onNodeWithText("Invocation").assertExists()
+        composeRule.onNodeWithTag("approval-exact-tool-request").assertExists()
+        composeRule.onNodeWithTag("approval-exact-tool-decision-context").assertExists()
+        composeRule.onNodeWithText("Risk evidence").assertExists()
+    }
+
+    @Test
     fun exactToolReviewAcknowledgementResetsWhenPayloadChanges() {
         val original = approval(ApprovalStatus.REQUESTED).copy(
             files = listOf(
