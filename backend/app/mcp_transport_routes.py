@@ -20,6 +20,7 @@ from .auth import require_maintainer
 from .mcp_gateway import MCPGatewayDecision, MCPGatewayToolCall
 from .mcp_gateway_routes import (
     GatewaySubmitRequest,
+    _require_mcp_request_context,
     _postgres_mcp_submission,
     _resolve_postgres_gateway_request,
     gateway_for_project,
@@ -452,6 +453,10 @@ async def handle_mcp_jsonrpc(
     user: AuthUser = MaintainerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> MCPJsonRpcResponse:
+    # This route can also be called directly by in-process integrations. In
+    # PostgreSQL/production mode, a missing request must not silently select
+    # the legacy process-local registry and gateway below.
+    _require_mcp_request_context(http_request)
     postgres_child_servers: list[MCPChildServer] | None = None
     if http_request is not None:
         try:

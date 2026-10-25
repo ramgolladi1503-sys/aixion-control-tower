@@ -200,13 +200,14 @@ def test_lifespan_rejects_invalid_notification_repository_before_startup() -> No
     asyncio.run(exercise())
 
 
-def test_local_push_loop_refuses_postgres_auth_mode(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "postgres_mode",
+    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+)
+def test_local_push_loop_refuses_postgres_modes(monkeypatch, postgres_mode) -> None:
     monkeypatch.setattr(
         "app.notifications.get_settings",
-        lambda: SimpleNamespace(
-            postgres_auth_enabled=True,
-            push_dispatch_enabled=True,
-        ),
+        lambda: SimpleNamespace(**{postgres_mode: True, "push_dispatch_enabled": True}),
     )
 
     async def exercise() -> None:
@@ -216,6 +217,32 @@ def test_local_push_loop_refuses_postgres_auth_mode(monkeypatch) -> None:
             await notification_dispatch_loop()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "postgres_mode",
+    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+)
+def test_local_notification_creation_refuses_postgres_modes_without_mutating_store(
+    monkeypatch, postgres_mode
+) -> None:
+    from app.notifications import create_notification
+    from app.store import store
+
+    monkeypatch.setattr(
+        "app.notifications.get_settings",
+        lambda: SimpleNamespace(**{postgres_mode: True}),
+    )
+    before = set(store.notifications)
+    with pytest.raises(RuntimeError, match="PostgreSQL notification dispatcher"):
+        create_notification(
+            title="Approval needed",
+            body="Open the app to review.",
+            entity_type="approval_request",
+            entity_id="approval_guard_test",
+            workspace_id="workspace_guard_test",
+        )
+    assert set(store.notifications) == before
 
 
 def test_postgres_dispatch_loop_drains_inflight_thread_on_cancellation(monkeypatch) -> None:

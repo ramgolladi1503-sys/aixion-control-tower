@@ -33,8 +33,10 @@ PUSH_BODY = "A request is waiting for your review. Open the app to view details.
 def _require_sqlite_notification_runtime() -> None:
     """Keep local notification helpers from becoming a PostgreSQL fallback."""
     settings = get_settings()
-    if getattr(settings, "is_production", False) or getattr(
-        settings, "postgres_auth_enabled", False
+    if (
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_runtime_probe_enabled", False)
+        or getattr(settings, "postgres_auth_enabled", False)
     ):
         raise RuntimeError(
             "PostgreSQL notification dispatcher is required; SQLite notification operations "
@@ -50,8 +52,10 @@ def _postgres_notification_repository(
     # app-bound PostgreSQL runtime as the authenticated workspace. The auth
     # rollout flag can be disabled independently, so it cannot authorize a
     # fallback to process-local SQLite in production.
-    if getattr(settings, "is_production", False) or getattr(
-        settings, "postgres_auth_enabled", False
+    if (
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_runtime_probe_enabled", False)
+        or getattr(settings, "postgres_auth_enabled", False)
     ):
         if http_request is None:
             raise HTTPException(
@@ -477,6 +481,7 @@ def create_notification(
     workspace_id: str | None = None,
     approval_request_id: str | None = None,
 ) -> Notification:
+    _require_sqlite_notification_runtime()
     if workspace_id is None:
         if entity_type == "approval_request":
             approval = store.approval_requests.get(entity_id)

@@ -8,12 +8,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app import mcp_transport_routes
+from app import mcp_gateway_routes, mcp_transport_routes
 from app.mcp_gateway_routes import (
     child_received_count_for_server_for_test,
     child_received_count_for_test,
@@ -328,6 +331,61 @@ def test_postgres_transport_persists_due_expiry_without_forwarding(monkeypatch) 
     assert response.result["structuredContent"]["status"] == ApprovalStatus.EXPIRED
     assert len(expiry_calls) == 1
     assert resolved == []
+
+
+def test_postgres_mode_direct_transport_call_fails_before_local_gateway(monkeypatch) -> None:
+    project_id = "project-direct-postgres-transport"
+    store.projects[project_id] = SimpleNamespace(id=project_id, workspace_id="workspace-direct")
+    gateway_calls: list[str] = []
+
+    class LocalGateway:
+        def submit_tool_call(self, _call):
+            gateway_calls.append("submit")
+            return MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                status=ApprovalStatus.REQUESTED,
+            )
+
+    monkeypatch.setattr(
+        mcp_transport_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        "app.mcp_gateway_routes.get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        mcp_transport_routes,
+        "gateway_for_project",
+        lambda _project_id: LocalGateway(),
+    )
+    user = AuthUser(
+        id="user-direct",
+        email="reviewer@example.test",
+        display_name="Reviewer",
+        role=UserRole.OWNER,
+        workspace_id="workspace-direct",
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(
+            mcp_transport_routes.handle_mcp_jsonrpc(
+                project_id,
+                mcp_transport_routes.MCPJsonRpcRequest(
+                    id="request-direct",
+                    method="tools/call",
+                    params={"name": "update_config", "arguments": {"key": "x", "value": "y"}},
+                ),
+                user=user,
+            )
+        )
+
+    assert raised.value.status_code == 503
+    assert gateway_calls == []
+    assert store.mcp_pending_requests == {}
+    assert project_id not in mcp_gateway_routes._gateways
 
 
 def setup_function() -> None:
