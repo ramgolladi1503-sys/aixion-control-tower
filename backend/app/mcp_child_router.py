@@ -33,7 +33,12 @@ class MCPChildServerRouter:
         workspace_id: str | None = None,
         project_id: str | None = None,
     ) -> dict:
-        if request is not None or get_settings().postgres_auth_enabled:
+        settings = get_settings()
+        if (
+            request is not None
+            or settings.postgres_auth_enabled
+            or getattr(settings, "is_production", False)
+        ):
             server = self._find_app_registered_server(
                 call.server_name,
                 request=request,

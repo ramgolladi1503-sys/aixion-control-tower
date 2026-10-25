@@ -53,6 +53,24 @@ def test_postgres_mode_never_uses_process_local_child_server_registry(monkeypatc
     assert router.received_count_for_test() == 0
 
 
+def test_production_without_postgres_auth_never_uses_demo_child_server(monkeypatch) -> None:
+    """Production must not inherit the local demo transport during a bad setup."""
+    monkeypatch.setattr(
+        mcp_child_router,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=False, is_production=True),
+    )
+    router = MCPChildServerRouter()
+
+    result = router.call_tool(
+        ChildMCPToolCall(server_name="child-test-server", tool_name="read_status")
+    )
+
+    assert result["ok"] is False
+    assert "application repository" in result["error"]
+    assert router.received_count_for_test() == 0
+
+
 def test_app_repository_lookup_is_workspace_and_project_scoped(monkeypatch) -> None:
     expected = _server()
     repository = _Repository([expected])
