@@ -272,30 +272,41 @@ fun ApprovalDetailContent(
                     .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
                 verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
             ) {
-                item {
-                    ApprovalHeroPanel(
-                        approval = approval,
-                        canApprove = canApprove,
-                        canDecide = canDecide,
-                        isBlocked = isBlocked,
-                        hasUnsupportedData = hasUnsupportedData,
-                        hasRequiredActions = hasRequiredActions,
-                        showDecisionContext = true
-                    )
-                }
-
                 if (hasExactToolRequest) {
                     item {
                         ExactToolRequestHeader(approval)
                     }
                     items(approval.files) { file -> DiffBlock(file = file) }
                     item {
-                        ExactToolDecisionContext(approval = approval)
-                    }
-                    item {
                         ExactToolRequestReviewAcknowledgement(
                             checked = exactToolRequestReviewed,
                             onCheckedChange = { exactToolRequestReviewed = it }
+                        )
+                    }
+                    item {
+                        ApprovalHeroPanel(
+                            approval = approval,
+                            canApprove = canApprove,
+                            canDecide = canDecide,
+                            isBlocked = isBlocked,
+                            hasUnsupportedData = hasUnsupportedData,
+                            hasRequiredActions = hasRequiredActions,
+                            showDecisionContext = false
+                        )
+                    }
+                    item {
+                        ExactToolDecisionContext(approval = approval)
+                    }
+                } else {
+                    item {
+                        ApprovalHeroPanel(
+                            approval = approval,
+                            canApprove = canApprove,
+                            canDecide = canDecide,
+                            isBlocked = isBlocked,
+                            hasUnsupportedData = hasUnsupportedData,
+                            hasRequiredActions = hasRequiredActions,
+                            showDecisionContext = true
                         )
                     }
                 }
@@ -919,6 +930,15 @@ private fun ExactToolDecisionContext(
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier.testTag("approval-exact-tool-decision-context"), elevated = true) {
+        Text("Request context", color = palette.ink, style = MaterialTheme.typography.titleSmall)
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
+        DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
+        DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
+        DecisionContextLine("Session", approval.sourceSessionId?.let(::shortSafeApprovalId) ?: "Not provided")
+        DecisionContextLine("Invocation", approval.sourceInvocationId?.let(::shortSafeApprovalId) ?: "Not provided")
+        DecisionContextLine("Expires", formatApprovalExpiry(approval.expiresAt))
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             "Risk evidence",
             modifier = Modifier.semantics { heading() },

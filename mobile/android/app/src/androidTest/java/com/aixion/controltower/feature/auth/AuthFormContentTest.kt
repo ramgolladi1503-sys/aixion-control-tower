@@ -3,6 +3,7 @@ package com.aixion.controltower.feature.auth
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.assert
@@ -67,6 +68,37 @@ class AuthFormContentTest {
         composeRule.onNodeWithText("Password").assertExists()
         composeRule.onNodeWithText("Back to sign in").assertExists()
         composeRule.onNodeWithContentDescription("Show password").assertExists()
+    }
+
+    @Test
+    fun emailAndPasswordFieldsExposeSignInAndRegistrationAutofillTypes() {
+        composeRule.setContent {
+            AuthFormContent(
+                state = AuthUiState(),
+                onEmailChange = {},
+                onPasswordChange = {},
+                onVerificationCodeChange = {},
+                onLogin = {},
+                onRegister = {},
+                onVerify = {},
+                onResendVerification = {}
+            )
+        }
+
+        composeRule.onNodeWithText("Email address").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.ContentType, ContentType.EmailAddress)
+        )
+        composeRule.onNodeWithText("Password").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.ContentType, ContentType.Password)
+        )
+
+        composeRule.onNodeWithText("Create account").performClick()
+        composeRule.onNodeWithText("Email address").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.ContentType, ContentType.EmailAddress)
+        )
+        composeRule.onNodeWithText("Password").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.ContentType, ContentType.NewPassword)
+        )
     }
 
     @Test

@@ -889,7 +889,16 @@ def test_listing_invites_persists_expiration_for_own_workspace_only(
             "UPDATE invites SET expires_at=%s,payload=%s WHERE invite_id=%s",
             (expired.expires_at, Jsonb(expired.model_dump(mode="json")), expired.id),
         )
-        other = _insert_invite(conn, workspace_b, owner_b, "other@example.test")
+        other = _insert_invite(
+            conn,
+            workspace_b,
+            owner_b,
+            "other@example.test",
+        ).model_copy(update={"expires_at": current - timedelta(seconds=1)})
+        conn.execute(
+            "UPDATE invites SET expires_at=%s,payload=%s WHERE invite_id=%s",
+            (other.expires_at, Jsonb(other.model_dump(mode="json")), other.id),
+        )
 
     listed = repository.list_invites(actor_user_id=owner_a.id, now=current)
     assert len(listed) == 1
@@ -899,9 +908,85 @@ def test_listing_invites_persists_expiration_for_own_workspace_only(
         row = conn.execute(
             "SELECT status,payload FROM invites WHERE invite_id=%s", (expired.id,)
         ).fetchone()
+        audit_rows = conn.execute(
+            "SELECT event_type,actor,workspace_id,entity_type,entity_id,details "
+            "FROM audit_events WHERE event_type='auth.invite_expired' ORDER BY entity_id"
+        ).fetchall()
     assert row[0] == "EXPIRED"
     assert Invite.model_validate(row[1]).status == InviteStatus.EXPIRED
-    assert repository.list_invites(actor_user_id=owner_b.id)[0].id == other.id
+    assert audit_rows == [
+        (
+            "auth.invite_expired",
+            owner_a.email,
+            workspace_a.id,
+            "invite",
+            expired.id,
+            {
+                "invite_id": expired.id,
+                "workspace_id": workspace_a.id,
+                "email": expired.email,
+                "role": expired.role.value,
+                "status": InviteStatus.EXPIRED.value,
+                "expires_at": expired.expires_at.isoformat(),
+            },
+        )
+    ]
+    with connect() as conn:
+        other_status, other_payload = conn.execute(
+            "SELECT status,payload FROM invites WHERE invite_id=%s", (other.id,)
+        ).fetchone()
+        assert other_status == InviteStatus.PENDING.value
+        assert Invite.model_validate(other_payload).status == InviteStatus.PENDING
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='auth.invite_expired' "
+            "AND workspace_id=%s",
+            (workspace_b.id,),
+        ).fetchone()[0] == 0
+
+
+def test_invite_expiration_rolls_back_if_audit_write_fails(
+    auth_repository: tuple[PostgresAuthRepository, Callable[[], Connection]],
+) -> None:
+    repository, connect = auth_repository
+    current = now_utc()
+    with connect() as conn:
+        workspace = _insert_workspace(conn)
+        owner = _insert_user(conn, workspace, "owner", role=UserRole.OWNER)
+        expired = _insert_invite(
+            conn,
+            workspace,
+            owner,
+            "expired@example.test",
+        ).model_copy(update={"expires_at": current - timedelta(seconds=1)})
+        conn.execute(
+            "UPDATE invites SET expires_at=%s,payload=%s WHERE invite_id=%s",
+            (expired.expires_at, Jsonb(expired.model_dump(mode="json")), expired.id),
+        )
+        before_payload = conn.execute(
+            "SELECT payload FROM invites WHERE invite_id=%s", (expired.id,)
+        ).fetchone()[0]
+        conn.execute(
+            "CREATE FUNCTION reject_invite_expired_audit() RETURNS trigger AS $$ "
+            "BEGIN IF NEW.event_type='auth.invite_expired' THEN "
+            "RAISE EXCEPTION 'invite expiry audit unavailable'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_invite_expired_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_invite_expired_audit()"
+        )
+
+    with pytest.raises(psycopg.Error, match="invite expiry audit unavailable"):
+        repository.list_invites(actor_user_id=owner.id, now=current)
+
+    with connect() as conn:
+        status_value, payload = conn.execute(
+            "SELECT status,payload FROM invites WHERE invite_id=%s", (expired.id,)
+        ).fetchone()
+        assert status_value == InviteStatus.PENDING.value
+        assert payload == before_payload
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_type='auth.invite_expired'"
+        ).fetchone()[0] == 0
 
 
 def test_invite_revoke_is_audited_and_idempotent_but_rejects_accepted_invites(

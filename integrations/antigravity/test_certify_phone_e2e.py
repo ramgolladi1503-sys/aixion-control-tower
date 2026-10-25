@@ -24,6 +24,7 @@ def evidence() -> dict:
         "source_agent_id": "agent_test",
         "source_invocation_id": invocation,
         "project_id": "project_test",
+        "workspace_id": "workspace_test",
         "title": "Antigravity approval: run_command",
         "summary": "Review the exact Antigravity tool and arguments before this invocation continues.",
         "agent_name": "Antigravity",
@@ -44,6 +45,7 @@ def evidence() -> dict:
             "source_agent_id": "agent_test",
             "status": "APPROVED",
             "payload": payload,
+            "workspace_id": "workspace_test",
         },
         "decision_events": [{
             "approval_id": payload["id"],
@@ -73,6 +75,7 @@ def _verify(evidence: dict) -> dict:
         expected_approval_id="approval_0123456789ab",
         expected_agent_id="agent_test",
         expected_project_id="project_test",
+        expected_workspace_id="workspace_test",
         tool_name="run_command",
         expected_arguments={"command": "mkdir /tmp/aixion-e2e-marker"},
     )
@@ -84,6 +87,42 @@ def test_certifier_accepts_exact_approved_and_claimed_invocation(evidence: dict)
     assert result["source_invocation_id"] == evidence["claim"]["source_invocation_id"]
     assert result["approved_payload_hash"] == evidence["approval"]["payload"]["approved_payload_hash"]
     assert result["delivery_claim_events"] == 1
+    assert result["workspace_id"] == "workspace_test"
+
+
+@pytest.mark.parametrize(
+    ("scope", "value", "message"),
+    [
+        ("expected", None, "Expected workspace identity is required"),
+        ("expected", "", "Expected workspace identity is required"),
+        ("row", "workspace_other", "database workspace scope does not match"),
+        ("row", None, "database workspace scope does not match"),
+        ("payload", "workspace_other", "payload workspace scope does not match"),
+        ("payload", None, "payload workspace scope does not match"),
+    ],
+)
+def test_certifier_rejects_missing_or_mismatched_workspace_scope(
+    evidence: dict, scope: str, value: str | None, message: str
+) -> None:
+    changed = copy.deepcopy(evidence)
+    if scope == "expected":
+        with pytest.raises(EvidenceError, match=message):
+            verify_records(
+                **changed,
+                expected_approval_id="approval_0123456789ab",
+                expected_agent_id="agent_test",
+                expected_project_id="project_test",
+                expected_workspace_id=value,
+                tool_name="run_command",
+                expected_arguments={"command": "mkdir /tmp/aixion-e2e-marker"},
+            )
+        return
+    if scope == "row":
+        changed["approval"]["workspace_id"] = value
+    else:
+        changed["approval"]["payload"]["workspace_id"] = value
+    with pytest.raises(EvidenceError, match=message):
+        _verify(changed)
 
 
 def test_certifier_rejects_payload_hash_mismatch_even_when_audits_repeat_it(evidence: dict) -> None:
@@ -144,7 +183,7 @@ def test_database_verifier_sets_read_only_before_any_query(
             if "FROM approval_requests" in self.current_query:
                 return (
                     approval["approval_id"], approval["source_agent_id"],
-                    approval["status"], approval["payload"],
+                    approval["status"], approval["payload"], approval["workspace_id"],
                 )
             if "FROM approval_delivery_claims" in self.current_query:
                 return (claim["approval_id"], claim["source_agent_id"], claim["source_invocation_id"])
@@ -177,6 +216,7 @@ def test_database_verifier_sets_read_only_before_any_query(
         approval_id=approval["approval_id"],
         agent_id="agent_test",
         project_id="project_test",
+        workspace_id="workspace_test",
         tool_name="run_command",
         expected_arguments={"command": "mkdir /tmp/aixion-e2e-marker"},
         marker=str(marker),

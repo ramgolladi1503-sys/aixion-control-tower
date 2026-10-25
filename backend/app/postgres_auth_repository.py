@@ -429,6 +429,15 @@ class PostgresAuthRepository:
                     )
                     if result.rowcount != 1:
                         raise PostgresAuthIntegrityError("Invite changed while expiring")
+                    event = AuditEvent(
+                        event_type="auth.invite_expired",
+                        actor=actor.email,
+                        entity_id=invite.id,
+                        workspace_id=invite.workspace_id,
+                        details=self._invite_audit_details(invite),
+                        created_at=current_time,
+                    )
+                    self._insert_auth_audit(conn, event, entity_type="invite")
                 invites.append(invite)
         return invites
 

@@ -46,7 +46,8 @@ revision; do not carry this PASS forward to code that has not been exercised.
 4. Run the verifier against that disposable database. It opens a read-only
    PostgreSQL transaction, rejects remote/non-test databases, and requires an
    exact tool payload, one matching approval decision, a matching at-most-once
-   claim and audit event, and a marker newer than the recorded start time:
+   claim and audit event, matching database-row and payload workspace scope,
+   and a marker newer than the recorded start time:
 
    ```sh
    export AIXION_E2E_POSTGRES_DSN='<disposable-local-postgres-dsn>'
@@ -54,6 +55,7 @@ revision; do not carry this PASS forward to code that has not been exercised.
      --approval-id 'approval_<id-shown-in-phone-or-hook-log>' \
      --agent-id 'agent_<registered-agent>' \
      --project-id 'project_<registered-project>' \
+     --workspace-id 'workspace_<registered-workspace>' \
      --tool-name run_command \
      --expected-arguments '{"command":"mkdir /tmp/aixion-ct-phone-e2e-<unique-id>"}' \
      --marker '/tmp/aixion-ct-phone-e2e-<unique-id>' \
@@ -65,7 +67,7 @@ durable approval/claim identity and a fresh marker; the operator must also
 record that the phone displayed and approved this exact request and that the
 same pending Antigravity call resumed. No phone or Antigravity UI is automated
 by the verifier. Any missing row, duplicate event, mismatched invocation/hash,
-stale marker, remote database, or unreadable state fails nonzero.
+workspace, stale marker, remote database, or unreadable state fails nonzero.
 
 ## Limits
 

@@ -117,6 +117,7 @@ def verify_records(
     expected_approval_id: str,
     expected_agent_id: str,
     expected_project_id: str,
+    expected_workspace_id: str,
     tool_name: str,
     expected_arguments: dict[str, Any],
 ) -> dict[str, Any]:
@@ -129,6 +130,12 @@ def verify_records(
             raise EvidenceError("Approval payload is invalid JSON") from exc
     if not isinstance(payload, dict):
         raise EvidenceError("Approval payload is missing")
+    if not isinstance(expected_workspace_id, str) or not expected_workspace_id.strip():
+        raise EvidenceError("Expected workspace identity is required")
+    if approval.get("workspace_id") != expected_workspace_id:
+        raise EvidenceError("Approval database workspace scope does not match")
+    if payload.get("workspace_id") != expected_workspace_id:
+        raise EvidenceError("Approval payload workspace scope does not match")
     if approval.get("approval_id") != expected_approval_id or payload.get("id") != expected_approval_id:
         raise EvidenceError("Approval identity does not match")
     if approval.get("status") != "APPROVED" or payload.get("status") != "APPROVED":
@@ -191,6 +198,7 @@ def verify_records(
         "approval_id": expected_approval_id,
         "agent_id": expected_agent_id,
         "project_id": expected_project_id,
+        "workspace_id": expected_workspace_id,
         "source_invocation_id": invocation_id,
         "approved_payload_hash": approved_hash,
         "decision_events": len(decision_events),
@@ -221,7 +229,7 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
         with conn.cursor() as cursor:
             cursor.execute("SET TRANSACTION READ ONLY")
             cursor.execute(
-                "SELECT approval_id, source_agent_id, status, payload "
+                "SELECT approval_id, source_agent_id, status, payload, workspace_id "
                 "FROM approval_requests WHERE approval_id=%s",
                 (args.approval_id,),
             )
@@ -229,7 +237,8 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
             if row is None:
                 raise EvidenceError("Approval was not found in the configured PostgreSQL database")
             approval = {
-                "approval_id": row[0], "source_agent_id": row[1], "status": row[2], "payload": row[3]
+                "approval_id": row[0], "source_agent_id": row[1], "status": row[2],
+                "payload": row[3], "workspace_id": row[4],
             }
             cursor.execute(
                 "SELECT approval_id, event_type, details FROM audit_events "
@@ -271,6 +280,7 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
         expected_approval_id=args.approval_id,
         expected_agent_id=args.agent_id,
         expected_project_id=args.project_id,
+        expected_workspace_id=args.workspace_id,
         tool_name=args.tool_name,
         expected_arguments=args.expected_arguments,
     )
@@ -298,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval-id", required=True)
     parser.add_argument("--agent-id", required=True)
     parser.add_argument("--project-id", required=True)
+    parser.add_argument("--workspace-id", required=True)
     parser.add_argument("--tool-name", required=True)
     parser.add_argument("--expected-arguments", type=_json_object, required=True)
     parser.add_argument("--marker", required=True, help="Unique path created only by the approved tool call")
