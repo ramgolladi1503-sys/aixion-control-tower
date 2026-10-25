@@ -1049,6 +1049,99 @@ def test_postgres_delivery_failure_report_requires_matching_claim(postgres_repos
             )
 
 
+def test_postgres_delivery_failure_audit_error_rolls_back_failure_evidence(
+    postgres_repository,
+) -> None:
+    repository, connect = postgres_repository
+    workspace, _project, approval, _task = _seed(connect)
+    agent = ExternalAgent(
+        id=f"agent_delivery_failure_rollback_{uuid.uuid4().hex}",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Delivery failure rollback connector",
+        auth_type=AgentAuthType.API_KEY,
+        workspace_id=workspace.id,
+    )
+    agent, presented_token_hash = _insert_agent_credential(connect, agent)
+    invocation_id = f"delivery-failure-rollback:{uuid.uuid4().hex}"
+    approved = _persist_live_approved_invocation(
+        connect,
+        approval=approval,
+        agent=agent,
+        source_invocation_id=invocation_id,
+    )
+    claim_event = AuditEvent(
+        event_type="approval.delivery_claimed",
+        actor=f"agent:{agent.id}",
+        entity_id=approved.id,
+        workspace_id=workspace.id,
+        details={"source_invocation_id": invocation_id},
+    )
+    assert repository.claim_approved_delivery(
+        approval_id=approved.id,
+        workspace_id=workspace.id,
+        source_agent_id=agent.id,
+        source_invocation_id=invocation_id,
+        expected_payload_hash=approved.approved_payload_hash,
+        presented_token_hash=presented_token_hash,
+        audit_event=claim_event,
+    ) is True
+
+    failure_event = AuditEvent(
+        event_type="approval.delivery_failed",
+        actor=f"agent:{agent.id}",
+        entity_id=approved.id,
+        workspace_id=workspace.id,
+        details={
+            "source_agent_id": agent.id,
+            "source_invocation_id": invocation_id,
+            "approved_payload_hash": approved.approved_payload_hash,
+            "reason_code": "CLAIM_RESPONSE_AMBIGUOUS",
+        },
+    )
+    with connect() as conn:
+        conn.execute(
+            "CREATE FUNCTION reject_delivery_failure_audit() RETURNS trigger AS $$ "
+            "BEGIN IF NEW.event_type='approval.delivery_failed' THEN "
+            "RAISE EXCEPTION 'delivery failure audit unavailable'; END IF; "
+            "RETURN NEW; END; $$ LANGUAGE plpgsql"
+        )
+        conn.execute(
+            "CREATE TRIGGER reject_delivery_failure_audit BEFORE INSERT ON audit_events "
+            "FOR EACH ROW EXECUTE FUNCTION reject_delivery_failure_audit()"
+        )
+
+    with pytest.raises(psycopg.errors.RaiseException, match="delivery failure audit unavailable"):
+        repository.record_approved_delivery_failure(
+            approval_id=approved.id,
+            workspace_id=workspace.id,
+            source_agent_id=agent.id,
+            source_invocation_id=invocation_id,
+            expected_payload_hash=approved.approved_payload_hash,
+            reason_code="CLAIM_RESPONSE_AMBIGUOUS",
+            audit_event=failure_event,
+        )
+
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM approval_delivery_failures WHERE approval_id=%s",
+            (approved.id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_failed'",
+            (approved.id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            (approved.id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.delivery_claimed'",
+            (approved.id,),
+        ).fetchone()[0] == 1
+
+
 def test_postgres_delivery_failure_identity_migration_rejects_legacy_mismatch(
     postgres_repository,
 ) -> None:
