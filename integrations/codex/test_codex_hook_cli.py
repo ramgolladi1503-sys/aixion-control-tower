@@ -171,7 +171,16 @@ def test_main_denies_nonstandard_json_numbers(
 
 
 @pytest.mark.parametrize(
-    "outcome", ["approved", "revoked", "stale_payload", "invalid_approved_hash"]
+    "outcome",
+    [
+        "approved",
+        "revoked",
+        "stale_payload",
+        "invalid_approved_hash",
+        "changed_workspace",
+        "changed_risk",
+        "changed_hash_version",
+    ],
 )
 def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
@@ -211,6 +220,12 @@ def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None
             created.update(_codex_approval(body))
+            if outcome in {"changed_workspace", "changed_risk", "changed_hash_version"}:
+                created.update({
+                    "approved_payload_hash_version": 2,
+                    "workspace_id": "workspace-codex-test",
+                    "risk": {"level": "MEDIUM", "score": 3},
+                })
             # The phone sees the canonical JSON encoding of these exact tool
             # arguments, and the same source invocation identity follows them.
             assert created["files"][0]["diff"] == json.dumps(
@@ -225,6 +240,12 @@ def test_cli_entrypoint_runs_real_approval_gate_and_fails_closed(
                 changed["summary"] = "different invocation payload"
                 return changed
             approved = {**created, "status": "APPROVED"}
+            if outcome == "changed_workspace":
+                approved["workspace_id"] = "workspace-other"
+            elif outcome == "changed_risk":
+                approved["risk"] = {"level": "CRITICAL", "score": 99}
+            elif outcome == "changed_hash_version":
+                approved["approved_payload_hash_version"] = 1
             approved["approved_payload_hash"] = hook._hash(approved)
             if outcome == "invalid_approved_hash":
                 approved["approved_payload_hash"] = "sha256:" + "0" * 64

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -46,6 +47,7 @@ from scripts.import_approval_slice_to_postgres import (
     ImportBlocked,
     _target_is_remote,
     apply_import,
+    build_invocation_drain_report,
     build_plan,
     main,
 )
@@ -537,11 +539,148 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     assert plan["invocation_drain"] == {
         "status": "CLEAR",
         "lease_table_present": True,
+        "native_invocation_approval_count": 1,
         "pending_native_invocation_count": 0,
         "approval_id_sha256": [],
         "approved_unconsumed_invocation_count": 0,
         "approved_unconsumed_approval_id_sha256": [],
+        "unverifiable_native_invocation_count": 0,
+        "unverifiable_approval_id_sha256": [],
     }
+
+
+def test_invocation_drain_report_is_read_only_hash_bound_and_records_clear_outcome(tmp_path):
+    path = tmp_path / "drained-snapshot.sqlite3"
+    _snapshot(path)
+    before = path.read_bytes()
+    captured_at = datetime(2026, 10, 25, 1, 2, 3, tzinfo=timezone.utc)
+
+    report = build_invocation_drain_report(path, generated_at=captured_at)
+
+    assert path.read_bytes() == before
+    assert report["status"] == "READY_FOR_OWNER_REVIEW"
+    assert report["read_only"] is True
+    assert report["migration_authorized"] is False
+    assert report["source_snapshot_sha256"] == hashlib.sha256(before).hexdigest()
+    assert report["generated_at"] == captured_at.isoformat()
+    assert report["native_invocation_status_counts"] == {"DENIED": 1}
+    assert report["pending_native_invocation_count"] == 0
+    assert report["approved_unconsumed_invocation_count"] == 0
+    assert report["unverifiable_native_invocation_count"] == 0
+    assert report["unverifiable_approval_id_sha256"] == []
+
+
+def test_invocation_drain_report_persists_blocked_pending_state_without_source_mutation(
+    tmp_path, capsys
+):
+    path = tmp_path / "pending-snapshot.sqlite3"
+    _snapshot(path)
+    _set_approval_status(path, "PENDING_REVIEW")
+    before = path.read_bytes()
+    report_path = tmp_path / "reports" / "drain-20261025.json"
+    report_path.parent.mkdir(mode=0o700)
+
+    result = main([
+        "--source", str(path),
+        "--write-invocation-drain-report", str(report_path),
+    ])
+
+    assert result == 2
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["status"] == "BLOCKED"
+    assert path.read_bytes() == before
+    assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
+    report = json.loads(report_path.read_text())
+    assert report["status"] == "BLOCKED"
+    assert report["pending_native_invocation_count"] == 1
+    assert report["pending_approval_id_sha256"] == [hashlib.sha256(b"a1").hexdigest()]
+    assert report["unverifiable_native_invocation_count"] == 1
+    assert report["unverifiable_approval_id_sha256"] == [hashlib.sha256(b"a1").hexdigest()]
+    assert "Review" not in report_path.read_text()
+    assert "agent1" not in report_path.read_text()
+
+
+def test_invocation_drain_report_blocks_native_request_with_missing_invocation_identity(
+    tmp_path,
+):
+    path = tmp_path / "unverifiable-snapshot.sqlite3"
+    _snapshot(path)
+    _set_approval_status(path, "REQUESTED")
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id='a1'"
+        ).fetchone()
+        approval = json.loads(row[0])
+        approval["source_invocation_id"] = None
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id='a1'",
+            (json.dumps(approval),),
+        )
+    os.chmod(path, 0o600)
+
+    report = build_invocation_drain_report(path)
+
+    assert report["status"] == "BLOCKED"
+    assert report["pending_native_invocation_count"] == 1
+    assert report["unverifiable_native_invocation_count"] == 1
+    assert report["unverifiable_approval_id_sha256"] == [hashlib.sha256(b"a1").hexdigest()]
+    assert "inv1" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("lease_state", ["missing", "expired", "mismatched"])
+def test_invocation_drain_report_blocks_unverifiable_live_invocation_lease(
+    tmp_path, lease_state: str
+):
+    path = tmp_path / f"unverifiable-lease-{lease_state}.sqlite3"
+    _snapshot(path)
+    _set_approval_status(path, "PENDING_REVIEW")
+    with sqlite3.connect(path) as conn:
+        if lease_state == "missing":
+            conn.execute("DELETE FROM approval_invocation_leases WHERE approval_id='a1'")
+        elif lease_state == "expired":
+            expired = datetime.now(timezone.utc) - timedelta(minutes=5)
+            conn.execute(
+                "UPDATE approval_invocation_leases SET heartbeat_at=?,expires_at=? WHERE approval_id='a1'",
+                ((expired - timedelta(seconds=1)).isoformat(), expired.isoformat()),
+            )
+        else:
+            conn.execute(
+                "UPDATE approval_invocation_leases SET source_invocation_id='other-invocation' "
+                "WHERE approval_id='a1'"
+            )
+    os.chmod(path, 0o600)
+
+    report = build_invocation_drain_report(path)
+
+    assert report["status"] == "BLOCKED"
+    assert report["pending_native_invocation_count"] == 1
+    assert report["unverifiable_native_invocation_count"] == 1
+    assert report["unverifiable_approval_id_sha256"] == [hashlib.sha256(b"a1").hexdigest()]
+
+
+def test_plan_blocks_unverifiable_native_pending_identity_before_import(tmp_path):
+    path = tmp_path / "pending-native-missing-identity.sqlite3"
+    _snapshot(path)
+    _set_approval_status(path, "REQUESTED")
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' AND entity_id='a1'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["source_agent_id"] = None
+        payload["source_invocation_id"] = None
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='approval_request' AND entity_id='a1'",
+            (json.dumps(payload),),
+        )
+    os.chmod(path, 0o600)
+
+    with pytest.raises(ImportBlocked, match="1 unverifiable native invocation") as exc_info:
+        build_plan(path)
+
+    assert hashlib.sha256(b"a1").hexdigest() in str(exc_info.value)
+    assert "agent1" not in str(exc_info.value)
+    assert "inv1" not in str(exc_info.value)
 
 
 def test_plan_refuses_unknown_sqlite_table_before_postgres_connection(tmp_path, monkeypatch):

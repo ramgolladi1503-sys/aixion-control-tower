@@ -171,31 +171,192 @@ def _native_invocation_drain_summary(
         ApprovalStatus.REQUESTED.value,
         ApprovalStatus.PENDING_REVIEW.value,
     }
-    pending_fingerprints = sorted(
-        hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
-        for approval_id, payload in approvals.items()
-        if payload.get("status", ApprovalStatus.REQUESTED.value) in pending_statuses
-        and isinstance(payload.get("source_agent_id"), str)
-        and bool(payload.get("source_agent_id"))
-        and isinstance(payload.get("source_invocation_id"), str)
-        and bool(payload.get("source_invocation_id"))
-    )
-    approved_unconsumed_fingerprints = sorted(
-        hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
-        for approval_id, payload in approvals.items()
-        if payload.get("status") == ApprovalStatus.APPROVED.value
-        and isinstance(payload.get("source_agent_id"), str)
-        and bool(payload.get("source_agent_id"))
-        and isinstance(payload.get("source_invocation_id"), str)
-        and bool(payload.get("source_invocation_id"))
-        and approval_id not in delivery_claims
-    )
+    native_providers = {"ANTIGRAVITY", "CODEX"}
+    pending_fingerprints: list[str] = []
+    approved_unconsumed_fingerprints: list[str] = []
+    unverifiable_fingerprints: list[str] = []
+    native_approval_count = 0
+    for approval_id, payload in approvals.items():
+        if not (
+            payload.get("source_provider") in native_providers
+            or payload.get("source_invocation_id") is not None
+        ):
+            continue
+        native_approval_count += 1
+        status = payload.get("status", ApprovalStatus.REQUESTED.value)
+        pending = status in pending_statuses
+        approved_unconsumed = (
+            status == ApprovalStatus.APPROVED.value and approval_id not in delivery_claims
+        )
+        approval_fingerprint = hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
+        if pending:
+            pending_fingerprints.append(approval_fingerprint)
+        if approved_unconsumed:
+            approved_unconsumed_fingerprints.append(approval_fingerprint)
+        identity_valid = (
+            isinstance(payload.get("source_agent_id"), str)
+            and bool(payload.get("source_agent_id"))
+            and isinstance(payload.get("source_invocation_id"), str)
+            and bool(payload.get("source_invocation_id"))
+        )
+        if (pending or approved_unconsumed) and not identity_valid:
+            unverifiable_fingerprints.append(approval_fingerprint)
+    pending_fingerprints.sort()
+    approved_unconsumed_fingerprints.sort()
+    unverifiable_fingerprints = sorted(set(unverifiable_fingerprints))
     return {
+        "native_invocation_approval_count": native_approval_count,
         "pending_native_invocation_count": len(pending_fingerprints),
         "approval_id_sha256": pending_fingerprints,
         "approved_unconsumed_invocation_count": len(approved_unconsumed_fingerprints),
         "approved_unconsumed_approval_id_sha256": approved_unconsumed_fingerprints,
+        "unverifiable_native_invocation_count": len(unverifiable_fingerprints),
+        "unverifiable_approval_id_sha256": unverifiable_fingerprints,
     }
+
+
+def build_invocation_drain_report(
+    path: Path, *, generated_at: datetime | None = None
+) -> dict[str, Any]:
+    """Build a redacted, read-only cutover report bound to one stable snapshot."""
+    _validate_source(path)
+    initial_stat = path.stat()
+    digest = _sha256_file(path)
+    records = _read_records(path)
+    claims, _failures = _read_delivery_state(path)
+    leases, lease_table_present = _read_approval_invocation_leases(path)
+    captured_at = generated_at or datetime.now(timezone.utc)
+    if captured_at.tzinfo is None:
+        raise ImportBlocked("drain report timestamp must include a timezone")
+    captured_at = captured_at.astimezone(timezone.utc)
+
+    approvals = records.get("approval_request", {})
+    native_providers = {"ANTIGRAVITY", "CODEX"}
+    drain_summary = _native_invocation_drain_summary(approvals, claims)
+    native: dict[str, dict[str, Any]] = {}
+    for approval_id, approval in approvals.items():
+        provider = approval.get("source_provider")
+        if provider in native_providers or approval.get("source_invocation_id") is not None:
+            native[approval_id] = approval
+
+    status_counts: Counter[str] = Counter()
+    pending_fingerprints = list(drain_summary["approval_id_sha256"])
+    approved_unconsumed_fingerprints = list(
+        drain_summary["approved_unconsumed_approval_id_sha256"]
+    )
+    unverifiable_fingerprints = list(drain_summary["unverifiable_approval_id_sha256"])
+    pending_statuses = {ApprovalStatus.REQUESTED.value, ApprovalStatus.PENDING_REVIEW.value}
+    known_statuses = {status.value for status in ApprovalStatus}
+
+    def fingerprint(approval_id: str) -> str:
+        return hashlib.sha256(approval_id.encode("utf-8")).hexdigest()
+
+    for approval_id, approval in native.items():
+        status = approval.get("status")
+        if not isinstance(status, str) or not status:
+            status = "UNKNOWN"
+        status_counts[status] += 1
+        agent_id = approval.get("source_agent_id")
+        invocation_id = approval.get("source_invocation_id")
+        active = status in pending_statuses or status == ApprovalStatus.APPROVED.value
+        identity_valid = (
+            isinstance(agent_id, str) and bool(agent_id)
+            and isinstance(invocation_id, str) and bool(invocation_id)
+        )
+        lease = leases.get(approval_id)
+        lease_valid = bool(
+            identity_valid
+            and lease_table_present
+            and lease is not None
+            and lease.get("workspace_id") == approval.get("workspace_id")
+            and lease.get("source_agent_id") == agent_id
+            and lease.get("source_invocation_id") == invocation_id
+        )
+        if lease_valid:
+            try:
+                lease_expiry = datetime.fromisoformat(lease["expires_at"])
+                approval_expiry = datetime.fromisoformat(approval["expires_at"])
+                lease_valid = (
+                    lease_expiry > captured_at
+                    and approval_expiry > captured_at
+                    and lease_expiry <= approval_expiry
+                )
+            except (KeyError, TypeError, ValueError):
+                lease_valid = False
+        if active and not lease_valid:
+            unverifiable_fingerprints.append(fingerprint(approval_id))
+        elif status == ApprovalStatus.APPROVED.value:
+            claim = claims.get(approval_id)
+            claim_matches = bool(
+                claim
+                and claim.get("workspace_id") == approval.get("workspace_id")
+                and claim.get("source_agent_id") == agent_id
+                and claim.get("source_invocation_id") == invocation_id
+            )
+            if not claim_matches:
+                approved_unconsumed_fingerprints.append(fingerprint(approval_id))
+                if claim is not None and fingerprint(approval_id) not in unverifiable_fingerprints:
+                    unverifiable_fingerprints.append(fingerprint(approval_id))
+        elif status not in known_statuses:
+            unverifiable_fingerprints.append(fingerprint(approval_id))
+
+    pending_fingerprints.sort()
+    approved_unconsumed_fingerprints.sort()
+    unverifiable_fingerprints = sorted(set(unverifiable_fingerprints))
+    final_stat = path.stat()
+    final_digest = _sha256_file(path)
+    if (
+        (initial_stat.st_dev, initial_stat.st_ino, initial_stat.st_size, initial_stat.st_mtime_ns)
+        != (final_stat.st_dev, final_stat.st_ino, final_stat.st_size, final_stat.st_mtime_ns)
+        or digest != final_digest
+    ):
+        raise ImportBlocked("source snapshot changed during drain inspection; discard it and create a stable snapshot")
+
+    blocked = bool(
+        pending_fingerprints or approved_unconsumed_fingerprints or unverifiable_fingerprints
+    )
+    return {
+        "report_version": 1,
+        "generated_at": captured_at.isoformat(),
+        "source_snapshot_sha256": digest,
+        "source_snapshot_size_bytes": initial_stat.st_size,
+        "read_only": True,
+        "status": "BLOCKED" if blocked else "READY_FOR_OWNER_REVIEW",
+        "migration_authorized": False,
+        "native_invocation_approval_count": len(native),
+        "native_invocation_status_counts": dict(sorted(status_counts.items())),
+        "pending_native_invocation_count": len(pending_fingerprints),
+        "pending_approval_id_sha256": pending_fingerprints,
+        "approved_unconsumed_invocation_count": len(approved_unconsumed_fingerprints),
+        "approved_unconsumed_approval_id_sha256": approved_unconsumed_fingerprints,
+        "unverifiable_native_invocation_count": len(unverifiable_fingerprints),
+        "unverifiable_approval_id_sha256": unverifiable_fingerprints,
+        "invocation_lease_table_present": lease_table_present,
+    }
+
+
+def _write_drain_report(path: Path, report: dict[str, Any]) -> None:
+    """Create a private report without replacing an existing operator artifact."""
+    parent = path.parent
+    if not parent.exists() or parent.is_symlink():
+        raise ImportBlocked("drain report parent must be an existing real directory")
+    parent_stat = parent.stat()
+    if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid():
+        raise ImportBlocked("drain report parent must be a directory owned by the current user")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as exc:
+        raise ImportBlocked("drain report already exists; choose a new path") from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(json.dumps(report, sort_keys=True, indent=2) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _validate_source(path: Path) -> None:
@@ -591,15 +752,18 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     if (
         invocation_drain["pending_native_invocation_count"]
         or invocation_drain["approved_unconsumed_invocation_count"]
+        or invocation_drain["unverifiable_native_invocation_count"]
     ):
         safe_fingerprints = ",".join(
             invocation_drain["approval_id_sha256"]
             + invocation_drain["approved_unconsumed_approval_id_sha256"]
+            + invocation_drain["unverifiable_approval_id_sha256"]
         )
         raise ImportBlocked(
             "source snapshot contains native invocations that must drain before import: "
             f"{invocation_drain['pending_native_invocation_count']} pending native invocation approval(s), "
-            f"{invocation_drain['approved_unconsumed_invocation_count']} approved but unconsumed native invocation(s); "
+            f"{invocation_drain['approved_unconsumed_invocation_count']} approved but unconsumed native invocation(s), "
+            f"{invocation_drain['unverifiable_native_invocation_count']} unverifiable native invocation(s); "
             "complete or explicitly reject/expire them through the owner flow "
             "before creating the migration snapshot; approval_id_sha256="
             f"{safe_fingerprints}"
@@ -1970,12 +2134,24 @@ def apply_import(dsn: str, digest: str, plan: dict[str, Any], selected: dict[str
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, type=Path, help="owner-only, quiesced SQLite snapshot")
+    parser.add_argument(
+        "--write-invocation-drain-report",
+        type=Path,
+        help="write a private read-only native invocation drain report; never imports data",
+    )
     parser.add_argument("--apply", action="store_true", help="write the validated partial slice")
     parser.add_argument("--confirm-source-snapshot", action="store_true", help="assert an operator-created coordinated snapshot")
     parser.add_argument("--allow-partial-slice", action="store_true", help="acknowledge omitted entity types")
     parser.add_argument("--allow-remote-staging", action="store_true", help="allow a non-loopback staging server")
     args = parser.parse_args(argv)
     try:
+        if args.write_invocation_drain_report is not None:
+            if args.apply or args.confirm_source_snapshot or args.allow_partial_slice or args.allow_remote_staging:
+                raise ImportBlocked("invocation drain report mode cannot be combined with import or apply options")
+            report = build_invocation_drain_report(args.source)
+            _write_drain_report(args.write_invocation_drain_report, report)
+            print(json.dumps(report, sort_keys=True, indent=2))
+            return 0 if report["status"] == "READY_FOR_OWNER_REVIEW" else 2
         plan, records, digest = build_plan(args.source)
         if args.apply:
             dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import argparse
+from copy import deepcopy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import json
@@ -578,6 +579,20 @@ def _approval_snapshot(approval: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _decision_snapshot(approval: dict[str, Any]) -> dict[str, Any]:
+    """Bind decision polling to the server-derived context present at creation."""
+    snapshot = _approval_snapshot(approval)
+    # Keep historical v1 hash bytes stable; these server-derived fields are
+    # compared separately so the decision cannot migrate to another workspace,
+    # risk assessment, or hash contract while the invocation is waiting.
+    snapshot["approved_payload_hash_version"] = approval.get(
+        "approved_payload_hash_version", 1
+    )
+    snapshot["workspace_id"] = approval.get("workspace_id")
+    snapshot["risk"] = deepcopy(approval.get("risk"))
+    return snapshot
+
+
 def _matches_invocation_payload(
     approval: dict[str, Any], *, body: dict[str, Any], agent_id: str
 ) -> bool:
@@ -912,7 +927,7 @@ def _run(
         return _decision("deny", "Control Tower approval does not match the original tool invocation")
     diagnostics["approval_id"] = _validated_diagnostic_approval_id(approval_id)
     try:
-        created_snapshot = _approval_snapshot(created)
+        created_snapshot = _decision_snapshot(created)
     except (KeyError, TypeError):
         return _decision("deny", "Control Tower approval payload is incomplete")
 
@@ -984,7 +999,7 @@ def _run(
         ):
             return _decision("deny", "Control Tower returned a different approval request")
         try:
-            if _approval_snapshot(current) != created_snapshot:
+            if _decision_snapshot(current) != created_snapshot:
                 return _decision("deny", "Approval payload changed after the original tool invocation")
         except (KeyError, TypeError):
             return _decision("deny", "Control Tower approval payload is incomplete")

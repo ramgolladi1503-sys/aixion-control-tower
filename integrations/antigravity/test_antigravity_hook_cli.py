@@ -434,7 +434,16 @@ def test_new_provider_session_cannot_reuse_previous_session_approval(
     assert not any(method == "POST" and endpoint == "consume" for method, endpoint, _body in calls)
 
 
-@pytest.mark.parametrize("failure", ["changed_payload", "invalid_approved_hash"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "changed_payload",
+        "invalid_approved_hash",
+        "changed_workspace",
+        "changed_risk",
+        "changed_hash_version",
+    ],
+)
 def test_run_denies_invalid_approval_snapshot_or_hash_before_consuming(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
@@ -447,14 +456,25 @@ def test_run_denies_invalid_approval_snapshot_or_hash_before_consuming(
         if method == "POST" and url.endswith("/agents/approvals"):
             assert body is not None
             created_approval.update(_approval_from_request(body))
+            if failure in {"changed_workspace", "changed_risk", "changed_hash_version"}:
+                created_approval.update({
+                    "approved_payload_hash_version": 2,
+                    "workspace_id": "workspace-antigravity-test",
+                    "risk": {"level": "MEDIUM", "score": 3},
+                })
             return dict(created_approval)
         if method == "GET" and url.endswith("/decision"):
             approved = {**created_approval, "status": "APPROVED"}
             if failure == "changed_payload":
                 approved["summary"] = "different invocation"
-                approved["approved_payload_hash"] = hook._payload_hash(approved)
-            else:
-                approved["approved_payload_hash"] = hook._payload_hash(approved)
+            elif failure == "changed_workspace":
+                approved["workspace_id"] = "workspace-other"
+            elif failure == "changed_risk":
+                approved["risk"] = {"level": "CRITICAL", "score": 99}
+            elif failure == "changed_hash_version":
+                approved["approved_payload_hash_version"] = 1
+            approved["approved_payload_hash"] = hook._payload_hash(approved)
+            if failure == "invalid_approved_hash":
                 approved["approved_payload_hash"] = "sha256:" + "0" * 64
             return approved
         raise AssertionError(f"Invalid approval must not be consumed: {method} {url}")
@@ -464,7 +484,12 @@ def test_run_denies_invalid_approval_snapshot_or_hash_before_consuming(
     result = hook.run(_hook_payload(), _test_environment())
 
     assert result["decision"] == "deny"
-    if failure == "changed_payload":
+    if failure in {
+        "changed_payload",
+        "changed_workspace",
+        "changed_risk",
+        "changed_hash_version",
+    }:
         assert result["reason"] == "Approval payload changed after the original tool invocation"
     else:
         assert result["reason"] == "Approved payload integrity check failed"

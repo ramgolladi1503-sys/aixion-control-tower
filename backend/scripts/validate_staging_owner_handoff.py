@@ -40,20 +40,115 @@ REQUIRED_SECTIONS = {
     "9": "Owner approval record",
 }
 REQUIRED_ROW_LABELS = {
-    "1": ("Dedicated GCP staging project ID", "Billing account associated"),
-    "2": ("Approved Cloud Run region", "Data-residency requirement"),
-    "3": ("API requests per day/month", "Cloud SQL edition/tier", "Backup/PITR schedule"),
+    "1": (
+        "Accountable staging project owner",
+        "Dedicated GCP staging project ID",
+        "Project number, verified against selected project",
+        "Billing account associated",
+        "Association verification date and verifier",
+        "Confirm project is dedicated to staging",
+    ),
+    "2": (
+        "Approved Cloud Run region",
+        "Approved Cloud SQL region",
+        "Approved Scheduler, Artifact Registry, Logging, and Monitoring locations",
+        "Data-residency requirement",
+        "Firebase/FCM project boundary",
+    ),
+    "3": (
+        "Test accounts/workspaces",
+        "Approval requests per day/month",
+        "API requests per day/month",
+        "Push/email notifications per day/month",
+        "Push/email job cadence and latency target",
+        "Average and maximum job runtime/invocations",
+        "Cloud Run API CPU, memory, concurrency, timeout, min/max instances",
+        "Cloud SQL edition/tier",
+        "Database storage, growth, and autoscaling limit",
+        "Backup/PITR schedule and retention",
+        "Logs/metrics ingestion and retention",
+        "Artifact Registry storage/retention",
+        "Expected network ingress/egress and destinations",
+        "Other billable services, support plans, or shared usage",
+    ),
     "4": (
         "Calculator URL/share reference",
+        "Export file/reference in approved restricted storage",
+        "Estimate date and pricing date",
+        "Project and region represented",
+        "Currency, taxes, discounts, and free-tier assumptions",
+        "Services/SKUs included and quantity assumptions",
         "Monthly low / expected / peak totals",
-        "Maximum exposure",
+        "Excluded costs and reason for exclusion",
+        "Independent reviewer and review date",
+        "Whole-project budget notification target",
+        "Cloud Run spend cap",
+        "Project-wide maximum exposure",
+        "Cloud SQL compute, storage, backups, and PITR maximum acceptable monthly exposure",
+        "Other uncapped services",
+        "Total residual exposure",
+        "Authorized containment action and named operator",
+        "Budget notification thresholds",
     ),
-    "5": ("Approval/decision/audit records", "RPO and measured RTO"),
-    "6": ("Primary staging operator", "Billing/cost alert recipient"),
-    "7": ("Slice 1 complete PostgreSQL", "Cloud SQL backup/PITR", "Spend notification/cap"),
-    "8": ("Enable billing or paid APIs", "Create Cloud SQL", "Deploy or route traffic"),
-    "9": ("Owner decision:", "Owner name/role:", "Reviewer name/role:"),
+    "5": (
+        "Account/profile/deletion records",
+        "Sessions/authentication records",
+        "Approval/decision/audit records",
+        "Connector credentials and credential audit",
+        "Application/infrastructure logs",
+        "PostgreSQL automated backups and PITR/WAL",
+        "Logical exports and recovery copies",
+        "RPO and measured RTO",
+    ),
+    "6": (
+        "Primary staging operator",
+        "Backup staging operator",
+        "Billing/cost alert recipient",
+        "Reliability/security incident escalation",
+        "Backup/restore operator",
+        "Approved alert channel and test-recipient reference",
+    ),
+    "7": (
+        "Slice 1 complete PostgreSQL",
+        "Project-specific immutable image built and scanned",
+        "Project/region-specific Cloud Run and Jobs manifests",
+        "IAM/API/secret bindings",
+        "Migration and rollback procedure",
+        "Cloud SQL backup/PITR and isolated restore",
+        "Health/readiness and approval-delivery alerts",
+        "Spend notification/cap and uncapped-resource stop/teardown",
+        "Privacy/retention and data-flow review",
+    ),
+    "8": (
+        "Read-only project/billing/API/IAM inspection",
+        "Enable billing or paid APIs",
+        "Create/modify IAM bindings or secrets",
+        "Create Cloud SQL",
+        "Run migration/import or move real data",
+        "Deploy or route traffic",
+        "Cloud backup/restore, spend-control, rollback, or teardown rehearsal",
+    ),
+    "9": (
+        "Owner decision:",
+        "Owner name/role:",
+        "Reviewer name/role:",
+        "Decision date and record version:",
+        "Conditions/exceptions:",
+        "Restricted evidence references:",
+    ),
 }
+OWNER_SIGNOFF_FIELDS = (
+    "- Owner decision:",
+    "- Owner name/role:",
+    "- Reviewer name/role:",
+    "- Decision date and record version:",
+    "- Conditions/exceptions:",
+    "- Restricted evidence references:",
+)
+BLOCKING_MARKER = re.compile(
+    r"\b(?:PENDING|UNKNOWN|UNRESOLVED|TBD|NOT\s+ESTABLISHED|NOT\s+APPROVED|NOT\s+AUTHORIZED)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -109,19 +204,25 @@ def _table_rows(lines: Sequence[str]) -> list[list[str]]:
     return rows
 
 
+def _has_blocking_marker(value: str) -> bool:
+    return BLOCKING_MARKER.search(value) is not None
+
+
 def evaluate_owner_record(markdown: str, local_check_issues: Sequence[str] = ()) -> HandoffReport:
     sections, issues = _sections(markdown)
     owner_pending: dict[str, int] = {}
     for number in ("1", "2", "3", "4", "5", "6"):
         title = REQUIRED_SECTIONS[number]
         rows = _table_rows(sections.get(number, []))
-        pending = sum(1 for row in rows if any("PENDING" in cell.upper() for cell in row[1:]))
+        pending = sum(
+            1 for row in rows if any(_has_blocking_marker(cell) for cell in row[1:])
+        )
         if pending:
             owner_pending[title] = pending
 
     implementation_pending = []
     for row in _table_rows(sections.get("7", [])):
-        if len(row) >= 3 and "PENDING" in row[-1].upper():
+        if len(row) >= 3 and _has_blocking_marker(row[-1]):
             implementation_pending.append(row[0])
 
     unauthorized = []
@@ -129,12 +230,13 @@ def evaluate_owner_record(markdown: str, local_check_issues: Sequence[str] = ())
         if (
             len(row) >= 5
             and row[0].lower() != "live action requiring separate authorization"
-            and "NOT AUTHORIZED" in row[-1].upper()
+            and _has_blocking_marker(row[-1])
         ):
             unauthorized.append(row[0])
 
     owner_decision_pending = any(
-        line.strip().startswith("- Owner decision:") and "PENDING" in line.upper()
+        line.strip().startswith(field) and _has_blocking_marker(line)
+        for field in OWNER_SIGNOFF_FIELDS
         for line in sections.get("9", [])
     )
     all_issues = issues + list(local_check_issues)

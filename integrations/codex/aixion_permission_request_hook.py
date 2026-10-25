@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
@@ -682,6 +683,20 @@ def _snapshot(approval: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _decision_snapshot(approval: dict[str, Any]) -> dict[str, Any]:
+    """Include server-derived approval context that must not change while waiting."""
+    snapshot = _snapshot(approval)
+    # Version 2 hashes bind workspace and risk, but version 1 intentionally
+    # retains its historical hash format. Compare these fields separately so
+    # neither hash version can inherit approval after context changes.
+    snapshot["approved_payload_hash_version"] = approval.get(
+        "approved_payload_hash_version", 1
+    )
+    snapshot["workspace_id"] = approval.get("workspace_id")
+    snapshot["risk"] = deepcopy(approval.get("risk"))
+    return snapshot
+
+
 def _matches(approval: dict[str, Any], *, body: dict[str, Any], config: dict[str, str]) -> bool:
     try:
         expected = dict(body)
@@ -867,7 +882,7 @@ def _run(
             or not _matches(created, body=body, config=config)):
         return "deny", "Control Tower did not create a matching actionable approval"
     diagnostics["approval_id"] = _validated_diagnostic_approval_id(approval_id)
-    original = _snapshot(created)
+    original = _decision_snapshot(created)
     wait_started_at = time.monotonic()
     deadline = wait_started_at + timeout
     next_heartbeat_at = wait_started_at + INVOCATION_HEARTBEAT_INTERVAL_SECONDS
@@ -929,7 +944,7 @@ def _run(
         if not _identity_matches(current, approval_id=approval_id, config=config):
             return "deny", "Control Tower returned a different approval request"
         try:
-            if _snapshot(current) != original:
+            if _decision_snapshot(current) != original:
                 return "deny", "Approval payload changed after the original Codex request"
         except (KeyError, TypeError):
             return "deny", "Control Tower approval payload is incomplete"
