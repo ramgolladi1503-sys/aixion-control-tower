@@ -103,6 +103,7 @@ from .agent_worker_workspace import (
     prepare_agent_worker_workspace,
 )
 from .models import ApprovalRequest, ApprovalStatus, AuditEvent, now_utc
+from .settings import get_settings
 from .trust_crypto import sha256_hex
 from .trust_models import CapabilityActionType, ProposedAction
 from .store import store
@@ -733,9 +734,41 @@ def create_agent_run(
     approval_repository: ApprovalDecisionRepository | None = None,
     run_repository: AgentRunRepository | None = None,
 ) -> AgentRun:
+    provided_repositories = (
+        task_repository is not None,
+        approval_repository is not None,
+        run_repository is not None,
+    )
+    settings = get_settings()
+    if any(provided_repositories) and not all(provided_repositories):
+        raise AgentRunConflict(
+            "AgentRun creation requires task, approval, and run repositories together."
+        )
+    if not any(provided_repositories) and (
+        settings.is_production
+        or settings.postgres_auth_enabled
+        or settings.postgres_runtime_probe_enabled
+    ):
+        raise AgentRunConflict(
+            "AgentRun creation requires explicit durable repositories in production "
+            "or PostgreSQL-auth mode."
+        )
     active_task_repository = task_repository or agent_task_repository
     active_approval_repository = approval_repository or approval_decision_repository
     active_run_repository = run_repository or agent_run_repository
+    if (
+        settings.is_production
+        or settings.postgres_auth_enabled
+        or settings.postgres_runtime_probe_enabled
+    ) and not (
+        isinstance(active_task_repository, PostgresAgentTaskRepository)
+        and isinstance(active_approval_repository, PostgresApprovalDecisionRepository)
+        and isinstance(active_run_repository, PostgresAgentRunRepository)
+    ):
+        raise AgentRunConflict(
+            "AgentRun creation requires PostgreSQL task, approval, and run repositories "
+            "in production or PostgreSQL-auth mode."
+        )
     sqlite_adapters = (
         isinstance(active_task_repository, SQLiteAgentTaskRepository),
         isinstance(active_approval_repository, SQLiteApprovalDecisionRepository),
@@ -1612,6 +1645,16 @@ def execute_next_step(
     postgres_pull_request_coordinator=None,
     postgres_pull_request_request_factory: PostgresPullRequestRequestFactory | None = None,
 ) -> AgentRunStepExecutionResult:
+    settings = get_settings()
+    if run_repository is None and (
+        settings.is_production
+        or settings.postgres_auth_enabled
+        or settings.postgres_runtime_probe_enabled
+    ):
+        raise AgentRunConflict(
+            "AgentRun execution requires an explicit durable repository in production "
+            "or PostgreSQL-auth mode."
+        )
     if (postgres_branch_coordinator is None) != (postgres_branch_request_factory is None):
         raise AgentRunConflict(
             "PostgreSQL branch coordinator and request factory must be injected together."
@@ -1650,6 +1693,15 @@ def execute_next_step(
         raise AgentRunConflict("AgentRun execution is unavailable for the configured repository.")
     if active_run_repository is None:
         active_run_repository = agent_run_repository
+    if (
+        settings.is_production
+        or settings.postgres_auth_enabled
+        or settings.postgres_runtime_probe_enabled
+    ) and not isinstance(active_run_repository, PostgresAgentRunRepository):
+        raise AgentRunConflict(
+            "AgentRun execution requires a PostgreSQL repository in production "
+            "or PostgreSQL-auth mode."
+        )
     if isinstance(active_run_repository, PostgresAgentRunRepository):
         run = active_run_repository.get(run_id)
         if run is None:

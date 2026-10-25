@@ -1,13 +1,21 @@
 package com.aixion.controltower.feature.agentaccess
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
 import com.aixion.controltower.core.api.dto.ExternalAgentDto
 import com.aixion.controltower.core.api.dto.ProjectDto
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import com.aixion.controltower.data.repository.AgentAccessSummary
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -108,5 +116,30 @@ class AgentAccessSetupGuideTest {
         composeRule.onNodeWithText("Native Codex Desktop approval interception is not verified.", substring = true)
             .assertExists()
         composeRule.onNodeWithText("Mac setup not confirmed").assertExists()
+    }
+
+    @Test
+    fun setupProgressTitleAndBadgeStackWithinNarrowLargeTextViewport() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    ControlTowerTheme {
+                        AgentAccessSetupGuide(AgentAccessUiState(loading = false, projectsLoaded = true))
+                    }
+                }
+            }
+        }
+
+        val title = composeRule.onNodeWithText("Setup progress")
+        val badge = composeRule.onNodeWithText("0 of 2 phone steps")
+        title.assertIsDisplayed()
+        badge.assertIsDisplayed()
+        composeRule.runOnIdle {
+            val titleBounds = title.fetchSemanticsNode().boundsInRoot
+            val badgeBounds = badge.fetchSemanticsNode().boundsInRoot
+            assertTrue("Setup title must fit the viewport", titleBounds.left >= 0f && titleBounds.right <= 240f)
+            assertTrue("Setup status must fit the viewport", badgeBounds.left >= 0f && badgeBounds.right <= 240f)
+            assertTrue("Setup status must sit below the title at large text", badgeBounds.top >= titleBounds.bottom)
+        }
     }
 }

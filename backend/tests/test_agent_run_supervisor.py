@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 from app import agent_run_supervisor
@@ -83,6 +84,115 @@ def test_postgres_run_scheduler_does_not_fall_back_to_stale_process_local_run(
 
     assert looked_up == ["stale-local-run"]
     assert list(store.agent_runs) == ["stale-local-run"]
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled", "postgres_runtime_probe_enabled"),
+    [(True, False, False), (False, True, False), (False, False, True)],
+)
+def test_create_agent_run_requires_explicit_repositories_in_authoritative_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+    postgres_runtime_probe_enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_supervisor,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+            postgres_runtime_probe_enabled=postgres_runtime_probe_enabled,
+        ),
+    )
+
+    with pytest.raises(AgentRunConflict, match="explicit durable repositories"):
+        create_agent_run(AgentRunCreate(task_id="must-not-read-sqlite"))
+
+
+def test_create_agent_run_rejects_partial_repository_binding() -> None:
+    with pytest.raises(AgentRunConflict, match="repositories together"):
+        create_agent_run(
+            AgentRunCreate(task_id="must-not-mix-stores"),
+            task_repository=agent_task_repository,
+        )
+
+
+@pytest.mark.parametrize(
+    "postgres_mode",
+    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+)
+def test_create_agent_run_rejects_explicit_sqlite_repositories_in_postgres_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_mode: str,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_supervisor,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=False,
+            postgres_auth_enabled=postgres_mode == "postgres_auth_enabled",
+            postgres_runtime_probe_enabled=postgres_mode == "postgres_runtime_probe_enabled",
+        ),
+    )
+
+    with pytest.raises(AgentRunConflict, match="requires PostgreSQL"):
+        create_agent_run(
+            AgentRunCreate(task_id="must-not-use-sqlite"),
+            task_repository=agent_task_repository,
+            approval_repository=approval_decision_repository,
+            run_repository=agent_run_repository,
+        )
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled", "postgres_runtime_probe_enabled"),
+    [(True, False, False), (False, True, False), (False, False, True)],
+)
+def test_execute_next_step_requires_explicit_repository_in_authoritative_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+    postgres_runtime_probe_enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_supervisor,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+            postgres_runtime_probe_enabled=postgres_runtime_probe_enabled,
+        ),
+    )
+
+    with pytest.raises(AgentRunConflict, match="explicit durable repository"):
+        execute_next_step("must-not-read-sqlite", worker_id="worker")
+
+
+@pytest.mark.parametrize(
+    "postgres_mode",
+    ["postgres_auth_enabled", "postgres_runtime_probe_enabled"],
+)
+def test_execute_next_step_rejects_explicit_sqlite_repository_in_postgres_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_mode: str,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_supervisor,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=False,
+            postgres_auth_enabled=postgres_mode == "postgres_auth_enabled",
+            postgres_runtime_probe_enabled=postgres_mode == "postgres_runtime_probe_enabled",
+        ),
+    )
+
+    with pytest.raises(AgentRunConflict, match="requires a PostgreSQL repository"):
+        execute_next_step(
+            "must-not-use-sqlite",
+            worker_id="worker",
+            run_repository=agent_run_repository,
+        )
 
 
 def _approved_task() -> AgentTask:

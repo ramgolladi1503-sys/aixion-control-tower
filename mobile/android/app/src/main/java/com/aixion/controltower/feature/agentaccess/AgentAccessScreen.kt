@@ -343,9 +343,9 @@ internal fun AgentAccessSetupGuide(state: AgentAccessUiState) {
     val completePhoneSteps = listOf(projectReady, connectorReady).count { it }
 
     TowerPanel(elevated = true) {
-        Row(
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
         ) {
             Text("Setup progress", color = palette.ink, style = MaterialTheme.typography.titleMedium)
             StatusBadge(
