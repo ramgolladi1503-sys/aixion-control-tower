@@ -222,11 +222,19 @@ def _pending_read_workspace_id(user: AuthUser, request: Request | None) -> str |
 
 
 def _require_local_mcp_write_runtime(request: Request) -> None:
-    """Keep process-local MCP mutations disabled under a PostgreSQL runtime."""
-    if _postgres_pending_repository_for_request(request) is not None:
+    """Reject local MCP mutation fallbacks in durable or production modes."""
+    settings = get_settings()
+    state = request.app.state
+    if (
+        settings.is_production
+        or settings.postgres_auth_enabled
+        or getattr(state, "postgres_runtime", None) is not None
+        or getattr(state, "postgres_repositories", None) is not None
+    ):
         raise HTTPException(
             status_code=503,
-            detail="MCP request submission and forwarding are unavailable in PostgreSQL runtime",
+            detail="MCP mutations require the active PostgreSQL runtime in production/PostgreSQL mode",
+            headers={"Retry-After": "1"},
         )
 
 
@@ -549,6 +557,7 @@ def submit_gateway_request(
                 request=request,
                 idempotency_key=idempotency_key,
             )
+        _require_local_mcp_write_runtime(request)
     workspace_id = workspace_id_for_user(user)
     if workspace_id is not None and project_workspace_id(payload.project_id) != workspace_id:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -673,6 +682,7 @@ def retry_pending_gateway_request(
             if pending is None:
                 raise HTTPException(status_code=404, detail="MCP pending request not found")
             return pending
+        _require_local_mcp_write_runtime(request)
     pending = _pending_for_user(pending_request_id, user)
     payload = payload or PendingRetryRequest()
     previous_status = pending.status
@@ -739,6 +749,7 @@ def resolve_gateway_request(
                 request=request,
                 pending_repository=postgres_pending_repository,
             )
+        _require_local_mcp_write_runtime(request)
     approval = approval_decision_repository.get(approval_request_id)
     if not approval or not approval_scope_is_consistent(approval):
         raise HTTPException(status_code=404, detail="Approval request not found")

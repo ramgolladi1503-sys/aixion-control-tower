@@ -32,6 +32,15 @@ class AgentRunTrustConflict(RuntimeError):
     pass
 
 
+def _require_local_trust_authority() -> None:
+    """Reject process-local trust operations in authoritative PostgreSQL modes."""
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        raise AgentRunTrustConflict(
+            "AgentRun trust operations require the app-bound durable PostgreSQL path."
+        )
+
+
 SIDE_EFFECT_STEPS = {
     AgentRunStepType.CREATE_BRANCH,
     AgentRunStepType.APPLY_CHANGES,
@@ -118,6 +127,7 @@ def attach_capability_lease(
     *,
     actor: str,
 ) -> AgentRun:
+    _require_local_trust_authority()
     if run.capability_lease_id:
         if run.capability_lease_id == lease_id:
             return run
@@ -330,6 +340,8 @@ def authorize_run_step(
     actor: str,
     timeout_seconds: int,
 ) -> list[ProposedAction]:
+    if step.step_type in SIDE_EFFECT_STEPS:
+        _require_local_trust_authority()
     if not get_settings().trust_enforcement or step.step_type not in SIDE_EFFECT_STEPS:
         return []
     if not run.capability_lease_id:
@@ -470,6 +482,7 @@ def consume_run_step_actions(
 ) -> None:
     if not actions or step.status != AgentRunStepStatus.SUCCEEDED:
         return
+    _require_local_trust_authority()
     duration_seconds = max(0, int((step.duration_ms or 0) / 1000))
     per_action_runtime = duration_seconds // len(actions)
     remainder = duration_seconds - per_action_runtime * len(actions)

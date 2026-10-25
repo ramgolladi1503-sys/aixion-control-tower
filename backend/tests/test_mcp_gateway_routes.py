@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import timedelta
+from types import SimpleNamespace
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -55,6 +56,80 @@ def _submit_mutating_request(project_id: str) -> dict:
 
 def _pending() -> object:
     return next(iter(store.mcp_pending_requests.values()))
+
+
+def _select_production_without_postgres_auth(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.mcp_gateway_routes.get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+
+
+def test_production_gateway_submit_fails_closed_without_postgres_runtime(monkeypatch) -> None:
+    project_id = _create_project()
+    _select_production_without_postgres_auth(monkeypatch)
+
+    response = client.post(
+        "/mcp-gateway/requests",
+        json={
+            "project_id": project_id,
+            "request": {
+                "server_name": "child-test-server",
+                "tool_name": "update_config",
+                "arguments": {"key": "demo", "value": "must-not-be-local"},
+                "mutating": True,
+            },
+        },
+    )
+
+    assert response.status_code == 503
+    assert "active PostgreSQL runtime" in response.json()["detail"]
+    assert store.mcp_pending_requests == {}
+    assert store.approval_requests == {}
+    assert child_received_count_for_test() == 0
+
+
+def test_production_gateway_retry_fails_closed_without_mutating_local_pending(monkeypatch) -> None:
+    project_id = _create_project()
+    _submit_mutating_request(project_id)
+    pending = _pending()
+    pending.status = MCPPendingStatus.DEAD_LETTER
+    pending.last_error = "retry fixture"
+    store.persist()
+    previous = pending.model_copy(deep=True)
+    previous_audit = list(store.audit_events)
+    _select_production_without_postgres_auth(monkeypatch)
+
+    response = client.post(
+        f"/mcp-gateway/pending-requests/{pending.id}/retry",
+        json={"reason": "must not mutate local state"},
+    )
+
+    assert response.status_code == 503
+    assert pending == previous
+    assert store.audit_events == previous_audit
+
+
+def test_production_gateway_resolve_fails_closed_without_forwarding_locally(monkeypatch) -> None:
+    project_id = _create_project()
+    submitted = _submit_mutating_request(project_id)
+    approval_id = submitted["approval_request_id"]
+    pending = _pending()
+    pending_before = pending.model_copy(deep=True)
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "reason": "guard regression fixture"},
+    )
+    assert decision.status_code == 200
+    audit_before = list(store.audit_events)
+    _select_production_without_postgres_auth(monkeypatch)
+
+    response = client.post(f"/mcp-gateway/approvals/{approval_id}/resolve")
+
+    assert response.status_code == 503
+    assert pending == pending_before
+    assert store.audit_events == audit_before
+    assert child_received_count_for_test() == 0
 
 
 def test_http_mcp_gateway_waits_then_forwards_after_mobile_decision() -> None:
