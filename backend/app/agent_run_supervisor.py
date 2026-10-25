@@ -918,9 +918,12 @@ def _ready_step(
     run: AgentRun,
     *,
     pending_events: list[AgentRunEvent] | None = None,
+    step_snapshot: list[AgentRunStep] | None = None,
 ) -> AgentRunStep | None:
     now = _now()
-    for step in _run_steps(run.id):
+    for step in (
+        step_snapshot if step_snapshot is not None else _run_steps(run.id)
+    ):
         if (
             step.status == AgentRunStepStatus.RETRY_WAIT
             and step.next_retry_at
@@ -1703,8 +1706,6 @@ def execute_next_step(
         if run is None:
             raise ValueError("Agent run not found.")
         run_steps = active_run_repository.list_steps_for_run(run_id)
-        run_events = active_run_repository.list_events_for_run(run_id)
-        store.project_agent_run_snapshot(run, run_steps, run_events)
     elif isinstance(active_run_repository, SQLiteAgentRunRepository):
         if run_repository is None:
             run = store.agent_runs.get(run_id)
@@ -1729,7 +1730,9 @@ def execute_next_step(
     if postgres_repository_execution and not postgres_run_validation_enabled() and (
         postgres_validation_coordinator is not None
         or (
-            (current_step := store.agent_run_steps.get(run.current_step_id or "")) is not None
+            (current_step := next(
+                (item for item in run_steps if item.id == run.current_step_id), None
+            )) is not None
             and current_step.step_type == AgentRunStepType.RUN_VALIDATION
         )
     ):
@@ -1738,7 +1741,9 @@ def execute_next_step(
             "AIXION_POSTGRES_RUN_VALIDATION_ENABLED rollout gate."
         )
     if postgres_repository_execution:
-        current_step = store.agent_run_steps.get(run.current_step_id or "")
+        current_step = next(
+            (item for item in run_steps if item.id == run.current_step_id), None
+        )
         if current_step is None or current_step.step_type not in {
             AgentRunStepType.VALIDATE_SCOPE,
             AgentRunStepType.VERIFY_RESULT,
@@ -1834,14 +1839,14 @@ def execute_next_step(
         durable_run = active_run_repository.get(run_id)
         if durable_run is None:
             raise AgentRunConflict("AgentRun disappeared after its lease was acquired.")
-        store.project_agent_run_snapshot(
-            durable_run,
-            active_run_repository.list_steps_for_run(run_id),
-            active_run_repository.list_events_for_run(run_id),
-        )
-        run = store.agent_runs[run_id]
+        run = durable_run
+        run_steps = active_run_repository.list_steps_for_run(run_id)
     retry_ready_events: list[AgentRunEvent] = []
-    step = _ready_step(run, pending_events=retry_ready_events)
+    step = _ready_step(
+        run,
+        pending_events=retry_ready_events,
+        step_snapshot=run_steps if postgres_repository_execution else None,
+    )
     if step is None:
         release_run_lease(
             run,
@@ -1996,12 +2001,6 @@ def execute_next_step(
             raise AgentRunConflict(
                 "PostgreSQL scope validation could not be committed."
             ) from error
-        store.project_agent_run_control_transition(
-            updated_run,
-            updated_steps,
-            events,
-            [audit],
-        )
         completed_step = next(item for item in updated_steps if item.id == step.id)
         return AgentRunStepExecutionResult(
             success=completed_step.status == AgentRunStepStatus.SUCCEEDED,
