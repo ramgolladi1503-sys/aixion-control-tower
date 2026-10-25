@@ -1107,7 +1107,11 @@ private fun DecisionPanel(
                 text = approvalTitle,
                 color = palette.ink,
                 style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.testTag("approval-decision-identity-title")
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .semantics { contentDescription = "Approval title: $approvalTitle" }
+                    .testTag("approval-decision-identity-title")
             )
         }
         Row(

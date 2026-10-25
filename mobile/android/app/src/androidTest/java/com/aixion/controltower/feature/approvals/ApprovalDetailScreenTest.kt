@@ -759,6 +759,37 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun longTitleCannotPushNormalViewportDecisionActionsOffScreenAndRemainsAccessible() {
+        val longTitle = "Review approval for " + "production deployment configuration ".repeat(18)
+        composeRule.setContent {
+            Box(modifier = Modifier.width(360.dp).height(800.dp).testTag("approval-long-title-viewport")) {
+                ApprovalDetailContent(
+                    approval(ApprovalStatus.REQUESTED).copy(title = longTitle),
+                    null,
+                    {},
+                    {},
+                    {}
+                )
+            }
+        }
+
+        val repeatedTitle = composeRule.onNodeWithTag("approval-decision-identity-title")
+        repeatedTitle.assertIsDisplayed()
+        val maxTitleHeightPx = with(composeRule.density) { 52.dp.toPx() }
+        assertTrue(
+            "The repeated footer title should use at most two lines",
+            repeatedTitle.fetchSemanticsNode().boundsInRoot.height <= maxTitleHeightPx
+        )
+        composeRule.onNodeWithContentDescription("Approval title: $longTitle").assertExists()
+        composeRule.onNodeWithText("Deny").assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsDisplayed()
+
+        val viewport = composeRule.onNodeWithTag("approval-long-title-viewport").fetchSemanticsNode().boundsInRoot
+        val panel = composeRule.onNodeWithTag("approval-decision-panel").fetchSemanticsNode().boundsInRoot
+        assertTrue("The decision footer should stay inside the viewport", panel.bottom <= viewport.bottom)
+    }
+
+    @Test
     fun blockedCompactFooterWrapsReasonAndKeepsDisabledActionsAndIdentityVisible() {
         val request = approval(ApprovalStatus.BLOCKED).copy(
             title = "Run protected production command",

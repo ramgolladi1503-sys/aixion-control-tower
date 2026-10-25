@@ -170,6 +170,60 @@ def test_diagnostic_approval_id_requires_backend_id_format() -> None:
     assert hook._validated_diagnostic_approval_id("diagnostic_token_canary") is None
 
 
+def test_read_only_symlink_to_secret_requires_phone_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret_file = tmp_path / ".env"
+    secret_file.write_text("API_KEY=not-for-phone", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    benign_link = workspace / "notes.txt"
+    benign_link.symlink_to(secret_file)
+    payload = _hook_payload()
+    payload["toolCall"] = {
+        "name": "view_file",
+        "args": {"absolutePath": str(benign_link)},
+    }
+    requests: list[tuple[str, str]] = []
+    created: dict = {}
+
+    def request(
+        method: str,
+        url: str,
+        _agent_id: str,
+        _token: str,
+        body: dict | None = None,
+        **_kwargs: object,
+    ) -> dict:
+        requests.append((method, url))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            return {**created, "status": "DENIED"}
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(payload, _test_environment())
+
+    assert result == {"decision": "deny", "reason": "Control Tower decision: DENIED"}
+    assert requests[0][0] == "POST"
+    assert requests[0][1].endswith("/agents/approvals")
+
+
+def test_read_only_symlink_resolution_error_requires_review(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    loop_a = workspace / "a.txt"
+    loop_b = workspace / "b.txt"
+    loop_a.symlink_to(loop_b)
+    loop_b.symlink_to(loop_a)
+
+    assert hook._has_sensitive_path({"absolutePath": str(loop_a)}) is True
+
+
 def test_run_consumes_the_approved_invocation_before_returning_auto_approve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

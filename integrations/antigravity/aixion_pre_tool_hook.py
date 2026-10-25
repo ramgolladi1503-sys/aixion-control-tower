@@ -9,6 +9,7 @@ from email.utils import parsedate_to_datetime
 import json
 import math
 import os
+from pathlib import Path
 import re
 import stat
 import subprocess
@@ -246,7 +247,7 @@ def _has_sensitive_value(value: Any) -> bool:
 
 
 def _has_sensitive_path(args: Any) -> bool:
-    """Identify secret-bearing paths in documented Antigravity read arguments."""
+    """Identify secret-bearing paths, including symlink targets, in Antigravity read arguments."""
     if not isinstance(args, dict):
         return False
     for key, value in args.items():
@@ -268,6 +269,20 @@ def _has_sensitive_path(args: Any) -> bool:
         normalized_path = value.replace("\\", "/").strip()
         components = [part for part in normalized_path.split("/") if part and part != "."]
         for component in components:
+            candidate = component.lower()
+            if candidate in SAFE_ENV_EXAMPLES:
+                continue
+            if SENSITIVE_PATH_COMPONENT.fullmatch(candidate):
+                return True
+        # The read-only fast path must not treat a harmless-looking symlink as
+        # safe when it resolves into a credential-bearing location. If local
+        # path resolution is ambiguous (for example, a symlink loop), require
+        # phone review rather than bypassing the approval gate.
+        try:
+            resolved_path = Path(value).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return True
+        for component in resolved_path.parts:
             candidate = component.lower()
             if candidate in SAFE_ENV_EXAMPLES:
                 continue
