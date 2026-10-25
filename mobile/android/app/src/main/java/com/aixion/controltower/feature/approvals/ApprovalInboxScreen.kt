@@ -111,6 +111,14 @@ internal fun filterApprovalsForInbox(
     return orderApprovalsForInbox(selected)
 }
 
+/** Terminal requests belong in history for context, but never receive decision actions. */
+internal fun terminalApprovalRequests(approvals: List<ApprovalSummary>): List<ApprovalSummary> =
+    approvals.filter { it.status == ApprovalStatus.EXPIRED || it.status == ApprovalStatus.CANCELLED }
+        .sortedByDescending { approval ->
+            approval.expiresAt?.let { raw -> runCatching { Instant.parse(raw) }.getOrNull() }
+                ?: Instant.MIN
+        }
+
 internal fun decisionHistoryLabel(decision: String): String = when (decision.trim().lowercase()) {
     "approve", "approved" -> "Approved"
     "reject", "rejected", "deny", "denied" -> "Denied"
@@ -177,6 +185,7 @@ fun ApprovalInboxContent(
         section = selectedSection
     )
     val visibleHistory = filterApprovalHistory(state.approvalHistory, selectedHistoryFilter)
+    val terminalRequests = terminalApprovalRequests(state.approvals)
     val refreshSelectedContent = {
         onRetry()
         if (selectedSection == ApprovalInboxSection.HISTORY) {
@@ -557,6 +566,35 @@ fun ApprovalInboxContent(
         if (selectedSection == ApprovalInboxSection.HISTORY && state.historyErrorMessage == null) {
             items(visibleHistory, key = { it.eventId }) { event ->
                 ApprovalDecisionHistoryCard(event)
+            }
+        }
+
+        if (selectedSection == ApprovalInboxSection.HISTORY && !state.hasError && terminalRequests.isNotEmpty()) {
+            item {
+                Text(
+                    text = "Closed requests",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("approval-terminal-history-heading")
+                        .semantics { heading() },
+                    color = palette.ink,
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Text(
+                    text = "Expired and cancelled requests are shown for reference. They cannot be approved or denied.",
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            items(terminalRequests, key = { "terminal-${it.id}" }) { approval ->
+                ApprovalCard(
+                    approval = approval,
+                    onClick = if (canSelectApprovalFromInbox(state)) {
+                        { onApprovalSelected(approval) }
+                    } else {
+                        null
+                    }
+                )
             }
         }
 

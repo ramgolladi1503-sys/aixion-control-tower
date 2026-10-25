@@ -17,6 +17,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import com.aixion.controltower.core.model.ApprovalSummary
@@ -76,7 +77,8 @@ fun ApprovalCard(
         Text(
             text = approval.title,
             color = palette.ink,
-            style = MaterialTheme.typography.titleMedium
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.semantics { heading() }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(

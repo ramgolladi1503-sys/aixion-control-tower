@@ -132,6 +132,22 @@ Do not convert an unknown input to zero. Complete this worksheet with the projec
 | Operations reserve | Taxes, monitoring products, image scanning, DNS, and other usage-dependent charges | **PENDING** | Calculator line items or documented reason for exclusion |
 | Maximum exposure | Approved total monthly amount and maximum for services outside any eligible spend cap | **PENDING** | Owner approval plus reviewed teardown plan; alerts alone are not a ceiling |
 
+### Owner decision record — intentionally unfilled
+
+These are owner decisions, not defaults. Keep each item **PENDING** until the
+named owner records an explicit value and supporting evidence. Completing this
+checklist does not authorize billing, API enablement, or resource creation.
+
+| Decision | Required owner input | Status |
+| --- | --- | --- |
+| Project and billing authority | Exact staging project ID, linked billing account, and named project/billing owner | **PENDING** |
+| Region and data residency | Approved region and residency constraints; `asia-south1` remains a proposal | **PENDING** |
+| Approval delivery target | Expected/peak outbox volume and acceptable notification latency, used to select and validate Scheduler cadence | **PENDING** |
+| Data lifecycle and recovery | Audit/approval retention, backup/PITR retention, and approved recovery objectives | **PENDING** |
+| Spending authority | Approved expected and peak monthly total plus maximum exposure for every uncapped service; `$75/month` remains a proposal | **PENDING** |
+| Alert response | Named primary and break-glass operators, alert channels, and who can stop or tear down staging resources | **PENDING** |
+| Cost evidence | Dated regional calculator export covering the chosen workload and applicable services | **PENDING** |
+
 Calculate request-based Cloud Run API and Cloud Run Jobs on their respective pricing modes; do not blend their free tiers. For Cloud SQL, storage, backups/PITR, egress, logging, secrets, and registry, enter separate line items using the selected region and configuration. Record both the expected-month and conservative peak-month totals. If a charge cannot be priced from the selected calculator inputs, label it **UNPRICED** and keep the handoff open. A proposed $75/month amount is not an approved exposure limit and does not fill any pending input above.
 
 ### Proposed spend limit and enforcement boundary — owner approval pending

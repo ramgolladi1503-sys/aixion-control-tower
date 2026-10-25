@@ -107,6 +107,10 @@ class HomeScreenTest {
         val risk = composeRule.onNodeWithTag("approval-card-risk-badge").assertIsDisplayed()
         val project = composeRule.onNodeWithTag("approval-card-project").assertIsDisplayed()
         val title = composeRule.onNodeWithText("Allow .env file access").assertIsDisplayed()
+        assertTrue(
+            "Each approval card title should be exposed as a heading for direct screen-reader navigation",
+            title.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         val projectTop = project.fetchSemanticsNode().boundsInRoot.top
         assertTrue("Project context must sit below the trust badge", projectTop >= source.fetchSemanticsNode().boundsInRoot.bottom)
         assertTrue("Project context must sit below the risk badge", projectTop >= risk.fetchSemanticsNode().boundsInRoot.bottom)

@@ -326,6 +326,40 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
+    fun expiredAndCancelledRequestsAppearInHistoryAsReadOnlyTerminalRecords() {
+        var selectedId: String? = null
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    approvals = listOf(
+                        approval("expired-request", "Expired request", ApprovalStatus.EXPIRED),
+                        approval("cancelled-request", "Cancelled request", ApprovalStatus.CANCELLED)
+                    ),
+                    historyLoaded = true
+                ),
+                onApprovalSelected = { selectedId = it.id }
+            )
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+        composeRule.onNodeWithTag("approval-terminal-history-heading").assertTextContains("Closed requests")
+        composeRule.onNodeWithText(
+            "Expired and cancelled requests are shown for reference. They cannot be approved or denied."
+        ).assertExists()
+        composeRule.onNodeWithText("Expired request").assertExists()
+        composeRule.onNodeWithText("Cancelled request").assertExists()
+        composeRule.onNodeWithText("Expired").assertExists()
+        composeRule.onNodeWithText("Cancelled").assertExists()
+        composeRule.onNodeWithText("No decisions recorded").assertExists()
+        composeRule.onAllNodesWithText("Approve").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Deny").assertCountEquals(0)
+
+        composeRule.onNodeWithText("Expired request").performClick()
+        assertEquals("expired-request", selectedId)
+    }
+
+    @Test
     fun rendersApprovalBucketsForCanonicalAndLegacyStatuses() {
         composeRule.setContent {
             ApprovalInboxContent(

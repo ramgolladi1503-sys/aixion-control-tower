@@ -10,7 +10,7 @@ from app.postgres_external_agent_auth_repository import (
 
 from test_postgres_external_agent_auth_repository import _agent_and_credential, _create_agent
 
-pytest_plugins = ("test_postgres_external_agent_auth_repository",)
+pytest_plugins = ("postgres_external_agent_auth_fixtures",)
 
 
 class _PausingCursor:

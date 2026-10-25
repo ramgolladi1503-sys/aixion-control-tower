@@ -89,6 +89,24 @@ class ApprovalInboxFilterTest {
     }
 
     @Test
+    fun terminalApprovalRequestsIncludeOnlyExpiredAndCancelledRecords() {
+        val terminal = listOf(
+            approval("expired", ApprovalStatus.EXPIRED),
+            approval("cancelled", ApprovalStatus.CANCELLED)
+        )
+        val nonTerminal = listOf(
+            approval("approved", ApprovalStatus.APPROVED),
+            approval("denied", ApprovalStatus.DENIED),
+            approval("pending", ApprovalStatus.REQUESTED)
+        )
+
+        assertEquals(
+            listOf("expired", "cancelled"),
+            terminalApprovalRequests(terminal + nonTerminal).map { it.id }
+        )
+    }
+
+    @Test
     fun unknownStatusesAndRiskRemainInSeparateDisabledSetAcrossFilters() {
         val unknownStatus = approval("unknown_status", ApprovalStatus.UNKNOWN)
         val unknownRisk = approval("unknown_risk", ApprovalStatus.APPROVED).copy(risk = RiskLevel.UNKNOWN)
