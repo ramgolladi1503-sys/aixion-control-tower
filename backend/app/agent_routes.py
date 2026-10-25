@@ -247,6 +247,7 @@ def _get_agent_or_404(
     agent_id: str, user: AuthUser | None = None,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> tuple[ExternalAgent, object | None]:
+    _require_request_for_authoritative_repository(http_request, "External agent")
     repository = (
         None if http_request is None
         else external_agent_auth_repository_for_request(http_request)
@@ -296,6 +297,7 @@ def create_agent(
     user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> AgentRegistrationResponse:
+    _require_request_for_authoritative_repository(http_request, "External agent")
     return register_external_agent(payload, user, http_request=http_request)
 
 
@@ -1124,6 +1126,7 @@ def rotate_agent_token(
     user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> AgentRegistrationResponse:
+    _require_request_for_authoritative_repository(http_request, "External agent")
     repository = agent_auth_repository if http_request is None else external_agent_auth_repository_for_request(http_request)
     agent, credential = _get_agent_or_404(agent_id, user, http_request)
     response = rotate_external_agent_token(
@@ -1144,6 +1147,7 @@ def revoke_agent_token(
     agent_id: str, user: AuthUser = OwnerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ExternalAgentPublic:
+    _require_request_for_authoritative_repository(http_request, "External agent")
     repository = agent_auth_repository if http_request is None else external_agent_auth_repository_for_request(http_request)
     agent, credential = _get_agent_or_404(agent_id, user, http_request)
     public_agent = revoke_external_agent_token(
