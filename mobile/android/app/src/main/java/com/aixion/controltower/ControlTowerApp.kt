@@ -146,12 +146,31 @@ fun ControlTowerApp(
             }
         }
 
-        LaunchedEffect(notificationDeepLink, notificationEventId, authState.authenticated, authState.sessionChecked) {
+        LaunchedEffect(
+            notificationDeepLink,
+            notificationEventId,
+            authState.authenticated,
+            authState.sessionChecked,
+            approvalsState.decisionInFlight,
+            approvalsState.decisionNeedsReconciliation
+        ) {
             if (!AuthSessionGate.canOpenProtectedRoute(authState.authenticated, authState.sessionChecked)) {
                 return@LaunchedEffect
             }
             when (releaseOneNotificationDestination(notificationDeepLink)) {
                 Route.ApprovalDetail -> {
+                    if (!AuthSessionGate.canHandleApprovalNotification(
+                            authenticated = authState.authenticated,
+                            sessionChecked = authState.sessionChecked,
+                            decisionBlocked = approvalsState.decisionInFlight ||
+                                approvalsState.decisionNeedsReconciliation
+                        )
+                    ) {
+                        // openApprovalById intentionally refuses to replace detail state while a
+                        // prior decision is unresolved. Keep the notification event queued and
+                        // retry automatically when that state clears.
+                        return@LaunchedEffect
+                    }
                     val approvalLink = notificationDeepLink as? NotificationDeepLink.ApprovalRequest
                         ?: return@LaunchedEffect
                     approvalsViewModel.openApprovalById(approvalLink.entityId)

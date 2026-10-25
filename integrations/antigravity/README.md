@@ -143,9 +143,11 @@ the phone and host, plus production notification and host-availability setup.
      --project-id "project_..."
    ```
 
-   A loopback URL such as `http://127.0.0.1:<verified-port>` is only for
-   host-side simulation: `127.0.0.1` on the phone refers to the phone itself.
-   It cannot support phone approval. Do not use port 8002 on the current
+   A loopback URL such as `http://127.0.0.1:<verified-port>` supports phone
+   approval only when the Android device has an `adb reverse` mapping for that
+   port, as shown in the USB instructions above; without that mapping,
+   `127.0.0.1` on the phone refers to the phone itself and the URL supports
+   only host-side simulation. Do not use port 8002 on the current
    workstation until its competing listeners have been resolved and the single
    intended disposable database has been verified. Do not use `--config-home`
    with the user's normal home, reuse the blocked disk-cleanup workspace, or
