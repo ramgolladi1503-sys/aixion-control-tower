@@ -452,7 +452,10 @@ def test_run_rejects_missing_or_mismatched_workspace_before_credentials_or_netwo
 
 
 def test_event_workspace_accepts_symlink_alias_to_session_subdirectory(tmp_path: Path) -> None:
-    workspace = Path.cwd().resolve()
+    # CI invokes this suite from backend/, while local runs may start at the
+    # repository root. Anchor the fixture to this test file so its target
+    # directory exists independently of the caller's working directory.
+    workspace = Path(__file__).resolve().parents[2]
     alias = tmp_path / "workspace-alias"
     alias.symlink_to(workspace, target_is_directory=True)
     event = _codex_event()
