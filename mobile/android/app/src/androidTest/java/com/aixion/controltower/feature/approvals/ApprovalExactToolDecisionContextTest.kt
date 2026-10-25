@@ -3,6 +3,7 @@ package com.aixion.controltower.feature.approvals
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
@@ -56,12 +57,17 @@ class ApprovalExactToolDecisionContextTest {
         }
 
         val payloadNode = composeRule.onNodeWithText(payload)
+        val actionHeading = composeRule.onNodeWithText("Exact requested tool action")
         val wrapToggle = composeRule.onNodeWithTag("approval-payload-wrap-toggle")
         val context = composeRule.onNodeWithTag("approval-exact-tool-decision-context")
         val acknowledgement = composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
         val approve = composeRule.onNodeWithText("Approve request")
 
         context.assertExists()
+        assertTrue(
+            "The exact action section should be available through screen-reader heading navigation",
+            actionHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         payloadNode.assertExists()
         wrapToggle.assertIsOn()
         composeRule.onNodeWithTag("approval-unbroken-payload-wrapped-0").assertExists()

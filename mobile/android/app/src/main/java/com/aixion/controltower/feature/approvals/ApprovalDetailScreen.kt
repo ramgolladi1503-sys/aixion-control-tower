@@ -758,6 +758,7 @@ private fun ExactToolRequestHeader(approval: ApprovalSummary) {
     ) {
         Text(
             text = "Exact requested tool action",
+            modifier = Modifier.semantics { heading() },
             color = palette.ink,
             fontSize = 18.sp,
             fontWeight = FontWeight.SemiBold,

@@ -6,7 +6,64 @@ import pytest
 from fastapi import HTTPException
 
 from app import agent_routes
+from app import agent_task_routes
 from app.models import AgentProvider, ExternalAgent
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=["production", "postgres-auth"],
+)
+def test_agent_task_approval_binding_failure_is_retryable_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+) -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    local_repository = object()
+    monkeypatch.setattr(agent_task_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        agent_task_routes,
+        "approval_decision_repository",
+        local_repository,
+    )
+
+    def unavailable(_request):
+        raise RuntimeError("PostgreSQL approval repository is unavailable or mismatched")
+
+    monkeypatch.setattr(
+        agent_task_routes,
+        "approval_decision_repository_for_request",
+        unavailable,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        agent_task_routes._approval_repository_for_route(request)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert raised.value.detail == "Approval repository is unavailable"
+
+
+def test_agent_task_approval_requestless_local_selection_remains_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_repository = object()
+    monkeypatch.setattr(
+        agent_task_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    monkeypatch.setattr(
+        agent_task_routes,
+        "approval_decision_repository",
+        local_repository,
+    )
+
+    assert agent_task_routes._approval_repository_for_route(None) is local_repository
 
 
 def test_agent_task_request_selection_fails_closed_when_postgres_bundle_is_missing(

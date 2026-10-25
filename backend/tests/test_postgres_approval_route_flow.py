@@ -625,6 +625,25 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     assert decision.json()["status"] == "APPROVED"
     assert decision.json()["approved_payload_hash"]
 
+    # A duplicated mobile tap may submit the same decision again after the
+    # first response is delayed or lost. The route must report the terminal
+    # conflict without writing a second decision audit or notification.
+    duplicate_decision = client.post(
+        f"/approvals/{approval['id']}/decision",
+        json={"decision": "approve"},
+    )
+    assert duplicate_decision.status_code == 409, duplicate_decision.text
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='approval.decision'",
+            (approval["id"],),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT count(*) FROM notifications WHERE approval_id=%s",
+            (approval["id"],),
+        ).fetchone()[0] == 2  # creation plus the one committed decision
+
     read = client.get(f"/agents/approvals/{approval['id']}/decision", headers=headers)
     assert read.status_code == 200, read.text
     assert read.json()["approved_payload_hash"] == decision.json()["approved_payload_hash"]

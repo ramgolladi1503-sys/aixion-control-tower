@@ -3,7 +3,7 @@ services:
     build:
       context: ./backend
     environment:
-      AIXION_PROFILE: demo
+      AIXION_PROFILE: local
       AIXION_AUTH_ENABLED: "false"
       AIXION_DB_PATH: /app/runtime/aixion_control_tower.sqlite3
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}

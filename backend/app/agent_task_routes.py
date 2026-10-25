@@ -147,7 +147,17 @@ def _approval_repository_for_route(
             )
         # Direct function calls in unit tests use the explicit local adapter.
         return approval_decision_repository
-    return approval_decision_repository_for_request(http_request)
+    try:
+        return approval_decision_repository_for_request(http_request)
+    except RuntimeError:
+        # Missing or mismatched lifespan-owned bindings are an unavailable
+        # authority, not a generic route failure. Never let callers interpret
+        # this as a reason to consult the module-level SQLite adapter.
+        raise HTTPException(
+            status_code=503,
+            detail="Approval repository is unavailable",
+            headers={"Retry-After": "1"},
+        ) from None
 
 
 def _project_repository_for_route(http_request: Request | None):
