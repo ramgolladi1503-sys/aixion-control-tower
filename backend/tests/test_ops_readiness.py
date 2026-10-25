@@ -105,6 +105,43 @@ def test_sqlite_readiness_verifies_the_local_flight_recorder(monkeypatch) -> Non
     assert readiness.flight_recorder_event_count == 3
 
 
+def test_production_readiness_never_reads_sqlite_trust_or_lease_state(monkeypatch) -> None:
+    settings = replace(
+        get_settings(),
+        profile="production",
+        postgres_auth_enabled=False,
+        postgres_runtime_probe_enabled=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+
+    def sqlite_authority_must_not_be_read(*_args, **_kwargs):
+        pytest.fail("Production readiness must not read process-local SQLite state")
+
+    class ForbiddenSQLiteLeaseMap(dict):
+        def values(self):
+            sqlite_authority_must_not_be_read()
+
+    monkeypatch.setattr(
+        ops_routes, "verify_flight_recorder", sqlite_authority_must_not_be_read
+    )
+    monkeypatch.setattr(store, "capability_leases", ForbiddenSQLiteLeaseMap())
+
+    readiness = build_runtime_readiness(
+        postgres_runtime=None,
+        application_state=SimpleNamespace(
+            postgres_runtime=None,
+            postgres_repositories=None,
+        ),
+    )
+
+    assert readiness.status == "not_ready"
+    assert readiness.database_backend == "mixed"
+    assert readiness.application_store_ready is False
+    assert readiness.flight_recorder_valid is False
+    assert readiness.active_capability_leases_available is False
+    assert any("PostgreSQL runtime is unavailable" in error for error in readiness.errors)
+
+
 def test_readiness_reports_metrics_configuration_without_secret_value(monkeypatch) -> None:
     token = "test-only-prometheus-token-with-more-than-32-bytes"
     monkeypatch.setenv("AIXION_METRICS_TOKEN", token)

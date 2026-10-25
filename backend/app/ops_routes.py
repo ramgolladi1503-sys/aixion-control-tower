@@ -151,7 +151,7 @@ def _verify_readiness_flight_recorder(
 ) -> FlightRecorderVerification:
     """Verify the ledger selected by the active application persistence mode."""
     settings = get_settings()
-    if not settings.postgres_auth_enabled:
+    if not (settings.postgres_auth_enabled or settings.is_production):
         return verify_flight_recorder()
 
     repositories = getattr(application_state, "postgres_repositories", None)
@@ -421,7 +421,7 @@ def build_runtime_readiness(
             "credentials or send permission."
         )
 
-    if settings.postgres_auth_enabled:
+    if settings.postgres_auth_enabled or settings.is_production:
         active_capability_leases_available = (
             isinstance(postgres_active_capability_leases, int)
             and not isinstance(postgres_active_capability_leases, bool)
@@ -444,7 +444,7 @@ def build_runtime_readiness(
     # Auth mode selects the lifespan-owned PostgreSQL bundle for many routes,
     # but process-global SQLite writers remain. Report that mixed authority
     # explicitly and never call it application-ready.
-    if settings.postgres_auth_enabled:
+    if postgres_is_authoritative:
         application_store_mode = "postgres_auth_runtime"
         database_backend = "mixed"
         application_store_ready = False
