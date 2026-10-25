@@ -154,13 +154,13 @@ def test_valid_session_fallback_is_preserved_exactly() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
                 "source_agent_name": "Antigravity test",
             }
-        return {**created_body, "id": "approval-test", "status": "DENIED",
+        return {**created_body, "id": "approval_0123456789ab", "status": "DENIED",
                 "source_provider": "ANTIGRAVITY", "source_agent_id": agent_id}
 
     session_id = "  session-fallback-exact  "
@@ -179,7 +179,7 @@ def test_valid_session_fallback_is_preserved_exactly() -> None:
 def _approved_record(body: dict) -> dict:
     record = {
         **body,
-        "id": "approval-test",
+        "id": "approval_0123456789ab",
         "status": "APPROVED",
         "risk": {"level": "MEDIUM", "reasons": [], "blocked": False, "required_actions": []},
         "source_provider": "ANTIGRAVITY",
@@ -267,7 +267,7 @@ def test_read_only_tool_targets_secret_path_and_requires_mobile_approval(tool_na
             created_body = body or {}
             return {
                 **(body or {}),
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "project_id": "project-test",
                 "source_provider": "ANTIGRAVITY",
@@ -276,7 +276,7 @@ def test_read_only_tool_targets_secret_path_and_requires_mobile_approval(tool_na
             }
         return {
             **(body or {}),
-            "id": "approval-test",
+            "id": "approval_0123456789ab",
             "status": "DENIED",
             "project_id": "project-test",
             "work_order_id": None,
@@ -396,7 +396,7 @@ def test_unknown_tool_requires_mobile_approval_then_allows_exact_snapshot() -> N
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -426,7 +426,7 @@ def test_duplicate_approval_delivery_claim_denies_tool() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -460,7 +460,7 @@ def test_ambiguous_delivery_claim_response_denies_without_retry() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -494,7 +494,7 @@ def test_revoked_connector_at_consume_denies_approved_tool_call() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -533,7 +533,7 @@ def test_ambiguous_delivery_claim_is_reported_without_allowing_tool() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -605,7 +605,7 @@ def test_antigravity_heartbeat_accepts_future_utc_lease_timestamp() -> None:
 def test_denied_mobile_decision_blocks_tool() -> None:
     def request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
         if method == "POST":
-            return {"id": "approval-test", "status": "PENDING_REVIEW"}
+            return {"id": "approval_0123456789ab", "status": "PENDING_REVIEW"}
         return {"status": "DENIED", "approved_payload_hash": None}
 
     with patch.object(hook, "_request", side_effect=request):
@@ -621,7 +621,7 @@ def test_network_failure_while_waiting_emits_an_explicit_deny(
         if method == "POST":
             return {
                 **(body or {}),
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -667,7 +667,7 @@ def test_ambiguous_decision_poll_reconnects_and_resumes_same_approval() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -703,7 +703,7 @@ def test_repeated_ambiguous_decision_polls_back_off_and_expire_fail_closed() -> 
         if method == "POST" and url.endswith("/agents/approvals"):
             return {
                 **(body or {}),
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -713,7 +713,7 @@ def test_repeated_ambiguous_decision_polls_back_off_and_expire_fail_closed() -> 
             raise hook.AmbiguousRequestError("temporary network loss")
         if url.endswith("/expire"):
             return {
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "project_id": ENV["AIXION_PROJECT_ID"],
                 "status": "EXPIRED",
                 "source_provider": "ANTIGRAVITY",
@@ -754,7 +754,7 @@ def test_approval_poll_identity_mismatch_cannot_authorize_tool() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -782,7 +782,7 @@ def test_approval_created_for_different_invocation_is_not_polled() -> None:
         if method == "POST":
             return {
                 **json.loads(json.dumps(body or {})),
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -816,7 +816,7 @@ def test_changed_approved_payload_is_denied_even_with_a_matching_hash() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -843,7 +843,7 @@ def test_creation_response_with_wrong_project_is_not_polled() -> None:
         calls.append(method)
         return {
             **(body or {}),
-            "id": "approval-test",
+            "id": "approval_0123456789ab",
             "status": "PENDING_REVIEW",
             "source_provider": "ANTIGRAVITY",
             "source_agent_id": agent_id,
@@ -872,7 +872,7 @@ def test_rate_limited_decision_poll_retries_after_server_delay() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -918,7 +918,7 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
             created_body = body or {}
             return {
                 **json.loads(json.dumps(created_body)),
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -927,7 +927,7 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
         if method == "GET":
             return {
                 **json.loads(json.dumps(created_body)),
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -935,7 +935,7 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
             }
         if method == "POST" and url.endswith("/expire"):
             return {
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "project_id": ENV["AIXION_PROJECT_ID"],
                 "status": "EXPIRED",
                 "source_provider": "ANTIGRAVITY",
@@ -955,7 +955,7 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
 
     assert result["decision"] == "deny"
     assert calls[-1][0] == "POST"
-    assert calls[-1][1].endswith("/agents/approvals/approval-test/expire")
+    assert calls[-1][1].endswith("/agents/approvals/approval_0123456789ab/expire")
 
 
 def test_approval_received_after_host_deadline_is_denied() -> None:
@@ -967,7 +967,7 @@ def test_approval_received_after_host_deadline_is_denied() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -1001,7 +1001,7 @@ def test_approval_received_before_deadline_is_not_claimed_if_local_validation_cr
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -1043,7 +1043,7 @@ def test_approval_racing_with_timeout_is_denied() -> None:
             created_body = body or {}
             return {
                 **created_body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,
@@ -1052,7 +1052,7 @@ def test_approval_racing_with_timeout_is_denied() -> None:
         if method == "GET":
             return {
                 **json.loads(json.dumps(created_body)),
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "source_provider": "ANTIGRAVITY",
                 "source_agent_id": agent_id,

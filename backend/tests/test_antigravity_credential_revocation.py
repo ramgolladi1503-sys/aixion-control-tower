@@ -33,7 +33,7 @@ def test_revoked_credential_during_wait_emits_deny_without_claim(
             body = json.loads(body)
             approval = {
                 **body,
-                "id": "approval-test",
+                "id": "approval_0123456789ab",
                 "status": "PENDING_REVIEW",
                 "risk": {
                     "level": "HIGH",
