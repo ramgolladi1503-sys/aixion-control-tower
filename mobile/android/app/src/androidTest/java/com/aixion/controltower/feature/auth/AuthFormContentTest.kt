@@ -2,6 +2,7 @@ package com.aixion.controltower.feature.auth
 
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.test.performClick
@@ -291,10 +292,19 @@ class AuthFormContentTest {
 
         val signInHeading = composeRule.onNodeWithText("Welcome back")
         signInHeading.assertExists()
+        val signInSubtitle = composeRule.onNodeWithText("Sign in to review and decide on pending approvals.")
+        val formPanel = composeRule.onNodeWithTag("auth-form-panel")
+        signInSubtitle.assertExists()
+        formPanel.assertExists()
         composeRule.runOnIdle {
             val bounds = signInHeading.fetchSemanticsNode().boundsInRoot
             assertTrue("Sign-in heading must stay within narrow viewport", bounds.right <= 240f)
             assertTrue("Sign-in heading must wrap at 200% text", bounds.height > 48f)
+
+            val subtitleBounds = signInSubtitle.fetchSemanticsNode().boundsInRoot
+            val formBounds = formPanel.fetchSemanticsNode().boundsInRoot
+            assertTrue("The sign-in card must stay within the narrow viewport", formBounds.right <= 240f)
+            assertTrue("The form should follow the subtitle with a compact, positive gap", formBounds.top - subtitleBounds.bottom in 0f..10f)
         }
         composeRule.onNodeWithText("Log in").performScrollTo().assertExists()
         composeRule.onNodeWithText("Register").performScrollTo().performClick()

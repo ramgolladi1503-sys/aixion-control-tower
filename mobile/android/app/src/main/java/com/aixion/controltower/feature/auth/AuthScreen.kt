@@ -33,6 +33,7 @@ import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -195,7 +196,7 @@ internal fun AuthFormContent(
         if (verificationStarted) registrationExpanded = true
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)) {
+    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
         Text(
             text = when {
                 state.verificationRequired -> "Verify your email"
@@ -205,7 +206,7 @@ internal fun AuthFormContent(
             },
             modifier = Modifier.semantics { heading() },
             color = palette.ink,
-            style = MaterialTheme.typography.headlineLarge
+            style = MaterialTheme.typography.headlineMedium
         )
         Text(
             text = when {
@@ -218,7 +219,10 @@ internal fun AuthFormContent(
             style = MaterialTheme.typography.bodyMedium
         )
 
-        TowerPanel(elevated = true) {
+        TowerPanel(
+            modifier = Modifier.testTag("auth-form-panel"),
+            elevated = true
+        ) {
             OutlinedTextField(
                 value = state.email,
                 onValueChange = onEmailChange,
