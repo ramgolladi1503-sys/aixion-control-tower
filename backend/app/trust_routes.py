@@ -102,17 +102,37 @@ MaintainerDependency = Depends(require_maintainer)
 OwnerDependency = Depends(require_owner)
 
 
+def _postgres_trust_is_selected() -> bool:
+    settings = get_settings()
+    return bool(
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_auth_enabled", False)
+    )
+
+
+def _require_postgres_trust_runtime(runtime, request: Request | None) -> None:
+    """Prevent process-local trust authority when PostgreSQL is authoritative."""
+    if _postgres_trust_is_selected() and (runtime is None or request is None):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL trust authority requires a complete app-bound request runtime",
+        )
+
+
 def _postgres_attestation_runtime(request: Request | None):
     """Select PostgreSQL only when every attestation authority shares its runtime."""
     if request is None:
+        _require_postgres_trust_runtime(None, request)
         return None
     state = request.app.state
     runtime = getattr(state, "postgres_runtime", None)
     if runtime is None:
+        _require_postgres_trust_runtime(None, request)
         return None
     try:
         repositories = application_repositories_for_request(request)
     except RuntimeError:
+        _require_postgres_trust_runtime(None, request)
         return None
     bindings = (
         ("approval_decision_repository", "approval_decisions"),
@@ -124,6 +144,7 @@ def _postgres_attestation_runtime(request: Request | None):
         getattr(state, state_name, None) is not getattr(repositories, repository_name, None)
         for state_name, repository_name in bindings
     ):
+        _require_postgres_trust_runtime(None, request)
         return None
     return runtime
 
@@ -175,6 +196,7 @@ def _postgres_lease_runtime(request: Request | None):
         is not getattr(repositories, repository_name, None)
         for state_name, repository_name in bindings
     ):
+        _require_postgres_trust_runtime(None, request)
         return None
     return runtime
 
@@ -196,7 +218,7 @@ def _postgres_reporting_bundle(request: Request | None):
     runtime = getattr(state, "postgres_runtime", None)
     repositories = getattr(state, "postgres_repositories", None)
     postgres_selected = (
-        get_settings().postgres_auth_enabled
+        _postgres_trust_is_selected()
         or runtime is not None
         or repositories is not None
     )
@@ -230,6 +252,7 @@ def _postgres_action_runtime(request: Request | None):
         return None
     repositories = request.app.state.postgres_repositories
     if getattr(request.app.state, "project_repository", None) is not repositories.projects:
+        _require_postgres_trust_runtime(None, request)
         return None
     return runtime
 

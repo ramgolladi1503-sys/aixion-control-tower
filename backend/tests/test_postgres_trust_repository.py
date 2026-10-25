@@ -3071,6 +3071,120 @@ def test_postgres_attestation_routes_refuse_single_partial_repository_binding(
     assert store.reviewer_attestations == before
 
 
+@pytest.mark.parametrize(
+    "settings_values",
+    [
+        {"is_production": True, "postgres_auth_enabled": False},
+        {"is_production": False, "postgres_auth_enabled": True},
+    ],
+    ids=["production-profile", "postgres-auth"],
+)
+@pytest.mark.parametrize(
+    "route_name",
+    [
+        "list_attestations",
+        "create_attestation",
+        "list_leases",
+        "create_lease",
+        "get_exact_action_decision",
+        "decide_exact_action",
+    ],
+)
+def test_production_trust_routes_without_request_fail_before_local_authority(
+    route_name: str,
+    settings_values: dict[str, bool],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A direct call cannot reach process-local trust maps in durable modes."""
+    monkeypatch.setattr(
+        "app.trust_routes.get_settings",
+        lambda: SimpleNamespace(**settings_values),
+    )
+    local_reads: list[str] = []
+
+    class ReadProbe(dict):
+        def get(self, *args, **kwargs):
+            local_reads.append("get")
+            return super().get(*args, **kwargs)
+
+        def values(self):
+            local_reads.append("values")
+            return super().values()
+
+    monkeypatch.setattr(store, "capability_leases", ReadProbe())
+    monkeypatch.setattr(store, "reviewer_attestations", ReadProbe())
+    monkeypatch.setattr(store, "proposed_actions", ReadProbe())
+    monkeypatch.setattr(
+        "app.trust_routes._approval_for_user",
+        lambda *_args, **_kwargs: local_reads.append("approval lookup"),
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.record_reviewer_attestation",
+        lambda *_args, **_kwargs: local_reads.append("attestation write"),
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.record_action_authorization",
+        lambda *_args, **_kwargs: local_reads.append("action authorization write"),
+    )
+
+    user = AuthUser(
+        id="direct-call-user",
+        email="direct-call@example.test",
+        display_name="Direct call user",
+        role=UserRole.MAINTAINER,
+        email_verified=True,
+    )
+    lease_payload = CapabilityLeaseCreate(
+        approval_request_id="approval-direct-call",
+        provider=AgentProvider.CODEX,
+        mode=CapabilityLeaseMode.BOUNDED,
+        scope=CapabilityScope(
+            repository="owner/repo",
+            branch="feature/trust-test",
+            allowed_actions=[CapabilityActionType.MODIFY_FILES],
+            allowed_path_prefixes=["src/approved.py"],
+            allowed_commands=["python -m pytest tests/test_approved.py"],
+            max_runtime_seconds=120,
+            max_cost_usd=1.0,
+        ),
+    )
+    calls = {
+        "list_attestations": lambda: list_attestations(user=user, request=None),
+        "create_attestation": lambda: create_attestation(
+            ReviewerAttestationCreate(
+                approval_request_id="approval-direct-call",
+                decision=ReviewerAttestationDecision.APPROVE,
+            ),
+            user=user,
+            request=None,
+        ),
+        "list_leases": lambda: list_leases(user=user, request=None),
+        "create_lease": lambda: create_lease(
+            lease_payload,
+            user=user,
+            request=None,
+        ),
+        "get_exact_action_decision": lambda: get_exact_action_decision(
+            "action-direct-call", user=user, request=None
+        ),
+        "decide_exact_action": lambda: decide_exact_action(
+            "action-direct-call",
+            ActionAuthorizationCreate(
+                decision=ActionAuthorizationDecision.ALLOW,
+                reason="Direct-call regression",
+            ),
+            user=user,
+            request=None,
+        ),
+    }
+
+    with pytest.raises(HTTPException) as error:
+        calls[route_name]()
+
+    assert error.value.status_code == 503
+    assert local_reads == []
+
+
 def test_postgres_runtime_reads_durable_scorecards_without_sqlite_projection(
     trust_repository,
     monkeypatch: pytest.MonkeyPatch,

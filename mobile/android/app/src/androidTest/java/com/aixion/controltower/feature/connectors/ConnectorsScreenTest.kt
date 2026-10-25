@@ -49,14 +49,14 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
         composeRule.onNodeWithText(
-            "A local PostgreSQL phone round-trip is documented for revision 2ad22d4. This app build has not been re-tested on a phone; remote delivery remains unverified."
+            "A local phone approval flow passed on an earlier build. This build has not yet been verified on a phone, and delivery while away from the Mac is unverified."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Set up Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText(
             "Phone approvals from Codex Desktop and returning a decision to its same task have not been verified. Do not rely on Codex Desktop approvals yet."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Local E2E on prior revision").assertExists()
-        composeRule.onNodeWithText("Local E2E on prior revision").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Earlier build tested").assertExists()
+        composeRule.onNodeWithText("Earlier build tested").performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
         composeRule.onNodeWithText("Codex Desktop not verified").performScrollTo().assertExists()
         composeRule.onNodeWithText("When an approval arrives").performScrollTo().assertExists()
@@ -102,7 +102,7 @@ class ConnectorsScreenTest {
     fun providerReadinessStatesAreDistinctAndDoNotClaimLiveConnection() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("Local E2E on prior revision").assertExists()
+        composeRule.onNodeWithText("Earlier build tested").assertExists()
         composeRule.onNodeWithText("Phone test passed locally").assertDoesNotExist()
         composeRule.onNodeWithText("Codex Desktop not verified").assertExists()
         composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
@@ -130,6 +130,6 @@ class ConnectorsScreenTest {
         }
 
         composeRule.onNodeWithText("Choose a provider").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Local E2E on prior revision").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Earlier build tested").performScrollTo().assertIsDisplayed()
     }
 }

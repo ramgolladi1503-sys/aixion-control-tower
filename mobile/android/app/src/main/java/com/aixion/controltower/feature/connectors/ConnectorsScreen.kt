@@ -115,9 +115,9 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupCard(
             name = "Antigravity",
-            status = "Local E2E on prior revision",
+            status = "Earlier build tested",
             statusColor = palette.brand,
-            description = "A local PostgreSQL phone round-trip is documented for revision 2ad22d4. This app build has not been re-tested on a phone; remote delivery remains unverified.",
+            description = "A local phone approval flow passed on an earlier build. This build has not yet been verified on a phone, and delivery while away from the Mac is unverified.",
             buttonLabel = "Set up Antigravity",
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
