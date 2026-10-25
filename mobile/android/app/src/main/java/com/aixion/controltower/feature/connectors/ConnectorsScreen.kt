@@ -38,6 +38,12 @@ import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
+internal fun providerSetupDescription(provider: String): String = when (provider) {
+    "ANTIGRAVITY" -> "Set up the connector on the computer running Antigravity. Keep that computer available so a decision can return to the waiting session."
+    "CODEX" -> "Codex Desktop phone approvals are not verified yet. Do not rely on this connection for live work until setup is confirmed."
+    else -> "Choose a supported provider and complete setup on the computer where the agent runs."
+}
+
 @Composable
 fun ConnectorsScreen(
     onOpenAgentAccess: (String) -> Unit = {}
@@ -194,7 +200,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             name = "Antigravity",
             status = "Not verified",
             statusColor = palette.caution,
-            description = "A local phone approval passed on an earlier build. This build has not been phone-tested, and delivery while away from the Mac is unverified.",
+            description = providerSetupDescription("ANTIGRAVITY"),
             buttonLabel = "Open Antigravity setup",
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
@@ -203,7 +209,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             name = "Codex",
             status = "Codex Desktop not verified",
             statusColor = palette.caution,
-            description = "Codex Desktop phone approvals and returning a decision to the same task are unverified. Do not rely on this flow yet.",
+            description = providerSetupDescription("CODEX"),
             buttonLabel = "Open Codex setup",
             onClick = { onOpenAgentAccess("CODEX") }
         )
