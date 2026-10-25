@@ -10,6 +10,7 @@ from app import settings
 def worker_settings(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
         "is_production": True,
+        "postgres_auth_enabled": True,
         "outbox_dispatch_mode": "scheduled",
         "postgres_dsn_configured": True,
         "push_dispatch_enabled": True,
@@ -62,6 +63,7 @@ def test_disabled_worker_does_not_require_database_or_provider_secrets(
     ("overrides", "message"),
     [
         ({"is_production": False}, "AIXION_PROFILE=production"),
+        ({"postgres_auth_enabled": False}, "AIXION_POSTGRES_AUTH_ENABLED=true"),
         ({"outbox_dispatch_mode": "inline"}, "AIXION_OUTBOX_DISPATCH_MODE=scheduled"),
         ({"postgres_dsn_configured": False}, "AIXION_POSTGRES_DSN"),
         ({"fcm_project_id": None}, "AIXION_FCM_PROJECT_ID"),

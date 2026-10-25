@@ -641,6 +641,11 @@ def validate_outbox_worker_environment(worker_kind: str) -> Settings:
     if enabled:
         if not settings.postgres_dsn_configured:
             errors.append("AIXION_POSTGRES_DSN is required for one-shot outbox workers")
+        if not settings.postgres_auth_enabled:
+            errors.append(
+                "AIXION_POSTGRES_AUTH_ENABLED=true is required for one-shot outbox workers "
+                "so dispatch uses the application account and workspace authority"
+            )
         if worker_kind == "push":
             if not settings.fcm_project_id:
                 errors.append("AIXION_FCM_PROJECT_ID is required for push dispatch")
