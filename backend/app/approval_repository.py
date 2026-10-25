@@ -652,6 +652,11 @@ def _validate_approval_creation(
         or notification.workspace_id != approval.workspace_id
     ):
         raise ValueError("Approval creation notification must match the approval identity and scope.")
+    if (
+        notification_entity_type == "approval_request"
+        and notification.approval_request_id not in {None, approval.id}
+    ):
+        raise ValueError("Approval notification push target must match the approval identity.")
 
 
 def _validate_postgres_work_order_scope(
@@ -1879,6 +1884,8 @@ class SQLiteApprovalDecisionRepository:
             raise ValueError("Approval and audit identifiers must match the decision target")
         if decision_notification.entity_type != "approval_request":
             raise ValueError("Approval decision notification must reference the approval request")
+        if decision_notification.approval_request_id not in {None, approval_id}:
+            raise ValueError("Approval decision notification push target must match the approval identity")
         if expected_approval.status != expected_status:
             raise ValueError("Expected approval snapshot status must match expected_status")
         if audit_event.event_type != "approval.decision":
@@ -3345,6 +3352,8 @@ class PostgresApprovalDecisionRepository:
             raise ValueError("Approval and audit identifiers must match the decision target")
         if decision_notification.entity_type != "approval_request":
             raise ValueError("Approval decision notification must reference the approval request")
+        if decision_notification.approval_request_id not in {None, approval_id}:
+            raise ValueError("Approval decision notification push target must match the approval identity")
         if expected_approval.status != expected_status:
             raise ValueError("Expected approval snapshot status must match expected_status")
         if audit_event.event_type != "approval.decision":

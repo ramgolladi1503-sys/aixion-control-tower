@@ -1874,6 +1874,32 @@ def test_postgres_create_rolls_back_approval_and_audit_when_outbox_fails(
         ).fetchone()[0] == 0
 
 
+def test_postgres_create_rejects_notification_push_target_mismatch_before_writes(
+    postgres_repository: tuple[
+        PostgresApprovalDecisionRepository, Callable[[], Connection]
+    ],
+) -> None:
+    repository, connect = postgres_repository
+    _, _, existing, _ = _seed(connect)
+    approval = _new_approval_from(existing, "notification_target_mismatch")
+    audit_event, notification = _creation_records(approval, "notification_target_mismatch")
+    notification = notification.model_copy(
+        update={"approval_request_id": "approval_from_another_request"}
+    )
+
+    with pytest.raises(ValueError, match="push target must match"):
+        repository.create(approval=approval, audit_event=audit_event, notification=notification)
+
+    assert repository.get(approval.id) is None
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_id=%s", (audit_event.id,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE notification_id=%s", (notification.id,)
+        ).fetchone()[0] == 0
+
+
 def test_postgres_commit_updates_approval_task_audit_and_outbox_atomically(
     postgres_repository: tuple[
         PostgresApprovalDecisionRepository, Callable[[], Connection]
@@ -1950,6 +1976,39 @@ def test_postgres_commit_updates_approval_task_audit_and_outbox_atomically(
                 "UPDATE audit_events SET actor = 'changed' WHERE approval_id = %s",
                 (approval.id,),
             )
+
+
+def test_postgres_decision_rejects_notification_push_target_mismatch_without_commit(
+    postgres_repository: tuple[
+        PostgresApprovalDecisionRepository, Callable[[], Connection]
+    ],
+) -> None:
+    repository, connect = postgres_repository
+    _, _, approval, _ = _seed(connect)
+    updated = _updated_approval(approval, ApprovalStatus.APPROVED)
+    decision_audit = _audit(approval, updated, "decision_notification_target_mismatch")
+    notification = _notification(approval, "decision_notification_target_mismatch").model_copy(
+        update={"approval_request_id": "approval_from_another_request"}
+    )
+
+    with pytest.raises(ValueError, match="push target must match"):
+        repository.commit_decision(
+            approval_id=approval.id,
+            expected_status=ApprovalStatus.REQUESTED,
+            expected_approval=approval,
+            updated_approval=updated,
+            audit_event=decision_audit,
+            decision_notification=notification,
+        )
+
+    assert repository.get(approval.id) == approval
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_id=%s", (decision_audit.id,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE notification_id=%s", (notification.id,)
+        ).fetchone()[0] == 0
 
 
 def test_postgres_approval_rolls_back_when_linked_run_creation_fails(
