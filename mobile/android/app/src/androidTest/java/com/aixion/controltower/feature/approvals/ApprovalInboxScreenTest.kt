@@ -609,7 +609,7 @@ class ApprovalInboxScreenTest {
     }
 
     @Test
-    fun caughtUpInboxExplainsConnectedAgentsAndOffersConnectionManagement() {
+    fun caughtUpInboxDoesNotAssumeAnAgentIsAlreadyConnectedAndOffersConnectRoute() {
         var connectRequested = false
         composeRule.setContent {
             ApprovalInboxContent(
@@ -623,9 +623,9 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithText("Needs review 0").assertCountEquals(0)
         composeRule.onNodeWithText("You’re all caught up").assertExists()
         composeRule.onNodeWithText(
-            "Pending requests from your connected agents will appear here when they need your decision."
+            "New approval requests will appear here when an agent needs your decision."
         ).assertExists()
-        composeRule.onNodeWithText("Manage agent connections").performClick()
+        composeRule.onNodeWithText("Connect or manage agents").performClick()
         assertEquals(true, connectRequested)
     }
 

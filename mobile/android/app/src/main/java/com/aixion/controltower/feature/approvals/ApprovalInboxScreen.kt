@@ -438,13 +438,13 @@ fun ApprovalInboxContent(
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        text = "Pending requests from your connected agents will appear here when they need your decision.",
+                        text = "New approval requests will appear here when an agent needs your decision.",
                         color = palette.inkMuted,
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
                     TextButton(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
-                        Text("Manage agent connections")
+                        Text("Connect or manage agents")
                     }
                 }
             }
