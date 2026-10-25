@@ -848,6 +848,32 @@ def test_audit_event_inventory_verifies_workspace_parent_identity(tmp_path):
     assert row["classification"] == "same_workspace_parent_via_entity_id_fallback"
 
 
+def test_audit_event_inventory_rejects_source_mutation_during_preflight(tmp_path, monkeypatch):
+    import scripts.import_approval_slice_to_postgres as importer
+
+    path = tmp_path / "audit-mutated-during-preflight.sqlite3"
+    _snapshot(path)
+    os.chmod(path, 0o600)
+    original_count = importer._source_kv_entity_type_counts
+
+    def mutate_after_count(source_path):
+        counts = original_count(source_path)
+        with sqlite3.connect(source_path) as conn:
+            conn.execute(
+                "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+                ("audit_event", "added-during-preflight", json.dumps({
+                    "id": "added-during-preflight", "event_type": "future.event",
+                    "entity_id": "unknown", "workspace_id": None,
+                })),
+            )
+        return counts
+
+    monkeypatch.setattr(importer, "_source_kv_entity_type_counts", mutate_after_count)
+
+    with pytest.raises(ImportBlocked, match="source snapshot changed during audit inventory"):
+        build_audit_event_inventory_report(path)
+
+
 def test_invocation_drain_report_persists_blocked_pending_state_without_source_mutation(
     tmp_path, capsys
 ):

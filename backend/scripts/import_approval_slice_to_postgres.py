@@ -551,10 +551,10 @@ def build_audit_event_inventory_report(path: Path) -> dict[str, Any]:
     an explicit event-writer contract.
     """
     _validate_source(path)
-    _source_table_coverage(path)
-    _source_kv_entity_type_counts(path)
     initial_stat = path.stat()
     digest = _sha256_file(path)
+    _source_table_coverage(path)
+    _source_kv_entity_type_counts(path)
     records = _read_records(path)
 
     workspaces = records.get("workspace", {})
