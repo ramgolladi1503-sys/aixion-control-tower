@@ -702,7 +702,13 @@ class ApprovalDetailScreenTest {
             }
         }
 
-        composeRule.onNodeWithText("Review full request").assertIsDisplayed()
+        val compactTitle = composeRule.onNodeWithTag("approval-decision-identity-title")
+        compactTitle.assertTextContains(request.title)
+        compactTitle.assertIsDisplayed()
+        assertTrue(
+            "The compact approval title should wrap instead of hiding the request identity",
+            compactTitle.fetchSemanticsNode().boundsInRoot.height > 48f
+        )
         composeRule.onNodeWithContentDescription(
             "Review full request: Run the requested production shell command from CODEX, request 87654321."
         ).assertExists()
@@ -714,7 +720,7 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
 
-        composeRule.onNodeWithText("Review full request").performClick()
+        compactTitle.performClick()
 
         composeRule.onNodeWithText("Action: Run the requested production shell command").assertIsDisplayed()
         composeRule.onNodeWithText("Provider: Codex · Request 87654321").assertIsDisplayed()
@@ -738,7 +744,7 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Close").performClick()
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
 
-        composeRule.onNodeWithText("Review full request").performClick()
+        compactTitle.performClick()
         acknowledgement.assertIsNotEnabled()
         composeRule.onNodeWithTag("approval-compact-tool-review-acknowledgement")
             .performScrollTo()

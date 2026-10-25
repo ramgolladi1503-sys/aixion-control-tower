@@ -112,7 +112,7 @@ def _to_public(connector: AgentConnector) -> ConnectorPublic:
 
 
 def _get_connector_or_404(connector_id: str, user: AuthUser | None = None) -> AgentConnector:
-    if get_settings().postgres_auth_enabled:
+    if _requires_bound_connector_repository():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="PostgreSQL connector repository requires an app-bound request",
@@ -148,13 +148,13 @@ def _get_bound_connector_or_404(
 def _connector_repository_or_none(request: Request | None) -> ConnectorRepository | None:
     """Choose the configured connector authority, with no PostgreSQL fallback."""
     if request is None:
-        if get_settings().postgres_auth_enabled:
+        if _requires_bound_connector_repository():
             raise HTTPException(
                 status_code=503,
                 detail="PostgreSQL connector repository runtime is unavailable",
             )
         return None
-    if get_settings().postgres_auth_enabled:
+    if _requires_bound_connector_repository():
         try:
             return connector_repository_for_request(request)
         except RuntimeError as error:
@@ -165,6 +165,15 @@ def _connector_repository_or_none(request: Request | None) -> ConnectorRepositor
     if getattr(request.app.state, "connector_repository", None) is None:
         return None
     return connector_repository_for_request(request)
+
+
+def _requires_bound_connector_repository() -> bool:
+    """Disallow process-global SQLite connector access in authoritative modes."""
+    settings = get_settings()
+    return bool(
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_auth_enabled", False)
+    )
 
 
 def _connector_audit(

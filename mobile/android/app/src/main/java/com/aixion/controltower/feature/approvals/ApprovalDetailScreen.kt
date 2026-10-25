@@ -1042,14 +1042,14 @@ private fun DecisionPanel(
     val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
-            text = if (compactLayout) "Review full request" else approvalTitle,
+            text = approvalTitle,
             color = if (compactLayout) palette.brand else palette.ink,
             style = if (compactLayout) {
                 MaterialTheme.typography.labelLarge.copy(textDecoration = TextDecoration.Underline)
             } else {
                 MaterialTheme.typography.titleSmall
             },
-            maxLines = if (compactLayout) 1 else 2,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
             modifier = if (compactLayout) {
                 Modifier

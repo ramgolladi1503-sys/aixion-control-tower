@@ -16,24 +16,39 @@ connection must stay available while it waits. Cloud hosting can relay a
 decision to an online Mac; it cannot wake a sleeping Mac or resume a terminated
 agent task.
 
-This setup is per project. It does not install a separate Mac app or take over
-existing conversations that do not load the project's hook.
+This setup is per project. It does not install a separate Mac app, sign in to
+Antigravity or Codex for you, or take over existing conversations that do not
+load the project's hook. You keep using the provider's normal signed-in desktop
+app; the hook uses a separate Control Tower connector credential, not your
+provider password or account token.
 
 ## Before you start
 
-- Sign in to the Android app and choose the project you intend to protect.
-- Have the Control Tower API URL that the Mac can reach. Use HTTPS for remote
-  access; loopback HTTP is supported only for local development.
+- Create or sign in to your Control Tower account in the Android app, then
+  choose the project you intend to protect on Connect.
+- Know the Control Tower API URL and ensure both the Android app and Mac
+  connector use that same backend and account/project. Use HTTPS for remote
+  access. Loopback HTTP is for local development; a phone cannot reach the
+  Mac's `127.0.0.1` unless you configure the documented USB reverse tunnel.
 - Have the Control Tower repository checked out on the Mac and Python 3
-  available. The connector scripts are installed from that checkout.
-- Keep the Mac awake, the agent app open, and the project available until the
-  approval finishes.
+  available. The provider hook and its scripts run locally from that checkout
+  whenever the provider invokes the configured workspace hook; there is no
+  separate always-on Aixion desktop daemon.
+- Keep the Mac powered, awake, connected to the API, and the provider app,
+  project, and waiting hook process available until the decision returns. If
+  the Mac sleeps, loses connectivity, the agent exits, or the hook is stopped,
+  a phone decision cannot wake or resume that local task. The request instead
+  times out or remains unresolved according to the server state; inspect it
+  before starting a replacement action.
 
-The app creates a provider-specific connector scoped to one project and grants
-only approval-related actions. It displays the connector ID, project ID, and a
+In Connect, select the provider you will use and create its connector for the
+chosen project. The registration must grant only the approval actions required
+by that provider's guide. The app displays the connector ID, project ID, and a
 one-time token. Save the token immediately; do not paste it into a command,
-chat, source file, or shell history. The current app's suggested macOS command
-stores it in Keychain without putting the token in command arguments:
+chat, source file, or shell history. Store the token in macOS Keychain under
+service `com.aixion.controltower.agent` and account equal to the connector ID.
+The command below prompts for the secret rather than placing it in command
+arguments:
 
 ```sh
 security add-generic-password -U -s com.aixion.controltower.agent -a "AGENT_ID" -w
@@ -41,7 +56,9 @@ security add-generic-password -U -s com.aixion.controltower.agent -a "AGENT_ID" 
 
 Replace `AGENT_ID` with the displayed connector ID. Enter the one-time token at
 the secure prompt. Do not enable Keychain access for all applications. If you
-lose the token, rotate it in the app and update the host credential.
+lose the token, rotate it in the app and update the host credential. This
+registration associates a local hook with your Control Tower account; it does
+not link or import your Antigravity/Codex provider login.
 
 ## Install for one project
 
@@ -87,7 +104,10 @@ python3 integrations/codex/aixion_permission_request_hook.py \
 
 The check verifies API health and that the token belongs to the expected
 provider, project, and connector. It does not prove that the native agent app
-will invoke the hook or that the phone can receive a push notification.
+will invoke the hook, that the phone can reach the same API, or that the phone
+will receive a push notification. Push wake-up and hosted HTTPS delivery are
+not certified; keep the app available and confirm the request appears before
+relying on an away-from-computer approval.
 
 ## Verify the same paused action
 
@@ -112,13 +132,23 @@ Provider-specific coverage differs:
 - **Codex:** the hook handles local `PermissionRequest` prompts that Codex is
   already about to show. It does not intercept tools Codex runs without a
   permission prompt or Codex-hosted tools outside local hooks. Review and trust
-  the hook in Codex before expecting it to run.
+  the hook in Codex before expecting it to run. This is a local Codex hook, not
+  interception of every native Codex Desktop approval or hosted session.
 
 ## Remove access
 
-Run the matching installer with `--remove` for the same project folder. This
-removes only the managed hook and its non-secret config. Revoke the connector
-credential in the app when the Mac or project is no longer trusted.
+To disconnect, first revoke or disable the connector credential in the Control
+Tower app so the host can no longer authenticate. Then run the matching
+installer with `--remove` for the same project folder. This removes only the
+managed hook entry and its non-secret config, preserving unrelated hooks. If
+the Mac or project is no longer trusted, remove the Keychain item as well:
+
+```sh
+security delete-generic-password -s com.aixion.controltower.agent -a "AGENT_ID"
+```
+
+Replace `AGENT_ID` with the connector ID. Revocation is the server-side access
+cutoff; deleting the local hook and Keychain item cleans up the host.
 
 ## Support and current proof limits
 

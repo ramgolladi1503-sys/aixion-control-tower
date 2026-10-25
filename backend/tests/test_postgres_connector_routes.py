@@ -192,6 +192,40 @@ def test_connector_mutation_without_request_context_does_not_fall_back_to_sqlite
     assert {event.id for event in store.audit_events} == before_audits
 
 
+def test_production_connector_routes_without_request_context_do_not_fall_back_to_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        connector_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+    user = AuthUser(
+        id="production-owner",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id="workspace-production",
+    )
+    before_connectors = dict(store.agent_connectors)
+    before_audits = list(store.audit_events)
+
+    with pytest.raises(HTTPException) as create_error:
+        connector_routes.create_connector(
+            connector_routes.ConnectorCreate(name="Must not be stored"), user
+        )
+    with pytest.raises(HTTPException) as list_error:
+        connector_routes.list_connectors(user)
+    with pytest.raises(HTTPException) as read_error:
+        connector_routes._get_connector_or_404("missing-connector", user)
+
+    assert create_error.value.status_code == 503
+    assert list_error.value.status_code == 503
+    assert read_error.value.status_code == 503
+    assert store.agent_connectors == before_connectors
+    assert store.audit_events == before_audits
+
+
 def test_connector_route_rejects_repository_bundle_from_another_runtime_without_mutation(
     postgres_connector_route_runtime,
     monkeypatch: pytest.MonkeyPatch,
