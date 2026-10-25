@@ -224,7 +224,9 @@ def test_database_verifier_sets_read_only_before_any_query(
 
         def execute(self, query, _params=None):
             if query.lstrip().upper().startswith("SELECT"):
-                assert queries and queries[0].strip().upper() == "SET TRANSACTION READ ONLY"
+                assert queries and queries[0].strip().upper() == (
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+                )
             queries.append(query)
             self.current_query = query
 
@@ -288,7 +290,7 @@ def test_database_verifier_sets_read_only_before_any_query(
     assert result["result"] == "PASS_DURABLE_APPROVAL_AND_FRESH_MARKER"
     assert result["physical_phone_provider_flow_proven"] is False
     assert result["application_or_hook_revision_proven"] is False
-    assert queries[0] == "SET TRANSACTION READ ONLY"
+    assert queries[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
     assert len(queries) == 5
 
 

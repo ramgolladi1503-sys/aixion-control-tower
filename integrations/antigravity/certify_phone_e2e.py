@@ -294,7 +294,12 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
         if not any(label in database for label in ("e2e", "test", "disposable")):
             raise EvidenceError("Database name must identify an E2E, test, or disposable database")
         with conn.cursor() as cursor:
-            cursor.execute("SET TRANSACTION READ ONLY")
+            # All approval, audit, and claim rows must come from one database
+            # snapshot. READ COMMITTED could observe rows from different
+            # committed states across these SELECTs while a request is being
+            # decided/claimed; the certifier should fail closed on a coherent
+            # point-in-time view instead.
+            cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             cursor.execute(
                 "SELECT approval_id, source_agent_id, status, payload, workspace_id, created_at "
                 "FROM approval_requests WHERE approval_id=%s",
