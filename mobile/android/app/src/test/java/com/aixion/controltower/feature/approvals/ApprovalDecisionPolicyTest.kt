@@ -82,6 +82,31 @@ class ApprovalDecisionPolicyTest {
         assertEquals(false, ApprovalDecisionPolicy.expiryIsUrgent("invalid", now))
     }
 
+    @Test
+    fun expiryAccessibilityAnnouncementChangesAtMeaningfulMilestones() {
+        val now = Instant.parse("2026-10-21T12:00:00Z")
+        assertEquals(
+            "Approval expires in about 6 hours.",
+            ApprovalDecisionPolicy.expiryAccessibilityAnnouncement("2026-10-21T18:00:00Z", now)
+        )
+        assertEquals(
+            "Approval expires in less than five minutes.",
+            ApprovalDecisionPolicy.expiryAccessibilityAnnouncement("2026-10-21T12:04:59Z", now)
+        )
+        assertEquals(
+            "Approval expires in less than one minute.",
+            ApprovalDecisionPolicy.expiryAccessibilityAnnouncement("2026-10-21T12:00:59Z", now)
+        )
+        assertEquals(
+            "Approval has expired. No decision can be sent.",
+            ApprovalDecisionPolicy.expiryAccessibilityAnnouncement("2026-10-21T12:00:00Z", now)
+        )
+        assertEquals(
+            "Approval expiry is unavailable.",
+            ApprovalDecisionPolicy.expiryAccessibilityAnnouncement("invalid", now)
+        )
+    }
+
     private fun approval() = ApprovalSummary(
         id = "approval-policy-test",
         projectName = "Test project",

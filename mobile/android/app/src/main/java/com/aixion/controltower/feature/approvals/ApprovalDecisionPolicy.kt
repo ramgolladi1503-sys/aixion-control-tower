@@ -34,6 +34,22 @@ internal object ApprovalDecisionPolicy {
         return "Expires in about $hoursLeft $unit"
     }
 
+    /** Stable accessibility copy for milestone announcements; never includes ticking seconds. */
+    fun expiryAccessibilityAnnouncement(value: String?, now: Instant): String {
+        val expiry = expiryInstant(value) ?: return "Approval expiry is unavailable."
+        val remaining = Duration.between(now, expiry)
+        if (remaining.isNegative || remaining.isZero) return "Approval has expired. No decision can be sent."
+        if (remaining <= Duration.ofMinutes(1)) return "Approval expires in less than one minute."
+        if (remaining <= Duration.ofMinutes(5)) return "Approval expires in less than five minutes."
+        val minutes = (remaining.seconds + 59) / 60
+        return if (minutes < 60) {
+            "Approval expires in about $minutes minutes."
+        } else {
+            val hours = (minutes + 59) / 60
+            "Approval expires in about $hours ${if (hours == 1L) "hour" else "hours"}."
+        }
+    }
+
     fun expiryIsUrgent(value: String?, now: Instant): Boolean =
         expiryInstant(value)?.let { !it.isAfter(now.plusSeconds(5 * 60)) } ?: false
 
