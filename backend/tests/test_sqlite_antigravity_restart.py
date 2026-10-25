@@ -532,7 +532,7 @@ def test_blocked_antigravity_invocation_survives_sqlite_api_restart(
             "hook did not finish within the bounded test deadline"
         )
         assert not hook_error, f"hook raised unexpectedly: {hook_error}"
-        assert hook_result.get("value", {}).get("decision") == expected_decision
+        assert hook_result.get("value", {}).get("decision") == expected_decision, hook_result
 
         with sqlite3.connect(db_path) as connection:
             approvals = connection.execute(

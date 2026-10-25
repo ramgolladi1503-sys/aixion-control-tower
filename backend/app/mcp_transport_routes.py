@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 import psycopg
 
+from .child_mcp_test_server import ChildMCPToolCall
 from .application_repository_access import (
     approval_decision_repository_for_request,
     mcp_child_server_repository_for_request,
@@ -20,6 +21,7 @@ from .auth import require_maintainer
 from .mcp_gateway import MCPGatewayDecision, MCPGatewayToolCall
 from .mcp_gateway_routes import (
     GatewaySubmitRequest,
+    _child_router,
     _require_mcp_request_context,
     _postgres_mcp_submission,
     _resolve_postgres_gateway_request,
@@ -272,10 +274,94 @@ async def _postgres_mcp_tool_call(
     except ValueError as error:
         return _error_response(payload.id, code=-32602, message=str(error))
 
+    if call.mutating is False:
+        matching_servers = [
+            server for server in registered_servers if server.name == call.server_name
+        ]
+        if len(matching_servers) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL MCP read-only target is ambiguous or unavailable",
+            )
+        server = matching_servers[0]
+        matching_tools = [tool for tool in server.tools if tool.name == call.tool_name]
+        if (
+            server.project_id != project_id
+            or not server.enabled
+            or len(matching_tools) != 1
+            or matching_tools[0].mutating is not False
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL MCP read-only server or tool binding is invalid",
+            )
+        try:
+            workspace_id = await anyio.to_thread.run_sync(
+                lambda: workspace_id_for_request(user, request)
+            )
+            child_server_repository = await anyio.to_thread.run_sync(
+                lambda: mcp_child_server_repository_for_request(request)
+            )
+            current_servers = await anyio.to_thread.run_sync(
+                lambda: child_server_repository.list_for_workspace(
+                    workspace_id,
+                    project_id=project_id,
+                    enabled=True,
+                )
+            )
+        except (RuntimeError, psycopg.Error) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL MCP read-only registry is unavailable",
+            ) from error
+        current_matches = [
+            candidate for candidate in current_servers if candidate.name == call.server_name
+        ]
+        if (
+            workspace_id is None
+            or server.workspace_id != workspace_id
+            or len(current_matches) != 1
+            or current_matches[0] != server
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL MCP read-only server changed; retry with the current registry",
+            )
+
+        child_call = ChildMCPToolCall(
+            server_name=call.server_name,
+            tool_name=call.tool_name,
+            arguments=call.arguments,
+            session_id=call.session_id,
+            requested_by=call.requested_by,
+        )
+
+        def dispatch_read_only() -> dict[str, Any]:
+            if server.transport == "test":
+                return _child_router._call_test_server(server, child_call)
+            if server.transport == "http":
+                return _child_router._call_http_server(server, child_call)
+            if server.transport == "http-jsonrpc":
+                return _child_router._call_http_jsonrpc_server(server, child_call)
+            return {
+                "ok": False,
+                "server_name": server.name,
+                "tool_name": call.tool_name,
+                "reason_code": "UNSUPPORTED_CHILD_TRANSPORT",
+            }
+
+        result = await anyio.to_thread.run_sync(dispatch_read_only)
+        decision = MCPGatewayDecision(
+            forwarded=isinstance(result, dict) and result.get("ok") is not False,
+            approval_required=False,
+            result=result,
+            reason="Registered read-only MCP tool forwarded without approval.",
+        )
+        return _result_response(payload.id, _gateway_decision_to_mcp_result(decision))
     if call.mutating is not True:
         raise HTTPException(
             status_code=503,
-            detail="PostgreSQL MCP non-mutating forwarding is unavailable",
+            detail="PostgreSQL MCP tool mutability is not registered",
         )
     if payload.id is None:
         return _error_response(

@@ -6,6 +6,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from types import SimpleNamespace
@@ -173,6 +174,46 @@ def _register_server(repositories, project: Project, workspace: Workspace) -> MC
     return server
 
 
+def _register_read_only_server(
+    repositories,
+    project: Project,
+    workspace: Workspace,
+    *,
+    endpoint: str,
+) -> MCPChildServer:
+    server = MCPChildServer(
+        project_id=project.id,
+        workspace_id=workspace.id,
+        name="pg-read-only-tools",
+        transport="http-jsonrpc",
+        endpoint=endpoint,
+        enabled=True,
+        tools=[
+            MCPToolDefinition(
+                name="lookup_status",
+                description="Read status from a registered child MCP server.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"key": {"type": "string"}},
+                    "required": ["key"],
+                    "additionalProperties": False,
+                },
+                mutating=False,
+            )
+        ],
+    )
+    repositories.mcp_child_servers.create(
+        server=server,
+        audit_event=AuditEvent(
+            event_type="mcp.child_server.created",
+            entity_id=server.id,
+            workspace_id=workspace.id,
+            details={"project_id": project.id, "name": server.name},
+        ),
+    )
+    return server
+
+
 class _RecordingPostgresMCPChildHandler(BaseHTTPRequestHandler):
     received: list[dict] = []
 
@@ -281,6 +322,143 @@ def test_postgres_mcp_transport_hides_foreign_workspace_projects(
 
     assert response.status_code == 404
     assert workspace.id != foreign_workspace.id
+
+
+def test_postgres_mcp_read_only_tool_uses_scoped_registry_without_approval_or_sqlite_projection(
+    postgres_mcp_transport_runtime,
+) -> None:
+    connect, workspace, project, _user, repositories = postgres_mcp_transport_runtime
+    child_http, endpoint = _start_postgres_mcp_child()
+    server = _register_read_only_server(
+        repositories,
+        project,
+        workspace,
+        endpoint=endpoint,
+    )
+    client = TestClient(main.app)
+    try:
+        response = client.post(
+            f"/mcp/{project.id}/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "id": "read-only-call-001",
+                "method": "tools/call",
+                "params": {
+                    "name": "lookup_status",
+                    "server_name": server.name,
+                    "arguments": {"key": "approval-service"},
+                    "session_id": "read-only-session-001",
+                    # Client claims mutating; the persisted tool registry remains
+                    # authoritative and classifies this call as read-only.
+                    "mutating": True,
+                },
+            },
+        )
+    finally:
+        client.close()
+        child_http.shutdown()
+        child_http.server_close()
+
+    assert response.status_code == 200, response.text
+    structured = response.json()["result"]["structuredContent"]
+    assert structured["forwarded"] is True
+    assert structured["approval_required"] is False
+    assert structured["approval_request_id"] is None
+    assert structured["result"]["jsonrpc_response"]["result"]["structuredContent"] == {
+        "committed": True,
+        "path": None,
+    }
+    assert _RecordingPostgresMCPChildHandler.received == [
+        {
+            "jsonrpc": "2.0",
+            "id": "read-only-session-001",
+            "method": "tools/call",
+            "params": {
+                "name": "lookup_status",
+                "arguments": {"key": "approval-service"},
+            },
+        }
+    ]
+    assert repositories.mcp_pending_requests.list_for_workspace(
+        workspace.id,
+        project_id=project.id,
+    ) == []
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_requests WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone() == (0,)
+        audit_types = connection.execute(
+            "SELECT event_type FROM audit_events WHERE workspace_id=%s ORDER BY event_type",
+            (workspace.id,),
+        ).fetchall()
+    assert audit_types == [("mcp.child_server.created",)]
+    assert project.id not in store.projects
+    assert server.id not in store.mcp_child_servers
+    assert store.mcp_pending_requests == {}
+
+
+def test_postgres_mcp_read_only_tool_refuses_stale_server_snapshot_before_forwarding(
+    postgres_mcp_transport_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _connect, workspace, project, _user, repositories = postgres_mcp_transport_runtime
+    child_http, endpoint = _start_postgres_mcp_child()
+    server = _register_read_only_server(
+        repositories,
+        project,
+        workspace,
+        endpoint=endpoint,
+    )
+    original_list = repositories.mcp_child_servers.list_for_workspace
+    list_calls = 0
+
+    def return_changed_snapshot(*args, **kwargs):
+        nonlocal list_calls
+        list_calls += 1
+        current = original_list(*args, **kwargs)
+        if list_calls == 2:
+            return [
+                item.model_copy(update={"updated_at": item.updated_at + timedelta(seconds=1)})
+                if item.id == server.id
+                else item
+                for item in current
+            ]
+        return current
+
+    monkeypatch.setattr(
+        repositories.mcp_child_servers,
+        "list_for_workspace",
+        return_changed_snapshot,
+    )
+    client = TestClient(main.app)
+    try:
+        response = client.post(
+            f"/mcp/{project.id}/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "id": "read-only-stale-001",
+                "method": "tools/call",
+                "params": {
+                    "name": "lookup_status",
+                    "server_name": server.name,
+                    "arguments": {"key": "must-not-forward"},
+                    "session_id": "read-only-stale-session",
+                },
+            },
+        )
+    finally:
+        client.close()
+        child_http.shutdown()
+        child_http.server_close()
+
+    assert response.status_code == 409, response.text
+    assert "server changed" in response.json()["detail"]
+    assert _RecordingPostgresMCPChildHandler.received == []
+    assert repositories.mcp_pending_requests.list_for_workspace(
+        workspace.id,
+        project_id=project.id,
+    ) == []
 
 
 def test_postgres_mcp_tools_call_waits_for_durable_approval_and_forwards_once(

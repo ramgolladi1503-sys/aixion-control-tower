@@ -999,7 +999,19 @@ def _run(
         ):
             return _decision("deny", "Control Tower returned a different approval request")
         try:
-            if _decision_snapshot(current) != created_snapshot:
+            current_snapshot = _decision_snapshot(current)
+            # The backend upgrades the approved hash from legacy v1 to v2
+            # exactly once when the reviewer decides. Permit that transition
+            # only when every other snapshot field is unchanged; v2 then binds
+            # the workspace and risk while the action hash is verified below.
+            approved_v1_to_v2 = (
+                created_snapshot.get("approved_payload_hash_version") == 1
+                and current.get("status") == "APPROVED"
+                and current_snapshot.get("approved_payload_hash_version") == 2
+            )
+            if approved_v1_to_v2:
+                current_snapshot["approved_payload_hash_version"] = 1
+            if current_snapshot != created_snapshot:
                 return _decision("deny", "Approval payload changed after the original tool invocation")
         except (KeyError, TypeError):
             return _decision("deny", "Control Tower approval payload is incomplete")

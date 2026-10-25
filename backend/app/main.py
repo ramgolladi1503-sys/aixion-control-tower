@@ -1579,6 +1579,8 @@ def decide_approval(
                         "required_actions": candidate.risk.required_actions,
                     },
                 )
+            # Freeze the approved payload using v2 so workspace and risk are
+            # cryptographically bound at the decision boundary.
             candidate.approved_payload_hash_version = 2
             candidate.approved_payload_hash = compute_approval_payload_hash(candidate)
             candidate.approved_at = now_utc()

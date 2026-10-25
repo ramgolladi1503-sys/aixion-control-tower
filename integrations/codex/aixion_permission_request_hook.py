@@ -944,7 +944,18 @@ def _run(
         if not _identity_matches(current, approval_id=approval_id, config=config):
             return "deny", "Control Tower returned a different approval request"
         try:
-            if _decision_snapshot(current) != original:
+            current_snapshot = _decision_snapshot(current)
+            # Approval freezes the reviewed payload as v2. Permit only the
+            # one-way v1 -> v2 transition on APPROVED, and compare every other
+            # field against creation before verifying the v2 hash below.
+            approved_v1_to_v2 = (
+                original.get("approved_payload_hash_version") == 1
+                and current.get("status") == "APPROVED"
+                and current_snapshot.get("approved_payload_hash_version") == 2
+            )
+            if approved_v1_to_v2:
+                current_snapshot["approved_payload_hash_version"] = 1
+            if current_snapshot != original:
                 return "deny", "Approval payload changed after the original Codex request"
         except (KeyError, TypeError):
             return "deny", "Control Tower approval payload is incomplete"
