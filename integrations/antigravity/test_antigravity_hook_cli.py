@@ -728,7 +728,10 @@ def test_long_wait_refreshes_exact_invocation_lease_before_same_call_is_consumed
 
 @pytest.mark.parametrize(
     "failure",
-    ["unauthorized", "conflict", "timeout", "mismatch", "not_live", "malformed", "late"],
+    [
+        "unauthorized", "conflict", "timeout", "mismatch", "not_live",
+        "malformed", "malformed_timestamp", "timezone_less_timestamp", "late",
+    ],
 )
 def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
     monkeypatch: pytest.MonkeyPatch,
@@ -766,6 +769,10 @@ def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
                 response["live"] = False
             elif failure == "malformed":
                 return []  # type: ignore[return-value]
+            elif failure == "malformed_timestamp":
+                response["heartbeat_at"] = "not-a-timestamp"
+            elif failure == "timezone_less_timestamp":
+                response["heartbeat_at"] = "2026-10-25T12:00:00"
             return response
         if method == "POST" and url.endswith("/expire"):
             return {**created, "status": "EXPIRED"}

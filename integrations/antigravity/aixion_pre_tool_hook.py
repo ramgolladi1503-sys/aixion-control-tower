@@ -127,6 +127,17 @@ def _lease_expiry_is_current(value: Any) -> bool:
     return expires_at > datetime.now(timezone.utc)
 
 
+def _heartbeat_timestamp_is_valid(value: Any) -> bool:
+    """Reject malformed or timezone-less heartbeat timestamps."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        heartbeat_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return heartbeat_at.tzinfo is not None
+
+
 def _validated_diagnostic_approval_id(value: Any) -> str | None:
     if isinstance(value, str) and DIAGNOSTIC_APPROVAL_ID.fullmatch(value):
         return value
@@ -439,8 +450,7 @@ def _refresh_invocation_lease_if_due(
         or heartbeat.get("source_agent_id") != agent_id
         or heartbeat.get("source_invocation_id") != source_invocation_id
         or heartbeat.get("live") is not True
-        or not isinstance(heartbeat.get("heartbeat_at"), str)
-        or not heartbeat["heartbeat_at"]
+        or not _heartbeat_timestamp_is_valid(heartbeat.get("heartbeat_at"))
         or not _lease_expiry_is_current(heartbeat.get("expires_at"))
     ):
         return next_heartbeat_at, False
