@@ -152,14 +152,7 @@ def test_valid_session_fallback_is_preserved_exactly() -> None:
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         return {**created_body, "id": "approval_0123456789ab", "status": "DENIED",
                 "source_provider": "ANTIGRAVITY", "source_agent_id": agent_id}
 
@@ -182,6 +175,8 @@ def _approved_record(body: dict) -> dict:
         "id": "approval_0123456789ab",
         "status": "APPROVED",
         "risk": {"level": "MEDIUM", "reasons": [], "blocked": False, "required_actions": []},
+        "workspace_id": "workspace-test",
+        "approved_payload_hash_version": 2,
         "source_provider": "ANTIGRAVITY",
         "source_agent_id": "agent-test",
         "source_agent_name": "Antigravity test",
@@ -192,6 +187,24 @@ def _approved_record(body: dict) -> dict:
     }
     record["approved_payload_hash"] = hook._payload_hash(record)
     return record
+
+
+def _pending_record(body: dict, *, source_agent_id: str | None = None) -> dict:
+    """Model the server's scoped v1 creation response for an agent approval."""
+    return {
+        **body,
+        "id": "approval_0123456789ab",
+        "status": "PENDING_REVIEW",
+        "risk": {"level": "MEDIUM", "reasons": [], "blocked": False, "required_actions": []},
+        "workspace_id": "workspace-test",
+        "approved_payload_hash_version": 1,
+        "approved_payload_hash": None,
+        "source_provider": "ANTIGRAVITY",
+        "source_agent_id": source_agent_id or ENV["AIXION_AGENT_ID"],
+        "source_agent_name": "Antigravity test",
+        "source_task_url": None,
+        "verified_source": True,
+    }
 
 
 def test_version_two_hash_binds_workspace_and_risk() -> None:
@@ -265,43 +278,10 @@ def test_read_only_tool_targets_secret_path_and_requires_mobile_approval(tool_na
         calls.append(method)
         if method == "POST":
             created_body = body or {}
-            return {
-                **(body or {}),
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "project_id": "project-test",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         return {
-            **(body or {}),
-            "id": "approval_0123456789ab",
+            **_pending_record(created_body, source_agent_id=agent_id),
             "status": "DENIED",
-            "project_id": "project-test",
-            "work_order_id": None,
-            "title": "Antigravity approval: " + tool_name,
-            "summary": "Review the exact Antigravity tool and arguments before this invocation continues.",
-            "agent_name": "Antigravity",
-            "target_branch": "current-workspace",
-            "files": [{
-                "path": f"antigravity://tool/{tool_name}",
-                "change_type": "tool_call",
-                "diff": json.dumps(args, sort_keys=True, separators=(",", ":")),
-                "new_content": None,
-            }],
-            "test_plan": ["Confirm the tool and arguments match the intended task"],
-            "rollback_plan": "Deny this request if uncertain. Approval authorizes only this displayed invocation.",
-            "source_agent_id": agent_id,
-            "source_agent_name": "Antigravity test",
-            "source_session_id": created_body["source_session_id"],
-            "source_invocation_id": created_body["source_invocation_id"],
-            "risk": {"level": "MEDIUM", "reasons": [], "blocked": False, "required_actions": []},
-            "source_provider": "ANTIGRAVITY",
-            "source_task_url": None,
-            "created_by_user_id": None,
-            "verified_source": True,
-            "approved_payload_hash": None,
         }
 
     with patch.object(hook, "_request", side_effect=request):
@@ -371,8 +351,8 @@ def test_read_only_file_tool_with_missing_or_invalid_documented_path_requires_mo
         calls.append(method)
         if method == "POST":
             created_body = body or {}
-            return {**_approved_record(created_body), "status": "PENDING_REVIEW"}
-        return {**_approved_record(created_body), "status": "DENIED"}
+            return _pending_record(created_body)
+        return {**_pending_record(created_body), "status": "DENIED"}
 
     with patch.object(hook, "_request", side_effect=request):
         result = _call_hook({"toolCall": {"name": tool_name, "args": args}}, ENV)
@@ -394,14 +374,7 @@ def test_unknown_tool_requires_mobile_approval_then_allows_exact_snapshot() -> N
             return {"consumed": True}
         if method == "POST":
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         return _approved_record(created_body)
 
     with patch.object(hook, "_request", side_effect=request), patch.object(hook.time, "sleep"):
@@ -424,14 +397,7 @@ def test_duplicate_approval_delivery_claim_denies_tool() -> None:
             return {"consumed": False}
         if method == "POST":
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         return _approved_record(created_body)
 
     with patch.object(hook, "_request", side_effect=request), patch.object(hook.time, "sleep"):
@@ -458,14 +424,7 @@ def test_ambiguous_delivery_claim_response_denies_without_retry() -> None:
         if method == "POST":
             calls.append("create")
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         calls.append("read")
         return _approved_record(created_body)
 
@@ -492,14 +451,7 @@ def test_revoked_connector_at_consume_denies_approved_tool_call() -> None:
         if method == "POST":
             calls.append("create")
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         calls.append("read")
         return _approved_record(created_body)
 
@@ -531,14 +483,7 @@ def test_ambiguous_delivery_claim_is_reported_without_allowing_tool() -> None:
         if method == "POST":
             calls.append("create")
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         calls.append("read")
         return _approved_record(created_body)
 
@@ -619,14 +564,7 @@ def test_network_failure_while_waiting_emits_an_explicit_deny(
 ) -> None:
     def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         if method == "POST":
-            return {
-                **(body or {}),
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(body or {}, source_agent_id=agent_id)
         raise hook.GateError("Control Tower is unavailable")
 
     monkeypatch.setenv("AIXION_API_BASE_URL", ENV["AIXION_API_BASE_URL"])
@@ -665,14 +603,7 @@ def test_ambiguous_decision_poll_reconnects_and_resumes_same_approval() -> None:
             return {"consumed": True}
         if method == "POST":
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         get_calls += 1
         if get_calls == 1:
             raise hook.AmbiguousRequestError("temporary network loss")
@@ -701,14 +632,7 @@ def test_repeated_ambiguous_decision_polls_back_off_and_expire_fail_closed() -> 
     def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append((method, url))
         if method == "POST" and url.endswith("/agents/approvals"):
-            return {
-                **(body or {}),
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(body or {}, source_agent_id=agent_id)
         if method == "GET":
             raise hook.AmbiguousRequestError("temporary network loss")
         if url.endswith("/expire"):
@@ -752,14 +676,7 @@ def test_approval_poll_identity_mismatch_cannot_authorize_tool() -> None:
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         response = _approved_record(created_body)
         response["id"] = "approval-from-another-request"
         return response
@@ -780,14 +697,7 @@ def test_approval_created_for_different_invocation_is_not_polled() -> None:
     def request(method: str, _url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
         calls.append(method)
         if method == "POST":
-            return {
-                **json.loads(json.dumps(body or {})),
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(json.loads(json.dumps(body or {})), source_agent_id=agent_id)
         raise AssertionError("A mismatched approval must not be polled")
 
     def mismatched_request(method: str, url: str, agent_id: str, token: str, body: dict | None = None, **_kwargs: object) -> dict:
@@ -814,14 +724,7 @@ def test_changed_approved_payload_is_denied_even_with_a_matching_hash() -> None:
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         changed_body = json.loads(json.dumps(created_body))
         changed_body["files"][0]["diff"] = '{"CommandLine":"echo changed"}'
         return _approved_record(changed_body)
@@ -870,14 +773,7 @@ def test_rate_limited_decision_poll_retries_after_server_delay() -> None:
             return {"consumed": True}
         if method == "POST":
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         get_calls += 1
         if get_calls == 1:
             raise hook.RateLimitError(7)
@@ -916,23 +812,9 @@ def test_timeout_expires_pending_server_approval_and_denies_tool() -> None:
         calls.append((method, url))
         if method == "POST" and url.endswith("/agents/approvals"):
             created_body = body or {}
-            return {
-                **json.loads(json.dumps(created_body)),
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(json.loads(json.dumps(created_body)), source_agent_id=agent_id)
         if method == "GET":
-            return {
-                **json.loads(json.dumps(created_body)),
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(json.loads(json.dumps(created_body)), source_agent_id=agent_id)
         if method == "POST" and url.endswith("/expire"):
             return {
                 "id": "approval_0123456789ab",
@@ -965,14 +847,7 @@ def test_approval_received_after_host_deadline_is_denied() -> None:
         nonlocal created_body
         if method == "POST":
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         return _approved_record(created_body)
 
     with (
@@ -999,14 +874,7 @@ def test_approval_received_before_deadline_is_not_claimed_if_local_validation_cr
         calls.append((method, url))
         if method == "POST" and url.endswith("/agents/approvals"):
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         if method == "GET":
             with patch.object(hook, "_payload_hash", real_payload_hash):
                 return _approved_record(created_body)
@@ -1041,23 +909,9 @@ def test_approval_racing_with_timeout_is_denied() -> None:
         calls.append(method)
         if method == "POST" and not url.endswith("/expire"):
             created_body = body or {}
-            return {
-                **created_body,
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(created_body, source_agent_id=agent_id)
         if method == "GET":
-            return {
-                **json.loads(json.dumps(created_body)),
-                "id": "approval_0123456789ab",
-                "status": "PENDING_REVIEW",
-                "source_provider": "ANTIGRAVITY",
-                "source_agent_id": agent_id,
-                "source_agent_name": "Antigravity test",
-            }
+            return _pending_record(json.loads(json.dumps(created_body)), source_agent_id=agent_id)
         if method == "POST" and url.endswith("/expire"):
             return _approved_record(created_body)
         raise AssertionError(f"Unexpected request: {method} {url}")
