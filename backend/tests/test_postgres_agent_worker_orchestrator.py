@@ -262,6 +262,63 @@ def test_postgres_orchestrator_requires_audit_repository_before_work(
     assert store.audit_events == []
 
 
+def test_postgres_orchestrator_rejects_audit_repository_from_another_runtime(
+    postgres_repositories,
+    monkeypatch,
+) -> None:
+    task_repository, approval_repository, connect = postgres_repositories
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    foreign_schema = f"ct_worker_orchestrator_foreign_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(foreign_schema)))
+
+    foreign_connect_calls: list[bool] = []
+
+    def foreign_connect() -> Connection:
+        foreign_connect_calls.append(True)
+        conn = psycopg.connect(dsn)
+        conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(foreign_schema)))
+        return conn
+
+    try:
+        audit_repository = PostgresAuditEventRepository(foreign_connect)
+        store.reset()
+        task = _seed_approved_task(connect)
+
+        monkeypatch.setattr(
+            orchestrator_module,
+            "_task",
+            lambda *_args, **_kwargs: pytest.fail(
+                "a foreign audit runtime must be rejected before task lookup"
+            ),
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="must share the same runtime connection factory",
+        ):
+            run_approved_agent_task_worker_flow(
+                task_id=task.id,
+                task_repository=task_repository,
+                approval_repository=approval_repository,
+                audit_repository=audit_repository,
+            )
+
+        assert foreign_connect_calls == []
+        assert task_repository.get(task.id) == task
+        assert task_repository.list_events(task.id, workspace_id=task.workspace_id) == []
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT count(*) FROM audit_events WHERE entity_id=%s", (task.id,)
+            ).fetchone()[0] == 0
+        assert store.agent_tasks == {}
+        assert store.agent_task_events == {}
+        assert store.audit_events == []
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(foreign_schema)))
+
+
 @pytest.mark.parametrize("settings", [
     SimpleNamespace(is_production=True, postgres_auth_enabled=False),
     SimpleNamespace(is_production=False, postgres_auth_enabled=True),

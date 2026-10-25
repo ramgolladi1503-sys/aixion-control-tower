@@ -1591,6 +1591,41 @@ def test_late_consume_response_cannot_allow_after_host_wait_deadline(
     assert clock.now > 103
 
 
+def test_approval_read_returning_after_host_deadline_denies_without_consuming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late successful decision read must not authorize the expired host call."""
+    clock = _patch_clock(monkeypatch)
+    created: dict = {}
+    calls: list[str] = []
+    environment = _test_environment()
+    environment["AIXION_APPROVAL_TIMEOUT_SECONDS"] = "3"
+
+    def request(method: str, url: str, _agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
+        endpoint = url.rsplit("/", 1)[-1]
+        calls.append(f"{method} {endpoint}")
+        if method == "POST" and url.endswith("/agents/approvals"):
+            assert body is not None
+            created.update(_approval_from_request(body))
+            return dict(created)
+        if method == "GET" and url.endswith("/decision"):
+            # The request starts before the host deadline but the approval
+            # arrives only after it; this must not proceed to the one-shot claim.
+            clock.now = 103.1
+            approved = {**created, "status": "APPROVED"}
+            approved["approved_payload_hash"] = hook._payload_hash(approved)
+            return approved
+        raise AssertionError(f"Late approval must not trigger another request: {method} {url}")
+
+    monkeypatch.setattr(hook, "_request", request)
+    result = hook.run(_hook_payload(), environment)
+
+    assert result["decision"] == "deny"
+    assert "after the host wait deadline" in result["reason"]
+    assert calls == ["POST approvals", "GET decision"]
+    assert clock.now > 103
+
+
 @pytest.mark.parametrize(
     ("consume_finished_at", "expected_report_timeout"),
     [(103.5, 0.5), (104.1, None)],
