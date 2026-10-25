@@ -41,6 +41,11 @@ def _start_hook_process(payload: dict, environment: dict[str, str]) -> subproces
     assert process.stdin is not None
     process.stdin.write(json.dumps(payload))
     process.stdin.close()
+    # Popen.communicate() flushes stdin when it is still present, even if the
+    # pipe was explicitly closed above. The hook is intentionally left running
+    # while the test inspects its persisted approval, so retain stdout/stderr
+    # capture but detach the closed stdin handle.
+    process.stdin = None
     return process
 
 

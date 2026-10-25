@@ -278,6 +278,7 @@ def test_scheduled_push_entrypoint_dispatches_postgres_outbox_once(
     _repository, connect = outbox_repository
     dsn = os.environ["AIXION_TEST_POSTGRES_DSN"]
     monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
     monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "true")
     monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
     monkeypatch.setenv("AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED", "true")
