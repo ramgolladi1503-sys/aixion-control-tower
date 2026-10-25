@@ -88,6 +88,107 @@ def test_install_is_idempotent_for_private_existing_config(tmp_path: Path) -> No
     assert hooks_path.read_bytes() == original_hooks
 
 
+def test_failed_hook_write_restores_legacy_private_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://api.example.test",
+        agent_id="agent-codex-test",
+        project_id="project-codex-test",
+        home=home,
+    )
+
+    legacy_config = json.loads(config_path.read_text(encoding="utf-8"))
+    legacy_config.pop("workspace_path")
+    original_config = (json.dumps(legacy_config, separators=(",", ":")) + "\n").encode()
+    config_path.write_bytes(original_config)
+    config_path.chmod(0o600)
+    original_mode = config_path.stat().st_mode & 0o777
+    hooks_path.unlink()
+    original_hooks = b'{"description":"operator hooks","hooks":{"SessionStart":[]}}\n'
+    hooks_path.write_bytes(original_hooks)
+    hooks_path.chmod(0o600)
+
+    atomic_write = setup._atomic_write
+
+    def fail_hook_write(path: Path, data: bytes, mode: int) -> None:
+        if path == hooks_path:
+            raise OSError("simulated hooks replacement failure")
+        atomic_write(path, data, mode)
+
+    monkeypatch.setattr(setup, "_atomic_write", fail_hook_write)
+
+    with pytest.raises(OSError, match="simulated hooks replacement failure"):
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://api.example.test",
+            agent_id="agent-codex-test",
+            project_id="project-codex-test",
+            home=home,
+        )
+
+    assert config_path.read_bytes() == original_config
+    assert config_path.stat().st_mode & 0o777 == original_mode
+    assert hooks_path.read_bytes() == original_hooks
+    assert hooks_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_rollback_failure_does_not_mask_hook_install_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    config_path, hooks_path = setup.install_workspace(
+        workspace,
+        api_base_url="https://api.example.test",
+        agent_id="agent-codex-test",
+        project_id="project-codex-test",
+        home=home,
+    )
+    legacy_config = json.loads(config_path.read_text(encoding="utf-8"))
+    legacy_config.pop("workspace_path")
+    original_config = (json.dumps(legacy_config, separators=(",", ":")) + "\n").encode()
+    config_path.write_bytes(original_config)
+    hooks_path.write_text('{"hooks":{"SessionStart":[]}}\n', encoding="utf-8")
+
+    atomic_write = setup._atomic_write
+    failed_restore = False
+
+    def fail_hook_and_restore(path: Path, data: bytes, mode: int) -> None:
+        nonlocal failed_restore
+        if path == hooks_path:
+            raise OSError("primary hooks replacement failure")
+        if path == config_path and data == original_config:
+            failed_restore = True
+            raise OSError("secondary config restore failure")
+        atomic_write(path, data, mode)
+
+    monkeypatch.setattr(setup, "_atomic_write", fail_hook_and_restore)
+
+    with pytest.raises(OSError, match="primary hooks replacement failure") as error:
+        setup.install_workspace(
+            workspace,
+            api_base_url="https://api.example.test",
+            agent_id="agent-codex-test",
+            project_id="project-codex-test",
+            home=home,
+        )
+
+    assert failed_restore
+    assert any(
+        "Rollback could not restore the previous managed config" in note
+        and "secondary config restore failure" in note
+        for note in error.value.__notes__
+    )
+
+
 @pytest.mark.parametrize("unsafe_mode", [0o622, 0o666])
 def test_install_rejects_group_or_other_writable_hooks_file_without_mutation(
     tmp_path: Path, unsafe_mode: int,

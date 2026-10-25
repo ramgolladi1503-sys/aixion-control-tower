@@ -75,6 +75,24 @@ def _read_json(path: Path, *, allow_missing: bool, require_private: bool = False
     return value
 
 
+def _private_file_snapshot(path: Path) -> tuple[bytes, int]:
+    """Read exact bytes and mode from an owner-only regular file without following links."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            mode = stat.S_IMODE(metadata.st_mode)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                    or mode & 0o077):
+                raise SetupError(f"Managed config permissions or ownership changed: {path}")
+            raw = stream.read(MAX_JSON_BYTES + 1)
+        if len(raw) > MAX_JSON_BYTES:
+            raise SetupError(f"Managed JSON file exceeds {MAX_JSON_BYTES} bytes: {path}")
+        return raw, mode
+    except OSError as exc:
+        raise SetupError(f"Cannot safely snapshot managed config: {path}") from exc
+
+
 def _atomic_write(path: Path, data: bytes, mode: int) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     parent = path.parent.lstat()
@@ -186,12 +204,21 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
         raise SetupError(f"Hook {HOOK_NAME!r} already exists with different contents")
     config_exists = os.path.lexists(config_path)
     existing_config = None
+    previous_config_snapshot: tuple[bytes, int] | None = None
     if config_exists:
         existing_config = _read_json(config_path, allow_missing=False, require_private=True)
     legacy_config = {key: value for key, value in config.items() if key != "workspace_path"}
     config_upgrade = config_exists and existing_config == legacy_config
     if config_exists and existing_config != config and not config_upgrade:
         raise SetupError("Workspace Codex config exists with different values; refusing overwrite")
+    if config_upgrade:
+        previous_config_snapshot = _private_file_snapshot(config_path)
+        try:
+            snapshot_value = json.loads(previous_config_snapshot[0])
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise SetupError("Managed config changed while preparing workspace upgrade") from exc
+        if snapshot_value != existing_config:
+            raise SetupError("Managed config changed while preparing workspace upgrade")
     _ensure_config_dir(home, config_dir)
     config_created = False
     if not config_exists:
@@ -205,9 +232,22 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
         mode = stat.S_IMODE(hooks_path.stat().st_mode) if hooks_path.exists() else 0o600
         try:
             _atomic_write(hooks_path, (json.dumps(hooks_file, indent=2) + "\n").encode(), mode)
-        except (OSError, SetupError):
+        except (OSError, SetupError) as install_error:
             if config_created:
-                config_path.unlink(missing_ok=True)
+                try:
+                    config_path.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    install_error.add_note(
+                        f"Rollback could not remove the new managed config: {cleanup_error}"
+                    )
+            elif previous_config_snapshot is not None:
+                previous_bytes, previous_mode = previous_config_snapshot
+                try:
+                    _atomic_write(config_path, previous_bytes, previous_mode)
+                except (OSError, SetupError) as rollback_error:
+                    install_error.add_note(
+                        f"Rollback could not restore the previous managed config: {rollback_error}"
+                    )
             raise
     return config_path, hooks_path
 

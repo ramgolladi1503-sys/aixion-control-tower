@@ -125,6 +125,31 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun expiryCountdownExposesPoliteMilestoneAnnouncementToAccessibility() {
+        val now = Instant.now()
+        val expiresAt = now.plusSeconds(30).toString()
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval(ApprovalStatus.REQUESTED).copy(expiresAt = expiresAt),
+                null,
+                {},
+                {},
+                {}
+            )
+        }
+
+        val countdown = composeRule.onNodeWithTag("approval-decision-expiry-countdown")
+        assertEquals(
+            LiveRegionMode.Polite,
+            countdown.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+        assertEquals(
+            listOf("Approval expires in less than one minute."),
+            countdown.fetchSemanticsNode().config[SemanticsProperties.ContentDescription]
+        )
+    }
+
+    @Test
     fun unknownApprovalStatusDisablesEveryDecision() {
         composeRule.setContent {
             ApprovalDetailContent(approval(ApprovalStatus.UNKNOWN), null, {}, {}, {})

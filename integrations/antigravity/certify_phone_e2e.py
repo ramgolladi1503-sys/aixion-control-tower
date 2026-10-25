@@ -175,6 +175,7 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
         if not any(label in database for label in ("e2e", "test", "disposable")):
             raise EvidenceError("Database name must identify an E2E, test, or disposable database")
         with conn.cursor() as cursor:
+            cursor.execute("SET TRANSACTION READ ONLY")
             cursor.execute(
                 "SELECT approval_id, source_agent_id, status, payload "
                 "FROM approval_requests WHERE approval_id=%s",
@@ -215,7 +216,7 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
                 {"approval_id": r[0], "event_type": r[1], "details": r[2]}
                 for r in cursor.fetchall()
             ]
-        conn.rollback()  # Explicitly read-only; never commit from the verifier.
+        conn.rollback()  # End the enforced read-only transaction without committing.
     finally:
         conn.close()
     result = verify_records(
