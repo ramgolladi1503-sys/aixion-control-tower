@@ -104,8 +104,10 @@ def test_verified_user_can_read_me_with_bearer_session() -> None:
     assert response.json()["email_verified"] is True
 
 
-def test_production_registration_queues_encrypted_code_without_returning_it(monkeypatch) -> None:
-    monkeypatch.setenv("AIXION_PROFILE", "production")
+def test_local_registration_queues_encrypted_verification_code(monkeypatch) -> None:
+    # SQLite outbox coverage belongs to local mode. Production auth now fails
+    # closed unless the PostgreSQL repository is supplied explicitly.
+    monkeypatch.setenv("AIXION_PROFILE", "local")
     monkeypatch.setenv("AIXION_EMAIL_DISPATCH_ENABLED", "true")
     monkeypatch.setenv("AIXION_EMAIL_SMTP_HOST", "smtp.test.invalid")
     monkeypatch.setenv("AIXION_EMAIL_FROM", "verify@test.invalid")
@@ -116,7 +118,7 @@ def test_production_registration_queues_encrypted_code_without_returning_it(monk
 
     response = create_registration_response(user)
 
-    assert response.dev_verification_code is None
+    assert response.dev_verification_code
     with store._connect() as conn:
         row = conn.execute(
             "SELECT recipient, encrypted_code, status FROM auth_email_outbox ORDER BY created_at DESC LIMIT 1"
@@ -128,7 +130,8 @@ def test_production_registration_queues_encrypted_code_without_returning_it(monk
 
 
 def test_outbox_insert_failure_rolls_back_verification_hash_and_memory(monkeypatch) -> None:
-    monkeypatch.setenv("AIXION_PROFILE", "production")
+    # Exercise the SQLite transaction rollback path in its supported local mode.
+    monkeypatch.setenv("AIXION_PROFILE", "local")
     monkeypatch.setenv("AIXION_EMAIL_DISPATCH_ENABLED", "true")
     monkeypatch.setenv("AIXION_EMAIL_SMTP_HOST", "smtp.test.invalid")
     monkeypatch.setenv("AIXION_EMAIL_FROM", "verify@test.invalid")

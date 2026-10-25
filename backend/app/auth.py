@@ -82,6 +82,20 @@ def _safe_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+def _require_postgres_repository(postgres_repository, operation: str) -> None:
+    """Prevent service-level direct calls from falling back to SQLite in authoritative modes."""
+    settings = get_settings()
+    if postgres_repository is None and (
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_auth_enabled", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"{operation} requires the PostgreSQL auth repository in production mode",
+            headers={"Retry-After": "30"},
+        )
+
+
 def _default_role_for_new_user() -> UserRole:
     if not store.users:
         return UserRole.OWNER
@@ -197,6 +211,7 @@ def create_user(
     create_workspace: bool = False,
     _persist: bool = True,
 ) -> User:
+    _require_postgres_repository(None, "Account creation")
     normalized_email = email.lower().strip()
     salt = secrets.token_hex(16)
     password_hash = _hash_secret(password, salt)
@@ -244,6 +259,7 @@ def create_user(
 
 
 def create_registration_response(user: User, *, postgres_repository=None) -> RegistrationResponse:
+    _require_postgres_repository(postgres_repository, "Registration verification")
     settings = get_settings()
     if postgres_repository is not None:
         prepared, code = prepare_verification_state(user)
@@ -297,6 +313,7 @@ def create_registration_response(user: User, *, postgres_repository=None) -> Reg
 
 
 def resend_verification(email: str, *, postgres_repository=None) -> RegistrationResponse:
+    _require_postgres_repository(postgres_repository, "Verification resend")
     normalized_email = email.lower().strip()
     user = (
         postgres_repository.get_user_by_email(normalized_email)
@@ -315,6 +332,7 @@ def resend_verification(email: str, *, postgres_repository=None) -> Registration
 
 
 def verify_email(email: str, code: str, *, postgres_repository=None) -> VerifyEmailResponse:
+    _require_postgres_repository(postgres_repository, "Email verification")
     normalized_email = email.lower().strip()
     if postgres_repository is not None:
         from .postgres_auth_repository import PostgresEmailVerificationError
@@ -372,6 +390,7 @@ def verify_email(email: str, code: str, *, postgres_repository=None) -> VerifyEm
 
 
 def authenticate_user(email: str, password: str, *, postgres_repository=None) -> User:
+    _require_postgres_repository(postgres_repository, "Authentication")
     normalized_email = email.lower().strip()
     user = (
         postgres_repository.get_user_by_email(normalized_email)
@@ -389,6 +408,7 @@ def authenticate_user(email: str, password: str, *, postgres_repository=None) ->
 
 
 def create_session(user: User, *, postgres_repository=None) -> AuthResponse:
+    _require_postgres_repository(postgres_repository, "Session creation")
     raw_token = secrets.token_urlsafe(48)
     session = SessionToken(
         user_id=user.id,
