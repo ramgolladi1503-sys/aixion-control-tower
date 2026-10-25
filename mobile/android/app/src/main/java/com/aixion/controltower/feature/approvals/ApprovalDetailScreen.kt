@@ -432,6 +432,7 @@ fun ApprovalDetailContent(
                     approvalTitle = approval.title,
                     approvalId = approval.id,
                     approvalProvider = approval.sourceProvider.ifBlank { approval.sourceLabel },
+                    approvalInvocationId = approval.sourceInvocationId,
                     approvalRisk = approval.risk,
                     expiresAt = approval.expiresAt,
                     now = decisionClock,
@@ -1050,6 +1051,7 @@ private fun DecisionPanel(
     approvalTitle: String,
     approvalId: String,
     approvalProvider: String,
+    approvalInvocationId: String?,
     approvalRisk: RiskLevel,
     expiresAt: String?,
     now: Instant,
@@ -1061,6 +1063,7 @@ private fun DecisionPanel(
     showDisabledActions: Boolean = false
 ) {
     val palette = LocalTowerPalette.current
+    val invocationContext = approvalInvocationAccessibilityContext(approvalInvocationId)
     TowerPanel(modifier = modifier, elevated = true) {
         if (compactLayout) {
             TextButton(
@@ -1198,7 +1201,7 @@ private fun DecisionPanel(
                         .fillMaxWidth()
                         .heightIn(min = 56.dp)
                         .semantics(mergeDescendants = true) {
-                            contentDescription = "Deny request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}."
+                            contentDescription = "Deny request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}.$invocationContext"
                         },
                     enabled = canDecide
                 ) { Text("Deny", color = palette.danger) }
@@ -1210,10 +1213,16 @@ private fun DecisionPanel(
                         .fillMaxWidth()
                         .heightIn(min = 56.dp)
                         .semantics(mergeDescendants = true) {
-                            contentDescription = "Approve request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}."
+                            contentDescription = "Approve request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}.$invocationContext"
                         }
                 ) { Text("Approve request") }
             }
         }
     }
 }
+
+private fun approvalInvocationAccessibilityContext(invocationId: String?): String =
+    invocationId
+        ?.takeIf(String::isNotBlank)
+        ?.let { " Invocation: ${shortSafeApprovalId(it)}." }
+        .orEmpty()

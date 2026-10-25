@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.platform.LocalDensity
@@ -40,6 +41,7 @@ class ApprovalExactToolContextTest {
             files = listOf(
                 FileChangeSummary("codex://tool/shell", "tool_call", payload, RiskLevel.LOW)
             ),
+            sourceInvocationId = "codex-run-87654321",
             requiredActions = emptyList(),
             testPlan = emptyList(),
             rollbackPlan = ""
@@ -65,6 +67,12 @@ class ApprovalExactToolContextTest {
 
         context.assertExists()
         header.assertExists()
+        composeRule.onNodeWithContentDescription(
+            "Deny request xt-test from Codex: Check repository state. Risk: low. Invocation: 87654321."
+        ).assertExists()
+        composeRule.onNodeWithContentDescription(
+            "Approve request xt-test from Codex: Check repository state. Risk: low. Invocation: 87654321."
+        ).assertExists()
         path.assertExists()
         exactPayload.assertExists()
         composeRule.onNodeWithTag("approval-payload-horizontal-scroll-hint").assertDoesNotExist()
