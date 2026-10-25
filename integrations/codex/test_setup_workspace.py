@@ -114,6 +114,50 @@ def test_install_refuses_shared_writable_hooks_without_partial_config_or_mutatio
     assert not (home / ".config").exists()
 
 
+def test_install_refuses_output_hooks_file_over_size_limit_without_mutation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    _, config_path, hooks_path = setup._managed_paths(
+        workspace,
+        home,
+        Path(__file__).with_name("aixion_permission_request_hook.py"),
+    )
+    config_path.parent.mkdir(mode=0o700, parents=True)
+    config_bytes = (
+        json.dumps(
+            {
+                "api_base_url": "http://127.0.0.1:8004",
+                "agent_id": "agent_test_codex",
+                "project_id": "project_test_codex",
+                "workspace_path": str(workspace.resolve()),
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    config_path.write_bytes(config_bytes)
+    config_path.chmod(0o600)
+
+    original = json.dumps(
+        {"hooks": {"Stop": [{"command": "x" * (setup.MAX_JSON_BYTES - 256)}]}},
+        separators=(",", ":"),
+    ).encode()
+    assert len(original) <= setup.MAX_JSON_BYTES
+    hooks_path.parent.mkdir(mode=0o700, parents=True)
+    hooks_path.write_bytes(original)
+    hooks_path.chmod(0o600)
+
+    with pytest.raises(setup.SetupError, match="Updated Codex hooks file exceeds"):
+        _install(workspace, home)
+
+    assert hooks_path.read_bytes() == original
+    assert config_path.read_bytes() == config_bytes
+
+
 def test_install_restores_legacy_config_bytes_and_mode_if_hook_write_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -250,6 +250,17 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
             raise SetupError("Managed config changed while preparing workspace upgrade") from exc
         if snapshot_value != existing_config:
             raise SetupError("Managed config changed while preparing workspace upgrade")
+    updated_hooks_bytes: bytes | None = None
+    hooks_mode = 0o600
+    if not managed:
+        hooks["PermissionRequest"] = [*existing_entries, entry]
+        hooks_file["hooks"] = hooks
+        updated_hooks_bytes = (json.dumps(hooks_file, indent=2) + "\n").encode()
+        if len(updated_hooks_bytes) > MAX_JSON_BYTES:
+            raise SetupError(
+                f"Updated Codex hooks file exceeds {MAX_JSON_BYTES} bytes"
+            )
+        hooks_mode = stat.S_IMODE(hooks_path.stat().st_mode) if hooks_path.exists() else 0o600
     _ensure_config_dir(home, config_dir)
     config_created = False
     if not config_exists:
@@ -257,12 +268,9 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
         config_created = True
     elif config_upgrade:
         _atomic_write(config_path, (json.dumps(config, indent=2) + "\n").encode(), 0o600)
-    if not managed:
-        hooks["PermissionRequest"] = [*existing_entries, entry]
-        hooks_file["hooks"] = hooks
-        mode = stat.S_IMODE(hooks_path.stat().st_mode) if hooks_path.exists() else 0o600
+    if updated_hooks_bytes is not None:
         try:
-            _atomic_write(hooks_path, (json.dumps(hooks_file, indent=2) + "\n").encode(), mode)
+            _atomic_write(hooks_path, updated_hooks_bytes, hooks_mode)
         except (OSError, SetupError) as install_error:
             if config_created:
                 try:

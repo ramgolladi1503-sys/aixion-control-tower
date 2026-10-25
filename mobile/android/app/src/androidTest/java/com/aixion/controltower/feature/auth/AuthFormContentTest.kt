@@ -13,14 +13,17 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -272,9 +275,58 @@ class AuthFormContentTest {
     @Test
     fun loginAndRegistrationActionsRemainScrollableAtTwoHundredPercentText() {
         composeRule.setContent {
-            Box(modifier = Modifier.width(240.dp)) {
+            ControlTowerTheme {
                 CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
-                    Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    Box(modifier = Modifier.width(240.dp).height(420.dp)) {
+                        AuthFormViewport {
+                            AuthFormContent(
+                                state = AuthUiState(),
+                                onEmailChange = {},
+                                onPasswordChange = {},
+                                onVerificationCodeChange = {},
+                                onLogin = {},
+                                onRegister = {},
+                                onVerify = {},
+                                onResendVerification = {}
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        val signInHeading = composeRule.onNodeWithText("Welcome back")
+        signInHeading.assertExists()
+        val signInSubtitle = composeRule.onNodeWithText("Sign in to review and decide on pending approvals.")
+        val formPanel = composeRule.onNodeWithTag("auth-form-panel")
+        signInSubtitle.assertExists()
+        formPanel.assertExists()
+        val bounds = signInHeading.fetchSemanticsNode().boundsInRoot
+        assertTrue("Sign-in heading must stay within narrow viewport", bounds.right <= 240f)
+        assertTrue("Sign-in heading must wrap at 200% text", bounds.height > 48f)
+
+        val subtitleBounds = signInSubtitle.fetchSemanticsNode().boundsInRoot
+        val formBounds = formPanel.fetchSemanticsNode().boundsInRoot
+        assertTrue("The sign-in card must stay within the narrow viewport", formBounds.right <= 240f)
+        assertTrue("The form should follow the subtitle with a compact, positive gap", formBounds.top - subtitleBounds.bottom in 0f..10f)
+        composeRule.onNodeWithText("Log in").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Register").performScrollTo().performClick()
+        composeRule.onNodeWithText("Create your account").assertExists()
+        composeRule.onNodeWithText("Create account").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Back to sign in").performScrollTo().assertExists()
+    }
+
+    @Test
+    fun signInClusterCentersInAvailableViewportAtDefaultTextScale() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                Box(
+                    modifier = Modifier
+                        .width(360.dp)
+                        .height(800.dp)
+                        .testTag("auth-form-viewport")
+                ) {
+                    AuthFormViewport {
                         AuthFormContent(
                             state = AuthUiState(),
                             onEmailChange = {},
@@ -290,26 +342,23 @@ class AuthFormContentTest {
             }
         }
 
-        val signInHeading = composeRule.onNodeWithText("Welcome back")
-        signInHeading.assertExists()
-        val signInSubtitle = composeRule.onNodeWithText("Sign in to review and decide on pending approvals.")
-        val formPanel = composeRule.onNodeWithTag("auth-form-panel")
-        signInSubtitle.assertExists()
-        formPanel.assertExists()
-        composeRule.runOnIdle {
-            val bounds = signInHeading.fetchSemanticsNode().boundsInRoot
-            assertTrue("Sign-in heading must stay within narrow viewport", bounds.right <= 240f)
-            assertTrue("Sign-in heading must wrap at 200% text", bounds.height > 48f)
+        val heading = composeRule.onNodeWithText("Welcome back")
+        val register = composeRule.onNodeWithText("Register")
+        heading.assertExists()
+        register.assertExists()
+        val viewportBounds = composeRule.onNodeWithTag("auth-form-viewport")
+            .fetchSemanticsNode().boundsInRoot
+        val headingBounds = heading.fetchSemanticsNode().boundsInRoot
+        val registerBounds = register.fetchSemanticsNode().boundsInRoot
+        val clusterCenter = (headingBounds.top + registerBounds.bottom) / 2f
+        val viewportCenter = (viewportBounds.top + viewportBounds.bottom) / 2f
+        val centerTolerance = viewportBounds.height * 0.015f
 
-            val subtitleBounds = signInSubtitle.fetchSemanticsNode().boundsInRoot
-            val formBounds = formPanel.fetchSemanticsNode().boundsInRoot
-            assertTrue("The sign-in card must stay within the narrow viewport", formBounds.right <= 240f)
-            assertTrue("The form should follow the subtitle with a compact, positive gap", formBounds.top - subtitleBounds.bottom in 0f..10f)
-        }
-        composeRule.onNodeWithText("Log in").performScrollTo().assertExists()
-        composeRule.onNodeWithText("Register").performScrollTo().performClick()
-        composeRule.onNodeWithText("Create your account").assertExists()
-        composeRule.onNodeWithText("Create account").performScrollTo().assertExists()
-        composeRule.onNodeWithText("Back to sign in").performScrollTo().assertExists()
+        assertTrue("The login cluster should fit within the available viewport", headingBounds.top >= viewportBounds.top)
+        assertTrue("The login cluster should fit within the available viewport", registerBounds.bottom <= viewportBounds.bottom)
+        assertTrue(
+            "A fitting login cluster should be centered vertically: center=$clusterCenter viewport=$viewportCenter bounds=$viewportBounds/$headingBounds/$registerBounds",
+            kotlin.math.abs(clusterCenter - viewportCenter) <= centerTolerance
+        )
     }
 }

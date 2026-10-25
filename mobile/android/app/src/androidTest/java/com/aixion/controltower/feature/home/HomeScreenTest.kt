@@ -2,6 +2,7 @@ package com.aixion.controltower.feature.home
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
@@ -10,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -33,6 +35,45 @@ import org.junit.Test
 class HomeScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun compactHomeHeroGivesLargeTextFullWidthAndKeepsItsAnnouncementSemantics() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    Box(
+                        modifier = Modifier
+                            .width(320.dp)
+                            .height(900.dp)
+                            .testTag("home-hero-viewport")
+                    ) {
+                        HomeContent(
+                            state = HomeUiState(
+                                loading = false,
+                                lastSuccessfulSyncAt = Instant.parse("2026-10-22T10:00:00Z")
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        val title = composeRule.onNodeWithTag("home-status-title")
+        title.assertIsDisplayed()
+        composeRule.onNodeWithTag("home-hero-logo").assertDoesNotExist()
+        val viewport = composeRule.onNodeWithTag("home-hero-viewport").fetchSemanticsNode().boundsInRoot
+        val titleBounds = title.fetchSemanticsNode().boundsInRoot
+        assertTrue("Large Home status text should remain inside compact screen padding", titleBounds.left >= viewport.left + 20f)
+        assertTrue("Large Home status text should use the available compact width", titleBounds.right <= viewport.right - 20f)
+        assertTrue("Large Home status heading should receive the full hero copy column", titleBounds.width >= 220f)
+        assertTrue("The heading should wrap naturally at 200% font scale", titleBounds.height > 72f)
+        assertTrue("The status remains a heading", title.fetchSemanticsNode().config.contains(SemanticsProperties.Heading))
+        assertEquals(
+            "The status remains announced politely when it changes",
+            LiveRegionMode.Polite,
+            title.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+    }
 
     @Test
     fun approvalCardSeparatesTrustRiskAndProjectContextAtCompactWidth() {

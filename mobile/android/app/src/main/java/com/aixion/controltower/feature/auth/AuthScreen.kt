@@ -2,12 +2,14 @@ package com.aixion.controltower.feature.auth
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -70,23 +72,47 @@ fun AuthScreen(
     val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(palette.canvas)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
-    ) {
-        if (state.authenticated) {
+    if (state.authenticated) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(palette.canvas)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
+        ) {
             AccountHero(state = state)
             NotificationPermissionPanel()
             AccountInfoPanel(
                 state = state,
                 onLogout = onLogoutRequested
             )
-        } else {
+        }
+    } else {
+        AuthFormViewport {
             AuthForm(state = state, viewModel = viewModel)
+        }
+    }
+}
+
+@Composable
+internal fun AuthFormViewport(content: @Composable () -> Unit) {
+    val palette = LocalTowerPalette.current
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.canvas)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = maxHeight)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg, Alignment.CenterVertically)
+        ) {
+            content()
         }
     }
 }

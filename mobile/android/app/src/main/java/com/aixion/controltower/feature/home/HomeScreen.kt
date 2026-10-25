@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,6 +27,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -93,42 +96,7 @@ internal fun HomeContent(
         if (shouldShowHomeStatusHero(state)) {
             item {
                 TowerHeroPanel {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            StatusBadge(
-                                label = homeHeroStatusLabel(state),
-                                color = when {
-                                    state.unsupportedApprovals.isNotEmpty() -> palette.danger
-                                    state.actionRequiredCount > 0 -> palette.caution
-                                    state.loading || state.refreshing || !state.hasSuccessfulSync -> palette.caution
-                                    else -> palette.positive
-                                },
-                                fontSize = MaterialTheme.typography.labelLarge.fontSize,
-                                uppercase = false
-                            )
-                            Spacer(modifier = Modifier.height(TowerSpacing.md))
-                            Text(
-                                text = homeHeroTitle(state),
-                                modifier = Modifier.semantics {
-                                    heading()
-                                    liveRegion = LiveRegionMode.Polite
-                                },
-                                color = palette.ink,
-                                style = MaterialTheme.typography.headlineLarge
-                            )
-                            Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                            Text(
-                                text = homeHeroSubtitle(state),
-                                color = palette.inkMuted,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                        ForgedLogoMark(size = 56.dp, color = palette.ink.copy(alpha = 0.82f))
-                    }
+                    HomeStatusHero(state = state)
                 }
             }
         }
@@ -184,6 +152,69 @@ internal fun HomeContent(
         item {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
         }
+    }
+}
+
+@Composable
+private fun HomeStatusHero(state: HomeUiState) {
+    val palette = LocalTowerPalette.current
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val showBrandMarkBesideCopy =
+            maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
+
+        if (showBrandMarkBesideCopy) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.md),
+                verticalAlignment = Alignment.Top
+            ) {
+                HomeStatusHeroCopy(state = state, modifier = Modifier.weight(1f))
+                ForgedLogoMark(
+                    modifier = Modifier.testTag("home-hero-logo"),
+                    size = 56.dp,
+                    color = palette.ink.copy(alpha = 0.82f)
+                )
+            }
+        } else {
+            HomeStatusHeroCopy(state = state, modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+private fun HomeStatusHeroCopy(state: HomeUiState, modifier: Modifier = Modifier) {
+    val palette = LocalTowerPalette.current
+    Column(modifier = modifier) {
+        StatusBadge(
+            label = homeHeroStatusLabel(state),
+            color = when {
+                state.unsupportedApprovals.isNotEmpty() -> palette.danger
+                state.actionRequiredCount > 0 -> palette.caution
+                state.loading || state.refreshing || !state.hasSuccessfulSync -> palette.caution
+                else -> palette.positive
+            },
+            fontSize = MaterialTheme.typography.labelLarge.fontSize,
+            uppercase = false
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Text(
+            text = homeHeroTitle(state),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("home-status-title")
+                .semantics {
+                    heading()
+                    liveRegion = LiveRegionMode.Polite
+                },
+            color = palette.ink,
+            style = MaterialTheme.typography.headlineLarge
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = homeHeroSubtitle(state),
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
 
