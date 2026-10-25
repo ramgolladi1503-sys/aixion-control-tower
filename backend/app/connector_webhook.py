@@ -503,6 +503,7 @@ async def handle_connector_webhook(
             _commit_authenticated_refusal(
                 connector_repository,
                 connector,
+                request_nonce=x_aixion_nonce,
                 expected_updated_at=expected_updated_at,
                 body=body,
                 details=details,
@@ -563,6 +564,7 @@ async def handle_connector_webhook(
             _commit_authenticated_refusal(
                 connector_repository,
                 connector,
+                request_nonce=x_aixion_nonce,
                 expected_updated_at=expected_updated_at,
                 body=body,
                 details=details,
@@ -637,24 +639,40 @@ def _commit_authenticated_refusal(
     repository: ConnectorRepository,
     connector: AgentConnector,
     *,
+    request_nonce: str | None,
     expected_updated_at: datetime,
     body: bytes,
     details: dict[str, Any],
 ) -> None:
-    """Preserve authenticated and refusal audit records for rejected requests."""
-    _commit_webhook_connector_update(
-        repository,
-        connector,
-        expected_updated_at=expected_updated_at,
+    """Atomically preserve connector state and both audit rows for a refusal."""
+    record_connector_auth_failure(connector, str(details.get("reason", "webhook refused")))
+    if connector.updated_at <= expected_updated_at:
+        connector.updated_at = now_utc()
+    authenticated_audit = AuditEvent(
         event_type="connector.webhook_authenticated",
+        entity_id=connector.id,
+        workspace_id=connector.workspace_id,
+        actor=f"connector:{connector.id}",
         details={"body_sha256": _body_hash(body), "auth_type": connector.auth_type.value},
     )
-    authenticated_updated_at = connector.updated_at
-    record_connector_auth_failure(connector, str(details.get("reason", "webhook refused")))
-    _commit_webhook_connector_update(
-        repository,
-        connector,
-        expected_updated_at=authenticated_updated_at,
+    refusal_audit = AuditEvent(
         event_type="connector.webhook_refused",
+        entity_id=connector.id,
+        workspace_id=connector.workspace_id,
+        actor=f"connector:{connector.id}",
         details=details,
     )
+    try:
+        repository.commit_webhook_refusal(
+            connector=connector,
+            request_nonce=request_nonce,
+            expected_updated_at=expected_updated_at,
+            authenticated_audit=authenticated_audit,
+            refusal_audit=refusal_audit,
+        )
+    except ConnectorWebhookReplay as error:
+        raise HTTPException(status_code=401, detail=str(error)) from error
+    except ConnectorRepositoryConflict as error:
+        raise HTTPException(status_code=409, detail="Connector state changed; retry webhook") from error
+    except ConnectorRepositoryScopeError as error:
+        raise HTTPException(status_code=404, detail="Connector not found") from error

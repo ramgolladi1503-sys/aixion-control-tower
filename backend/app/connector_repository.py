@@ -52,6 +52,16 @@ class ConnectorRepository(Protocol):
         write_action: Callable[[Connection], object],
     ) -> object: ...
 
+    def commit_webhook_refusal(
+        self,
+        *,
+        connector: AgentConnector,
+        request_nonce: str | None,
+        expected_updated_at: datetime,
+        authenticated_audit: AuditEvent,
+        refusal_audit: AuditEvent,
+    ) -> None: ...
+
 
 def _validate_audit(connector: AgentConnector, audit_event: AuditEvent) -> None:
     if (
@@ -312,6 +322,67 @@ class PostgresConnectorRepository:
                 raise ConnectorRepositoryConflict("Connector changed before webhook action committed")
             self._insert_audit(conn, audit_event)
             return result
+
+    def commit_webhook_refusal(
+        self,
+        *,
+        connector: AgentConnector,
+        request_nonce: str | None,
+        expected_updated_at: datetime,
+        authenticated_audit: AuditEvent,
+        refusal_audit: AuditEvent,
+    ) -> None:
+        """Persist authenticated state and its refusal evidence in one transaction."""
+        _validate_audit(connector, authenticated_audit)
+        _validate_audit(connector, refusal_audit)
+        if (
+            authenticated_audit.event_type != "connector.webhook_authenticated"
+            or refusal_audit.event_type != "connector.webhook_refused"
+        ):
+            raise ConnectorRepositoryScopeError("Webhook refusal audits have invalid event types")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT connector_id,workspace_id,payload FROM agent_connectors "
+                "WHERE connector_id=%s AND workspace_id=%s FOR UPDATE",
+                (connector.id, connector.workspace_id),
+            ).fetchone()
+            stored = _decode(row)
+            if stored is None:
+                raise ConnectorRepositoryConflict("Connector changed or was removed")
+            if stored.updated_at != expected_updated_at:
+                if _webhook_nonce_replayed(stored, request_nonce):
+                    raise ConnectorWebhookReplay("Connector HMAC nonce has already been used")
+                raise ConnectorRepositoryConflict("Connector changed before webhook refusal committed")
+            if (
+                connector.created_by_user_id != stored.created_by_user_id
+                or connector.created_at != stored.created_at
+                or connector.updated_at <= expected_updated_at
+            ):
+                raise ConnectorRepositoryScopeError("Connector update changed immutable identity")
+            self._validate_allowed_projects(
+                conn,
+                workspace_id=connector.workspace_id,
+                project_ids=connector.allowed_project_ids,
+            )
+            changed = conn.execute(
+                "UPDATE agent_connectors SET provider_label=%s,auth_type=%s,status=%s,"
+                "updated_at=%s,payload=%s WHERE connector_id=%s AND workspace_id=%s "
+                "AND updated_at=%s",
+                (
+                    connector.provider_label.value,
+                    connector.auth_type.value,
+                    connector.status.value,
+                    connector.updated_at,
+                    Jsonb(connector.model_dump(mode="json")),
+                    connector.id,
+                    connector.workspace_id,
+                    expected_updated_at,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise ConnectorRepositoryConflict("Connector changed before webhook refusal committed")
+            self._insert_audit(conn, authenticated_audit)
+            self._insert_audit(conn, refusal_audit)
 
 
 class ConnectorWebhookReplay(ConnectorRepositoryError):
