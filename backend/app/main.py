@@ -465,7 +465,11 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 raise RuntimeError(
                     "PostgreSQL email dispatch requires the lifespan-owned PostgreSQL outbox"
                 )
-        if getattr(settings, "postgres_auth_enabled", False):
+        postgres_authoritative_recovery = bool(
+            getattr(settings, "is_production", False)
+            or getattr(settings, "postgres_auth_enabled", False)
+        )
+        if postgres_authoritative_recovery:
             recovery_repositories = getattr(
                 application.state, "postgres_repositories", None
             )
@@ -481,6 +485,11 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             recovery_task_repository = recovery_repositories.agent_tasks
             recovery_run_repository = recovery_repositories.agent_runs
         else:
+            profile = getattr(settings, "profile", None)
+            if profile not in {"local", "test"}:
+                raise RuntimeError(
+                    "SQLite approval recovery is available only in explicit local or test mode"
+                )
             recovery_approval_repository = getattr(
                 application.state,
                 "approval_decision_repository",

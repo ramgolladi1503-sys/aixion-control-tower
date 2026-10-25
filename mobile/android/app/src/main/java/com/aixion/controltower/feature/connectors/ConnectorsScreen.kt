@@ -39,13 +39,14 @@ import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 internal fun providerSetupDescription(provider: String): String = when (provider) {
-    "ANTIGRAVITY" -> "Set up the connector on the computer running Antigravity. Keep that computer available so a decision can return to the waiting session."
+    "ANTIGRAVITY" -> "Antigravity's local pre-tool hook is the supported approval path. Install it on the computer running this project, and keep that computer, session, and API reachable while a request waits."
     "CODEX" -> "Codex Desktop phone approval delivery and returning a decision to the same task are not verified. This setup page does not establish a live approval connection. Do not rely on it for live work."
     else -> "Choose a supported provider and complete setup on the computer where the agent runs."
 }
 
 internal fun providerSetupStatus(provider: String): String = when (provider) {
     "CODEX" -> "Unverified · not a live connection"
+    "ANTIGRAVITY" -> "Supported hook · setup required"
     else -> "Not verified"
 }
 

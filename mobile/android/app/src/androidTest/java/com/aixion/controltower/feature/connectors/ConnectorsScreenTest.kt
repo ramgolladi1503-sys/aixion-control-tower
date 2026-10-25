@@ -133,11 +133,11 @@ class ConnectorsScreenTest {
     fun providerReadinessStatesAreDistinctAndDoNotClaimLiveConnection() {
         composeRule.setContent { ConnectorsContent() }
 
-        composeRule.onNodeWithText("Not verified").assertExists()
-        composeRule.onAllNodesWithText("Not verified").assertCountEquals(1)
+        composeRule.onNodeWithText("Supported hook · setup required").assertExists()
+        composeRule.onAllNodesWithText("Supported hook · setup required").assertCountEquals(1)
         composeRule.onNodeWithText("Earlier build tested").assertDoesNotExist()
         composeRule.onNodeWithText(
-            "Set up the connector on the computer running Antigravity. Keep that computer available so a decision can return to the waiting session."
+            "Antigravity's local pre-tool hook is the supported approval path. Install it on the computer running this project, and keep that computer, session, and API reachable while a request waits."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Phone test passed locally").assertDoesNotExist()
         composeRule.onNodeWithText("Unverified · not a live connection").assertExists()
@@ -171,7 +171,7 @@ class ConnectorsScreenTest {
         }
 
         composeRule.onNodeWithText("Choose a provider").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Not verified").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Supported hook · setup required").performScrollTo().assertIsDisplayed()
     }
 
     @Test

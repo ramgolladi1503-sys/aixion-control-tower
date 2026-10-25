@@ -53,6 +53,7 @@ def test_lifespan_opens_verifies_and_closes_opt_in_postgres_runtime(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="inline",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,
@@ -104,6 +105,7 @@ def test_auth_rate_limit_binding_opens_runtime_without_probe_only_mode(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="inline",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,
@@ -129,6 +131,79 @@ def test_auth_rate_limit_binding_opens_runtime_without_probe_only_mode(
     asyncio.run(exercise())
 
 
+def test_production_recovery_uses_lifespan_postgres_bundle_with_diagnostic_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeRuntime()
+    recovery_calls: list[dict[str, object]] = []
+    settings = SimpleNamespace(
+        profile="production",
+        is_production=True,
+        outbox_dispatch_mode="scheduled",
+        push_dispatch_enabled=False,
+        email_dispatch_enabled=False,
+        postgres_runtime_probe_enabled=True,
+        postgres_auth_rate_limits_enabled=False,
+        postgres_auth_enabled=False,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        main.PostgresRuntime, "from_environment", staticmethod(lambda: runtime)
+    )
+    monkeypatch.setattr(
+        main,
+        "reconcile_linked_approval_tasks",
+        lambda **kwargs: recovery_calls.append(kwargs) or 0,
+    )
+    application = SimpleNamespace(state=SimpleNamespace())
+
+    async def exercise() -> None:
+        async with main.lifespan(application):
+            assert application.state.postgres_runtime is runtime
+            assert application.state.postgres_repositories is runtime.repositories
+            assert len(recovery_calls) == 1
+            assert recovery_calls[0]["approval_repository"] is runtime.repositories.approval_decisions
+            assert recovery_calls[0]["task_repository"] is runtime.repositories.agent_tasks
+            assert recovery_calls[0]["run_repository"] is runtime.repositories.agent_runs
+        assert runtime.closed is True
+
+    asyncio.run(exercise())
+
+
+def test_production_recovery_fails_before_worker_without_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            profile="production",
+            is_production=True,
+            outbox_dispatch_mode="scheduled",
+            push_dispatch_enabled=False,
+            email_dispatch_enabled=False,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "reconcile_linked_approval_tasks",
+        lambda **kwargs: recovery_calls.append(kwargs) or 0,
+    )
+    application = SimpleNamespace(state=SimpleNamespace())
+
+    async def exercise() -> None:
+        with pytest.raises(RuntimeError, match="lifespan-owned runtime repository bundle"):
+            async with main.lifespan(application):
+                pytest.fail("Production recovery must not start without PostgreSQL")
+
+    asyncio.run(exercise())
+    assert recovery_calls == []
+
+
 def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -137,6 +212,7 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
     recovery_calls: list[dict[str, object]] = []
     dispatched = asyncio.Event()
     settings = SimpleNamespace(
+        profile="test",
         outbox_dispatch_mode="inline",
         push_dispatch_enabled=False,
         postgres_runtime_probe_enabled=False,
@@ -213,6 +289,7 @@ def test_postgres_auth_lifecycle_fails_closed_for_missing_repository_binding(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="scheduled",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,
@@ -271,6 +348,7 @@ def test_postgres_auth_lifecycle_rejects_every_missing_or_mismatched_adapter(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="scheduled",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,
@@ -307,6 +385,7 @@ def test_postgres_auth_lifecycle_fails_closed_for_foreign_required_binding(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="scheduled",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,
@@ -344,6 +423,7 @@ def test_lifespan_retries_approval_reconciliation_and_cancels_worker(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="scheduled",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,
@@ -388,6 +468,7 @@ def test_lifespan_fails_closed_and_closes_pool_on_schema_mismatch(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="inline",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,
@@ -419,6 +500,7 @@ def test_lifespan_closes_postgres_runtime_if_selected_recovery_is_unsupported(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="inline",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,
@@ -462,6 +544,7 @@ def test_failed_background_worker_does_not_skip_postgres_runtime_cleanup(
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="scheduled",
             push_dispatch_enabled=False,
             email_dispatch_enabled=False,

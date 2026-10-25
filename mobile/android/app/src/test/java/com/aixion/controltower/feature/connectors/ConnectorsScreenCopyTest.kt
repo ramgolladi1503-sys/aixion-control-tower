@@ -10,8 +10,9 @@ class ConnectorsScreenCopyTest {
     fun antigravityGuidanceExplainsSetupAndHostAvailability() {
         val copy = providerSetupDescription("ANTIGRAVITY")
 
-        assertTrue(copy.contains("computer running Antigravity"))
-        assertTrue(copy.contains("decision can return to the waiting session"))
+        assertTrue(copy.contains("local pre-tool hook is the supported approval path"))
+        assertTrue(copy.contains("computer running this project"))
+        assertTrue(copy.contains("computer, session, and API reachable"))
         assertFalse(copy.contains("earlier build"))
         assertFalse(copy.contains("phone-tested"))
     }
@@ -29,8 +30,8 @@ class ConnectorsScreenCopyTest {
 
     @Test
     fun antigravityRetainsProjectHostSetupAffordance() {
-        assertTrue(providerSetupDescription("ANTIGRAVITY").contains("computer running Antigravity"))
-        assertEquals("Not verified", providerSetupStatus("ANTIGRAVITY"))
+        assertTrue(providerSetupDescription("ANTIGRAVITY").contains("computer running this project"))
+        assertEquals("Supported hook · setup required", providerSetupStatus("ANTIGRAVITY"))
         assertEquals("Open Antigravity setup", providerSetupButtonLabel("ANTIGRAVITY"))
     }
 }
