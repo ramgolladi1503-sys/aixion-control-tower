@@ -52,7 +52,9 @@ import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
+import java.text.DateFormat
 import java.time.Instant
+import java.util.Date
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -227,6 +229,16 @@ fun ApprovalInboxContent(
                     )
                     if (state.approvals.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                        state.lastSuccessfulSyncAt?.let { syncedAt ->
+                            Text(
+                                text = "Last successful check · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(syncedAt))}",
+                                modifier = Modifier
+                                    .testTag("approval-inbox-last-successful-check")
+                                    .semantics { liveRegion = LiveRegionMode.Polite },
+                                color = palette.inkMuted,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                         Text(
                             text = "The latest approval check failed. Previously loaded requests are hidden because their status may have changed. Reconnect and retry before reviewing.",
                             modifier = Modifier

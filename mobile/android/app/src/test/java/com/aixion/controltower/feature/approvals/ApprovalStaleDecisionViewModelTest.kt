@@ -32,6 +32,37 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class ApprovalStaleDecisionViewModelTest {
     @Test
+    fun successfulInboxSyncTimeIsRetainedAfterLaterRefreshFailure() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val syncedAt = Instant.parse("2026-10-22T05:30:00Z")
+            val api = StaleApprovalApi(terminalOnRefresh = false).apply {
+                approvalRows = listOf(approvalDto(APPROVAL_ID, "REQUESTED"))
+            }
+            val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
+            val viewModel = ApprovalsViewModel(
+                application,
+                ApprovalRepository(api),
+                Clock.fixed(syncedAt, ZoneOffset.UTC)
+            )
+            runCurrent()
+
+            assertEquals(syncedAt, viewModel.state.value.lastSuccessfulSyncAt)
+            assertEquals(listOf(APPROVAL_ID), viewModel.state.value.approvals.map { it.id })
+
+            api.failApprovalRefresh = true
+            viewModel.refresh()
+            runCurrent()
+
+            assertEquals(syncedAt, viewModel.state.value.lastSuccessfulSyncAt)
+            assertTrue(viewModel.state.value.hasError)
+            assertEquals(listOf(APPROVAL_ID), viewModel.state.value.approvals.map { it.id })
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
     fun alreadyExpiredMatchingApprovalDoesNotSendDecision() = runTest {
         assertExpiredRequestBlocksDecision(
             now = Instant.parse("2026-10-22T12:00:00Z"),
@@ -212,8 +243,13 @@ class ApprovalStaleDecisionViewModelTest {
         val historyCursors = mutableListOf<String?>()
         val historyPages = mutableMapOf<String?, ApprovalHistoryResponseDto>()
         var failHistoryCursor: String? = null
+        var approvalRows: List<ApprovalRequestDto> = emptyList()
+        var failApprovalRefresh = false
 
-        override suspend fun listApprovals(): List<ApprovalRequestDto> = emptyList()
+        override suspend fun listApprovals(): List<ApprovalRequestDto> {
+            if (failApprovalRefresh) throw IOException("Approval inbox unavailable")
+            return approvalRows
+        }
 
         override suspend fun listApprovalHistory(
             limit: Int,

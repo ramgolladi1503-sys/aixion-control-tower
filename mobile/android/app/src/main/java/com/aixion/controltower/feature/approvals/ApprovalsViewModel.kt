@@ -78,6 +78,7 @@ data class ApprovalsUiState(
     val loading: Boolean = true,
     val refreshing: Boolean = false,
     val approvals: List<ApprovalSummary> = emptyList(),
+    val lastSuccessfulSyncAt: Instant? = null,
     val approvalHistory: List<ApprovalHistoryEvent> = emptyList(),
     val historyLoading: Boolean = false,
     val historyLoadingMore: Boolean = false,
@@ -109,7 +110,8 @@ internal fun canSelectApprovalFromInbox(state: ApprovalsUiState): Boolean =
 
 internal fun reconcileApprovalsAfterRefresh(
     current: ApprovalsUiState,
-    refreshedApprovals: List<ApprovalSummary>
+    refreshedApprovals: List<ApprovalSummary>,
+    syncedAt: Instant = Instant.now()
 ): ApprovalsUiState {
     val targetId = current.openingApprovalId
         ?: current.detailTargetApprovalId
@@ -127,6 +129,7 @@ internal fun reconcileApprovalsAfterRefresh(
     return current.copy(
         loading = false,
         approvals = refreshedApprovals,
+        lastSuccessfulSyncAt = syncedAt,
         selectedApproval = selected,
         openingApprovalId = current.openingApprovalId?.takeIf { selected == null },
         lastActionMessage = if (recoveredDeepLinkFailure) {
@@ -251,7 +254,11 @@ class ApprovalsViewModel internal constructor(
         )
         try {
             val approvals = repository.listApprovals()
-            _state.value = reconcileApprovalsAfterRefresh(_state.value, approvals)
+            _state.value = reconcileApprovalsAfterRefresh(
+                current = _state.value,
+                refreshedApprovals = approvals,
+                syncedAt = clock.instant()
+            )
             return true
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled

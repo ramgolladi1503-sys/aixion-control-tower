@@ -257,6 +257,32 @@ def _block_unsupported_notifications(records: dict[str, dict[str, dict[str, Any]
         )
 
 
+def _agent_run_fault_summary(
+    records: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Summarize excluded diagnostic fault settings without exposing their data.
+
+    Fault injection configuration has no import target. Any enabled setting
+    with remaining uses can alter AgentRun behavior after cutover, so it blocks
+    the plan even when an operator acknowledges other partial omissions.
+    """
+    active: list[str] = []
+    inactive: list[str] = []
+    for fault_id, payload in records.get("agent_run_fault", {}).items():
+        if payload.get("enabled") is True and payload.get("remaining_uses", 1) > 0:
+            active.append(hashlib.sha256(fault_id.encode("utf-8")).hexdigest())
+        else:
+            inactive.append(hashlib.sha256(fault_id.encode("utf-8")).hexdigest())
+    active.sort()
+    inactive.sort()
+    return {
+        "active_count": len(active),
+        "active_id_sha256": active,
+        "excluded_inactive_count": len(inactive),
+        "excluded_inactive_id_sha256": inactive,
+    }
+
+
 def _read_email_outbox(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
     """Read encrypted outbox rows without decrypting verification material."""
     uri = f"file:{quote(path.resolve().as_posix(), safe='/')}?mode=ro"
@@ -510,6 +536,15 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         raise ImportBlocked("read-only structural audit did not pass; review its findings first")
     records = _read_records(path)
     _block_unsupported_notifications(records)
+    agent_run_faults = _agent_run_fault_summary(records)
+    if agent_run_faults["active_count"]:
+        fingerprints = ",".join(agent_run_faults["active_id_sha256"])
+        raise ImportBlocked(
+            "active AgentRun fault injection settings block PostgreSQL import "
+            f"(count={agent_run_faults['active_count']}; sha256_fingerprints={fingerprints}); "
+            "disable or remove each setting in the source, create a new coordinated snapshot, "
+            "and rerun the dry-run plan"
+        )
     selected = {key: value for key, value in records.items() if key in CORE_TYPES}
     # kv_store has its own composite key in addition to the entity's payload
     # identity. Refuse snapshots where those identities diverge: otherwise a
@@ -1268,6 +1303,11 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             **invocation_drain,
         },
         "sanitized_terminal_email_ciphertext_count": sanitized_terminal_email_ciphertexts,
+        "agent_run_fault_injection": {
+            "status": "CLEAR",
+            "excluded_reason": "diagnostic fault settings are not imported",
+            **agent_run_faults,
+        },
         "omitted_counts": dict(sorted(omissions.items())),
         "partial": bool(omissions),
         "audit_status": report["status"],

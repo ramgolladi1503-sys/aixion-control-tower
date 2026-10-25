@@ -47,6 +47,7 @@ from scripts.import_approval_slice_to_postgres import (
     _target_is_remote,
     apply_import,
     build_plan,
+    main,
 )
 
 
@@ -64,6 +65,7 @@ def _snapshot(
     include_trust=False,
     include_delivery_state=False,
     include_rate_limits=False,
+    agent_run_faults=None,
 ):
     now = datetime.now(timezone.utc).isoformat()
     workspace = {"id": "ws1", "name": "Account", "owner_user_id": "u1", "created_at": now}
@@ -220,6 +222,14 @@ def _snapshot(
                 "push_attempts": 2, "created_at": now,
             }),
         ])
+    if agent_run_faults:
+        rows.append(("agent_run", "fault-run", {
+            "id": "fault-run", "task_id": "t1", "workspace_id": "ws1",
+            "approval_request_id": "a1", "project_id": "p1", "status": "SUCCEEDED",
+            "created_at": now, "updated_at": now,
+        }))
+    for fault in agent_run_faults or []:
+        rows.append(("agent_run_fault", fault["id"], fault))
     if include_trust:
         approved = ApprovalRequest.model_validate({
             **approval,
@@ -516,6 +526,14 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     assert selected["approval_request"]["a1"]["workspace_id"] == "ws1"
     assert plan["planned_counts"]["notification"] == 2
     assert selected["notification"]["n2"]["entity_type"] == "agent_task"
+    assert plan["agent_run_fault_injection"] == {
+        "status": "CLEAR",
+        "excluded_reason": "diagnostic fault settings are not imported",
+        "active_count": 0,
+        "active_id_sha256": [],
+        "excluded_inactive_count": 0,
+        "excluded_inactive_id_sha256": [],
+    }
     assert plan["invocation_drain"] == {
         "status": "CLEAR",
         "lease_table_present": True,
@@ -1880,6 +1898,75 @@ def test_partial_import_refuses_preexisting_omitted_domain_data(
         assert conn.execute("SELECT count(*) FROM mcp_child_servers").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 0
         assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 0
+
+
+def test_active_agent_run_fault_blocks_apply_even_with_partial_acknowledgement(
+    tmp_path, monkeypatch, capsys,
+):
+    path = tmp_path / "active_fault_snapshot.sqlite3"
+    fault_id = "diagnostic-fault-secret-id"
+    _snapshot(path, include_omitted=False, agent_run_faults=[{
+        "id": fault_id,
+        "run_id": "fault-run",
+        "step_type": None,
+        "fault_kind": "WORKER_CRASH",
+        "enabled": True,
+        "remaining_uses": 1,
+        "message": "must-not-appear-in-output",
+        "created_by": "test",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }])
+    writes = []
+    monkeypatch.setenv("AIXION_TEST_POSTGRES_DSN", "postgresql://unused.invalid/approval_test")
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.apply_import",
+        lambda *args, **kwargs: writes.append((args, kwargs)),
+    )
+
+    exit_code = main([
+        "--source", str(path), "--apply", "--allow-partial-slice",
+        "--confirm-source-snapshot",
+    ])
+
+    captured = capsys.readouterr()
+    expected_fingerprint = hashlib.sha256(fault_id.encode()).hexdigest()
+    assert exit_code == 2
+    assert '"status": "BLOCKED"' in captured.err
+    assert "active AgentRun fault injection settings block PostgreSQL import" in captured.err
+    assert "disable or remove each setting" in captured.err
+    assert expected_fingerprint in captured.err
+    assert fault_id not in captured.err
+    assert "must-not-appear-in-output" not in captured.err
+    assert writes == []
+
+
+def test_inactive_agent_run_faults_are_reported_as_excluded(tmp_path):
+    path = tmp_path / "inactive_fault_snapshot.sqlite3"
+    fault_id = "inactive-diagnostic-fault"
+    _snapshot(path, include_omitted=False, agent_run_faults=[{
+        "id": fault_id,
+        "run_id": "fault-run",
+        "step_type": None,
+        "fault_kind": "WORKER_CRASH",
+        "enabled": False,
+        "remaining_uses": 3,
+        "message": "excluded diagnostic",
+        "created_by": "test",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }])
+
+    plan, selected, _ = build_plan(path)
+
+    assert "agent_run_fault" not in selected
+    assert plan["agent_run_fault_injection"] == {
+        "status": "CLEAR",
+        "excluded_reason": "diagnostic fault settings are not imported",
+        "active_count": 0,
+        "active_id_sha256": [],
+        "excluded_inactive_count": 1,
+        "excluded_inactive_id_sha256": [hashlib.sha256(fault_id.encode()).hexdigest()],
+    }
+    assert plan["omitted_counts"]["agent_run_fault"] == 1
 
 
 def test_plan_refuses_invalid_trust_authorization_signature(tmp_path):

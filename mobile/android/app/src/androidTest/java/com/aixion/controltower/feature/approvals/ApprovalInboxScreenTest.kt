@@ -439,6 +439,7 @@ class ApprovalInboxScreenTest {
             title = "Previously loaded request",
             status = ApprovalStatus.REQUESTED
         )
+        val syncedAt = Instant.parse("2026-10-22T05:30:00Z")
 
         composeRule.setContent {
             ApprovalInboxContent(
@@ -446,6 +447,7 @@ class ApprovalInboxScreenTest {
                     loading = false,
                     refreshing = false,
                     approvals = listOf(staleApproval),
+                    lastSuccessfulSyncAt = syncedAt,
                     errorMessage = "Backend unavailable: connection refused"
                 )
             )
@@ -456,6 +458,8 @@ class ApprovalInboxScreenTest {
         warning.assertTextContains("The latest approval check failed", substring = true)
         warning.assertTextContains("Previously loaded requests are hidden", substring = true)
         warning.assertTextContains("Reconnect and retry before reviewing", substring = true)
+        composeRule.onNodeWithTag("approval-inbox-last-successful-check")
+            .assertTextContains("Last successful check")
         assertEquals(
             LiveRegionMode.Polite,
             warning.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
@@ -464,6 +468,21 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithText("1 pending").assertCountEquals(0)
         composeRule.onAllNodesWithText("Review request").assertCountEquals(0)
         composeRule.onNodeWithText("Retry approvals").assertExists()
+    }
+
+    @Test
+    fun firstFetchFailureDoesNotInventLastSuccessfulCheckTime() {
+        composeRule.setContent {
+            ApprovalInboxContent(
+                state = ApprovalsUiState(
+                    loading = false,
+                    errorMessage = "Backend unavailable: connection refused"
+                )
+            )
+        }
+
+        composeRule.onNodeWithText("Approval data unavailable").assertExists()
+        composeRule.onAllNodesWithTag("approval-inbox-last-successful-check").assertCountEquals(0)
     }
 
     @Test
