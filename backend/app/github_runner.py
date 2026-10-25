@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from .approval_integrity import compute_approval_payload_hash
 from .auth import require_maintainer
 from .models import ApprovalStatus, AuthUser, TestRun, now_utc
+from .settings import get_settings
 from .store import store
 
 router = APIRouter(prefix="/github-runner", tags=["github-runner"])
@@ -65,6 +66,16 @@ def _github_headers() -> dict[str, str]:
 
 
 def _validate_execution(payload: PatchPlanRequest) -> PatchPlanResponse:
+    settings = get_settings()
+    if settings.is_production or getattr(settings, "postgres_auth_enabled", False):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Legacy GitHub runner is unavailable without a request-bound "
+                "PostgreSQL approval and execution repository."
+            ),
+            headers={"Retry-After": "1"},
+        )
     approval = store.approval_requests.get(payload.approval_request_id)
     if not approval:
         raise HTTPException(status_code=404, detail="Approval request not found")

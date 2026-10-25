@@ -186,44 +186,32 @@ fun ApprovalInboxContent(
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
                 Text(
                     text = when {
-                        state.hasError -> "Check the latest request status before making a decision."
-                        state.loading || state.refreshing -> "Sync the latest status before review."
-                        pendingCount == 1 -> "1 request is waiting for your decision."
-                        pendingCount > 1 -> "$pendingCount requests are waiting for your decision."
-                        else -> "Requests from connected agents appear here when they need your decision."
+                        state.loading && state.approvals.isEmpty() && !state.hasError -> "Loading approval requests…"
+                        state.refreshing -> "Refreshing. Requests are read-only until sync completes."
+                        state.hasError -> "Approval sync unavailable."
+                        state.lastSuccessfulSyncAt != null -> "Last checked · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(state.lastSuccessfulSyncAt))}"
+                        else -> "Status not verified"
                     },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("approval-inbox-sync-status")
+                        .semantics { liveRegion = LiveRegionMode.Polite },
                     color = palette.inkMuted,
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodySmall
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = when {
-                            state.loading && state.approvals.isEmpty() && !state.hasError -> "Loading approval requests…"
-                            state.refreshing -> "Refreshing. Requests are read-only until sync completes."
-                            state.hasError -> "Approval sync unavailable."
-                            else -> "Review pending requests or browse recorded decisions."
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("approval-inbox-sync-status")
-                            .semantics { liveRegion = LiveRegionMode.Polite },
-                        color = palette.inkMuted,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    if (!state.hasError) {
-                        TextButton(
-                            onClick = onRetry,
-                            enabled = !state.loading && !state.refreshing
-                        ) {
-                            Text(if (state.refreshing) "Refreshing…" else "Refresh")
-                        }
+                if (!state.hasError) {
+                    TextButton(
+                        onClick = onRetry,
+                        enabled = !state.loading && !state.refreshing
+                    ) {
+                        Text(if (state.refreshing) "Refreshing…" else "Refresh")
                     }
                 }
             }
@@ -296,7 +284,13 @@ fun ApprovalInboxContent(
                 verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
             ) {
                 if (pendingCount > 0) {
-                    StatusBadge("$pendingCount pending", palette.caution, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
+                    StatusBadge(
+                        "$pendingCount pending",
+                        palette.caution,
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize,
+                        uppercase = false,
+                        modifier = Modifier.testTag("approval-inbox-pending-count")
+                    )
                 }
                 if (blocked.isNotEmpty()) {
                     StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)

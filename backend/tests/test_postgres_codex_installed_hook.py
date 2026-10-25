@@ -100,11 +100,19 @@ def test_installed_codex_permission_request_uses_postgres_for_exact_decision_and
     workspace, project, reviewer, repositories, agent, token = _codex_connector(
         postgres_approval_route_runtime
     )
-    server = _start_postgres_approval_http_api(
-        dsn=dsn,
-        schema=schema,
-        reviewer=reviewer,
-    )
+    servers: list[tuple[object, object, str]] = []
+
+    def start_server(*, port: int | None = None):
+        server = _start_postgres_approval_http_api(
+            dsn=dsn,
+            schema=schema,
+            reviewer=reviewer,
+            port=port,
+        )
+        servers.append(server)
+        return server
+
+    server = start_server()
     process: subprocess.Popen[str] | None = None
     replay_process: subprocess.Popen[str] | None = None
     try:
@@ -218,6 +226,29 @@ def test_installed_codex_permission_request_uses_postgres_for_exact_decision_and
             ).fetchone()[0]
         assert approval_count == 1
 
+        # Force the live installed hook to experience a decision-read
+        # connection failure while this exact PostgreSQL invocation remains
+        # pending. Restart on the same endpoint before submitting the decision.
+        endpoint = api_base_url
+        _stop_postgres_approval_http_api(server)
+        time.sleep(3)
+        assert process.poll() is None, "Codex hook must remain pending through API unavailability"
+        with connect() as connection:
+            assert connection.execute(
+                "SELECT status,source_invocation_id FROM approval_requests "
+                "WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone() == (ApprovalStatus.PENDING_REVIEW.value, invocation_id)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0] == 0
+        port = httpx.URL(endpoint).port
+        assert port is not None
+        server = start_server(port=int(port))
+        assert server[2] == endpoint
+        api_base_url = server[2]
+
         with httpx.Client(timeout=10) as client:
             response = client.post(
                 f"{api_base_url}/approvals/{approval_id}/decision",
@@ -296,7 +327,9 @@ def test_installed_codex_permission_request_uses_postgres_for_exact_decision_and
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait(timeout=5)
-        _stop_postgres_approval_http_api(server)
+        for server_handle in reversed(servers):
+            if server_handle[0].is_alive():
+                _stop_postgres_approval_http_api(server_handle)
 
 
 def test_installed_codex_hook_denies_after_postgres_credential_revocation(

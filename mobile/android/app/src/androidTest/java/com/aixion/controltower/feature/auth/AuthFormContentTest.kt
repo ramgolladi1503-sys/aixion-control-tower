@@ -89,10 +89,18 @@ class AuthFormContentTest {
             )
         }
 
-        composeRule.onNodeWithContentDescription("Show password").assertExists().performClick()
+        composeRule.onNodeWithContentDescription("Show password")
+            .assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Password is hidden"))
+            .performClick()
         composeRule.onNodeWithContentDescription("Show password").assertDoesNotExist()
-        composeRule.onNodeWithContentDescription("Hide password").assertExists().performClick()
-        composeRule.onNodeWithContentDescription("Show password").assertExists()
+        composeRule.onNodeWithContentDescription("Hide password")
+            .assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Password is visible"))
+            .performClick()
+        composeRule.onNodeWithContentDescription("Show password")
+            .assertExists()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Password is hidden"))
 
         composeRule.onNodeWithText("Create account").performClick()
         composeRule.onNodeWithContentDescription("Show password").assertExists().performClick()

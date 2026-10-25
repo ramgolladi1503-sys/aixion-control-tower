@@ -491,6 +491,11 @@ def test_installed_antigravity_command_keeps_live_invocation_across_postgres_api
         # Reap only the API process. The installed hook and its exact invocation
         # stay alive while the new server binds to the same loopback endpoint.
         _stop_postgres_approval_http_api(first_server)
+        # Keep the endpoint unavailable past the hook's two-second poll
+        # interval. This forces its live decision read to observe connection
+        # failure, rather than merely restarting the API between polls.
+        time.sleep(3)
+        assert process.poll() is None, "hook must remain pending through API unavailability"
         restart_port_value = httpx.URL(first_server[2]).port
         assert restart_port_value is not None
         restart_port = int(restart_port_value)

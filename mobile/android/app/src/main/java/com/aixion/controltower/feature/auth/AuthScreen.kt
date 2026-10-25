@@ -270,6 +270,11 @@ internal fun AuthFormContent(
                             } else {
                                 "Show password"
                             }
+                            stateDescription = if (passwordVisible) {
+                                "Password is visible"
+                            } else {
+                                "Password is hidden"
+                            }
                         }
                     ) {
                         Text(if (passwordVisible) "Hide" else "Show")

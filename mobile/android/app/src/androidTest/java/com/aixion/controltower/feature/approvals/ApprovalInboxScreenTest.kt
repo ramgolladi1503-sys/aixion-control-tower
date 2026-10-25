@@ -116,7 +116,7 @@ class ApprovalInboxScreenTest {
         }
 
         val status = composeRule.onNodeWithTag("approval-inbox-sync-status")
-        composeRule.onNodeWithText("Review pending requests or browse recorded decisions.").assertExists()
+        composeRule.onNodeWithText("Status not verified").assertExists()
         assertEquals(
             LiveRegionMode.Polite,
             status.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
@@ -148,11 +148,12 @@ class ApprovalInboxScreenTest {
             }
         }
 
-        val count = composeRule.onNodeWithText("1 request is waiting for your decision.")
+        val count = composeRule.onNodeWithTag("approval-inbox-pending-count")
         count.assertExists()
         val bounds = count.fetchSemanticsNode().boundsInRoot
-        assertTrue("Queue summary must remain within a narrow viewport", bounds.right <= 240f)
-        assertTrue("Queue summary should wrap instead of clipping at large text", bounds.height > 24f)
+        assertTrue("Pending count must remain within a narrow viewport", bounds.right <= 240f)
+        assertTrue("Pending count must remain readable at large text", bounds.height > 24f)
+        composeRule.onAllNodesWithText("1 request is waiting for your decision.").assertCountEquals(0)
     }
 
     @Test
@@ -257,8 +258,8 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onAllNodesWithText("Approvals").assertCountEquals(0)
-        composeRule.onNodeWithText("Review pending requests or browse recorded decisions.").assertExists()
         composeRule.onNodeWithText("2 pending").assertExists()
+        composeRule.onAllNodesWithText("2 pending").assertCountEquals(1)
         composeRule.onAllNodesWithText("Needs review 2").assertCountEquals(0)
         composeRule.onNodeWithText("Status blocked 1").assertExists()
         val inboxList = composeRule.onNode(hasScrollAction())
