@@ -420,7 +420,8 @@ def get_run_metrics(
     user: AuthUser = MetricsDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> Response:
-    postgres_auth_enabled = bool(get_settings().postgres_auth_enabled)
+    settings = get_settings()
+    postgres_auth_enabled = bool(settings.postgres_auth_enabled)
     postgres_runtime = (
         getattr(http_request.app.state, "postgres_runtime", None)
         if http_request is not None
@@ -435,16 +436,22 @@ def get_run_metrics(
         postgres_runtime is not None
         or postgres_bundle is not None
         or postgres_auth_enabled
+        or bool(settings.is_production)
     )
-    workspace_id = (
-        user.workspace_id
-        if user.id == METRICS_SCRAPER_USER_ID
-        else (
+    if user.id == METRICS_SCRAPER_USER_ID:
+        workspace_id = user.workspace_id
+    elif postgres_selected:
+        # A maintainer's workspace must come from the app-bound PostgreSQL
+        # authentication context. Never consult the legacy SQLite map after a
+        # durable authority has been selected, even if we are about to reject
+        # an incomplete production configuration.
+        workspace_id = (
             workspace_id_for_request(user, http_request)
-            if postgres_selected and postgres_auth_enabled and http_request is not None
-            else workspace_id_for_user(user)
+            if postgres_auth_enabled and http_request is not None
+            else None
         )
-    )
+    else:
+        workspace_id = workspace_id_for_user(user)
     if postgres_selected:
         if user.id != METRICS_SCRAPER_USER_ID and not postgres_auth_enabled:
             raise HTTPException(

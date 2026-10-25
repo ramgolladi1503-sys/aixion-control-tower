@@ -110,6 +110,16 @@ def _postgres_trust_is_selected() -> bool:
     )
 
 
+def _postgres_trust_authority_is_selected(request: Request | None) -> bool:
+    """Treat partial app bindings as selected durable authority, never local mode."""
+    state = getattr(getattr(request, "app", None), "state", None)
+    return bool(
+        _postgres_trust_is_selected()
+        or getattr(state, "postgres_runtime", None) is not None
+        or getattr(state, "postgres_repositories", None) is not None
+    )
+
+
 def _require_postgres_trust_runtime(runtime, request: Request | None) -> None:
     """Prevent process-local trust authority when PostgreSQL is authoritative."""
     if _postgres_trust_is_selected() and (runtime is None or request is None):
@@ -452,7 +462,7 @@ def list_leases(
                     agent_id=agent_id,
                 )
         return [_public(item) for item in leases]
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=409,
             detail="PostgreSQL lease listing requires the complete durable trust and approval repository bundle",
@@ -514,7 +524,7 @@ def get_lease(
                         trust_event_repository=repositories.trust_events,
                     )
         return _public(lease)
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=409,
             detail="PostgreSQL lease lookup requires the complete durable trust and approval repository bundle",
@@ -549,7 +559,7 @@ def revoke_lease(
                         trust_event_repository=repositories.trust_events,
                     )
             return _public(lease)
-        if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        if _postgres_trust_authority_is_selected(request):
             raise HTTPException(
                 status_code=409,
                 detail="PostgreSQL lease revocation requires the complete durable trust repository bundle",
@@ -630,7 +640,7 @@ def evaluate_external_agent_action(
                 status_code=409,
                 detail="PostgreSQL-authenticated gateway actions require the complete durable trust repository bundle",
             )
-        if getattr(request.app.state, "postgres_runtime", None) is not None:
+        if _postgres_trust_authority_is_selected(request):
             raise HTTPException(
                 status_code=409,
                 detail="PostgreSQL gateway actions require the complete durable project and trust repository bundle",
@@ -687,7 +697,7 @@ def evaluate_manual_action(
             )
         except (ValueError, PostgresTrustRepositoryConflict) as error:
             raise _trust_error(error) from error
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=409,
             detail="PostgreSQL action evaluation requires the complete durable project and trust repository bundle",
@@ -794,7 +804,7 @@ def decide_exact_action(
             )
         except (ValueError, ActionAuthorizationConflict, PostgresTrustRepositoryConflict) as error:
             raise _trust_error(error) from error
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=409,
             detail="PostgreSQL action decisions require the complete durable project and trust repository bundle",
@@ -842,7 +852,7 @@ def get_exact_action_decision(
                         detail="Stored action authorization does not match its signed action payload",
                     )
                 return authorization
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=409,
             detail="PostgreSQL action decisions require the complete durable project and trust repository bundle",
@@ -947,7 +957,7 @@ def consume_external_agent_action(
                     )
         except (ValueError, TrustControlConflict, PostgresTrustRepositoryConflict) as error:
             raise _trust_error(error) from error
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=409,
             detail="PostgreSQL action consumption requires the complete durable project and trust repository bundle",
@@ -1007,7 +1017,7 @@ def consume_manual_action(
                     )
         except PostgresTrustRepositoryConflict as error:
             raise _trust_error(error) from error
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=409,
             detail="PostgreSQL action consumption requires the complete durable trust repository bundle",
@@ -1067,7 +1077,7 @@ def create_credential_grant(
                         trust_event_repository=repositories.trust_events,
                     )
             return CredentialGrantResponse(grant=grant, bearer_token=raw_token)
-        if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        if _postgres_trust_authority_is_selected(request):
             raise HTTPException(
                 status_code=409,
                 detail="PostgreSQL credential issuance requires the complete durable trust repository bundle",
@@ -1108,7 +1118,7 @@ def introspect_capability_credential(
             return introspect_credential_record(payload, None, None)
         grant, lease = found
         return introspect_credential_record(payload, grant, lease)
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=503,
             detail="PostgreSQL credential introspection requires the complete durable trust repository bundle",
@@ -1148,7 +1158,7 @@ def revoke_capability_credential(
                         trust_event_repository=repositories.trust_events,
                     )
             return _credential_public(grant)
-        if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+        if _postgres_trust_authority_is_selected(request):
             raise HTTPException(
                 status_code=409,
                 detail="PostgreSQL credential revocation requires the complete durable trust repository bundle",
@@ -1252,7 +1262,7 @@ def list_flight_recorder_events(
                     correlation_id=correlation_id,
                     limit=limit,
                 )
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=503,
             detail="PostgreSQL flight recorder requires the complete durable trust repository bundle",
@@ -1287,7 +1297,7 @@ def verify_flight_recorder_chain(
         with runtime.connect() as conn:
             with conn.transaction():
                 return repositories.trust_events.verify_in_transaction(conn)
-    if request is not None and getattr(request.app.state, "postgres_runtime", None) is not None:
+    if _postgres_trust_authority_is_selected(request):
         raise HTTPException(
             status_code=503,
             detail="PostgreSQL flight recorder verification requires the complete durable trust repository bundle",

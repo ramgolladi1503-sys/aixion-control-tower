@@ -33,7 +33,12 @@ from app.trust_models import (
     ReviewerAttestationCreate,
     ReviewerAttestationDecision,
 )
-from app.trust_routes import create_attestation, evaluate_manual_action, list_attestations
+from app.trust_routes import (
+    create_attestation,
+    evaluate_manual_action,
+    list_attestations,
+    list_flight_recorder_events,
+)
 
 client = TestClient(app)
 
@@ -137,6 +142,30 @@ def test_reviewer_attestation_create_and_list_keep_sqlite_local_behavior() -> No
 
     assert created.id in store.reviewer_attestations
     assert [item.id for item in listed] == [created.id]
+
+
+def test_flight_recorder_fails_closed_for_incomplete_postgres_bundle(monkeypatch) -> None:
+    reviewer = AuthUser(
+        id="reviewer-incomplete-postgres",
+        email="reviewer@example.test",
+        display_name="Reviewer",
+        role=UserRole.REVIEWER,
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(postgres_repositories=object()),
+        )
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        list_flight_recorder_events(user=reviewer, request=request)
+
+    assert error.value.status_code == 503
+    assert "PostgreSQL" in error.value.detail
 
 
 def test_lease_gateway_consumption_scorecard_and_flight_recorder_routes() -> None:

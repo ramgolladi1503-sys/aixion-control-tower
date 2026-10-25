@@ -270,6 +270,38 @@ def test_metrics_fail_closed_when_postgres_authority_is_selected(
     assert "aixion_agent_runs_total" not in response.text
 
 
+def test_production_metrics_without_postgres_auth_do_not_read_local_maps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+    monkeypatch.setattr(
+        agent_run_routes,
+        "prometheus_agent_run_metrics",
+        lambda _workspace_id: pytest.fail("Production metrics must not read SQLite maps"),
+    )
+    monkeypatch.setattr(
+        agent_run_routes,
+        "workspace_id_for_user",
+        lambda _user: pytest.fail("Production metrics must not resolve workspaces from SQLite"),
+    )
+    user = AuthUser(
+        id="production-maintainer",
+        email="maintainer@example.test",
+        display_name="Maintainer",
+        role=UserRole.MAINTAINER,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        agent_run_routes.get_run_metrics(user=user, http_request=None)
+
+    assert error.value.status_code == 503
+    assert "PostgreSQL-backed authentication" in error.value.detail
+
+
 def test_fault_admin_routes_are_explicit_and_disableable() -> None:
     task = _seed_approved_task()
     run_id = client.post("/agent/runs", json={"task_id": task.id}).json()["run"]["id"]
