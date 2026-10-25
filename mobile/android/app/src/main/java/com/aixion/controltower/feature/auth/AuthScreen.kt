@@ -35,6 +35,7 @@ import androidx.compose.ui.autofill.ContentType
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -125,39 +126,45 @@ internal fun AuthFormViewport(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun AccountHero(state: AuthUiState) {
+internal fun AccountHero(state: AuthUiState) {
     val palette = LocalTowerPalette.current
     TowerHeroPanel {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(
-                    label = when {
-                        state.authenticated -> "Session active"
-                        state.verificationRequired -> "Email verification required"
-                        state.emailVerified -> "Ready to log in"
-                        else -> "Sign in required"
-                    },
-                    color = if (state.authenticated || state.emailVerified) palette.positive else palette.caution,
-                    uppercase = false
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.md))
-                Text(
-                    text = AuthUxCopy.heroTitle(state),
-                    color = palette.ink,
-                    style = MaterialTheme.typography.headlineLarge
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(
-                    text = AuthUxCopy.heroSubtitle(state),
-                    color = palette.inkMuted,
-                    style = MaterialTheme.typography.bodyMedium
-                )
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val showBrandMark = maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
+            Row(verticalAlignment = Alignment.Top) {
+                Column(modifier = if (showBrandMark) Modifier.weight(1f) else Modifier.fillMaxWidth()) {
+                    StatusBadge(
+                        label = when {
+                            state.authenticated -> "Session active"
+                            state.verificationRequired -> "Email verification required"
+                            state.emailVerified -> "Ready to log in"
+                            else -> "Sign in required"
+                        },
+                        color = if (state.authenticated || state.emailVerified) palette.positive else palette.caution,
+                        uppercase = false
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Text(
+                        text = AuthUxCopy.heroTitle(state),
+                        modifier = Modifier.semantics { heading() },
+                        color = palette.ink,
+                        style = MaterialTheme.typography.headlineLarge
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(
+                        text = AuthUxCopy.heroSubtitle(state),
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                if (showBrandMark) {
+                    ForgedLogoMark(
+                        modifier = Modifier.testTag("account-hero-logo"),
+                        size = 52.dp,
+                        color = palette.ink.copy(alpha = 0.78f)
+                    )
+                }
             }
-            ForgedLogoMark(size = 52.dp, color = palette.ink.copy(alpha = 0.78f))
         }
     }
 }
