@@ -436,19 +436,23 @@ internal fun ConnectorPermissionsDisclosure() {
     Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
         Text("Granted actions", color = palette.ink, style = MaterialTheme.typography.titleMedium)
         Text(
-            "This connector is limited to the selected project and these five approval-only actions:",
+            "This connector can only:",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
             listOf(
-                "CREATE_APPROVAL",
-                "READ_APPROVAL_DECISION",
-                "CONSUME_APPROVAL_DECISION",
-                "REPORT_APPROVAL_DELIVERY_FAILURE",
-                "EXPIRE_OWN_APPROVAL"
-            ).forEach { action ->
-                Text("• $action", color = palette.inkMuted, style = TowerCodeTextStyle)
+                "Create approval requests for this project",
+                "Read a request’s recorded decision",
+                "Fetch an approved decision once",
+                "Report when decision delivery fails",
+                "Expire its own approval requests"
+            ).forEach { capability ->
+                Text(
+                    text = "• $capability",
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
         }
         Text(

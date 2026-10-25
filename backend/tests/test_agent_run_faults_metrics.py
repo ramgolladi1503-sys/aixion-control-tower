@@ -65,6 +65,32 @@ def test_production_run_never_consumes_persisted_fault_configuration(monkeypatch
     assert fault.enabled is True
 
 
+def test_postgres_auth_run_never_consumes_process_local_fault_configuration(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from app import agent_run_faults
+
+    fault = AgentRunFaultConfig(
+        run_id="run_postgres_auth",
+        step_type=AgentRunStepType.CREATE_BRANCH,
+        fault_kind=AgentRunFaultKind.GITHUB_TIMEOUT,
+        remaining_uses=1,
+    )
+    store.agent_run_faults[fault.id] = fault
+    monkeypatch.setattr(
+        agent_run_faults,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+
+    assert (
+        consume_fault("run_postgres_auth", AgentRunStepType.CREATE_BRANCH)
+        is None
+    )
+    assert fault.remaining_uses == 1
+    assert fault.enabled is True
+
+
 def test_prometheus_metrics_expose_run_step_and_trust_truth() -> None:
     task = AgentTask(id="task_1", title="Metrics task", goal="Exercise run metrics")
     store.agent_tasks[task.id] = task

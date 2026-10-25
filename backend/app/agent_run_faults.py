@@ -14,8 +14,10 @@ class InjectedAgentRunFault(RuntimeError):
 
 def matching_fault(run_id: str, step_type: AgentRunStepType) -> AgentRunFaultConfig | None:
     # Fault injection is a local/test diagnostic facility. Never let stale or
-    # accidentally persisted test configuration alter a production run.
-    if get_settings().is_production:
+    # accidentally persisted SQLite test configuration alter a run when either
+    # production mode or PostgreSQL-backed application auth is selected.
+    settings = get_settings()
+    if settings.is_production or getattr(settings, "postgres_auth_enabled", False):
         return None
     candidates = [
         fault
