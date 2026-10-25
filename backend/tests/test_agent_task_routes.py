@@ -52,6 +52,79 @@ def test_missing_request_fails_closed_before_returning_sqlite_task_repository(
     assert store.audit_events == before[3]
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+)
+@pytest.mark.parametrize(
+    "helper_name",
+    [
+        "_approval_repository_for_route",
+        "_project_repository_for_route",
+        "_work_order_repository_for_route",
+    ],
+)
+def test_missing_request_fails_closed_for_all_sqlite_repository_fallbacks(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+    helper_name: str,
+) -> None:
+    class _MustNotBeAccessed:
+        def __getattribute__(self, _name: str):
+            raise AssertionError("SQLite compatibility repository accessed in PostgreSQL mode")
+
+    before = (
+        dict(store.agent_tasks),
+        dict(store.agent_task_events),
+        dict(store.approval_requests),
+        list(store.audit_events),
+    )
+    monkeypatch.setattr(agent_task_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(agent_task_routes, "approval_decision_repository", _MustNotBeAccessed())
+    monkeypatch.setattr(agent_task_routes, "project_repository", _MustNotBeAccessed())
+    monkeypatch.setattr(agent_task_routes, "store", _MustNotBeAccessed())
+
+    with pytest.raises(HTTPException) as raised:
+        getattr(agent_task_routes, helper_name)(None)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert store.agent_tasks == before[0]
+    assert store.agent_task_events == before[1]
+    assert store.approval_requests == before[2]
+    assert store.audit_events == before[3]
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "fallback_name"),
+    [
+        ("_approval_repository_for_route", "approval_decision_repository"),
+        ("_project_repository_for_route", "project_repository"),
+        ("_work_order_repository_for_route", "work_order_repository"),
+    ],
+)
+def test_missing_request_keeps_local_repository_fallback_outside_production(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+    fallback_name: str,
+) -> None:
+    monkeypatch.setattr(
+        agent_task_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    expected = (
+        store.work_order_repository
+        if fallback_name == "work_order_repository"
+        else getattr(agent_task_routes, fallback_name)
+    )
+
+    assert getattr(agent_task_routes, helper_name)(None) is expected
+
+
 def test_create_agent_task_records_task_event_and_audit() -> None:
     response = client.post(
         "/agent/tasks",

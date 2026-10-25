@@ -135,17 +135,33 @@ def require_approval_protocol_v1(
         )
 
 
+def _require_request_for_authoritative_repository(
+    http_request: Request | None,
+    repository_name: str,
+) -> None:
+    """Prevent direct route calls from selecting module-level SQLite adapters."""
+    settings = get_settings()
+    if http_request is None and (settings.is_production or settings.postgres_auth_enabled):
+        raise HTTPException(
+            status_code=503,
+            detail=f"{repository_name} repository is unavailable",
+            headers={"Retry-After": "1"},
+        )
+
+
 def _approval_repository_for_route(
     http_request: Request | None,
 ):
     if http_request is None:
         # Direct calls in unit tests use the local/test adapter.
+        _require_request_for_authoritative_repository(http_request, "Approval")
         return approval_decision_repository
     return approval_decision_repository_for_request(http_request)
 
 
 def _project_repository_for_route(http_request: Request | None):
     if http_request is None:
+        _require_request_for_authoritative_repository(http_request, "Project")
         return project_repository
     return project_repository_for_request(http_request)
 
@@ -153,6 +169,7 @@ def _project_repository_for_route(http_request: Request | None):
 def _work_order_repository_for_route(http_request: Request | None):
     if http_request is None:
         # Direct function calls in unit tests use the explicit local adapter.
+        _require_request_for_authoritative_repository(http_request, "Work order")
         return store.work_order_repository
     return work_order_repository_for_request(http_request)
 
@@ -288,6 +305,7 @@ def list_agents(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[ExternalAgentPublic]:
     if http_request is None:
+        _require_request_for_authoritative_repository(http_request, "Agent")
         workspace_id = workspace_id_for_user(user)
         return [to_public_agent(agent) for agent in store.external_agents.values()
                 if external_agent_scope_is_consistent(agent)

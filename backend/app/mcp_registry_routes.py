@@ -14,6 +14,7 @@ from .mcp_child_server_repository import (
     SQLiteMCPChildServerRepository,
 )
 from .models import AuditEvent, AuthUser, MCPChildServer, MCPChildServerCreate, now_utc
+from .settings import get_settings
 from .store import store
 
 router = APIRouter(prefix="/mcp-registry", tags=["mcp-registry"])
@@ -23,13 +24,27 @@ MaintainerDependency = Depends(require_maintainer)
 
 def _repository_for_route(http_request: Request | None) -> MCPChildServerRepository:
     if http_request is None:
+        _require_local_direct_access()
         # Preserve direct local/test calls while HTTP routes use explicit app state.
         return SQLiteMCPChildServerRepository(store._connect)
     return mcp_child_server_repository_for_request(http_request)
 
 
+def _require_local_direct_access() -> None:
+    settings = get_settings()
+    if getattr(settings, "is_production", False) or getattr(
+        settings, "postgres_auth_enabled", False
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="MCP registry requires an app-bound repository in production mode",
+            headers={"Retry-After": "30"},
+        )
+
+
 def _workspace_for_route(user: AuthUser, http_request: Request | None) -> str | None:
     if http_request is None:
+        _require_local_direct_access()
         from .workspace_access import workspace_id_for_user
 
         return workspace_id_for_user(user)

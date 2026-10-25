@@ -121,18 +121,41 @@ def _approval_repository_for_route(
     http_request: Request | None,
 ) -> ApprovalDecisionRepository:
     if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL approval repository requires an app-bound request",
+                headers={"Retry-After": "1"},
+            )
+        # Direct function calls in unit tests use the explicit local adapter.
         return approval_decision_repository
     return approval_decision_repository_for_request(http_request)
 
 
 def _project_repository_for_route(http_request: Request | None):
     if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL project repository requires an app-bound request",
+                headers={"Retry-After": "1"},
+            )
+        # Direct function calls in unit tests use the explicit local adapter.
         return project_repository
     return project_repository_for_request(http_request)
 
 
 def _work_order_repository_for_route(http_request: Request | None):
     if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL WorkOrder repository requires an app-bound request",
+                headers={"Retry-After": "1"},
+            )
         # Direct function calls in unit tests use the explicit local adapter.
         return store.work_order_repository
     return work_order_repository_for_request(http_request)
