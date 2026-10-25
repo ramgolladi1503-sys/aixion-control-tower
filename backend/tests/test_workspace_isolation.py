@@ -458,7 +458,10 @@ def test_production_approval_list_requires_workspace_membership(monkeypatch) -> 
     with pytest.raises(HTTPException) as error:
         main.list_approval_requests(user)
 
-    assert error.value.status_code == 403
+    # Production has no durable membership repository in this direct call,
+    # so authorization must fail as an unavailable trust dependency rather
+    # than falling back to the process-local SQLite membership adapter.
+    assert error.value.status_code == 503
 
 
 def test_local_auth_bypass_is_not_a_cross_workspace_principal(monkeypatch) -> None:

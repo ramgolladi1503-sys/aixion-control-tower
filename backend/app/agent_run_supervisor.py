@@ -1865,6 +1865,19 @@ def execute_next_step(
         # selected. Mirror that result only after the scheduler has selected it
         # from PostgreSQL, so subsequent transition builders see the same cache.
         store.project_agent_run_snapshot(run, durable_steps, _run_events(run.id))
+        # Completion helpers intentionally mutate the compatibility projection
+        # before building the repository's compare-and-swap payload. Keep the
+        # durable choice, but use its just-projected cache object for those
+        # existing transition helpers; mutating the detached repository snapshot
+        # would leave the projected step unchanged and make completion look like
+        # a no-op.
+        if step is not None:
+            projected_step = store.agent_run_steps.get(step.id)
+            if projected_step is None:
+                raise AgentRunConflict(
+                    "Selected PostgreSQL AgentRun step is missing from its compatibility projection."
+                )
+            step = projected_step
     if step is None:
         release_run_lease(
             run,
