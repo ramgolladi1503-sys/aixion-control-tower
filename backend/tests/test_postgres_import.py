@@ -1646,7 +1646,11 @@ def test_worker_audit_resolves_task_before_colliding_entity_ids(
         collision = json.loads(raw)
         collision.update({
             "id": "t1", "project_id": "p2", "workspace_id": "ws2",
-            "status": "REQUESTED", "work_order_id": None,
+            # Keep this foreign ID collision terminal and non-native. A
+            # pending Antigravity approval without invocation identity must
+            # correctly block migration before audit-parent resolution.
+            "status": "DENIED", "source_provider": "MANUAL",
+            "work_order_id": None,
             "approved_payload_hash": None,
             "source_agent_id": None, "source_invocation_id": None,
         })
