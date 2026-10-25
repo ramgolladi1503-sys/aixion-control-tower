@@ -10,7 +10,13 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import agent_task_routes
-from app.agent_task_models import AgentProvider, AgentTask, AgentTaskRequestedAction
+from app.agent_task_models import (
+    AgentProvider,
+    AgentTask,
+    AgentTaskEventType,
+    AgentTaskRequestedAction,
+    AgentTaskStatus,
+)
 from app.main import app
 from app.models import ApprovalRequestCreate, AuthUser, Project, UserRole, WorkOrder
 from app.store import store
@@ -98,6 +104,62 @@ def test_request_bound_local_task_repository_remains_available(
     )
 
     assert agent_task_routes._task_repository_for_route(request) is repository
+
+
+def test_system_task_event_rejects_process_local_write_in_postgres_mode_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = AgentTask(
+        provider=AgentProvider.CODEX,
+        title="Persist worker transition",
+        goal="Keep task state durable",
+        requested_action=AgentTaskRequestedAction.OTHER,
+        status=AgentTaskStatus.RECEIVED,
+    )
+    before_events = dict(store.agent_task_events)
+    monkeypatch.setattr(
+        agent_task_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="Process-local AgentTask event writes"):
+        agent_task_routes.append_system_task_event(
+            task,
+            AgentTaskEventType.EXECUTION_STARTED,
+            "worker started",
+            status=AgentTaskStatus.EXECUTING,
+        )
+
+    assert task.status == AgentTaskStatus.RECEIVED
+    assert store.agent_task_events == before_events
+
+
+def test_system_task_event_keeps_local_mode_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task = AgentTask(
+        provider=AgentProvider.CODEX,
+        title="Persist worker transition",
+        goal="Keep task state durable",
+        requested_action=AgentTaskRequestedAction.OTHER,
+        status=AgentTaskStatus.RECEIVED,
+    )
+    monkeypatch.setattr(
+        agent_task_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+
+    event = agent_task_routes.append_system_task_event(
+        task,
+        AgentTaskEventType.EXECUTION_STARTED,
+        "worker started",
+        status=AgentTaskStatus.EXECUTING,
+    )
+
+    assert task.status == AgentTaskStatus.EXECUTING
+    assert store.agent_task_events[event.id] is event
 
 
 @pytest.mark.parametrize(

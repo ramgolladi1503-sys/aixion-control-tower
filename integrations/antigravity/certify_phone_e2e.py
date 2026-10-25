@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,47 @@ def _json_object(value: str) -> dict[str, Any]:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _computed_approved_payload_hash(payload: dict[str, Any]) -> str:
+    """Recompute the frozen approval hash using the backend v1/v2 contract."""
+    version = payload.get("approved_payload_hash_version", 1)
+    if type(version) is not int or version not in {1, 2}:
+        raise EvidenceError("Approval payload hash version is unsupported")
+    try:
+        snapshot = {
+            "project_id": payload["project_id"],
+            "work_order_id": payload.get("work_order_id"),
+            "title": payload["title"],
+            "summary": payload["summary"],
+            "agent_name": payload["agent_name"],
+            "target_branch": payload["target_branch"],
+            "files": [
+                {
+                    "path": item["path"],
+                    "change_type": item["change_type"],
+                    "diff": item["diff"],
+                    "new_content": item.get("new_content"),
+                }
+                for item in payload["files"]
+            ],
+            "test_plan": list(payload.get("test_plan", [])),
+            "rollback_plan": payload.get("rollback_plan", ""),
+            "source_provider": payload["source_provider"],
+            "source_agent_id": payload.get("source_agent_id"),
+            "source_agent_name": payload.get("source_agent_name"),
+            "source_session_id": payload.get("source_session_id"),
+            "source_invocation_id": payload.get("source_invocation_id"),
+            "source_task_url": payload.get("source_task_url"),
+        }
+        if version == 2:
+            snapshot["workspace_id"] = payload["workspace_id"]
+            snapshot["risk"] = payload["risk"]
+    except (KeyError, TypeError) as exc:
+        raise EvidenceError("Approval payload is incomplete for its hash version") from exc
+    encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    return "sha256:" + digest if version == 1 else "sha256:v2:" + digest
 
 
 def _verify_payload(
@@ -103,6 +145,8 @@ def verify_records(
     approved_hash = payload.get("approved_payload_hash")
     if not isinstance(approved_hash, str) or not approved_hash:
         raise EvidenceError("Approval has no approved payload hash")
+    if approved_hash != _computed_approved_payload_hash(payload):
+        raise EvidenceError("Approval payload does not match its frozen payload hash")
     _verify_payload(payload, tool_name=tool_name, expected_arguments=expected_arguments)
 
     if len(decision_events) != 1:

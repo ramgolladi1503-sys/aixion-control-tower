@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -133,6 +134,50 @@ class HomeScreenTest {
         composeRule.onAllNodesWithText("Command state").assertCountEquals(0)
         composeRule.onNodeWithText("Agent connection status is not available here.", substring = true)
             .assertExists()
+    }
+
+    @Test
+    fun approvalSummaryAnnouncesRefreshCompletionAndNewRequestCount() {
+        val state = mutableStateOf(HomeUiState(loading = true))
+        composeRule.setContent {
+            HomeContent(state = state.value)
+        }
+
+        val summary = composeRule.onNodeWithText("Loading approvals")
+        assertEquals(
+            androidx.compose.ui.semantics.LiveRegionMode.Polite,
+            summary.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
+
+        composeRule.runOnIdle {
+            state.value = HomeUiState(
+                loading = false,
+                approvals = listOf("first", "second").map { id ->
+                    ApprovalSummary(
+                        id = "screen-reader-$id",
+                        projectName = "Project",
+                        title = "Review request",
+                        summary = "This request is waiting for a decision.",
+                        agentName = "Antigravity",
+                        targetBranch = "main",
+                        status = ApprovalStatus.REQUESTED,
+                        risk = RiskLevel.MEDIUM,
+                        files = emptyList(),
+                        requiredActions = emptyList(),
+                        testPlan = emptyList(),
+                        rollbackPlan = ""
+                    )
+                },
+                lastSuccessfulSyncAt = Instant.parse("2026-10-22T10:00:00Z")
+            )
+        }
+
+        composeRule.onNodeWithText("2 requests require review").assertExists()
+        assertEquals(
+            androidx.compose.ui.semantics.LiveRegionMode.Polite,
+            composeRule.onNodeWithText("2 requests require review")
+                .fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
+        )
     }
 
     @Test

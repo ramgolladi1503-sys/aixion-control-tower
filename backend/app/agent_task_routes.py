@@ -243,6 +243,17 @@ def append_system_task_event(
     metadata: dict | None = None,
     notify_worker_status: bool = False,
 ) -> AgentTaskEvent:
+    settings = get_settings()
+    if getattr(settings, "is_production", False) or getattr(
+        settings, "postgres_auth_enabled", False
+    ):
+        # This helper has no repository argument and only writes the legacy
+        # process-local timeline map. Never let a PostgreSQL-backed worker
+        # report a transition that disappears on restart or is invisible to
+        # other API processes.
+        raise RuntimeError(
+            "Process-local AgentTask event writes are unavailable in PostgreSQL or production mode"
+        )
     if status is not None:
         task.status = status
         task.updated_at = now_utc()

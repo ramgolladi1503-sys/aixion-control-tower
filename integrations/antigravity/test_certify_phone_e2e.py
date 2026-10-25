@@ -7,7 +7,11 @@ from types import SimpleNamespace
 import pytest
 
 from integrations.antigravity import certify_phone_e2e
-from integrations.antigravity.certify_phone_e2e import EvidenceError, verify_records
+from integrations.antigravity.certify_phone_e2e import (
+    EvidenceError,
+    _computed_approved_payload_hash,
+    verify_records,
+)
 
 
 @pytest.fixture
@@ -20,13 +24,20 @@ def evidence() -> dict:
         "source_agent_id": "agent_test",
         "source_invocation_id": invocation,
         "project_id": "project_test",
-        "approved_payload_hash": "f" * 64,
+        "title": "Antigravity approval: run_command",
+        "summary": "Review the exact Antigravity tool and arguments before this invocation continues.",
+        "agent_name": "Antigravity",
+        "target_branch": "current-workspace",
+        "test_plan": ["Confirm the tool and arguments match the intended task"],
+        "rollback_plan": "Deny this request if uncertain. Approval authorizes only this displayed invocation.",
+        "approved_payload_hash": None,
         "files": [{
             "path": "antigravity://tool/run_command",
             "change_type": "tool_call",
             "diff": '{"command":"mkdir /tmp/aixion-e2e-marker"}',
         }],
     }
+    payload["approved_payload_hash"] = _computed_approved_payload_hash(payload)
     return {
         "approval": {
             "approval_id": payload["id"],
@@ -71,8 +82,38 @@ def test_certifier_accepts_exact_approved_and_claimed_invocation(evidence: dict)
     result = _verify(evidence)
 
     assert result["source_invocation_id"] == evidence["claim"]["source_invocation_id"]
-    assert result["approved_payload_hash"] == "f" * 64
+    assert result["approved_payload_hash"] == evidence["approval"]["payload"]["approved_payload_hash"]
     assert result["delivery_claim_events"] == 1
+
+
+def test_certifier_rejects_payload_hash_mismatch_even_when_audits_repeat_it(evidence: dict) -> None:
+    changed = copy.deepcopy(evidence)
+    changed["approval"]["payload"]["title"] = "Tampered after approval"
+    repeated_hash = changed["approval"]["payload"]["approved_payload_hash"]
+    changed["decision_events"][0]["details"]["approved_payload_hash"] = repeated_hash
+    changed["claim_events"][0]["details"]["approved_payload_hash"] = repeated_hash
+
+    with pytest.raises(EvidenceError, match="frozen payload hash"):
+        _verify(changed)
+
+
+def test_certifier_recomputes_workspace_and_risk_bound_v2_hash(evidence: dict) -> None:
+    changed = copy.deepcopy(evidence)
+    payload = changed["approval"]["payload"]
+    payload.update({
+        "approved_payload_hash_version": 2,
+        "workspace_id": "workspace_test",
+        "risk": {"level": "HIGH", "reasons": ["mutation"]},
+    })
+    payload["approved_payload_hash"] = _computed_approved_payload_hash(payload)
+    changed["decision_events"][0]["details"]["approved_payload_hash"] = payload["approved_payload_hash"]
+    changed["claim_events"][0]["details"]["approved_payload_hash"] = payload["approved_payload_hash"]
+
+    assert _verify(changed)["approved_payload_hash"] == payload["approved_payload_hash"]
+
+    payload["risk"]["level"] = "LOW"
+    with pytest.raises(EvidenceError, match="frozen payload hash"):
+        _verify(changed)
 
 
 def test_database_verifier_sets_read_only_before_any_query(
