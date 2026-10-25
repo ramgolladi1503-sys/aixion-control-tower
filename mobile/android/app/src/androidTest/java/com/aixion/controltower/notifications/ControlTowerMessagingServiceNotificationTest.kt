@@ -62,17 +62,21 @@ class ControlTowerMessagingServiceNotificationTest {
                 false
             )
             instrumentation.addMonitor(activityMonitor)
+            var launchedActivity: Activity? = null
             try {
                 assertNotNull("Approval notification must have a tap intent", notification.contentIntent)
                 notification.contentIntent.send()
                 val activity = activityMonitor.waitForActivityWithTimeout(ACTIVITY_START_TIMEOUT_MS)
                 assertNotNull("Notification tap should launch MainActivity", activity)
-                val resolvedLink = NotificationDeepLink.fromIntent((activity as Activity).intent)
+                val startedActivity = activity as Activity
+                launchedActivity = startedActivity
+                val resolvedLink = NotificationDeepLink.fromIntent(startedActivity.intent)
                 assertEquals(
                     NotificationDeepLink.ApprovalRequest(approvalId, notificationId),
                     resolvedLink
                 )
             } finally {
+                instrumentation.runOnMainSync { launchedActivity?.finish() }
                 instrumentation.removeMonitor(activityMonitor)
             }
         } finally {
@@ -126,11 +130,13 @@ class ControlTowerMessagingServiceNotificationTest {
                 false
             )
             instrumentation.addMonitor(activityMonitor)
+            var launchedActivity: Activity? = null
             try {
                 first.send()
                 val activity = activityMonitor.waitForActivityWithTimeout(ACTIVITY_START_TIMEOUT_MS)
                 assertNotNull("First colliding notification should launch MainActivity", activity)
                 val mainActivity = requireNotNull(activity)
+                launchedActivity = mainActivity
                 assertEquals(
                     NotificationDeepLink.ApprovalRequest(approvalIds[0], notificationIds[0]),
                     NotificationDeepLink.fromIntent(mainActivity.intent)
@@ -144,6 +150,7 @@ class ControlTowerMessagingServiceNotificationTest {
                     NotificationDeepLink.fromIntent(mainActivity.intent)
                 )
             } finally {
+                instrumentation.runOnMainSync { launchedActivity?.finish() }
                 instrumentation.removeMonitor(activityMonitor)
             }
 
