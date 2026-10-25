@@ -61,6 +61,70 @@ class ApprovalInboxScreenTest {
     val composeRule = createComposeRule()
 
     @Test
+    fun selectingHistoryRefreshesEvenWhenHistoryWasAlreadyLoaded() {
+        var historyLoadRequests = 0
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalInboxContent(
+                    state = ApprovalsUiState(
+                        loading = false,
+                        historyLoaded = true,
+                        approvalHistory = listOf(
+                            historyEvent(
+                                id = "already-loaded-history",
+                                decision = "approve",
+                                reviewerLabel = "Reviewer",
+                                requestSnapshotVerified = true,
+                                requestSnapshot = historySnapshot("Existing decision")
+                            )
+                        )
+                    ),
+                    onHistorySelected = { historyLoadRequests++ }
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+
+        assertEquals(1, historyLoadRequests)
+        composeRule.onNodeWithText("Existing decision").assertExists()
+    }
+
+    @Test
+    fun manualRefreshWhileHistorySelectedRefreshesInboxAndHistory() {
+        var inboxRefreshRequests = 0
+        var historyRefreshRequests = 0
+        composeRule.setContent {
+            ControlTowerTheme {
+                ApprovalInboxContent(
+                    state = ApprovalsUiState(
+                        loading = false,
+                        historyLoaded = true,
+                        approvalHistory = listOf(
+                            historyEvent(
+                                id = "history-refresh",
+                                decision = "approve",
+                                reviewerLabel = "Reviewer",
+                                requestSnapshotVerified = true,
+                                requestSnapshot = historySnapshot("Recorded decision")
+                            )
+                        )
+                    ),
+                    onRetry = { inboxRefreshRequests++ },
+                    onHistorySelected = {},
+                    onHistoryRetry = { historyRefreshRequests++ }
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("History").performClick()
+        composeRule.onNodeWithText("Refresh").performClick()
+
+        assertEquals(1, inboxRefreshRequests)
+        assertEquals(1, historyRefreshRequests)
+    }
+
+    @Test
     fun selectedHistorySectionAndFilterSurviveSavedStateRestoration() {
         val restorationTester = StateRestorationTester(composeRule)
         restorationTester.setContent {

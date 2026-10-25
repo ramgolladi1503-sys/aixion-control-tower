@@ -141,7 +141,7 @@ fun ApprovalInboxScreen(
     ApprovalInboxContent(
         state = state,
         onRetry = viewModel::refresh,
-        onHistorySelected = { viewModel.loadApprovalHistory() },
+        onHistorySelected = { viewModel.loadApprovalHistory(forceRefresh = true) },
         onHistoryRetry = { viewModel.loadApprovalHistory(forceRefresh = true) },
         onLoadOlderHistory = viewModel::loadOlderApprovalHistory,
         onOpenConnect = onOpenConnect,
@@ -177,6 +177,12 @@ fun ApprovalInboxContent(
         section = selectedSection
     )
     val visibleHistory = filterApprovalHistory(state.approvalHistory, selectedHistoryFilter)
+    val refreshSelectedContent = {
+        onRetry()
+        if (selectedSection == ApprovalInboxSection.HISTORY) {
+            onHistoryRetry()
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -208,7 +214,7 @@ fun ApprovalInboxContent(
                 )
                 if (!state.hasError) {
                     TextButton(
-                        onClick = onRetry,
+                        onClick = refreshSelectedContent,
                         enabled = !state.loading && !state.refreshing
                     ) {
                         Text(if (state.refreshing) "Refreshing…" else "Refresh")
@@ -254,7 +260,7 @@ fun ApprovalInboxContent(
                         )
                     }
                     Spacer(modifier = Modifier.height(TowerSpacing.md))
-                    Button(onClick = onRetry, enabled = !state.loading && !state.refreshing) {
+                    Button(onClick = refreshSelectedContent, enabled = !state.loading && !state.refreshing) {
                         Text("Retry approvals")
                     }
                     TextButton(

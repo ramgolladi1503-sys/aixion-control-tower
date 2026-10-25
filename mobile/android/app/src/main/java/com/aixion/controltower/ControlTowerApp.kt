@@ -41,6 +41,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.NavType
+import androidx.navigation.NavHostController
 import androidx.navigation.navArgument
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
@@ -227,15 +228,7 @@ fun ControlTowerApp(
                             currentRoute = currentRoute,
                             approvalsState = approvalsState,
                             onNavigate = { route ->
-                                val returnedToInbox = shouldPopBackToInbox(currentRoute, route) &&
-                                    navController.popBackStack(Route.Inbox.value, inclusive = false)
-                                if (!returnedToInbox) {
-                                    navController.navigate(route.value) {
-                                        launchSingleTop = true
-                                        popUpTo(Route.Home.value) { saveState = true }
-                                        restoreState = true
-                                    }
-                                }
+                                navigatePrimaryDestination(navController, currentRoute, route)
                             }
                         )
                     }
@@ -253,15 +246,7 @@ fun ControlTowerApp(
                             currentRoute = currentRoute,
                             approvalsState = approvalsState,
                             onNavigate = { route ->
-                                val returnedToInbox = shouldPopBackToInbox(currentRoute, route) &&
-                                    navController.popBackStack(Route.Inbox.value, inclusive = false)
-                                if (!returnedToInbox) {
-                                    navController.navigate(route.value) {
-                                        launchSingleTop = true
-                                        popUpTo(Route.Home.value) { saveState = true }
-                                        restoreState = true
-                                    }
-                                }
+                                navigatePrimaryDestination(navController, currentRoute, route)
                             }
                         )
                     }
@@ -381,6 +366,34 @@ fun ControlTowerApp(
                 }
             }
         }
+    }
+}
+
+/**
+ * Switch between the four primary destinations while keeping each tab's saved state.
+ * Home is the root of the authenticated graph, so return to it by popping the active
+ * tab stack instead of navigating to a second Home entry and asking restoreState to
+ * resolve the root destination.
+ */
+internal fun navigatePrimaryDestination(
+    navController: NavHostController,
+    currentRoute: String,
+    targetRoute: Route
+) {
+    val returnedToInbox = shouldPopBackToInbox(currentRoute, targetRoute) &&
+        navController.popBackStack(Route.Inbox.value, inclusive = false)
+    if (returnedToInbox) return
+
+    if (targetRoute == Route.Home && currentRoute != Route.Home.value &&
+        navController.popBackStack(Route.Home.value, inclusive = false)
+    ) {
+        return
+    }
+
+    navController.navigate(targetRoute.value) {
+        launchSingleTop = true
+        popUpTo(Route.Home.value) { saveState = true }
+        restoreState = true
     }
 }
 
