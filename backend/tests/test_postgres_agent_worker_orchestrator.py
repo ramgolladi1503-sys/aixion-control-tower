@@ -10,6 +10,7 @@ import pytest
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
+from app import agent_worker_claims as worker_claims
 from app.agent_task_models import AgentTask, AgentTaskEventType, AgentTaskStatus
 from app.agent_task_repository import PostgresAgentTaskRepository
 from app.agent_worker_github_branch import GitHubBranchCreateResult
@@ -269,9 +270,12 @@ def test_orchestrator_rejects_implicit_sqlite_repository_in_postgres_modes(
     monkeypatch, settings,
 ) -> None:
     store.reset()
-    monkeypatch.setattr(orchestrator_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker_claims, "get_settings", lambda: settings)
 
-    with pytest.raises(ValueError, match="PostgreSQL orchestration repositories are required"):
+    with pytest.raises(
+        ValueError,
+        match="PostgreSQL orchestration requires PostgreSQL task and approval repositories",
+    ):
         run_approved_agent_task_worker_flow(task_id="task_missing")
 
     assert store.agent_tasks == {}
