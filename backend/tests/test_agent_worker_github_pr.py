@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
-from app.agent_task_repository import SQLiteAgentTaskRepository
+from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
 from app.agent_worker_github_pr import GitHubPullRequestCreateResult, run_agent_worker_github_pr_creation
-from app.approval_repository import SQLiteApprovalDecisionRepository
+from app.approval_repository import (
+    PostgresApprovalDecisionRepository,
+    SQLiteApprovalDecisionRepository,
+)
+from app import agent_worker_github_pr as github_pr_worker
 from app.models import AgentProvider, ApprovalRequest, FileChange, Project, RiskAssessment, RiskLevel
 from app.store import store
 
@@ -45,6 +52,11 @@ class FakeGitHubPullRequestClient:
             base_branch=base_branch,
             html_url=f"https://github.com/{repository}/pull/42",
         )
+
+
+class FakePostgresRuntimeConnector:
+    def connect(self):
+        raise AssertionError("repository connector should not be invoked in pairing tests")
 
 
 def setup_function() -> None:
@@ -126,6 +138,124 @@ def test_github_pr_worker_opens_review_pr_and_marks_ready_for_pr() -> None:
     assert event.metadata["merged"] is False
     assert event.metadata["pull_request_url"] == result.pull_request_url
     assert any(audit.event_type == "agent_worker.github_pr_created" for audit in store.audit_events)
+
+
+@pytest.mark.parametrize("approval_repository", [None, "sqlite"])
+def test_github_pr_worker_rejects_unpaired_postgres_authority_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    approval_repository: str | None,
+) -> None:
+    postgres_task_repository = PostgresAgentTaskRepository(lambda: None)  # type: ignore[arg-type]
+    sqlite_approval_repository = SQLiteApprovalDecisionRepository(store._connect)
+    selected_approval_repository = (
+        sqlite_approval_repository if approval_repository == "sqlite" else None
+    )
+    fake = FakeGitHubPullRequestClient()
+    audits_before = list(store.audit_events)
+    events_before = dict(store.agent_task_events)
+    claims: list[object] = []
+    outcomes: list[object] = []
+
+    def unexpected_claim(**kwargs):
+        claims.append(kwargs)
+        raise AssertionError("repository mismatch must be rejected before claim")
+
+    def unexpected_outcome(*args, **kwargs):
+        outcomes.append((args, kwargs))
+        raise AssertionError("repository mismatch must not write an outcome")
+
+    monkeypatch.setattr(github_pr_worker, "claim_agent_task_for_worker", unexpected_claim)
+    monkeypatch.setattr(github_pr_worker, "claim_first_approved_agent_task_for_worker", unexpected_claim)
+    monkeypatch.setattr(github_pr_worker, "commit_agent_task_worker_outcome", unexpected_outcome)
+
+    result = run_agent_worker_github_pr_creation(
+        task_id="postgres-task-authority",
+        client=fake,
+        task_repository=postgres_task_repository,
+        approval_repository=selected_approval_repository,
+    )
+
+    assert result.success is False
+    assert result.reason == "GitHub PR workers require paired PostgreSQL task and approval repositories."
+    assert claims == []
+    assert outcomes == []
+    assert fake.branch_checks == []
+    assert fake.open_pr_checks == []
+    assert fake.create_calls == []
+    assert store.audit_events == audits_before
+    assert store.agent_task_events == events_before
+
+
+def test_github_pr_worker_accepts_paired_postgres_repositories_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakePostgresRuntimeConnector()
+    task_repository = PostgresAgentTaskRepository(runtime.connect)
+    approval_repository = PostgresApprovalDecisionRepository(runtime.connect)
+    claim_repositories: list[object] = []
+
+    def expected_claim(**kwargs):
+        claim_repositories.extend([kwargs["repository"]])
+        return SimpleNamespace(
+            success=False,
+            task=None,
+            task_id=kwargs["task_id"],
+            lease_token=None,
+            reason="claim reached with a valid paired repository",
+        )
+
+    monkeypatch.setattr(github_pr_worker, "get_settings", lambda: SimpleNamespace(
+        is_production=True, postgres_auth_enabled=True
+    ))
+    monkeypatch.setattr(github_pr_worker, "claim_agent_task_for_worker", expected_claim)
+
+    result = run_agent_worker_github_pr_creation(
+        task_id="postgres-task-authority",
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+    )
+
+    assert result.success is False
+    assert result.reason == "claim reached with a valid paired repository"
+    assert claim_repositories == [task_repository]
+
+
+def test_github_pr_worker_rejects_postgres_repositories_from_different_runtimes_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_repository = PostgresAgentTaskRepository(FakePostgresRuntimeConnector().connect)
+    approval_repository = PostgresApprovalDecisionRepository(FakePostgresRuntimeConnector().connect)
+    fake = FakeGitHubPullRequestClient()
+    claims: list[object] = []
+    outcomes: list[object] = []
+
+    def unexpected_claim(**kwargs):
+        claims.append(kwargs)
+        raise AssertionError("different PostgreSQL runtimes must be rejected before claim")
+
+    def unexpected_outcome(*args, **kwargs):
+        outcomes.append((args, kwargs))
+        raise AssertionError("different PostgreSQL runtimes must not write an outcome")
+
+    monkeypatch.setattr(github_pr_worker, "claim_agent_task_for_worker", unexpected_claim)
+    monkeypatch.setattr(github_pr_worker, "commit_agent_task_worker_outcome", unexpected_outcome)
+
+    result = run_agent_worker_github_pr_creation(
+        task_id="postgres-task-authority",
+        client=fake,
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+    )
+
+    assert result.success is False
+    assert result.reason == (
+        "GitHub PR workers require task and approval repositories to share the same PostgreSQL connection factory."
+    )
+    assert claims == []
+    assert outcomes == []
+    assert fake.branch_checks == []
+    assert fake.open_pr_checks == []
+    assert fake.create_calls == []
 
 
 def test_github_pr_worker_refuses_unsafe_branch_before_github_call() -> None:
