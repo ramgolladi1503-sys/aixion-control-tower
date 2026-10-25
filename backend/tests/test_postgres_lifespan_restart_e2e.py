@@ -4,6 +4,7 @@ import asyncio
 import json
 import multiprocessing
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -279,6 +280,40 @@ def test_lifespan_owned_postgres_approval_survives_api_restart_and_resumes_once(
         approval_id, status, invocation_id = approval_row
         assert status == ApprovalStatus.PENDING_REVIEW
 
+        # Freeze the hook after its request has been persisted so the reviewer
+        # decision cannot be consumed before the API restart. SIGSTOP is
+        # synchronous with respect to the child; waitpid confirms the process
+        # reached the stopped state before committing the decision.
+        os.kill(hook.pid, signal.SIGSTOP)
+        waited_pid, wait_status = os.waitpid(hook.pid, os.WUNTRACED)
+        assert waited_pid == hook.pid
+        assert os.WIFSTOPPED(wait_status)
+
+        # Commit the reviewer decision while the hook remains stopped and the
+        # original API process is still serving. The database assertion below
+        # is the durability boundary for the subsequent process restart.
+        with httpx.Client(timeout=15) as client:
+            decision = client.post(
+                f"{first[2]}/approvals/{approval_id}/decision",
+                json={"decision": "approve", "reason": "restart recovery E2E"},
+            )
+        assert decision.status_code == 200, decision.text
+        assert decision.json()["status"] == ApprovalStatus.APPROVED
+        with connect() as connection:
+            assert connection.execute(
+                "SELECT status FROM approval_requests WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone() == (ApprovalStatus.APPROVED,)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE entity_id=%s "
+                "AND event_type='approval.decision'",
+                (approval_id,),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0] == 0
+
         # Stop and recreate the API process; the blocked hook stays alive.
         _stop_server(first)
         original_port = int(urlparse(first[2]).port or 0)
@@ -288,13 +323,7 @@ def test_lifespan_owned_postgres_approval_survives_api_restart_and_resumes_once(
         servers.append(second)
         assert second[2] == first[2]
         assert hook.poll() is None
-        with httpx.Client(timeout=15) as client:
-            decision = client.post(
-                f"{second[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "restart recovery E2E"},
-            )
-        assert decision.status_code == 200, decision.text
-        assert decision.json()["status"] == ApprovalStatus.APPROVED
+        os.kill(hook.pid, signal.SIGCONT)
 
         stdout, stderr = hook.communicate(timeout=30)
         assert hook.returncode == 0, stderr
@@ -309,6 +338,21 @@ def test_lifespan_owned_postgres_approval_survives_api_restart_and_resumes_once(
                 "WHERE approval_id=%s AND workspace_id=%s AND source_agent_id=%s",
                 (approval_id, workspace.id, agent.id),
             ).fetchall() == [(approval_id, ApprovalStatus.APPROVED, invocation_id)]
+            assert connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
+                (approval_id,),
+            ).fetchone()[0] == 1
+            replay = httpx.post(
+                f"{second[2]}/agents/approvals/{approval_id}/consume",
+                headers={
+                    "X-Aixion-Agent-Id": agent.id,
+                    "X-Aixion-Agent-Token": token,
+                    "X-Aixion-Approval-Protocol": "1",
+                },
+                timeout=15,
+            )
+            assert replay.status_code == 409, replay.text
+            assert "already delivered" in replay.json()["detail"]
             assert connection.execute(
                 "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=%s",
                 (approval_id,),
