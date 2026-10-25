@@ -186,7 +186,7 @@ def test_connector_mutation_without_request_context_does_not_fall_back_to_sqlite
         connector_routes.disable_connector(connector.id, user=None)
 
     assert error.value.status_code == 503
-    assert error.value.detail == "PostgreSQL connector repository requires an app-bound request"
+    assert error.value.detail == "PostgreSQL connector repository runtime is unavailable"
     assert store.agent_connectors[connector.id] is connector
     assert connector.status.value == "ENABLED"
     assert {event.id for event in store.audit_events} == before_audits
