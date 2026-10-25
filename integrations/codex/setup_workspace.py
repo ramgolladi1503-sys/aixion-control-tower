@@ -103,6 +103,24 @@ def _private_file_snapshot(path: Path) -> tuple[bytes, int]:
         raise SetupError(f"Cannot safely snapshot managed config: {path}") from exc
 
 
+def _hooks_file_snapshot(path: Path) -> tuple[bytes, int]:
+    """Read exact bytes and mode for compensating a failed hook removal."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            mode = stat.S_IMODE(metadata.st_mode)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                    or mode & 0o022):
+                raise SetupError(f"Codex hooks file permissions or ownership changed: {path}")
+            raw = stream.read(MAX_JSON_BYTES + 1)
+        if len(raw) > MAX_JSON_BYTES:
+            raise SetupError(f"Managed JSON file exceeds {MAX_JSON_BYTES} bytes: {path}")
+        return raw, mode
+    except OSError as exc:
+        raise SetupError(f"Cannot safely snapshot Codex hooks file: {path}") from exc
+
+
 def _atomic_write(path: Path, data: bytes, mode: int) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     parent = path.parent.lstat()
@@ -288,24 +306,38 @@ def remove_workspace(workspace: Path, *, home: Path | None = None,
     config_exists = os.path.lexists(config_path)
     if config_exists:
         _read_json(config_path, allow_missing=False, require_private=True)
+    hooks_snapshot = _hooks_file_snapshot(hooks_path)
     remaining = [item for item in entries if item not in managed]
-    if remaining:
-        hooks["PermissionRequest"] = remaining
-    else:
-        hooks.pop("PermissionRequest", None)
-    if hooks:
-        hooks_file["hooks"] = hooks
-        _atomic_write(hooks_path, (json.dumps(hooks_file, indent=2) + "\n").encode(),
-                      stat.S_IMODE(hooks_path.stat().st_mode))
-    else:
-        hooks_file.pop("hooks", None)
-        if hooks_file:
-            _atomic_write(hooks_path, (json.dumps(hooks_file, indent=2) + "\n").encode(),
-                          stat.S_IMODE(hooks_path.stat().st_mode))
+    try:
+        if remaining:
+            hooks["PermissionRequest"] = remaining
         else:
-            hooks_path.unlink()
-    if config_exists:
-        config_path.unlink()
+            hooks.pop("PermissionRequest", None)
+        if hooks:
+            hooks_file["hooks"] = hooks
+            _atomic_write(hooks_path, (json.dumps(hooks_file, indent=2) + "\n").encode(),
+                          hooks_snapshot[1])
+        else:
+            hooks_file.pop("hooks", None)
+            if hooks_file:
+                _atomic_write(hooks_path, (json.dumps(hooks_file, indent=2) + "\n").encode(),
+                              hooks_snapshot[1])
+            else:
+                hooks_path.unlink()
+        if config_exists:
+            config_path.unlink()
+    except (OSError, SetupError) as remove_error:
+        # Hook and config are separate files, so removal cannot be one atomic
+        # filesystem operation. If deleting the config fails after the hook
+        # edit, restore the exact original hook bytes and mode. This prevents
+        # a failed removal from silently leaving a half-removed installation.
+        try:
+            _atomic_write(hooks_path, hooks_snapshot[0], hooks_snapshot[1])
+        except (OSError, SetupError) as rollback_error:
+            remove_error.add_note(
+                f"Rollback could not restore the original Codex hooks file: {rollback_error}"
+            )
+        raise
     return True, config_exists
 
 

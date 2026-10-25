@@ -163,6 +163,39 @@ def test_direct_recovery_export_fails_closed_when_postgres_auth_is_enabled(
     assert "authoritative recovery repository" in raised.value.detail
 
 
+def test_direct_recovery_export_fails_closed_in_production_before_sqlite_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = AuthUser(
+        id="owner-production-mode",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id="workspace-production-mode",
+    )
+    settings = replace(
+        get_settings(),
+        profile="production",
+        postgres_auth_enabled=False,
+    )
+
+    def unexpected_snapshot_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Production recovery export must not read SQLite")
+
+    monkeypatch.setattr(recovery_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        recovery_routes.recovery_snapshot_repository,
+        "read_snapshot",
+        unexpected_snapshot_read,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        recovery_routes.export_recovery_snapshot(user)
+
+    assert raised.value.status_code == 503
+    assert "authoritative recovery repository" in raised.value.detail
+
+
 def test_direct_recovery_export_fails_closed_when_request_has_postgres_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

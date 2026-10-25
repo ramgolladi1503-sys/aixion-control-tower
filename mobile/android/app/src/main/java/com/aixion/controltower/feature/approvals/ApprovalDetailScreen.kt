@@ -579,7 +579,10 @@ private fun CompactExactToolRequestReviewDialog(
     onDismiss: () -> Unit
 ) {
     val palette = LocalTowerPalette.current
-    var draftChecked by remember(approval.id) { mutableStateOf(checked) }
+    // Acknowledgement is valid only for the exact request snapshot shown in this
+    // dialog. A request can be refreshed or rebound while the dialog is open;
+    // keying only by ID would carry a checked box over to changed tool arguments.
+    var draftChecked by remember(approval) { mutableStateOf(checked) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Review full request") },

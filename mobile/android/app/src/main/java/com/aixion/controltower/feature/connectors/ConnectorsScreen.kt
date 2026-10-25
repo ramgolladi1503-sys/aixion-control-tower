@@ -28,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
@@ -69,7 +70,11 @@ private fun ConnectionGuidanceDisclosure() {
     TowerPanel {
         TextButton(
             onClick = { expanded = !expanded },
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    stateDescription = if (expanded) "Expanded" else "Collapsed"
+                }
         ) {
             Text(
                 text = if (expanded) "Hide connection details" else "How connection works",

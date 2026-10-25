@@ -6,6 +6,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
@@ -14,7 +17,6 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
@@ -98,10 +100,13 @@ class ConnectorsScreenTest {
         composeRule.setContent { ConnectorsContent() }
 
         composeRule.onNodeWithText("Open Antigravity setup").assertExists()
-        composeRule.onNodeWithText("How connection works").assertExists()
+        composeRule.onNodeWithText("How connection works")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed"))
         composeRule.onNodeWithText("Before you connect").assertDoesNotExist()
 
         composeRule.onNodeWithText("How connection works").performClick()
+        composeRule.onNodeWithText("Hide connection details")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Expanded"))
         composeRule.onNodeWithText("Before you connect").assertExists()
         composeRule.onNodeWithText("Keep the computer available").assertExists()
         composeRule.onNodeWithText("When an approval arrives").assertExists()

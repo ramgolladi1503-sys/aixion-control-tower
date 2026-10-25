@@ -988,6 +988,50 @@ def test_approval_received_after_host_deadline_is_denied() -> None:
     assert "after the host wait deadline" in result["reason"]
 
 
+def test_approval_received_before_deadline_is_not_claimed_if_local_validation_crosses_deadline() -> None:
+    created_body: dict = {}
+    calls: list[tuple[str, str]] = []
+    clock = {"now": 0.0}
+    real_payload_hash = hook._payload_hash
+
+    def request(method: str, url: str, agent_id: str, _token: str, body: dict | None = None, **_kwargs: object) -> dict:
+        nonlocal created_body
+        calls.append((method, url))
+        if method == "POST" and url.endswith("/agents/approvals"):
+            created_body = body or {}
+            return {
+                **created_body,
+                "id": "approval-test",
+                "status": "PENDING_REVIEW",
+                "source_provider": "ANTIGRAVITY",
+                "source_agent_id": agent_id,
+                "source_agent_name": "Antigravity test",
+            }
+        if method == "GET":
+            with patch.object(hook, "_payload_hash", real_payload_hash):
+                return _approved_record(created_body)
+        raise AssertionError(f"Unexpected request: {method} {url}")
+
+    def cross_deadline_during_payload_validation(record: dict) -> str:
+        clock["now"] = 1.01
+        return real_payload_hash(record)
+
+    with (
+        patch.object(hook, "_request", side_effect=request),
+        patch.object(hook.time, "monotonic", side_effect=lambda: clock["now"]),
+        patch.object(hook.time, "sleep"),
+        patch.object(hook, "_payload_hash", side_effect=cross_deadline_during_payload_validation),
+    ):
+        result = _call_hook(
+            {"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe"}}},
+            {**ENV, "AIXION_APPROVAL_TIMEOUT_SECONDS": "1"},
+        )
+
+    assert result["decision"] == "deny"
+    assert "before the host wait deadline" in result["reason"]
+    assert not any(url.endswith("/consume") for _method, url in calls)
+
+
 def test_approval_racing_with_timeout_is_denied() -> None:
     created_body: dict = {}
     calls: list[str] = []

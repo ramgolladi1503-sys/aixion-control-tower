@@ -970,6 +970,51 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
+    fun compactToolReviewAcknowledgementResetsWhenPayloadChangesUnderSameRequestId() {
+        val initial = approval(ApprovalStatus.REQUESTED).copy(
+            id = "approval-same-id",
+            files = listOf(
+                FileChangeSummary(
+                    path = "antigravity://tool/run_command",
+                    changeType = "tool_call",
+                    diff = "{\"command\":\"echo original\"}",
+                    risk = RiskLevel.LOW
+                )
+            )
+        )
+        val currentApproval = androidx.compose.runtime.mutableStateOf(initial)
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(320.dp).height(320.dp)) {
+                    ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("approval-decision-identity-title").performClick()
+        composeRule.onNodeWithTag("approval-compact-tool-review-acknowledgement").performClick()
+        composeRule.onNodeWithText("Acknowledge and continue").assertIsEnabled()
+
+        composeRule.runOnIdle {
+            currentApproval.value = initial.copy(
+                files = listOf(
+                    FileChangeSummary(
+                        path = "antigravity://tool/run_command",
+                        changeType = "tool_call",
+                        diff = "{\"command\":\"echo changed\"}",
+                        risk = RiskLevel.LOW
+                    )
+                )
+            )
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("{\"command\":\"echo changed\"}").assertIsDisplayed()
+        composeRule.onNodeWithText("Acknowledge and continue").assertIsNotEnabled()
+        composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
+    }
+
+    @Test
     fun decisionProgressStatusUsesPoliteLiveRegionAndUpdatesInPlace() {
         val decisionInFlight = androidx.compose.runtime.mutableStateOf(false)
         composeRule.setContent {

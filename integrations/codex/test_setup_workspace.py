@@ -194,3 +194,32 @@ def test_remove_deletes_only_managed_codex_hook_and_config(tmp_path: Path) -> No
         }
     }
     assert not config_path.exists()
+
+
+def test_remove_restores_hook_if_config_deletion_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+    hooks_before = hooks_path.read_bytes()
+    hooks_mode_before = hooks_path.stat().st_mode & 0o777
+    config_before = config_path.read_bytes()
+    original_unlink = Path.unlink
+
+    def fail_config_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path == config_path:
+            raise OSError("simulated config removal failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_config_unlink)
+
+    with pytest.raises(OSError, match="simulated config removal failure"):
+        setup.remove_workspace(workspace, home=home)
+
+    assert hooks_path.read_bytes() == hooks_before
+    assert hooks_path.stat().st_mode & 0o777 == hooks_mode_before
+    assert config_path.read_bytes() == config_before
