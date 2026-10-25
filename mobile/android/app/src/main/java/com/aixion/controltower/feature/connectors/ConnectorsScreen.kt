@@ -66,13 +66,13 @@ private fun ConnectorPrerequisitesPanel() {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ConnectorStep(
             number = "1",
-            title = "Open the project on its Mac",
+            title = "Open the project on the agent computer",
             detail = "Use the computer and agent session that should pause for approvals."
         )
         ConnectorStep(
             number = "2",
             title = "Keep it reachable",
-            detail = "The Mac, agent session, and Control Tower API must stay available while a request is waiting."
+            detail = "The agent computer, agent session, and Control Tower API must stay available while a request is waiting."
         )
         ConnectorStep(
             number = "3",
@@ -81,7 +81,7 @@ private fun ConnectorPrerequisitesPanel() {
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            "The phone cannot wake or restart the Mac. This screen does not verify hook installation.",
+            "The phone cannot wake or restart the agent computer. This screen does not verify hook installation.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodySmall
         )
@@ -125,7 +125,7 @@ private fun ConnectorsHero() {
                 )
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
                 Text(
-                    text = "Choose the agent used by this project. Set up each project workspace on the Mac where the agent runs.",
+                    text = "Choose the agent used by this project. Set up each project workspace on the computer where the agent runs.",
                     color = palette.inkMuted,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -210,7 +210,7 @@ private fun ApprovalFlowNote() {
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
-            text = "The request appears in Approvals. Review the exact action, then approve or deny it. Your decision returns to the waiting task only while its Mac, agent session, and API remain reachable.",
+            text = "The request appears in Approvals. Review the exact action, then approve or deny it. Your decision returns to the waiting task only while its agent computer, session, and API remain reachable.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )

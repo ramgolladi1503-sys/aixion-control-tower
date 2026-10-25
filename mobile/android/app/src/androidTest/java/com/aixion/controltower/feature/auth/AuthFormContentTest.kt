@@ -51,6 +51,11 @@ class AuthFormContentTest {
         composeRule.onNodeWithText("Password").assertExists()
         composeRule.onNodeWithText("Log in").assertExists()
         composeRule.onNodeWithText("Create account").assertExists()
+        assertTrue(
+            "Sign-in title should be exposed as a screen-reader heading",
+            composeRule.onNodeWithText("Welcome back")
+                .fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         composeRule.onNodeWithText("Name").assertDoesNotExist()
         composeRule.onNodeWithText("Invite code (optional)").assertDoesNotExist()
 

@@ -33,23 +33,26 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Set up a project").assertExists()
         composeRule.onNodeWithText("Connect your coding agent").assertExists()
         composeRule.onNodeWithText("Before you connect").assertExists()
-        composeRule.onNodeWithText("Open the project on its Mac").assertExists()
+        composeRule.onNodeWithText("Open the project on the agent computer").assertExists()
         composeRule.onNodeWithText(
             "Use the computer and agent session that should pause for approvals."
         ).assertExists()
         composeRule.onNodeWithText("Keep it reachable").assertExists()
         composeRule.onNodeWithText(
-            "The Mac, agent session, and Control Tower API must stay available while a request is waiting."
+            "The agent computer, agent session, and Control Tower API must stay available while a request is waiting."
         ).assertExists()
         composeRule.onNodeWithText("Save the one-time token").assertExists()
         composeRule.onNodeWithText(
             "Setup shows the connector token once. Store it like a password."
         ).assertExists()
         composeRule.onNodeWithText(
-            "The phone cannot wake or restart the Mac. This screen does not verify hook installation."
+            "The phone cannot wake or restart the agent computer. This screen does not verify hook installation."
         ).assertExists()
         composeRule.onAllNodesWithText("CONNECT ONCE").assertCountEquals(0)
         composeRule.onNodeWithText("Choose a provider").assertExists()
+        composeRule.onNodeWithText(
+            "Choose the agent used by this project. Set up each project workspace on the computer where the agent runs."
+        ).assertExists()
         composeRule.onNodeWithText("Antigravity").assertExists()
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
@@ -76,7 +79,7 @@ class ConnectorsScreenTest {
     fun approvalFlowExplainsReviewAndSameSessionRequirement() {
         val explanation =
             "The request appears in Approvals. Review the exact action, then approve or deny it. " +
-                "Your decision returns to the waiting task only while its Mac, agent session, and API remain reachable."
+            "Your decision returns to the waiting task only while its agent computer, session, and API remain reachable."
         composeRule.setContent { ConnectorsContent() }
 
         composeRule.onNodeWithText("When an approval arrives")

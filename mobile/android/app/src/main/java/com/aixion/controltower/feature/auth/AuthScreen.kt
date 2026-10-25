@@ -201,6 +201,7 @@ internal fun AuthFormContent(
                 registrationExpanded -> "Create your account"
                 else -> "Welcome back"
             },
+            modifier = Modifier.semantics { heading() },
             color = palette.ink,
             style = MaterialTheme.typography.headlineLarge
         )

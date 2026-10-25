@@ -278,6 +278,15 @@ def test_scheduled_push_entrypoint_dispatches_postgres_outbox_once(
     _repository, connect = outbox_repository
     dsn = os.environ["AIXION_TEST_POSTGRES_DSN"]
     monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_ENABLED", "true")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED", "true")
+    monkeypatch.setenv("AIXION_EMAIL_DISPATCH_ENABLED", "true")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_HOST", "mail.example.invalid")
+    monkeypatch.setenv("AIXION_EMAIL_FROM", "notifications@example.invalid")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_USERNAME", "test-user")
+    monkeypatch.setenv("AIXION_EMAIL_SMTP_PASSWORD", "test-password")
+    monkeypatch.setenv("AIXION_EMAIL_OUTBOX_KEY", "0" * 64)
     monkeypatch.setenv(
         "AIXION_POSTGRES_DSN",
         make_conninfo(dsn, sslmode="verify-full"),

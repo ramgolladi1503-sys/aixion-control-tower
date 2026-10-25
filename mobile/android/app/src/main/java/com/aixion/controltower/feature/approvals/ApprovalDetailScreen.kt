@@ -257,6 +257,10 @@ fun ApprovalDetailContent(
             maxWidth = maxWidth,
             fontScale = LocalDensity.current.fontScale
         )
+        val horizontalCompactActions = shouldUseHorizontalCompactDecisionActions(
+            maxWidth = maxWidth,
+            fontScale = LocalDensity.current.fontScale
+        )
         Column(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
                 state = requestListState,
@@ -468,6 +472,7 @@ fun ApprovalDetailContent(
                         .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.sm)
                         .testTag("approval-decision-panel"),
                     compactLayout = compactViewport,
+                    horizontalCompactActions = horizontalCompactActions,
                     showDisabledActions = compactViewport && (
                         isBlocked || hasUnsupportedData || decisionBlockReason != null ||
                             decisionNeedsReconciliation
@@ -988,6 +993,12 @@ internal fun shouldUseCompactDecisionPanel(
     fontScale: Float
 ): Boolean = maxHeight < 500.dp || (maxWidth < 400.dp && fontScale >= 1.5f)
 
+/** Use the short viewport's width to keep both decision controls visible without scrolling. */
+internal fun shouldUseHorizontalCompactDecisionActions(
+    maxWidth: androidx.compose.ui.unit.Dp,
+    fontScale: Float
+): Boolean = maxWidth >= 600.dp && fontScale < 1.5f
+
 @Composable
 private fun DecisionContextBody(label: String, value: String) {
     val palette = LocalTowerPalette.current
@@ -1072,6 +1083,7 @@ private fun DecisionPanel(
     onReviewFullRequest: () -> Unit,
     modifier: Modifier = Modifier,
     compactLayout: Boolean = false,
+    horizontalCompactActions: Boolean = false,
     showDisabledActions: Boolean = false
 ) {
     val palette = LocalTowerPalette.current
@@ -1201,34 +1213,65 @@ private fun DecisionPanel(
         }
         if (canDecide || showDisabledActions) {
             Spacer(modifier = Modifier.height(if (compactLayout) TowerSpacing.xs else TowerSpacing.md))
-            Column(
-                verticalArrangement = Arrangement.spacedBy(
-                    if (compactLayout) TowerSpacing.xs else TowerSpacing.sm
-                ),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                OutlinedButton(
-                    onClick = onReject,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 56.dp)
-                        .semantics(mergeDescendants = true) {
-                            contentDescription = "Deny request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}.$invocationContext"
-                        },
-                    enabled = canDecide
-                ) { Text("Deny", color = palette.danger) }
-                Button(
-                    onClick = onApprove,
-                    enabled = canApprove,
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.onBrand),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 56.dp)
-                        .semantics(mergeDescendants = true) {
-                            contentDescription = "Approve request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}.$invocationContext"
-                        }
-                ) { Text("Approve request") }
+            val denyDescription = "Deny request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}.$invocationContext"
+            val approveDescription = "Approve request ${shortSafeApprovalId(approvalId)} from ${approvalProviderName(approvalProvider)}: $approvalTitle. Risk: ${approvalRisk.name.lowercase().replace('_', ' ')}.$invocationContext"
+            if (compactLayout && horizontalCompactActions) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+                ) {
+                    DecisionActionButton(
+                        approve = false,
+                        enabled = canDecide,
+                        onClick = onReject,
+                        accessibilityDescription = denyDescription,
+                        modifier = Modifier.weight(1f)
+                    )
+                    DecisionActionButton(
+                        approve = true,
+                        enabled = canApprove,
+                        onClick = onApprove,
+                        accessibilityDescription = approveDescription,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            } else {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(
+                        if (compactLayout) TowerSpacing.xs else TowerSpacing.sm
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    DecisionActionButton(false, canDecide, onReject, denyDescription, Modifier.fillMaxWidth())
+                    DecisionActionButton(true, canApprove, onApprove, approveDescription, Modifier.fillMaxWidth())
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun DecisionActionButton(
+    approve: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    accessibilityDescription: String,
+    modifier: Modifier
+) {
+    val palette = LocalTowerPalette.current
+    val buttonModifier = modifier
+        .heightIn(min = 56.dp)
+        .semantics(mergeDescendants = true) { contentDescription = accessibilityDescription }
+    if (approve) {
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.onBrand),
+            modifier = buttonModifier
+        ) { Text("Approve request") }
+    } else {
+        OutlinedButton(onClick = onClick, enabled = enabled, modifier = buttonModifier) {
+            Text("Deny", color = palette.danger)
         }
     }
 }

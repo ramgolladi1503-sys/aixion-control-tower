@@ -18,4 +18,11 @@ class DecisionContextLayoutPolicyTest {
         assertFalse(shouldStackDecisionContext(maxWidth = 360.dp, fontScale = 1f))
         assertFalse(shouldStackDecisionContext(maxWidth = 480.dp, fontScale = 1.3f))
     }
+
+    @Test
+    fun usesSideBySideActionsOnlyWhenShortViewportHasRoom() {
+        assertTrue(shouldUseHorizontalCompactDecisionActions(maxWidth = 800.dp, fontScale = 1f))
+        assertFalse(shouldUseHorizontalCompactDecisionActions(maxWidth = 599.dp, fontScale = 1f))
+        assertFalse(shouldUseHorizontalCompactDecisionActions(maxWidth = 800.dp, fontScale = 1.5f))
+    }
 }
