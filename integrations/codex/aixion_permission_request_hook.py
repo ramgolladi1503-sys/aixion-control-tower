@@ -41,6 +41,9 @@ EXPIRY_CLEANUP_TIMEOUT_SECONDS = 1.0
 POLL_INTERVAL_SECONDS = 2
 INVOCATION_HEARTBEAT_INTERVAL_SECONDS = 15
 INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS = 0.1
+HEARTBEAT_RATE_LIMIT_RETRY_MAX_SECONDS = (
+    INVOCATION_HEARTBEAT_INTERVAL_SECONDS - MAX_REQUEST_TIMEOUT_SECONDS - 1
+)
 MAX_RECONNECT_BACKOFF_SECONDS = 10
 MAX_CREATE_ATTEMPTS = 2
 CREATE_RETRY_DELAY_SECONDS = 0.25
@@ -73,8 +76,9 @@ class AmbiguousRequestError(GateError):
 
 
 class RateLimitError(GateError):
-    def __init__(self, retry_after_seconds: int) -> None:
+    def __init__(self, retry_after_seconds: int, *, retry_after_header: str | None = None) -> None:
         self.retry_after_seconds = max(1, min(MAX_WAIT_SECONDS, retry_after_seconds))
+        self.retry_after_header = retry_after_header
         super().__init__("Control Tower rate limit exceeded")
 
 
@@ -458,7 +462,7 @@ def _request(method: str, url: str, config: dict[str, str], token: str,
                 None,
             )
             delay = _parse_retry_after(retry_after)
-            raise RateLimitError(delay)
+            raise RateLimitError(delay, retry_after_header=retry_after)
         if response.status >= 500:
             raise AmbiguousRequestError("Control Tower returned an ambiguous server failure")
         if expected_status is not None and response.status != expected_status:
@@ -512,6 +516,35 @@ def _parse_retry_after(
         return POLL_INTERVAL_SECONDS
 
 
+def _valid_retry_after_header(value: str | None) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    if re.fullmatch(r"[0-9]+", value.strip()):
+        return True
+    try:
+        parsed = parsedate_to_datetime(value)
+        return parsed.tzinfo is not None
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _monotonic_expiry_deadline(server_now_at: str, expires_at: str, *,
+                               request_started_at: float,
+                               response_received_at: float) -> float | None:
+    try:
+        server_now = datetime.fromisoformat(server_now_at.strip().replace("Z", "+00:00"))
+        expiry = datetime.fromisoformat(expires_at.strip().replace("Z", "+00:00"))
+    except (AttributeError, OverflowError, TypeError, ValueError):
+        return None
+    if server_now.tzinfo is None or expiry.tzinfo is None or expiry <= server_now:
+        return None
+    remaining_seconds = (expiry - server_now).total_seconds()
+    # Use the server's own heartbeat/expiry pair to avoid relying on host clock
+    # synchronization. Subtract the full request duration and one second for
+    # response/clock uncertainty, intentionally underestimating the lease.
+    return remaining_seconds - (response_received_at - request_started_at) - 1 + response_received_at
+
+
 def _refresh_invocation_lease_if_due(
     *,
     api_base: str,
@@ -521,6 +554,8 @@ def _refresh_invocation_lease_if_due(
     source_invocation_id: str,
     deadline: float,
     next_heartbeat_at: float,
+    approval_expires_at: str | None = None,
+    lease_state: dict[str, float | None] | None = None,
     diagnostics: dict[str, str | None] | None = None,
 ) -> tuple[float, bool]:
     """Renew the invocation lease when due, without extending the hook deadline."""
@@ -536,6 +571,7 @@ def _refresh_invocation_lease_if_due(
         if remaining_seconds <= 0:
             return next_heartbeat_at, False
         try:
+            request_started_at = time.monotonic()
             heartbeat = _request(
                 "POST",
                 f"{api_base}/agents/approvals/{approval_id}/heartbeat",
@@ -546,6 +582,28 @@ def _refresh_invocation_lease_if_due(
                 expected_status=200,
             )
             break
+        except RateLimitError as exc:
+            delay = exc.retry_after_seconds
+            remaining_seconds = deadline - time.monotonic()
+            if (
+                attempt != 0
+                or not _valid_retry_after_header(exc.retry_after_header)
+                or delay > HEARTBEAT_RATE_LIMIT_RETRY_MAX_SECONDS
+                or remaining_seconds <= delay + MAX_REQUEST_TIMEOUT_SECONDS + 1
+                or lease_state is None
+                or lease_state.get("deadline") is None
+                or lease_state["deadline"] <= time.monotonic() + delay + MAX_REQUEST_TIMEOUT_SECONDS + 1
+                or lease_state.get("approval_deadline") is None
+                or lease_state["approval_deadline"] <= time.monotonic() + delay + MAX_REQUEST_TIMEOUT_SECONDS + 1
+            ):
+                return next_heartbeat_at, False
+            if diagnostics is not None:
+                _emit_diagnostic(
+                    context=diagnostics,
+                    event="invocation_heartbeat_retry",
+                    attempt=attempt + 2,
+                )
+            time.sleep(delay)
         except GateError as exc:
             # Only retry a transport failure whose original exception is
             # preserved. HTTP errors and malformed/ambiguous responses remain
@@ -578,6 +636,26 @@ def _refresh_invocation_lease_if_due(
         or not _lease_expiry_is_current(heartbeat.get("expires_at"))
     ):
         return next_heartbeat_at, False
+    if lease_state is not None:
+        measured_deadline = _monotonic_expiry_deadline(
+            heartbeat.get("heartbeat_at"),
+            heartbeat.get("expires_at"),
+            request_started_at=request_started_at,
+            response_received_at=time.monotonic(),
+        )
+        if measured_deadline is None or measured_deadline <= time.monotonic():
+            return next_heartbeat_at, False
+        lease_state["deadline"] = measured_deadline
+        lease_state["approval_deadline"] = (
+            _monotonic_expiry_deadline(
+                heartbeat.get("heartbeat_at"),
+                approval_expires_at,
+                request_started_at=request_started_at,
+                response_received_at=time.monotonic(),
+            )
+            if isinstance(approval_expires_at, str)
+            else None
+        )
     return time.monotonic() + INVOCATION_HEARTBEAT_INTERVAL_SECONDS, True
 
 
@@ -793,6 +871,7 @@ def _run(
     wait_started_at = time.monotonic()
     deadline = wait_started_at + timeout
     next_heartbeat_at = wait_started_at + INVOCATION_HEARTBEAT_INTERVAL_SECONDS
+    lease_state: dict[str, float | None] = {"deadline": None}
     reconnect_backoff_seconds = POLL_INTERVAL_SECONDS
     while time.monotonic() < deadline:
         remaining_seconds = deadline - time.monotonic()
@@ -806,6 +885,8 @@ def _run(
             source_invocation_id=source_invocation_id,
             deadline=deadline,
             next_heartbeat_at=next_heartbeat_at,
+            approval_expires_at=created.get("expires_at"),
+            lease_state=lease_state,
             diagnostics=diagnostics,
         )
         if not lease_live:
@@ -869,6 +950,8 @@ def _run(
                 source_invocation_id=source_invocation_id,
                 deadline=deadline,
                 next_heartbeat_at=next_heartbeat_at,
+                approval_expires_at=created.get("expires_at"),
+                lease_state=lease_state,
                 diagnostics=diagnostics,
             )
             if not lease_live:

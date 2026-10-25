@@ -707,6 +707,164 @@ def test_invocation_heartbeat_retries_one_transport_failure_within_deadline(
     assert "approval-1" not in diagnostic
 
 
+def test_invocation_heartbeat_retries_one_short_rate_limit_within_both_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    attempts = 0
+    approval = {
+        "id": "approval-1",
+        "source_agent_id": "agent-1",
+        "source_invocation_id": "invocation-1",
+    }
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    lease_state: dict[str, float | None] = {
+        "deadline": clock.now + 60,
+        "approval_deadline": clock.now + 60,
+    }
+
+    def request(*_args: object, **_kwargs: object) -> dict:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise hook.RateLimitError(2, retry_after_header="2")
+        return _invocation_heartbeat(approval)
+
+    monkeypatch.setattr(hook, "_request", request)
+    next_at, live = hook._refresh_invocation_lease_if_due(
+        api_base="https://control.example",
+        approval_id="approval-1",
+        agent_id="agent-1",
+        token="test-token",
+        source_invocation_id="invocation-1",
+        deadline=clock.now + 30,
+        next_heartbeat_at=clock.now,
+        approval_expires_at=expires_at,
+        lease_state=lease_state,
+    )
+
+    assert live is True
+    assert attempts == 2
+    assert clock.sleeps == [2]
+    assert next_at == clock.now + hook.INVOCATION_HEARTBEAT_INTERVAL_SECONDS
+    assert lease_state["deadline"] is not None
+
+
+@pytest.mark.parametrize(
+    ("delay", "header", "host_budget", "approval_budget", "lease_budget"),
+    [
+        (2, None, 40, 60, 60),  # missing Retry-After
+        (5, "5", 40, 60, 60),  # exceeds the lease-safe retry window
+        (2, "2", 13, 60, 60),  # host deadline cannot cover delay plus request
+        (2, "2", 40, 13, 60),  # approval expiry cannot cover delay plus request
+        (2, "not-a-date", 40, 60, 60),
+        (2, "2", 40, 60, 13),  # measured invocation lease cannot cover retry
+    ],
+)
+def test_invocation_heartbeat_fails_closed_on_unsafe_rate_limit_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    delay: int,
+    header: str | None,
+    host_budget: int,
+    approval_budget: int,
+    lease_budget: int,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    attempts = 0
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=approval_budget)
+    ).isoformat()
+    lease_state: dict[str, float | None] = {
+        "deadline": clock.now + lease_budget,
+        "approval_deadline": clock.now + approval_budget,
+    }
+
+    def request(*_args: object, **_kwargs: object) -> dict:
+        nonlocal attempts
+        attempts += 1
+        raise hook.RateLimitError(delay, retry_after_header=header)
+
+    monkeypatch.setattr(hook, "_request", request)
+    _, live = hook._refresh_invocation_lease_if_due(
+        api_base="https://control.example",
+        approval_id="approval-1",
+        agent_id="agent-1",
+        token="test-token",
+        source_invocation_id="invocation-1",
+        deadline=clock.now + host_budget,
+        next_heartbeat_at=clock.now,
+        approval_expires_at=expires_at,
+        lease_state=lease_state,
+    )
+
+    assert live is False
+    assert attempts == 1
+    assert clock.sleeps == []
+
+
+def test_invocation_heartbeat_denies_after_repeated_rate_limit_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    attempts = 0
+    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    lease_state: dict[str, float | None] = {
+        "deadline": clock.now + 60,
+        "approval_deadline": clock.now + 60,
+    }
+
+    def request(*_args: object, **_kwargs: object) -> dict:
+        nonlocal attempts
+        attempts += 1
+        raise hook.RateLimitError(2, retry_after_header="2")
+
+    monkeypatch.setattr(hook, "_request", request)
+    _, live = hook._refresh_invocation_lease_if_due(
+        api_base="https://control.example",
+        approval_id="approval-1",
+        agent_id="agent-1",
+        token="test-token",
+        source_invocation_id="invocation-1",
+        deadline=clock.now + 30,
+        next_heartbeat_at=clock.now,
+        approval_expires_at=expires_at,
+        lease_state=lease_state,
+    )
+
+    assert live is False
+    assert attempts == 2
+    assert clock.sleeps == [2]
+
+
+def test_invocation_heartbeat_fails_closed_on_rate_limit_without_measured_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _patch_clock(monkeypatch)
+    attempts = 0
+
+    def request(*_args: object, **_kwargs: object) -> dict:
+        nonlocal attempts
+        attempts += 1
+        raise hook.RateLimitError(2, retry_after_header="2")
+
+    monkeypatch.setattr(hook, "_request", request)
+    _, live = hook._refresh_invocation_lease_if_due(
+        api_base="https://control.example",
+        approval_id="approval-1",
+        agent_id="agent-1",
+        token="test-token",
+        source_invocation_id="invocation-1",
+        deadline=clock.now + 30,
+        next_heartbeat_at=clock.now,
+        approval_expires_at=(datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
+        lease_state={"deadline": None, "approval_deadline": None},
+    )
+
+    assert live is False
+    assert attempts == 1
+    assert clock.sleeps == []
+
+
 def test_invocation_heartbeat_does_not_retry_when_deadline_cannot_cover_backoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1294,6 +1452,31 @@ def test_heartbeat_request_requires_exact_http_200(
             {"source_invocation_id": "antigravity:v1:test"},
             expected_status=200,
         )
+
+
+def test_rate_limit_error_preserves_retry_after_for_bounded_heartbeat_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hook,
+        "deadline_request",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status=429, headers={"Retry-After": "2"}, body=b"{}"
+        ),
+    )
+
+    with pytest.raises(hook.RateLimitError) as raised:
+        hook._request(
+            "POST",
+            "https://control.example/agents/approvals/id/heartbeat",
+            "agent-123",
+            "test-token",
+            {"source_invocation_id": "antigravity:v1:test"},
+            expected_status=200,
+        )
+
+    assert raised.value.retry_after_seconds == 2
+    assert raised.value.retry_after_header == "2"
 
 
 @pytest.mark.parametrize("failure", [TimeoutError("private timeout detail"), OSError("private socket detail")])

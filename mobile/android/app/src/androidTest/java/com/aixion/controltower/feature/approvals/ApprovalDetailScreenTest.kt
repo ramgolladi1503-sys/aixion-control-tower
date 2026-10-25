@@ -370,7 +370,7 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
-    fun exactToolRequestAndAcknowledgementPrecedeOverviewAndRiskContext() {
+    fun exactToolRequestAndDecisionContextPrecedeAcknowledgement() {
         val request = approval(ApprovalStatus.REQUESTED).copy(
             files = listOf(
                 FileChangeSummary(
@@ -404,9 +404,9 @@ class ApprovalDetailScreenTest {
         val overviewTop = overview.fetchSemanticsNode().boundsInRoot.top
         val riskContextTop = riskContext.fetchSemanticsNode().boundsInRoot.top
         assertTrue("Exact request header must precede its payload", exactHeaderTop < payloadTop)
-        assertTrue("Payload must be followed immediately by the acknowledgment, before overview", payloadTop < acknowledgementTop)
-        assertTrue("Acknowledgment must precede the overview", acknowledgementTop < overviewTop)
-        assertTrue("Overview must precede additional risk context", overviewTop < riskContextTop)
+        assertTrue("Exact payload must precede the request overview", payloadTop < overviewTop)
+        assertTrue("Request overview must precede risk context", overviewTop < riskContextTop)
+        assertTrue("Reviewer must reach all decision context before acknowledging", riskContextTop < acknowledgementTop)
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
     }
 

@@ -26,7 +26,7 @@ class ApprovalExactToolDecisionContextTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun exactToolDecisionContextPrecedesAcknowledgementAndDecision() {
+    fun exactToolPayloadAndDecisionContextPrecedeAcknowledgementAndDecision() {
         val expiresAt = "2099-01-02T03:04:05Z"
         val longArgument = "x".repeat(180)
         val payload = "{\"command\":\"run --token $longArgument\"}"

@@ -326,12 +326,6 @@ fun ApprovalDetailContent(
                     }
                     items(approval.files) { file -> DiffBlock(file = file) }
                     item {
-                        ExactToolRequestReviewAcknowledgement(
-                            checked = exactToolRequestReviewed,
-                            onCheckedChange = { exactToolRequestReviewed = it }
-                        )
-                    }
-                    item {
                         ApprovalHeroPanel(
                             approval = approval,
                             canApprove = canApprove,
@@ -344,6 +338,12 @@ fun ApprovalDetailContent(
                     }
                     item {
                         ExactToolDecisionContext(approval = approval)
+                    }
+                    item {
+                        ExactToolRequestReviewAcknowledgement(
+                            checked = exactToolRequestReviewed,
+                            onCheckedChange = { exactToolRequestReviewed = it }
+                        )
                     }
                 } else {
                     item {

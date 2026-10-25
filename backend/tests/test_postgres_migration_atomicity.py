@@ -11,6 +11,57 @@ from app import postgres_database
 from app.postgres_database import PostgresMigration, run_postgres_migrations
 
 
+def test_postgres_migration_chain_bootstraps_empty_schema_and_replays_idempotently() -> None:
+    """The complete checked-in chain must build a pristine schema and replay cleanly."""
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL migration tests")
+
+    schema = f"ct_migration_fresh_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    def connect() -> Connection:
+        connection = psycopg.connect(dsn)
+        connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        return connection
+
+    try:
+        first_ledger = run_postgres_migrations(connect)
+        expected_ids = sorted(migration.migration_id for migration in postgres_database.POSTGRES_MIGRATIONS)
+        assert [row["migration_id"] for row in first_ledger] == expected_ids
+        assert len(expected_ids) == len(set(expected_ids))
+
+        replayed_ledger = run_postgres_migrations(connect)
+        assert replayed_ledger == first_ledger
+
+        with connect() as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema=current_schema() AND table_type='BASE TABLE'"
+                ).fetchall()
+            }
+            persisted_migrations = conn.execute(
+                "SELECT count(*) FROM schema_migrations"
+            ).fetchone()[0]
+
+        assert {
+            "workspaces",
+            "users",
+            "sessions",
+            "projects",
+            "approval_requests",
+            "agent_tasks",
+            "audit_events",
+        } <= tables
+        assert persisted_migrations == len(expected_ids)
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 def test_postgres_migration_failure_rolls_back_prior_migrations_and_ledger(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
