@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
 import sqlite3
 import stat
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -44,6 +46,8 @@ from app.trust_models import (
 from app.trust_policy import lease_receipt_payload
 from app.postgres_trust_event_repository import PostgresTrustEventRepository
 from scripts.import_approval_slice_to_postgres import (
+    CORE_TYPES,
+    ENTITY_TYPES,
     ImportBlocked,
     _target_is_remote,
     apply_import,
@@ -51,6 +55,52 @@ from scripts.import_approval_slice_to_postgres import (
     build_plan,
     main,
 )
+
+
+def _sqlite_store_persistent_entity_types() -> set[str]:
+    """Read literal entity names written by SQLiteBackedStore.persist().
+
+    Keep this source-derived so a new `_write_map`/`_write_list` call cannot
+    silently expand the SQLite persistence contract without importer review.
+    Dynamic `persist_records` inserts and repository-owned tables are not
+    represented here; those need dedicated inventory as they are introduced.
+    """
+    source_path = Path(__file__).parents[1] / "app" / "store.py"
+    module = ast.parse(source_path.read_text(encoding="utf-8"))
+    store_class = next(
+        node for node in module.body
+        if isinstance(node, ast.ClassDef) and node.name == "SQLiteBackedStore"
+    )
+    persist_method = next(
+        node for node in store_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "persist"
+    )
+    entity_types: set[str] = set()
+    for node in ast.walk(persist_method):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in {"_write_map", "_write_list"} or len(node.args) < 2:
+            continue
+        entity_name = node.args[1]
+        if isinstance(entity_name, ast.Constant) and isinstance(entity_name.value, str):
+            entity_types.add(entity_name.value)
+    return entity_types
+
+
+def test_sqlite_persistent_entities_are_accounted_for_by_import_inventory():
+    persistent_types = _sqlite_store_persistent_entity_types()
+
+    documented_exclusions: set[str] = set()
+    importer_accounted_types = set(ENTITY_TYPES) | set(CORE_TYPES)
+
+    assert persistent_types, "SQLite persist() entity inventory unexpectedly empty"
+    assert persistent_types <= importer_accounted_types | documented_exclusions, (
+        "SQLite-backed entity types are missing from the PostgreSQL importer "
+        "inventory and its documented exclusions: "
+        f"{sorted(persistent_types - importer_accounted_types - documented_exclusions)}"
+    )
+    assert "agent_run_fault" in importer_accounted_types
+    assert documented_exclusions.isdisjoint(importer_accounted_types)
 
 
 @pytest.fixture(autouse=True)
@@ -530,11 +580,11 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     assert selected["notification"]["n2"]["entity_type"] == "agent_task"
     assert plan["agent_run_fault_injection"] == {
         "status": "CLEAR",
-        "excluded_reason": "diagnostic fault settings are not imported",
+        "inactive_settings": "IMPORTED",
         "active_count": 0,
         "active_id_sha256": [],
-        "excluded_inactive_count": 0,
-        "excluded_inactive_id_sha256": [],
+        "inactive_import_count": 0,
+        "inactive_import_id_sha256": [],
     }
     assert plan["invocation_drain"] == {
         "status": "CLEAR",
@@ -895,7 +945,7 @@ def test_delivery_state_is_included_and_requires_matching_invocation_audit(tmp_p
 
     plan, selected, digest = build_plan(path)
 
-    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12"
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13"
     assert plan["planned_counts"]["approval_delivery_claim"] == 1
     assert plan["planned_counts"]["approval_delivery_failure"] == 1
     assert plan["planned_counts"]["approval_invocation_lease"] == 1
@@ -1971,7 +2021,7 @@ def test_import_preserves_trust_state_signatures_and_hash_chain(tmp_path, postgr
     _snapshot(path, include_omitted=False, include_trust=True)
     plan, selected, digest = build_plan(path)
 
-    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12"
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13"
     assert plan["planned_counts"]["agent_run"] == 1
     assert plan["planned_counts"]["agent_run_step"] == 1
     assert plan["planned_counts"]["agent_run_event"] == 1
@@ -2124,7 +2174,7 @@ def test_integer_encoded_enabled_agent_run_fault_blocks_import(tmp_path):
         build_plan(path)
 
 
-def test_inactive_agent_run_faults_are_reported_as_excluded(tmp_path):
+def test_inactive_agent_run_faults_are_imported(tmp_path):
     path = tmp_path / "inactive_fault_snapshot.sqlite3"
     fault_id = "inactive-diagnostic-fault"
     _snapshot(path, include_omitted=False, agent_run_faults=[{
@@ -2141,16 +2191,17 @@ def test_inactive_agent_run_faults_are_reported_as_excluded(tmp_path):
 
     plan, selected, _ = build_plan(path)
 
-    assert "agent_run_fault" not in selected
+    assert selected["agent_run_fault"][fault_id]["enabled"] is False
     assert plan["agent_run_fault_injection"] == {
         "status": "CLEAR",
-        "excluded_reason": "diagnostic fault settings are not imported",
+        "inactive_settings": "IMPORTED",
         "active_count": 0,
         "active_id_sha256": [],
-        "excluded_inactive_count": 1,
-        "excluded_inactive_id_sha256": [hashlib.sha256(fault_id.encode()).hexdigest()],
+        "inactive_import_count": 1,
+        "inactive_import_id_sha256": [hashlib.sha256(fault_id.encode()).hexdigest()],
     }
-    assert plan["omitted_counts"]["agent_run_fault"] == 1
+    assert plan["planned_counts"]["agent_run_fault"] == 1
+    assert plan["omitted_counts"].get("agent_run_fault", 0) == 0
 
 
 def test_plan_refuses_invalid_trust_authorization_signature(tmp_path):

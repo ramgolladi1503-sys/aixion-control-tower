@@ -145,6 +145,16 @@ def _postgres_patch_plan(
     user: AuthUser,
     request: Request | None,
 ) -> PatchPlanResponse:
+    # Production cannot use the process-local membership adapter. Even though
+    # this endpoint is read-only, it must never let a production-configured app
+    # silently inspect the SQLite compatibility store when PostgreSQL auth was
+    # not selected.
+    if not getattr(get_settings(), "postgres_auth_enabled", False):
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL patch planning requires PostgreSQL-backed authentication",
+            headers={"Retry-After": "1"},
+        )
     if request is None:
         raise HTTPException(
             status_code=503,
@@ -198,7 +208,24 @@ def create_patch_plan(
 
 
 @router.post("/execute", response_model=ExecuteGitHubResponse)
-async def execute_github_change(payload: ExecuteGitHubRequest, _: AuthUser = MaintainerDependency) -> ExecuteGitHubResponse:
+async def execute_github_change(
+    payload: ExecuteGitHubRequest,
+    request: Request,
+    _: AuthUser = MaintainerDependency,
+) -> ExecuteGitHubResponse:
+    settings = get_settings()
+    if settings.is_production or getattr(settings, "postgres_auth_enabled", False):
+        # The legacy execution sequence has no PostgreSQL transaction spanning
+        # approval state, TestRun, audit, and GitHub side effects. Keep the
+        # external write unavailable until that durable workflow exists.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "GitHub execution is unavailable until approval state, execution "
+                "status, and external side effects share a durable workflow."
+            ),
+            headers={"Retry-After": "1"},
+        )
     plan = _validate_execution(payload)
     if not plan.ready:
         raise HTTPException(status_code=409, detail={"blockers": plan.blockers})

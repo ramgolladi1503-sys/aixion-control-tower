@@ -66,7 +66,7 @@ from app.trust_models import (
     TrustEvent,
 )
 
-SCOPE = "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12"
+SCOPE = "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13"
 ENTITY_TYPES = {
     "workspace": Workspace,
     "user": User,
@@ -85,6 +85,7 @@ ENTITY_TYPES = {
     "agent_run": AgentRun,
     "agent_run_step": AgentRunStep,
     "agent_run_event": AgentRunEvent,
+    "agent_run_fault": AgentRunFaultConfig,
     "audit_event": AuditEvent,
     "notification": Notification,
     "capability_lease": CapabilityLease,
@@ -102,6 +103,7 @@ CORE_TYPES = {
     "workspace", "user", "invite", "session", "project", "idea", "work_order", "agent_connector", "external_agent",
     "external_agent_credential", "device_registration", "approval_request",
     "agent_task", "agent_task_event", "agent_run", "agent_run_step", "agent_run_event",
+    "agent_run_fault",
     "audit_event", "notification", "capability_lease",
     "reviewer_attestation", "proposed_action", "policy_decision", "action_authorization",
     "action_consumption", "credential_grant", "trust_event",
@@ -134,6 +136,7 @@ IMPORT_TABLES = {
     "agent_run": ("agent_runs", "run_id"),
     "agent_run_step": ("agent_run_steps", "step_id"),
     "agent_run_event": ("agent_run_events", "event_id"),
+    "agent_run_fault": ("agent_run_faults", "fault_id"),
     "audit_event": ("audit_events", "event_id"),
     "notification": ("notifications", "notification_id"),
     "capability_lease": ("capability_leases", "lease_id"),
@@ -421,16 +424,17 @@ def _block_unsupported_notifications(records: dict[str, dict[str, dict[str, Any]
 def _agent_run_fault_summary(
     records: dict[str, dict[str, dict[str, Any]]],
 ) -> dict[str, Any]:
-    """Summarize excluded diagnostic fault settings without exposing their data.
+    """Summarize fault settings without exposing their data.
 
-    Fault injection configuration has no import target. Any enabled setting
-    with remaining uses can alter AgentRun behavior after cutover, so it blocks
-    the plan even when an operator acknowledges other partial omissions.
+    Active fault injection can alter AgentRun behavior after cutover and blocks
+    the plan. Inactive settings are imported so their durable history is kept.
     """
     active: list[str] = []
     inactive: list[str] = []
     for fault_id, payload in records.get("agent_run_fault", {}).items():
         fault = AgentRunFaultConfig.model_validate(payload)
+        if fault.id != fault_id:
+            raise ImportBlocked(f"agent_run_fault/{fault_id} payload identity does not match its SQLite key")
         if fault.enabled and fault.remaining_uses > 0:
             active.append(hashlib.sha256(fault_id.encode("utf-8")).hexdigest())
         else:
@@ -440,9 +444,47 @@ def _agent_run_fault_summary(
     return {
         "active_count": len(active),
         "active_id_sha256": active,
-        "excluded_inactive_count": len(inactive),
-        "excluded_inactive_id_sha256": inactive,
+        "inactive_import_count": len(inactive),
+        "inactive_import_id_sha256": inactive,
     }
+
+
+def _prepare_agent_run_faults(
+    records: dict[str, dict[str, Any]],
+    runs: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Validate inactive fault rows against their exact imported AgentRun parent.
+
+    The legacy payload has no workspace field, so workspace authority comes
+    only from the matching AgentRun record. A legacy optional workspace field,
+    if present, must agree with that parent rather than override it.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for fault_id, payload in records.items():
+        try:
+            fault = AgentRunFaultConfig.model_validate(payload)
+        except Exception as error:
+            raise ImportBlocked(f"agent_run_fault/{fault_id} has an invalid payload") from error
+        if fault.id != fault_id:
+            raise ImportBlocked(f"agent_run_fault/{fault_id} payload identity does not match its SQLite key")
+        if fault.enabled and fault.remaining_uses > 0:
+            raise ImportBlocked(f"agent_run_fault/{fault_id} is active and cannot be imported")
+        if not isinstance(fault.run_id, str) or not fault.run_id:
+            raise ImportBlocked(f"agent_run_fault/{fault_id} has no supported AgentRun parent")
+        raw_parent = runs.get(fault.run_id)
+        if not isinstance(raw_parent, dict):
+            raise ImportBlocked(f"agent_run_fault/{fault_id} references a missing AgentRun parent")
+        try:
+            parent = AgentRun.model_validate(raw_parent)
+        except Exception as error:
+            raise ImportBlocked(f"agent_run_fault/{fault_id} references an invalid AgentRun parent") from error
+        if parent.id != fault.run_id or not parent.workspace_id:
+            raise ImportBlocked(f"agent_run_fault/{fault_id} references a mismatched or unscoped AgentRun parent")
+        stated_workspace = payload.get("workspace_id")
+        if stated_workspace is not None and stated_workspace != parent.workspace_id:
+            raise ImportBlocked(f"agent_run_fault/{fault_id} workspace does not match its AgentRun parent")
+        result[fault_id] = fault.model_dump(mode="json")
+    return result
 
 
 def _read_email_outbox(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
@@ -802,6 +844,9 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     tasks = selected.get("agent_task", {})
     task_events = selected.get("agent_task_event", {})
     runs = selected.get("agent_run", {})
+    selected["agent_run_fault"] = _prepare_agent_run_faults(
+        records.get("agent_run_fault", {}), runs
+    )
     run_steps = selected.get("agent_run_step", {})
     run_events = selected.get("agent_run_event", {})
     leases = selected.get("capability_lease", {})
@@ -1470,7 +1515,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         "sanitized_terminal_email_ciphertext_count": sanitized_terminal_email_ciphertexts,
         "agent_run_fault_injection": {
             "status": "CLEAR",
-            "excluded_reason": "diagnostic fault settings are not imported",
+            "inactive_settings": "IMPORTED",
             **agent_run_faults,
         },
         "omitted_counts": dict(sorted(omissions.items())),
@@ -1482,6 +1527,29 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
 
 
 def _insert_payload(conn: psycopg.Connection, kind: str, entity_id: str, payload: dict[str, Any]) -> None:
+    if kind == "agent_run_fault":
+        model = AgentRunFaultConfig.model_validate(payload)
+        parent = conn.execute(
+            "SELECT workspace_id FROM agent_runs WHERE run_id=%s",
+            (model.run_id,),
+        ).fetchone()
+        if parent is None or not parent[0]:
+            raise ImportBlocked(f"agent_run_fault/{entity_id} references a missing or unscoped target AgentRun")
+        if model.enabled and model.remaining_uses > 0:
+            raise ImportBlocked(f"agent_run_fault/{entity_id} is active and cannot be imported")
+        conn.execute(
+            "INSERT INTO agent_run_faults(fault_id,workspace_id,run_id,step_type,fault_kind,"
+            "enabled,remaining_uses,message,created_by,created_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                entity_id, parent[0], model.run_id,
+                model.step_type.value if model.step_type is not None else None,
+                model.fault_kind.value, model.enabled, model.remaining_uses,
+                model.message, model.created_by, model.created_at,
+                Jsonb(model.model_dump(mode="json")),
+            ),
+        )
+        return
     if kind == "approval_invocation_lease":
         conn.execute(
             "INSERT INTO approval_invocation_leases "
@@ -1907,6 +1975,37 @@ def _first_payload_mismatch(
 ) -> str | None:
     """Return the entity type whose target payloads differ from the source plan."""
     for kind, (table, id_column) in IMPORT_TABLES.items():
+        if kind == "agent_run_fault":
+            rows = conn.execute(
+                "SELECT fault_id,workspace_id,run_id,payload FROM agent_run_faults"
+            ).fetchall()
+            actual = {
+                fault_id: (workspace_id, run_id, payload)
+                for fault_id, workspace_id, run_id, payload in rows
+            }
+            expected = {}
+            for fault_id, raw_payload in selected.get(kind, {}).items():
+                model = AgentRunFaultConfig.model_validate(raw_payload)
+                run = selected.get("agent_run", {}).get(model.run_id or "")
+                if run is None:
+                    return kind
+                parent = AgentRun.model_validate(run)
+                expected[fault_id] = (
+                    parent.workspace_id,
+                    model.run_id,
+                    model.model_dump(mode="json"),
+                )
+            normalized_actual = {
+                fault_id: (
+                    workspace_id,
+                    run_id,
+                    AgentRunFaultConfig.model_validate(payload).model_dump(mode="json"),
+                )
+                for fault_id, (workspace_id, run_id, payload) in actual.items()
+            }
+            if normalized_actual != expected:
+                return kind
+            continue
         if kind == "approval_invocation_lease":
             rows = conn.execute(
                 "SELECT approval_id,workspace_id,source_agent_id,source_invocation_id,heartbeat_at,expires_at "
@@ -2099,7 +2198,8 @@ def apply_import(dsn: str, digest: str, plan: dict[str, Any], selected: dict[str
                 "device_registration", "idea", "work_order", "approval_request",
                 "approval_invocation_lease", "test_run",
                 "mcp_pending_request",
-                "agent_task", "agent_task_event", "agent_run", "agent_run_step", "agent_run_event",
+                "agent_task", "agent_task_event", "agent_run", "agent_run_fault",
+                "agent_run_step", "agent_run_event",
                 "approval_delivery_claim", "approval_delivery_failure",
                 "capability_lease", "reviewer_attestation",
                 "proposed_action", "policy_decision", "action_authorization", "action_consumption",
