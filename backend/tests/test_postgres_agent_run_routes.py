@@ -111,6 +111,51 @@ def test_postgres_execute_next_requires_request_before_local_fallback(
     assert raised.value.headers == {"Retry-After": "1"}
 
 
+def test_postgres_create_run_requires_request_before_local_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        agent_run_routes,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    def reject_local_access(*_args, **_kwargs):
+        raise AssertionError("PostgreSQL AgentRun creation must not select local repositories")
+
+    monkeypatch.setattr(agent_run_routes, "agent_task_repository_for_request", reject_local_access)
+    monkeypatch.setattr(
+        agent_run_routes, "approval_decision_repository_for_request", reject_local_access
+    )
+    monkeypatch.setattr(agent_run_routes, "agent_run_repository_for_request", reject_local_access)
+    monkeypatch.setattr(agent_run_routes, "create_agent_run", reject_local_access)
+    user = AuthUser(
+        id="postgres-create-route-test-user",
+        email="create-route-test@example.invalid",
+        display_name="Create Route Test",
+        role=UserRole.MAINTAINER,
+    )
+    payload = agent_run_routes.AgentRunCreate(task_id="missing-task")
+    before_runs = {key: value.model_copy(deep=True) for key, value in store.agent_runs.items()}
+    before_steps = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_steps.items()
+    }
+    before_events = {
+        key: value.model_copy(deep=True) for key, value in store.agent_run_events.items()
+    }
+    before_audits = [value.model_copy(deep=True) for value in store.audit_events]
+
+    with pytest.raises(HTTPException) as raised:
+        agent_run_routes.create_run(payload, user=user, request=None)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert store.agent_runs == before_runs
+    assert store.agent_run_steps == before_steps
+    assert store.agent_run_events == before_events
+    assert store.audit_events == before_audits
+
+
 def _claim_apply_change_intent_in_process(
     dsn: str,
     schema: str,

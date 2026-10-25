@@ -271,6 +271,15 @@ def create_run(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> AgentRunDetail:
+    if request is None and get_settings().postgres_auth_enabled:
+        # HTTP requests always carry the application-bound repositories. A
+        # direct invocation without Request must never fall back to the
+        # module-level SQLite adapters while PostgreSQL auth is active.
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL AgentRun creation requires an app-bound request",
+            headers={"Retry-After": "1"},
+        )
     task_repository = (
         agent_task_repository_for_request(request) if request is not None else agent_task_repository
     )
