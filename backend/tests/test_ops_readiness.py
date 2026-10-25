@@ -390,6 +390,10 @@ def test_readiness_recognizes_sqlite_repository_subclasses() -> None:
 
 def test_readiness_reports_all_high_risk_postgres_lifespan_bindings() -> None:
     binding_fields = {
+        "agent_run_faults": (
+            "agent_run_fault_repository",
+            "agent_run_faults",
+        ),
         "agent_run_branch_intents": (
             "agent_run_branch_intent_repository",
             "agent_run_branch_intents",
