@@ -187,9 +187,9 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupCard(
             name = "Antigravity",
-            status = "Earlier build tested",
-            statusColor = palette.brand,
-            description = "A local phone approval flow passed on an earlier build. This build has not yet been verified on a phone, and delivery while away from the Mac is unverified.",
+            status = "Not verified",
+            statusColor = palette.caution,
+            description = "A local phone approval flow passed on an earlier build, but this build has not been tested on a phone. Approval delivery while away from the Mac is also unverified.",
             buttonLabel = "Set up Antigravity",
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )

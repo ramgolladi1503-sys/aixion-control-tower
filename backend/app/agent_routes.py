@@ -29,6 +29,7 @@ from .agent_task_models import (
     AgentTaskEvent,
     AgentTaskEventCreate,
     AgentTaskEventType,
+    AgentTaskStatus,
 )
 from .agent_task_repository import (
     AgentTaskRepositoryConflict,
@@ -1055,6 +1056,14 @@ def append_agent_owned_task_event(
     agent: ExternalAgent = Depends(require_external_agent),
     http_request: Request = None,  # type: ignore[assignment]
 ) -> AgentTaskEvent:
+    if payload.event_type in {AgentTaskEventType.APPROVED, AgentTaskEventType.DENIED} or payload.status in {
+        AgentTaskStatus.APPROVED,
+        AgentTaskStatus.DENIED,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="Approval decisions must be recorded through the linked approval workflow",
+        )
     assert_agent_can(
         agent, AgentAction.APPEND_AGENT_TASK_EVENT, http_request=http_request
     )

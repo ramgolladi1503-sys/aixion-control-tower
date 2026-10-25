@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 
 from app import approval_recovery, main
 from app.approval_decisions import agent_task_repository as sqlite_agent_task_repository
-from app.agent_task_models import AgentTaskStatus
+from app.agent_task_models import AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from app.agent_task_repository import PostgresAgentTaskRepository
 from app.agent_task_routes import (
     MaintainerDependency,
@@ -25,7 +25,17 @@ from app.approval_repository import ApprovalDecisionConflict
 from app.approval_recovery import reconcile_linked_approval_tasks
 from app.approval_integrity import compute_approval_payload_hash
 from app.application_repositories import ApplicationRepositories
-from app.models import ApprovalRequest, ApprovalStatus, AuthUser, Project, User, UserRole, Workspace, WorkOrder
+from app.models import (
+    ApprovalRequest,
+    ApprovalStatus,
+    AuditEvent,
+    AuthUser,
+    Project,
+    User,
+    UserRole,
+    Workspace,
+    WorkOrder,
+)
 from app.postgres_database import run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
 from app.settings import get_settings
@@ -919,6 +929,124 @@ def test_postgres_agent_task_event_route_commits_event_audit_and_notification_at
     assert set(store.agent_task_events) == before_event_ids
     assert {audit.id for audit in store.audit_events} == before_audit_ids
     assert set(store.notifications) == before_notification_ids
+
+
+def test_postgres_agent_task_event_route_cannot_forge_approval_decisions(
+    postgres_agent_task_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, project = postgres_agent_task_route_runtime
+    _bind_postgres_agent_task_runtime(connect, monkeypatch)
+    client = TestClient(main.app)
+    created = client.post(
+        "/agent/tasks",
+        json={
+            "provider": "MANUAL",
+            "project_id": project.id,
+            "title": "Approval authority target",
+            "goal": "Keep approval decisions bound to the linked approval transition.",
+            "requested_action": "OTHER",
+            "requires_approval": False,
+        },
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    with connect() as conn:
+        original_task = conn.execute(
+            "SELECT status,payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        original_events = conn.execute(
+            "SELECT event_id,payload FROM agent_task_events WHERE task_id=%s ORDER BY event_id",
+            (task_id,),
+        ).fetchall()
+        original_audits = conn.execute(
+            "SELECT event_id,payload FROM audit_events WHERE entity_type='agent_task' "
+            "AND entity_id=%s ORDER BY event_id",
+            (task_id,),
+        ).fetchall()
+        original_notifications = conn.execute(
+            "SELECT notification_id,payload FROM notifications WHERE task_id=%s ORDER BY notification_id",
+            (task_id,),
+        ).fetchall()
+
+    for event_type, task_status in (("APPROVED", "APPROVED"), ("DENIED", "DENIED")):
+        response = client.post(
+            f"/agent/tasks/{task_id}/events",
+            json={
+                "event_type": event_type,
+                "message": "This event must not create an approval decision.",
+                "status": task_status,
+            },
+        )
+        assert response.status_code == 409, response.text
+        assert "linked approval transition" in response.json()["detail"]
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT status,payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+                (task_id, workspace.id),
+            ).fetchone() == original_task
+            assert conn.execute(
+                "SELECT event_id,payload FROM agent_task_events WHERE task_id=%s ORDER BY event_id",
+                (task_id,),
+            ).fetchall() == original_events
+            assert conn.execute(
+                "SELECT event_id,payload FROM audit_events WHERE entity_type='agent_task' "
+                "AND entity_id=%s ORDER BY event_id",
+                (task_id,),
+            ).fetchall() == original_audits
+            assert conn.execute(
+                "SELECT notification_id,payload FROM notifications WHERE task_id=%s ORDER BY notification_id",
+                (task_id,),
+            ).fetchall() == original_notifications
+
+    task_repository = main.app.state.agent_task_repository
+    expected = task_repository.get(task_id)
+    assert expected is not None
+    for event_type, task_status in (
+        (AgentTaskEventType.APPROVED, AgentTaskStatus.APPROVED),
+        (AgentTaskEventType.NOTE, AgentTaskStatus.APPROVED),
+        (AgentTaskEventType.DENIED, AgentTaskStatus.DENIED),
+        (AgentTaskEventType.NOTE, AgentTaskStatus.DENIED),
+    ):
+        event = AgentTaskEvent(
+            task_id=task_id,
+            event_type=event_type,
+            status=task_status,
+            actor="agent:untrusted",
+            message="Direct repository attempts must fail closed.",
+        )
+        audit = AuditEvent(
+            event_type="agent_task.event_recorded_by_agent",
+            entity_id=task_id,
+            workspace_id=workspace.id,
+            actor="agent:untrusted",
+            details={
+                "event_id": event.id,
+                "event_type": event.event_type,
+                "status": event.status,
+                "message": event.message,
+                "notification_id": None,
+            },
+        )
+        with pytest.raises(ValueError, match="linked approval transition"):
+            task_repository.commit_event(
+                expected=expected,
+                updated=expected.model_copy(update={"status": task_status}),
+                event=event,
+                audit=audit,
+            )
+        assert task_repository.get(task_id) == expected
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT event_id,payload FROM agent_task_events WHERE task_id=%s ORDER BY event_id",
+                (task_id,),
+            ).fetchall() == original_events
+            assert conn.execute(
+                "SELECT event_id,payload FROM audit_events WHERE entity_type='agent_task' "
+                "AND entity_id=%s ORDER BY event_id",
+                (task_id,),
+            ).fetchall() == original_audits
 
 
 def test_postgres_agent_task_event_route_rolls_back_all_records_when_notification_insert_fails(

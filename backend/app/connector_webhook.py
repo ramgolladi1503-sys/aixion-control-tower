@@ -364,6 +364,14 @@ def _append_task_event_from_connector(
     project_to_store: bool = True,
     task_connection: Connection | None = None,
 ) -> ConnectorWebhookResponse:
+    if payload.event_type in {AgentTaskEventType.APPROVED, AgentTaskEventType.DENIED} or payload.status in {
+        AgentTaskStatus.APPROVED,
+        AgentTaskStatus.DENIED,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Approval decisions must be recorded through the linked approval workflow",
+        )
     if not connector_scope_is_consistent(
         connector, projects=project_repository, memberships=workspace_memberships
     ):

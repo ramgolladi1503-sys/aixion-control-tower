@@ -176,6 +176,37 @@ def _validate_event_commit(
     notification: Notification | None,
 ) -> None:
     expected_status = event.status or expected.status
+    approval_decision_task_states = {
+        AgentTaskEventType.APPROVED: (AgentTaskStatus.APPROVED, ApprovalStatus.APPROVED),
+        AgentTaskEventType.DENIED: (AgentTaskStatus.DENIED, ApprovalStatus.DENIED),
+    }
+    terminal_approval_event = (
+        event.event_type in approval_decision_task_states
+        or event.status in {AgentTaskStatus.APPROVED, AgentTaskStatus.DENIED}
+        or (
+            expected.status != updated.status
+            and updated.status in {AgentTaskStatus.APPROVED, AgentTaskStatus.DENIED}
+        )
+    )
+    if terminal_approval_event:
+        decision = approval_decision_task_states.get(event.event_type)
+        if (
+            audit.event_type != "agent_task.approval_decision_propagated"
+            or decision is None
+            or not expected.approval_request_id
+            or expected.status != AgentTaskStatus.WAITING_FOR_APPROVAL
+            or event.status != decision[0]
+            or updated.status != decision[0]
+            or event.metadata.get("approval_request_id") != expected.approval_request_id
+            or event.metadata.get("new_status") != decision[1]
+            or audit.details.get("approval_request_id") != expected.approval_request_id
+            or audit.details.get("new_status") != decision[1]
+            or audit.details.get("task_status") != decision[0]
+            or audit.actor != event.actor
+        ):
+            raise ValueError(
+                "AgentTask approval decisions must come from the linked approval transition."
+            )
     if (
         expected.id != updated.id
         or expected.project_id != updated.project_id

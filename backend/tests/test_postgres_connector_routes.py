@@ -1095,6 +1095,112 @@ def test_postgres_webhook_append_failure_rolls_back_connector_and_task_event(
     assert append_nonce not in final_connector_payload["config"].get("hmac_nonce_history", {})
 
 
+def test_postgres_webhook_cannot_forge_approval_or_denial_task_events(
+    postgres_connector_route_runtime,
+) -> None:
+    connect, workspace, user = postgres_connector_route_runtime
+    project = Project(
+        id=f"project_{uuid.uuid4().hex}",
+        name="Approval authority webhook project",
+        workspace_id=workspace.id,
+        created_by_user_id=user.id,
+    )
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+            (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))),
+        )
+    client = TestClient(main.app)
+    created = client.post(
+        "/connectors",
+        json={
+            "name": "Approval authority connector",
+            "provider_label": "ANTIGRAVITY",
+            "auth_type": "HMAC",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": ["CREATE_AGENT_TASK", "APPEND_AGENT_TASK_EVENT"],
+        },
+    )
+    assert created.status_code == 200, created.text
+    connector_id = created.json()["id"]
+    issued = client.post(f"/connectors/{connector_id}/secret/issue")
+    assert issued.status_code == 200, issued.text
+    secret = issued.json()["secret"]
+
+    def send(payload: dict):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        timestamp = str(int(time.time()))
+        nonce = f"approval_attempt_{uuid.uuid4().hex}"
+        signature = expected_hmac_v1_signature(
+            hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
+        )
+        return client.post(
+            f"/connectors/{connector_id}/webhook",
+            content=body,
+            headers={
+                "X-Aixion-Signature-Version": "v1",
+                "X-Aixion-Timestamp": timestamp,
+                "X-Aixion-Nonce": nonce,
+                "X-Aixion-Connector-Signature": f"v1={signature}",
+                "Content-Type": "application/json",
+            },
+        )
+
+    task_response = send({
+        "action": "CREATE_AGENT_TASK",
+        "project_id": project.id,
+        "title": "Webhook approval authority target",
+        "goal": "Keep connector progress separate from reviewer decisions.",
+    })
+    assert task_response.status_code == 200, task_response.text
+    task_id = task_response.json()["task_id"]
+    with connect() as conn:
+        original_task = conn.execute(
+            "SELECT status,payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+            (task_id, workspace.id),
+        ).fetchone()
+        original_events = conn.execute(
+            "SELECT event_id,payload FROM agent_task_events WHERE task_id=%s ORDER BY event_id",
+            (task_id,),
+        ).fetchall()
+        original_task_audits = conn.execute(
+            "SELECT event_id,payload FROM audit_events WHERE entity_type='agent_task' "
+            "AND entity_id=%s ORDER BY event_id",
+            (task_id,),
+        ).fetchall()
+        original_notifications = conn.execute(
+            "SELECT notification_id,payload FROM notifications WHERE task_id=%s ORDER BY notification_id",
+            (task_id,),
+        ).fetchall()
+
+    for event_type, task_status in (("APPROVED", "APPROVED"), ("DENIED", "DENIED")):
+        response = send({
+            "action": "APPEND_AGENT_TASK_EVENT",
+            "task_id": task_id,
+            "event_type": event_type,
+            "message": "This connector event must not decide the linked approval.",
+            "status": task_status,
+        })
+        assert response.status_code == 409, response.text
+        assert "linked approval workflow" in response.json()["detail"]
+        with connect() as conn:
+            assert conn.execute(
+                "SELECT status,payload FROM agent_tasks WHERE task_id=%s AND workspace_id=%s",
+                (task_id, workspace.id),
+            ).fetchone() == original_task
+            assert conn.execute(
+                "SELECT event_id,payload FROM agent_task_events WHERE task_id=%s ORDER BY event_id",
+                (task_id,),
+            ).fetchall() == original_events
+            assert conn.execute(
+                "SELECT event_id,payload FROM audit_events WHERE entity_type='agent_task' "
+                "AND entity_id=%s ORDER BY event_id",
+                (task_id,),
+            ).fetchall() == original_task_audits
+            assert conn.execute(
+                "SELECT notification_id,payload FROM notifications WHERE task_id=%s ORDER BY notification_id",
+                (task_id,),
+            ).fetchall() == original_notifications
 @pytest.mark.parametrize(
     ("body", "expected_status"),
     [
