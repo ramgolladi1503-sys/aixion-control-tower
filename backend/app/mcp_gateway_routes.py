@@ -230,6 +230,22 @@ def _require_local_mcp_write_runtime(request: Request) -> None:
         )
 
 
+def _require_mcp_request_context(request: Request | None) -> None:
+    """Prevent direct route invocation from selecting SQLite in PostgreSQL mode.
+
+    FastAPI supplies ``Request`` for HTTP calls. Route functions are also
+    callable from in-process integrations, though, and their optional request
+    parameter must not silently turn a PostgreSQL-authenticated deployment
+    into the process-local compatibility store.
+    """
+    if request is None and get_settings().postgres_auth_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL MCP route requires an app-bound request context",
+            headers={"Retry-After": "1"},
+        )
+
+
 def _postgres_mcp_submission(
     *,
     payload: GatewaySubmitRequest,
@@ -509,6 +525,7 @@ def submit_gateway_request(
     request: Request = None,  # type: ignore[assignment]
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> MCPGatewayDecision:
+    _require_mcp_request_context(request)
     try:
         serialized_arguments = json.dumps(
             payload.request.arguments,
@@ -545,6 +562,7 @@ def list_pending_gateway_requests(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> list[MCPPendingRequest]:
+    _require_mcp_request_context(request)
     repository = _postgres_pending_repository_for_request(request) if request is not None else None
     workspace_id = _pending_read_workspace_id(user, request)
     if repository is not None:
@@ -577,6 +595,7 @@ def pending_gateway_health(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> MCPPendingHealthSummary:
+    _require_mcp_request_context(request)
     repository = _postgres_pending_repository_for_request(request) if request is not None else None
     workspace_id = _pending_read_workspace_id(user, request)
     if repository is not None:
@@ -600,6 +619,7 @@ def get_pending_gateway_request(
     user: AuthUser = ReviewerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> MCPPendingRequest:
+    _require_mcp_request_context(request)
     repository = _postgres_pending_repository_for_request(request) if request is not None else None
     if repository is not None:
         workspace_id = _pending_read_workspace_id(user, request)
@@ -619,6 +639,7 @@ def retry_pending_gateway_request(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> MCPPendingRequest:
+    _require_mcp_request_context(request)
     if request is not None:
         repository = _postgres_pending_repository_for_request(request)
         if repository is not None:
@@ -707,6 +728,7 @@ def resolve_gateway_request(
     user: AuthUser = MaintainerDependency,
     request: Request = None,  # type: ignore[assignment]
 ) -> MCPGatewayDecision:
+    _require_mcp_request_context(request)
     if request is not None:
         postgres_pending_repository = _postgres_pending_repository_for_request(request)
         if postgres_pending_repository is not None:

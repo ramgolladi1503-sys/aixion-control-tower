@@ -1341,6 +1341,71 @@ def test_configured_postgres_auth_without_runtime_does_not_select_sqlite(
     assert store.mcp_pending_requests == before_pending
 
 
+@pytest.mark.parametrize(
+    "route_name",
+    ["submit", "list", "health", "get", "retry", "resolve"],
+)
+def test_postgres_auth_direct_mcp_routes_require_app_request_before_local_store_access(
+    route_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Optional Request defaults must not expose the local store to in-process callers."""
+
+    class ForbiddenLocalMap(dict):
+        def _forbidden(self, *_args, **_kwargs):
+            raise AssertionError("MCP PostgreSQL mode accessed process-local persistence")
+
+        __getitem__ = _forbidden
+        __contains__ = _forbidden
+        get = _forbidden
+        values = _forbidden
+        items = _forbidden
+        keys = _forbidden
+        __iter__ = _forbidden
+
+    monkeypatch.setattr(
+        mcp_gateway_routes,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+    for field in ("projects", "mcp_pending_requests", "approval_requests", "audit_events"):
+        monkeypatch.setattr(store, field, ForbiddenLocalMap(), raising=True)
+
+    user = AuthUser(
+        id="postgres-mcp-no-context-user",
+        email="mcp-no-context@example.test",
+        display_name="MCP No Context",
+        role=UserRole.OWNER,
+        workspace_id="postgres-mcp-no-context-workspace",
+    )
+    with pytest.raises(HTTPException) as error:
+        if route_name == "submit":
+            mcp_gateway_routes.submit_gateway_request(
+                payload=mcp_gateway_routes.GatewaySubmitRequest(
+                    project_id="postgres-mcp-no-context-project",
+                    request=mcp_gateway_routes.MCPGatewayToolCall(
+                        tool_name="write_file",
+                        arguments={"path": "x", "content": "y"},
+                    ),
+                ),
+                user=user,
+            )
+        elif route_name == "list":
+            mcp_gateway_routes.list_pending_gateway_requests(user=user)
+        elif route_name == "health":
+            mcp_gateway_routes.pending_gateway_health(user=user)
+        elif route_name == "get":
+            mcp_gateway_routes.get_pending_gateway_request("missing", user=user)
+        elif route_name == "retry":
+            mcp_gateway_routes.retry_pending_gateway_request("missing", user=user)
+        else:
+            mcp_gateway_routes.resolve_gateway_request("missing", user=user)
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "PostgreSQL MCP route requires an app-bound request context"
+    assert error.value.headers == {"Retry-After": "1"}
+
+
 def test_postgres_pending_binding_is_rejected_without_postgres_auth(
     postgres_mcp_pending_route_runtime,
     monkeypatch: pytest.MonkeyPatch,

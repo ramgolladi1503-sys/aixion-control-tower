@@ -27,6 +27,7 @@ from .agent_worker_validation_plan import (
 )
 from .models import ApprovalRequest, AuditEvent
 from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
+from .settings import get_settings
 from .store import store
 
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -328,6 +329,15 @@ def run_agent_worker_validation_commands(
             worker_id=worker_id,
             reason="Provide task_id or set first_approved=true.",
         )
+
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        if not isinstance(task_repository, PostgresAgentTaskRepository) or not isinstance(
+            approval_repository, PostgresApprovalDecisionRepository
+        ):
+            raise ValueError(
+                "PostgreSQL validation requires runtime-bound PostgreSQL task and approval repositories."
+            )
 
     postgres_mode = isinstance(task_repository, PostgresAgentTaskRepository)
     if postgres_mode != isinstance(approval_repository, PostgresApprovalDecisionRepository):

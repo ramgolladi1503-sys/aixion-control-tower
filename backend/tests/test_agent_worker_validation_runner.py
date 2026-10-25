@@ -11,8 +11,9 @@ import pytest
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
+import app.agent_worker_validation_runner as validation_runner
 from app.agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
-from app.agent_task_repository import PostgresAgentTaskRepository
+from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
 from app.approval_repository import PostgresApprovalDecisionRepository
 from app.postgres_database import run_postgres_migrations
 from app.agent_worker_validation_runner import (
@@ -460,3 +461,25 @@ def test_postgres_validation_runner_rolls_back_pass_event_when_audit_fails(
             == 0
         )
     assert not any(event.task_id == task.id for event in store.agent_task_events.values())
+
+
+@pytest.mark.parametrize("use_sqlite_repository", [False, True])
+def test_postgres_auth_validation_runner_rejects_legacy_sqlite_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    use_sqlite_repository: bool,
+) -> None:
+    monkeypatch.setattr(
+        validation_runner,
+        "get_settings",
+        lambda: type("Settings", (), {"is_production": False, "postgres_auth_enabled": True})(),
+    )
+    task_repository = (
+        SQLiteAgentTaskRepository(store._connect) if use_sqlite_repository else None
+    )
+
+    with pytest.raises(ValueError, match="runtime-bound PostgreSQL task and approval repositories"):
+        run_agent_worker_validation_commands(
+            task_id="must-not-read-from-legacy-store",
+            task_repository=task_repository,
+            approval_repository=None,
+        )
