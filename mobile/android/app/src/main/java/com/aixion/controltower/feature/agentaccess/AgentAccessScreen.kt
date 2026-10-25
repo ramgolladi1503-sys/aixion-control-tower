@@ -46,6 +46,7 @@ import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -489,7 +490,7 @@ private fun copyNonSecretCommand(context: android.content.Context, label: String
     }.getOrDefault(false)
 
 internal fun keychainSetupCommand(agentId: String): String =
-    "security add-generic-password -U -s com.aixion.controltower.agent -a ${shellQuote(agentId)} -w"
+    "security add-generic-password -s com.aixion.controltower.agent -a ${shellQuote(agentId)} -w"
 
 internal fun normalizeWorkspacePath(rawPath: String): String? {
     if (rawPath.isBlank() || rawPath != rawPath.trim() ||
@@ -554,15 +555,14 @@ internal fun authenticatedActivityLabel(credential: AgentCredentialStatusDto?): 
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
-private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRotate: () -> Unit, onRevoke: () -> Unit) {
+internal fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRotate: () -> Unit, onRevoke: () -> Unit) {
     val palette = LocalTowerPalette.current
     val agent = agentSummary.agent
+    var accessDetailsExpanded by remember(agent.id) { mutableStateOf(false) }
     TowerPanel(elevated = true) {
         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(agent.display_name, color = palette.ink, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(4.dp))
-                Text(agent.id, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
             }
             val credentialState = if (agent.enabled) agentSummary.credentialState else "DISABLED"
             val statusColor = when (credentialState) {
@@ -583,15 +583,50 @@ private fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRota
             style = MaterialTheme.typography.bodyMedium
         )
         Text(
-            "Projects: ${agent.allowed_project_ids.joinToString().ifBlank { "none" }}",
+            "Project scope · ${agent.allowed_project_ids.size} ${if (agent.allowed_project_ids.size == 1) "project" else "projects"}",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
         Text(
-            "Actions: ${agent.allowed_actions.joinToString()}",
+            "Granted access · ${agent.allowed_actions.size} actions",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
+        TextButton(
+            onClick = { accessDetailsExpanded = !accessDetailsExpanded },
+            modifier = Modifier
+                .fillMaxWidth()
+                .semantics {
+                    stateDescription = if (accessDetailsExpanded) "Expanded" else "Collapsed"
+                }
+        ) {
+            Text(if (accessDetailsExpanded) "Hide exact access details" else "View exact access details")
+        }
+        if (accessDetailsExpanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("agent-access-details"),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+            ) {
+                Text(
+                    "Exact access details",
+                    modifier = Modifier.semantics { heading() },
+                    color = palette.ink,
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Text("Agent ID: ${agent.id}", color = palette.inkMuted, style = TowerCodeTextStyle)
+                Text(
+                    "Project IDs: ${agent.allowed_project_ids.joinToString().ifBlank { "none" }}",
+                    color = palette.inkMuted,
+                    style = TowerCodeTextStyle
+                )
+                Text("Granted permission constants", color = palette.ink, style = MaterialTheme.typography.titleSmall)
+                agent.allowed_actions.forEach { action ->
+                    Text(action, color = palette.inkMuted, style = TowerCodeTextStyle)
+                }
+            }
+        }
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),

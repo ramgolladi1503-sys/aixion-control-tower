@@ -109,9 +109,22 @@ the phone and host, plus production notification and host-availability setup.
 ## Workspace installation
 
 1. Register an Antigravity external agent in Control Tower with one project and
-   only the five actions above. Store its one-time token in macOS Keychain as a
-   generic password with service `com.aixion.controltower.agent` and account
-   equal to the agent ID. Do not enable Keychain's “allow all applications”.
+   only the five actions above. Store its one-time token in macOS Keychain using
+   the secure prompt helper below. The token is entered at the macOS Keychain
+   prompt; it is not put in shell history or process arguments. The helper
+   refuses to replace an existing item. Do not enable Keychain's “allow all
+   applications”.
+
+   ```sh
+   python3 /ABSOLUTE/PATH/integrations/antigravity/store_agent_token.py \
+     --agent-id "agent_..."
+   ```
+
+   If the one-time token has already been dismissed or lost, it cannot be
+   recovered from the server. An owner must issue a new credential in the app,
+   then store that newly displayed token with this helper. Do not rotate a
+   credential solely to test this command unless the owner intends to replace
+   the active credential.
 2. Install the hook only in the intended workspace. This writes protected
    non-secret metadata under `~/.config/aixion/workspaces/`, merges its hook
    entry into `.agents/hooks.json`, preserves other entries, and refuses to

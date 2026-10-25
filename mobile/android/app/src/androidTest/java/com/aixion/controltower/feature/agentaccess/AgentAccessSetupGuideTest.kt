@@ -9,6 +9,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.api.dto.AgentCredentialStatusDto
@@ -177,5 +178,76 @@ class AgentAccessSetupGuideTest {
             assertTrue("The setup guidance must wrap within the narrow viewport", bodyBounds.left >= 0f && bodyBounds.right <= 240f)
             assertTrue("Large text should remain multi-line", bodyBounds.height > titleBounds.height)
         }
+    }
+
+    @Test
+    fun existingConnectorSummarizesScopeAndRevealsExactDetailsAtLargeFontScale() {
+        val exactActions = listOf(
+            "CREATE_APPROVAL",
+            "READ_APPROVAL_DECISION",
+            "CONSUME_APPROVAL_DECISION",
+            "REPORT_APPROVAL_DELIVERY_FAILURE",
+            "EXPIRE_OWN_APPROVAL"
+        )
+        val agent = ExternalAgentDto(
+            id = "agent-e2e-123456",
+            provider = "ANTIGRAVITY",
+            display_name = "Antigravity on this Mac",
+            auth_type = "API_KEY",
+            allowed_project_ids = listOf("project-e2e-987654"),
+            allowed_actions = exactActions
+        )
+        val credential = AgentCredentialStatusDto(
+            agent_id = agent.id,
+            auth_type = "API_KEY",
+            credential_state = "ACTIVE",
+            token_present = true
+        )
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp)) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    ControlTowerTheme {
+                        AgentCard(
+                            agentSummary = AgentAccessSummary(agent, credential),
+                            working = false,
+                            onRotate = {},
+                            onRevoke = {}
+                        )
+                    }
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("Project scope · 1 project").assertIsDisplayed()
+        composeRule.onNodeWithText("Granted access · 5 actions").assertIsDisplayed()
+        val disclosure = composeRule.onNodeWithText("View exact access details")
+        disclosure.assertIsDisplayed()
+        composeRule.onNodeWithText("Agent ID: agent-e2e-123456").assertDoesNotExist()
+        composeRule.onNodeWithText("agent-e2e-123456").assertDoesNotExist()
+        exactActions.forEach { action -> composeRule.onNodeWithText(action).assertDoesNotExist() }
+        assertTrue(
+            "Disclosure should announce its collapsed state",
+            disclosure.fetchSemanticsNode().config[SemanticsProperties.StateDescription] == "Collapsed"
+        )
+        composeRule.runOnIdle {
+            assertTrue(
+                "Access detail disclosure should stay within a narrow large-text viewport",
+                disclosure.fetchSemanticsNode().boundsInRoot.right <= 240f
+            )
+        }
+
+        disclosure.performClick()
+        val detailsHeading = composeRule.onNodeWithText("Exact access details")
+        detailsHeading.assertIsDisplayed()
+        assertTrue(detailsHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading))
+        assertTrue(
+            "Disclosure should announce its expanded state",
+            composeRule.onNodeWithText("Hide exact access details")
+                .fetchSemanticsNode().config[SemanticsProperties.StateDescription] == "Expanded"
+        )
+        composeRule.onNodeWithText("Agent ID: agent-e2e-123456").assertIsDisplayed()
+        composeRule.onNodeWithText("Project IDs: project-e2e-987654").assertIsDisplayed()
+        exactActions.forEach { action -> composeRule.onNodeWithText(action).assertIsDisplayed() }
+        composeRule.onNodeWithText("Hide exact access details").assertIsDisplayed()
     }
 }

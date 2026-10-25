@@ -93,7 +93,7 @@ class OneTimeTokenPanelTest {
             "Store the token in macOS Keychain. This command contains no token; Terminal prompts you to enter it securely."
         ).assertExists()
         composeRule.onNodeWithText(
-            "security add-generic-password -U -s com.aixion.controltower.agent -a 'agent-example' -w"
+            "security add-generic-password -s com.aixion.controltower.agent -a 'agent-example' -w"
         ).assertExists()
         composeRule.onNodeWithText("Copy Keychain command").assertExists()
         composeRule.onNodeWithText(
@@ -312,9 +312,10 @@ class OneTimeTokenPanelTest {
             "Keychain command copied. Enter the token only at the secure prompt."
         ).assertExists()
         assertEquals(
-            "security add-generic-password -U -s com.aixion.controltower.agent -a 'agent-example' -w",
+            "security add-generic-password -s com.aixion.controltower.agent -a 'agent-example' -w",
             keychainCommandCopied
         )
+        assertFalse("Keychain command must not overwrite an existing item", keychainCommandCopied.orEmpty().contains("-U"))
         assertFalse(sensitiveTokenCopied)
 
         composeRule.onNodeWithText("Absolute local project directory")
