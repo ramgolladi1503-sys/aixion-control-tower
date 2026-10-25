@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app import main
@@ -26,6 +29,36 @@ class RecordingApprovalRepository:
         del now, legacy_ttl_seconds, limit
         self.expiry_workspace_reads.append(workspace_id)
         return []
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+)
+def test_approval_repository_without_request_fails_closed_for_authoritative_modes(
+    monkeypatch,
+    settings: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    with pytest.raises(main.HTTPException) as raised:
+        main._approval_repository_for_route(None)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+
+
+def test_approval_repository_without_request_keeps_local_test_adapter(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+
+    assert main._approval_repository_for_route(None) is main.approval_decision_repository
 
 
 def test_approval_list_route_uses_repository_bound_to_fastapi_app(monkeypatch) -> None:

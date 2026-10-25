@@ -782,6 +782,16 @@ def _approval_repository_for_route(
     http_request: Request | None,
 ) -> ApprovalDecisionRepository:
     if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            # Without the app-bound request there is no way to prove which
+            # lifespan-owned PostgreSQL repository serves this approval. Do
+            # not silently fall back to the module-level SQLite adapter.
+            raise HTTPException(
+                status_code=503,
+                detail="Approval storage context is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            )
         # Direct function calls in existing unit tests use the explicit
         # local/test adapter. Real HTTP requests must use app.state binding.
         return approval_decision_repository
