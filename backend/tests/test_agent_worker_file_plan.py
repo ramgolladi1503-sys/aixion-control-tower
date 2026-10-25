@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.agent_worker_file_plan import run_agent_worker_file_plan_dry_run, validate_file_patch_plan
+from app import agent_worker_file_plan as file_plan_module
 from app.models import AgentProvider, ApprovalRequest, FileChange, Project, RiskAssessment, RiskLevel
 from app.store import store
 
@@ -86,6 +88,37 @@ def test_file_plan_records_safe_file_patch_evidence_without_mutation() -> None:
     assert event.metadata["files_written"] is False
     assert event.metadata["file_count"] == 1
     assert any(audit.event_type == "agent_worker.file_plan_dry_run_completed" for audit in store.audit_events)
+
+
+@pytest.mark.parametrize("settings_values", [{"is_production": True}, {"postgres_auth_enabled": True}])
+def test_file_plan_fails_closed_before_claim_or_mutation(monkeypatch, settings_values) -> None:
+    from types import SimpleNamespace
+
+    project = _project()
+    approval = _approval(project)
+    task = _approved_task(approval)
+    before_events = dict(store.agent_task_events)
+    before_audits = list(store.audit_events)
+    before_task = task.model_copy(deep=True)
+    monkeypatch.setattr(
+        file_plan_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=settings_values.get("is_production", False),
+            postgres_auth_enabled=settings_values.get("postgres_auth_enabled", False),
+        ),
+    )
+    monkeypatch.setattr(file_plan_module, "claim_agent_task_for_worker", lambda **_: pytest.fail("claim must not run"))
+    monkeypatch.setattr(file_plan_module, "claim_first_approved_agent_task_for_worker", lambda **_: pytest.fail("claim must not run"))
+    monkeypatch.setattr(store, "persist", lambda: pytest.fail("persist must not run"))
+
+    result = run_agent_worker_file_plan_dry_run(task_id=task.id)
+
+    assert not result.success
+    assert "unavailable in production or PostgreSQL auth mode" in result.reason
+    assert store.agent_tasks[task.id] == before_task
+    assert store.agent_task_events == before_events
+    assert store.audit_events == before_audits
 
 
 def test_file_plan_allows_delete_without_new_content() -> None:
