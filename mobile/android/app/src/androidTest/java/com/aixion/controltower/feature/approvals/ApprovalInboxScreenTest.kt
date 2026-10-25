@@ -291,7 +291,8 @@ class ApprovalInboxScreenTest {
             )
         }
         composeRule.onAllNodesWithTag("approval-inbox-loading-skeletons").assertCountEquals(0)
-        composeRule.onNodeWithText("Approval data unavailable").assertExists()
+        val title = composeRule.onNodeWithText("Approval data unavailable").assertExists()
+        assertTrue(title.fetchSemanticsNode().config.contains(SemanticsProperties.Heading))
     }
 
     @Test
@@ -621,7 +622,8 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithText("Status blocked 0").assertCountEquals(0)
         composeRule.onAllNodesWithText("0 pending").assertCountEquals(0)
         composeRule.onAllNodesWithText("Needs review 0").assertCountEquals(0)
-        composeRule.onNodeWithText("You’re all caught up").assertExists()
+        val caughtUp = composeRule.onNodeWithText("You’re all caught up").assertExists()
+        assertTrue(caughtUp.fetchSemanticsNode().config.contains(SemanticsProperties.Heading))
         composeRule.onNodeWithText(
             "New approval requests will appear here when an agent needs your decision."
         ).assertExists()

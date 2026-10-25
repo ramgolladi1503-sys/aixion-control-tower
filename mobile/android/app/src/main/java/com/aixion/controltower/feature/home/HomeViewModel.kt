@@ -49,10 +49,15 @@ internal fun homeHeroTitle(state: HomeUiState): String = when {
     state.refreshing -> "Refreshing approvals"
     state.hasError -> "Approval service unavailable"
     state.unsupportedApprovals.isNotEmpty() -> "${state.unsupportedApprovals.size} approvals need an app update"
-    state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"
+    state.actionRequiredCount > 0 -> homeActionRequiredTitle(state.actionRequiredCount)
     state.blockedCount > 0 -> "${state.blockedCount} blocked actions need attention"
     state.hasSuccessfulSync -> "No approvals waiting"
     else -> "Status not verified"
+}
+
+internal fun homeActionRequiredTitle(count: Int): String = when (count) {
+    1 -> "1 request needs your decision"
+    else -> "$count requests need your decision"
 }
 
 internal fun homeHeroStatusLabel(state: HomeUiState): String = when {

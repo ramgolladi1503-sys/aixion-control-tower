@@ -1363,7 +1363,8 @@ class ApprovalDetailScreenTest {
             ApprovalDetailEmptyContent(loading = true, message = null, onRetry = null)
         }
 
-        composeRule.onNodeWithText("Loading requested approval…").assertExists()
+        val loadingTitle = composeRule.onNodeWithTag("approval-detail-loading").assertExists()
+        assertTrue(loadingTitle.fetchSemanticsNode().config.contains(SemanticsProperties.Heading))
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
         composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
@@ -1379,7 +1380,12 @@ class ApprovalDetailScreenTest {
             )
         }
 
-        composeRule.onNodeWithTag("approval-detail-open-error").assertExists()
+        val errorCopy = composeRule.onNodeWithTag("approval-detail-open-error").assertExists()
+        errorCopy.assertTextContains("No other request is selected")
+        composeRule.onNodeWithTag("approval-detail-technical-error").assertDoesNotExist()
+        composeRule.onNodeWithText("Technical details").performClick()
+        composeRule.onNodeWithTag("approval-detail-technical-error")
+            .assertTextContains("not found")
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
         composeRule.onNodeWithText("Retry approval load").performClick()
         assertEquals(1, retryCount)

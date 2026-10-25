@@ -99,6 +99,12 @@ class HomeScreenCopyTest {
     }
 
     @Test
+    fun actionRequiredHeadlineUsesCorrectSingularAndPluralGrammar() {
+        assertEquals("1 request needs your decision", homeActionRequiredTitle(1))
+        assertEquals("2 requests need your decision", homeActionRequiredTitle(2))
+    }
+
+    @Test
     fun statusHeroIsHiddenForBackendFailureButRemainsForNormalState() {
         val errorState = HomeUiState(loading = false, errorMessage = "SocketTimeoutException")
 

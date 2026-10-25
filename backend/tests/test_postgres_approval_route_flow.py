@@ -1666,6 +1666,89 @@ def test_postgres_http_consume_rejects_revocation_after_authentication(
     client.close()
 
 
+def test_postgres_http_heartbeat_rejects_revocation_after_authentication(
+    postgres_approval_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revocation after HTTP auth cannot renew the durable PostgreSQL lease."""
+    connect, workspace, project, _user, repositories, agent, agent_token, _schema = (
+        postgres_approval_route_runtime
+    )
+    client = TestClient(main.app)
+    headers = {
+        "X-Aixion-Agent-Id": agent.id,
+        "X-Aixion-Agent-Token": agent_token,
+        "X-Aixion-Approval-Protocol": "1",
+    }
+    invocation_id = f"heartbeat-revocation-race:{uuid.uuid4().hex}"
+    created = client.post(
+        "/agents/approvals",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "title": "Revoke during invocation heartbeat",
+            "summary": "A revoked connector must not extend the live invocation lease.",
+            "agent_name": agent.display_name,
+            "target_branch": "feature/heartbeat-revocation-race",
+            "files": [
+                {
+                    "path": "antigravity://tool/run_command",
+                    "change_type": "tool_call",
+                    "diff": '{"command":"echo heartbeat-revocation-race"}',
+                }
+            ],
+            "source_session_id": "session-heartbeat-revocation-race",
+            "source_invocation_id": invocation_id,
+        },
+    )
+    assert created.status_code == 200, created.text
+    approval_id = created.json()["id"]
+    with connect() as connection:
+        lease_before = connection.execute(
+            "SELECT heartbeat_at,expires_at FROM approval_invocation_leases "
+            "WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()
+    assert lease_before is not None
+
+    auth_repository = repositories.external_agent_auth
+
+    class RevokeImmediatelyAfterAuthentication:
+        def authenticate_and_consume(self, **kwargs):
+            result = auth_repository.authenticate_and_consume(**kwargs)
+            if result.reason is None:
+                assert result.agent is not None and result.credential is not None
+                revoke_external_agent_token(
+                    result.agent,
+                    credential=result.credential,
+                    repository=auth_repository,
+                    actor="test:revoke-between-auth-and-heartbeat",
+                )
+            return result
+
+    monkeypatch.setattr(
+        main.app.state,
+        "external_agent_auth_repository",
+        RevokeImmediatelyAfterAuthentication(),
+    )
+    response = client.post(
+        f"/agents/approvals/{approval_id}/heartbeat",
+        headers=headers,
+        json={"source_invocation_id": invocation_id},
+    )
+
+    assert response.status_code == 401, response.text
+    assert response.json()["detail"] == "External agent credential is no longer active"
+    with connect() as connection:
+        lease_after = connection.execute(
+            "SELECT heartbeat_at,expires_at FROM approval_invocation_leases "
+            "WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()
+    assert lease_after == lease_before
+    client.close()
+
+
 def test_postgres_competing_connector_claims_deliver_approved_invocation_once(
     postgres_approval_route_runtime,
 ) -> None:

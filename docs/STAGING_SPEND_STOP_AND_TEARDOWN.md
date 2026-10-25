@@ -44,6 +44,91 @@ If the project or inventory does not match the approved record, stop. Do not
 disable billing or APIs as a shortcut: that can affect unrelated project services
 and does not replace resource-by-resource verification.
 
+## Copyable incident evidence record
+
+Create one restricted record for each containment or decommissioning event. Keep
+the authorization record separate and link to it here; this template does not
+grant authority. Use `UNKNOWN` when a value cannot be verified. Do not infer a
+project, resource, owner, cost, or approval from a local default or resource name.
+
+```text
+Record ID / incident or change ID:
+Record type: CONTAINMENT | DECOMMISSIONING
+Exact project ID and project number:
+Billing account reference (restricted if needed):
+Region(s) and Firebase project boundary:
+Trigger and source timestamp:
+Billing view/export reference and observation timestamp:
+Budget or spend-cap scope:
+Known charges/services outside that scope:
+Owner authorization record reference and approved action/time window:
+Named operator / role:
+Named reviewer / role:
+Data classification and retention decision reference:
+Current approved maximum exposure for remaining resources:
+If any required value is UNKNOWN, stop and record the blocker:
+```
+
+### Pre-action gate record
+
+Mark each item `PASS`, `FAIL`, or `UNKNOWN` and link to restricted evidence. Any
+`FAIL` or `UNKNOWN` blocks destructive actions; it does not authorize a narrower
+action by default.
+
+| Gate | Result | Evidence reference and timestamp | Operator / reviewer |
+| --- | --- | --- | --- |
+| Exact project, billing association, and region match the authorization | PENDING | PENDING | PENDING |
+| Live resource inventory matches the approved inventory; no shared or unlisted resource is in scope | PENDING | PENDING | PENDING |
+| Trigger, cap scope, and excluded cost categories have been reviewed | PENDING | PENDING | PENDING |
+| Active executions and API/database writers are identified | PENDING | PENDING | PENDING |
+| Data classification, retention, backup, and recovery decision is recorded | PENDING | PENDING | PENDING |
+| Named operator, reviewer, response path, and time window are available | PENDING | PENDING | PENDING |
+| Residual exposure is quantified, owner-approved, and within the authorized bound | PENDING | PENDING | PENDING |
+
+An `UNKNOWN` exposure is not a bounded maximum. If the owner has not explicitly
+accepted the residual exposure in the authorization record, do not proceed.
+
+### Action and verification log
+
+Record one row per action and resource. Capture the exact resource identifier,
+not only its display name. For containment, record state and verification for
+every applicable step. For decommissioning, include the approved deletion list
+and the required recovery evidence before recording a deletion.
+
+| Sequence | Exact resource ID / type | Authorized action and authorization reference | Observed pre-state, source, timestamp | Operator and action timestamp | Observed post-state, source, timestamp | Residual charge / retained data / owner | Reviewer |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 2 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+| 3 | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING |
+
+If observed state differs from the approved inventory or an action fails, stop
+the sequence, preserve evidence, and obtain a revised decision. Do not retry a
+destructive action based only on a timeout or missing console response; first
+read the resource state again and reconcile the outcome.
+
+### Residual exposure and closure
+
+| Service/resource category | Exact retained resource or `NONE VERIFIED` | Expected continuing charge and evidence, or `UNKNOWN` | Responsible owner | Next billing recheck date / evidence |
+| --- | --- | --- | --- | --- |
+| Cloud SQL compute, storage, backups, and PITR | PENDING | PENDING | PENDING | PENDING |
+| Cloud Run services, jobs, and active executions | PENDING | PENDING | PENDING | PENDING |
+| Scheduler, Artifact Registry, Secret Manager, logs/metrics, and network | PENDING | PENDING | PENDING | PENDING |
+| Firebase/FCM and shared-project resources | PENDING | PENDING | PENDING | PENDING |
+| Other discovered resource | PENDING | PENDING | PENDING | PENDING |
+
+```text
+Containment/decommissioning outcome: OPEN | CONTAINED | DECOMMISSIONED | BLOCKED
+Unresolved actions or UNKNOWN states:
+Residual exposure decision reference (must be owner-approved):
+Follow-up billing observation date and evidence reference:
+Operator signoff and timestamp:
+Reviewer signoff and timestamp:
+```
+
+Do not mark the event closed while a required resource state, recovery decision,
+or residual-cost owner is `UNKNOWN`. A zero or unchanged billing view immediately
+after containment or deletion does not establish that charges have stopped.
+
 ## A. Containment: stop new work and bound ongoing exposure
 
 Perform in order; record the observed state after each action.

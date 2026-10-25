@@ -246,8 +246,9 @@ fun ApprovalInboxContent(
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
                         text = "Approval data unavailable",
+                        modifier = Modifier.semantics { heading() },
                         color = palette.ink,
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.titleLarge
                     )
                     Text(
                         text = "Reconnect and retry to load the latest approvals. Requests stay unavailable until the server responds.",
@@ -441,8 +442,9 @@ fun ApprovalInboxContent(
                 TowerPanel(elevated = true) {
                     Text(
                         text = "You’re all caught up",
+                        modifier = Modifier.semantics { heading() },
                         color = palette.ink,
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.titleLarge
                     )
                     Text(
                         text = "New approval requests will appear here when an agent needs your decision.",
@@ -464,7 +466,12 @@ fun ApprovalInboxContent(
             item {
                 TowerPanel(elevated = true) {
                     if (selectedHistoryFilter == ApprovalHistoryFilter.ALL) {
-                        Text("No decisions recorded", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "No decisions recorded",
+                            modifier = Modifier.semantics { heading() },
+                            color = palette.ink,
+                            style = MaterialTheme.typography.titleLarge
+                        )
                         Text(
                             "Recorded approve, deny, and revision decisions will appear here.",
                             color = palette.inkMuted,
@@ -477,7 +484,12 @@ fun ApprovalInboxContent(
                             ApprovalHistoryFilter.REJECTED -> "denied decisions"
                             ApprovalHistoryFilter.REVISION_REQUESTED -> "revision requests"
                         }
-                        Text("No $filterName match", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "No $filterName match",
+                            modifier = Modifier.semantics { heading() },
+                            color = palette.ink,
+                            style = MaterialTheme.typography.titleLarge
+                        )
                         Text(
                             "Try another filter or show all recorded decisions.",
                             color = palette.inkMuted,

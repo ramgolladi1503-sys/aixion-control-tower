@@ -8,7 +8,7 @@ waits for the phone decision, and returns Codex's documented `allow` or
 that Codex considers safe enough to run without a permission prompt.
 
 The event schema and decision response follow the [official Codex hooks
-documentation](https://learn.chatgpt.com/docs/hooks), including its
+documentation](https://developers.openai.com/codex/hooks/), including its
 `PermissionRequest` event and `hookSpecificOutput.decision.behavior` values.
 The connector rejects duplicate JSON object keys in both the hook event and
 Control Tower responses, so request and decision fields cannot depend on a
@@ -43,17 +43,23 @@ that the configuration is accepted; it is not runtime-flow evidence.
 - The Codex process and this hook must remain running and connected while the
   phone decision is pending. Cloud delivery cannot resume a sleeping,
   disconnected, or terminated host process.
-- Codex's documented `PermissionRequest` payload includes `session_id` and
-  `turn_id`, but does not list `tool_use_id`. If Codex supplies a valid
-  `tool_use_id`, the hook uses it for restart-stable identity. Otherwise it
-  creates a cryptographically random ID for that synchronous hook callback and
-  keeps it through the create, wait, and single-use consume sequence. Repeated
-  identical calls in one turn therefore get different IDs. If the hook process
-  or Codex restarts, the new callback gets a new ID and cannot inherit an old
-  approval; the old request can only expire or remain unconsumed. This fallback
-  preserves fail-closed binding but does not provide restart recovery for an
-  event whose callback process was lost. The installed app's actual input shape
-  and callback behavior still require device/app verification.
+- The current public hook documentation lists `session_id`, `cwd`,
+  `permission_mode`, `turn_id`, `tool_name`, and `tool_input` for
+  `PermissionRequest`; it does **not** list `tool_use_id` for this event. The
+  same documentation lists `tool_use_id` for `PreToolUse` and `PostToolUse`,
+  which are different events and do not substitute for this adapter's
+  permission decision. For the documented `PermissionRequest` shape, the hook
+  creates a cryptographically random invocation ID for that synchronous
+  callback and keeps it through approval creation, decision wait, and the
+  single-use consume sequence. Repeated identical requests in one turn get
+  different IDs. The adapter tolerates a non-empty, bounded `tool_use_id` if a
+  Codex build supplies it, but this is an undocumented compatibility extension
+  and is not relied on by the integration. If the hook process or Codex
+  restarts, the new callback gets a new ID and cannot inherit an old approval;
+  the old request can only expire or remain unconsumed. This preserves
+  fail-closed binding but does not provide restart recovery for a callback
+  whose process was lost. The installed app's actual input shape and callback
+  behavior still require native runtime verification.
 - This is a per-project integration. It does not alter global Codex settings
   or take over existing conversations that do not load this project's hook.
 - This hook handles Codex's local permission prompts. Codex-hosted tools that

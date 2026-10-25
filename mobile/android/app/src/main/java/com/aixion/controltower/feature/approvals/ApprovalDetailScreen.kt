@@ -51,6 +51,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -137,6 +138,7 @@ internal fun ApprovalDetailEmptyContent(
     onRetry: (() -> Unit)?
 ) {
     val palette = LocalTowerPalette.current
+    var technicalDetailsExpanded by remember(message) { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -149,29 +151,72 @@ internal fun ApprovalDetailEmptyContent(
                 loading -> {
                     Text(
                         "Loading requested approval…",
-                        modifier = Modifier.testTag("approval-detail-loading"),
+                        modifier = Modifier
+                            .semantics { heading() }
+                            .testTag("approval-detail-loading"),
                         color = palette.ink,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold
+                        style = MaterialTheme.typography.headlineSmall
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                    Text("The app is fetching this approval from the authenticated backend.", color = palette.inkMuted, fontSize = 14.sp)
+                    Text(
+                        "The app is fetching this request from your account.",
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                 }
                 message != null -> {
-                    Text("Approval unavailable", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Approval unavailable",
+                        modifier = Modifier.semantics { heading() },
+                        color = palette.ink,
+                        style = MaterialTheme.typography.headlineSmall
+                    )
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                    Text(message, modifier = Modifier.testTag("approval-detail-open-error"), color = palette.inkMuted, fontSize = 14.sp)
+                    Text(
+                        "This request could not be loaded. Check your connection and retry. No other request is selected.",
+                        modifier = Modifier.testTag("approval-detail-open-error"),
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                     onRetry?.let { retry ->
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         OutlinedButton(onClick = retry, modifier = Modifier.fillMaxWidth()) {
                             Text("Retry approval load")
                         }
                     }
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    TextButton(
+                        onClick = { technicalDetailsExpanded = !technicalDetailsExpanded },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .semantics {
+                                stateDescription = if (technicalDetailsExpanded) "Expanded" else "Collapsed"
+                            }
+                    ) {
+                        Text(if (technicalDetailsExpanded) "Hide technical details" else "Technical details")
+                    }
+                    if (technicalDetailsExpanded) {
+                        Text(
+                            text = message,
+                            modifier = Modifier.testTag("approval-detail-technical-error"),
+                            color = palette.inkMuted,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                 }
                 else -> {
-                    Text("No approval selected", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "No approval selected",
+                        modifier = Modifier.semantics { heading() },
+                        color = palette.ink,
+                        style = MaterialTheme.typography.headlineSmall
+                    )
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                    Text("Open the inbox and select a request to review.", color = palette.inkMuted, fontSize = 14.sp)
+                    Text(
+                        "Open the inbox and choose a request to review.",
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                 }
             }
         }
@@ -900,9 +945,7 @@ private fun ApprovalHeroPanel(
                 text = approval.title,
                 modifier = Modifier.semantics { heading() },
                 color = palette.ink,
-                fontSize = 25.sp,
-                fontWeight = FontWeight.SemiBold,
-                lineHeight = 30.sp
+                style = MaterialTheme.typography.headlineMedium
             )
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
             Text(text = approval.summary, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)

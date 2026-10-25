@@ -49,18 +49,29 @@ fun ApprovalCard(
     TowerPanel(modifier = clickableModifier.testTag("approval-card"), elevated = true) {
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
-            SourceBadge(approval = approval)
-            Text(
-                text = approval.projectName,
-                color = palette.inkMuted,
-                style = MaterialTheme.typography.labelLarge,
-                modifier = Modifier.weight(1f, fill = false)
+            SourceBadge(
+                approval = approval,
+                modifier = Modifier.testTag("approval-card-source-badge")
             )
-            RiskBadge(risk = approval.risk, readable = true)
+            RiskBadge(
+                risk = approval.risk,
+                readable = true,
+                modifier = Modifier.testTag("approval-card-risk-badge")
+            )
         }
+        Text(
+            text = "Project · ${approval.projectName.ifBlank { "Not provided" }}",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .semantics { contentDescription = "Project: ${approval.projectName.ifBlank { "Not provided" }}" }
+                .testTag("approval-card-project")
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text(
             text = approval.title,

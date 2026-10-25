@@ -11,6 +11,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -21,6 +22,8 @@ import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
+import com.aixion.controltower.core.ui.components.ApprovalCard
+import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -30,6 +33,44 @@ import org.junit.Test
 class HomeScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun approvalCardSeparatesTrustRiskAndProjectContextAtCompactWidth() {
+        val request = ApprovalSummary(
+            id = "approval-card-layout",
+            projectName = "A long project name that should wrap without crowding the trust badges",
+            title = "Allow .env file access",
+            summary = "A tool wants to read a local environment file.",
+            agentName = "Antigravity",
+            targetBranch = "main",
+            status = ApprovalStatus.REQUESTED,
+            risk = RiskLevel.HIGH,
+            files = emptyList(),
+            requiredActions = emptyList(),
+            testPlan = emptyList(),
+            rollbackPlan = "",
+            sourceProvider = "ANTIGRAVITY",
+            sourceAgentName = "Antigravity Desktop Workspace Connector",
+            verifiedSource = true
+        )
+
+        composeRule.setContent {
+            ControlTowerTheme {
+                Box(modifier = Modifier.width(320.dp)) {
+                    ApprovalCard(approval = request)
+                }
+            }
+        }
+
+        val source = composeRule.onNodeWithTag("approval-card-source-badge").assertIsDisplayed()
+        val risk = composeRule.onNodeWithTag("approval-card-risk-badge").assertIsDisplayed()
+        val project = composeRule.onNodeWithTag("approval-card-project").assertIsDisplayed()
+        val title = composeRule.onNodeWithText("Allow .env file access").assertIsDisplayed()
+        val projectTop = project.fetchSemanticsNode().boundsInRoot.top
+        assertTrue("Project context must sit below the trust badge", projectTop >= source.fetchSemanticsNode().boundsInRoot.bottom)
+        assertTrue("Project context must sit below the risk badge", projectTop >= risk.fetchSemanticsNode().boundsInRoot.bottom)
+        assertTrue("Request title must follow its project context", title.fetchSemanticsNode().boundsInRoot.top >= project.fetchSemanticsNode().boundsInRoot.bottom)
+    }
 
     @Test
     fun lastSuccessfulSyncRemainsReadableAtLargeFontScale() {
