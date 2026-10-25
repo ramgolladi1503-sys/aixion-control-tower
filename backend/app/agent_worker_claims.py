@@ -11,6 +11,7 @@ from .agent_task_repository import (
     SQLiteAgentTaskRepository,
 )
 from .approval_decisions import agent_task_repository
+from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
 from .models import AuditEvent, now_utc
 from .settings import get_settings
 from .store import store
@@ -37,6 +38,59 @@ class AgentWorkerClaimResult:
             "lease_expires_at": self.lease_expires_at.isoformat() if self.lease_expires_at else None,
             "generated_at": self.generated_at.isoformat(),
         }
+
+
+def _same_postgres_connector(
+    task_repository: AgentTaskRepository,
+    approval_repository: ApprovalDecisionRepository,
+) -> bool:
+    task_connect = getattr(task_repository, "_connect", None)
+    approval_connect = getattr(approval_repository, "_connect", None)
+    if not callable(task_connect) or not callable(approval_connect):
+        return False
+    if task_connect is approval_connect:
+        return True
+    # Runtime.connect returns a fresh bound-method object on each access. Accept
+    # only the same implementation bound to the same runtime instance; arbitrary
+    # callable equality is not a reliable database-authority check.
+    return (
+        getattr(task_connect, "__self__", None) is not None
+        and getattr(task_connect, "__self__", None) is getattr(approval_connect, "__self__", None)
+        and getattr(task_connect, "__func__", None) is getattr(approval_connect, "__func__", None)
+    )
+
+
+def validate_agent_worker_repository_pair(
+    task_repository: AgentTaskRepository | None,
+    approval_repository: ApprovalDecisionRepository | None,
+    *,
+    worker_name: str,
+) -> bool:
+    """Validate worker task/approval authority and return whether it is PostgreSQL-backed.
+
+    PostgreSQL task and approval repositories must be the pair owned by one runtime.
+    Production and PostgreSQL-auth modes require that pair. In local/test modes,
+    omitted or SQLite repositories remain available to existing callers.
+    """
+    task_is_postgres = isinstance(task_repository, PostgresAgentTaskRepository)
+    approval_is_postgres = isinstance(approval_repository, PostgresApprovalDecisionRepository)
+    if task_is_postgres != approval_is_postgres:
+        raise ValueError(
+            f"{worker_name} requires paired PostgreSQL task and approval repositories."
+        )
+    if task_is_postgres and not _same_postgres_connector(task_repository, approval_repository):
+        raise ValueError(
+            f"{worker_name} requires task and approval repositories to share the same PostgreSQL connection factory."
+        )
+
+    settings = get_settings()
+    if (settings.is_production or settings.postgres_auth_enabled) and not (
+        task_is_postgres and approval_is_postgres
+    ):
+        raise ValueError(
+            f"{worker_name} requires PostgreSQL task and approval repositories in production or PostgreSQL-auth mode."
+        )
+    return task_is_postgres
 
 
 def _claim(

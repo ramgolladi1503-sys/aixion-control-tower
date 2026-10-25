@@ -15,6 +15,7 @@ from app.approval_repository import (
     SQLiteApprovalDecisionRepository,
 )
 from app import agent_worker_github_pr as github_pr_worker
+from app import agent_worker_claims as worker_claims
 from app.models import AgentProvider, ApprovalRequest, FileChange, Project, RiskAssessment, RiskLevel
 from app.store import store
 
@@ -176,7 +177,7 @@ def test_github_pr_worker_rejects_unpaired_postgres_authority_before_claim(
     )
 
     assert result.success is False
-    assert result.reason == "GitHub PR workers require paired PostgreSQL task and approval repositories."
+    assert result.reason == "GitHub PR worker requires paired PostgreSQL task and approval repositories."
     assert claims == []
     assert outcomes == []
     assert fake.branch_checks == []
@@ -204,7 +205,7 @@ def test_github_pr_worker_accepts_paired_postgres_repositories_before_claim(
             reason="claim reached with a valid paired repository",
         )
 
-    monkeypatch.setattr(github_pr_worker, "get_settings", lambda: SimpleNamespace(
+    monkeypatch.setattr(worker_claims, "get_settings", lambda: SimpleNamespace(
         is_production=True, postgres_auth_enabled=True
     ))
     monkeypatch.setattr(github_pr_worker, "claim_agent_task_for_worker", expected_claim)
@@ -249,7 +250,7 @@ def test_github_pr_worker_rejects_postgres_repositories_from_different_runtimes_
 
     assert result.success is False
     assert result.reason == (
-        "GitHub PR workers require task and approval repositories to share the same PostgreSQL connection factory."
+        "GitHub PR worker requires task and approval repositories to share the same PostgreSQL connection factory."
     )
     assert claims == []
     assert outcomes == []

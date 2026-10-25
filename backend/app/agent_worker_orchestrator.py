@@ -15,6 +15,7 @@ from .agent_worker_container_validation import ContainerRuntime, ContainerValida
 from .agent_worker_github_branch import AgentWorkerGitHubBranchResult, GitHubBranchClient, run_agent_worker_github_branch_creation
 from .agent_worker_github_files import AgentWorkerGitHubFilesResult, GitHubFileClient, run_agent_worker_github_file_application
 from .agent_worker_github_pr import AgentWorkerGitHubPRResult, GitHubPullRequestClient, run_agent_worker_github_pr_creation
+from .agent_worker_claims import validate_agent_worker_repository_pair
 from .agent_worker_validation_runner import CommandExecutionResult, run_agent_worker_validation_commands
 from .agent_worker_workspace import AgentWorkerWorkspaceResult, WorkspaceCommandRunner, cleanup_agent_worker_workspace, prepare_agent_worker_workspace
 from .approval_repository import PostgresApprovalDecisionRepository
@@ -47,22 +48,18 @@ class AgentWorkerOrchestrationResult:
 
 
 def _is_postgres_pair(task_repository, approval_repository) -> bool:
-    settings = get_settings()
     task_is_postgres = isinstance(task_repository, PostgresAgentTaskRepository)
     approval_is_postgres = isinstance(approval_repository, PostgresApprovalDecisionRepository)
-    if (
-        settings.is_production or settings.postgres_auth_enabled
-    ) and task_repository is None and approval_repository is None:
-        raise ValueError(
-            "PostgreSQL orchestration repositories are required in production or PostgreSQL auth mode."
-        )
-    if task_is_postgres != approval_is_postgres:
-        raise ValueError("PostgreSQL orchestration requires paired task and approval repositories.")
+    postgres_pair = validate_agent_worker_repository_pair(
+        task_repository,
+        approval_repository,
+        worker_name="PostgreSQL orchestration",
+    )
     if task_repository is not None and not task_is_postgres:
         raise ValueError("Orchestration task repository is not supported.")
     if approval_repository is not None and not approval_is_postgres:
         raise ValueError("Orchestration approval repository is not supported.")
-    return task_is_postgres
+    return postgres_pair
 
 
 def _task(task_id: str | None, task_repository=None) -> AgentTask | None:

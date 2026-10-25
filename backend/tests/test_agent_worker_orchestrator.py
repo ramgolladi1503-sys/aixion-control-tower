@@ -3,15 +3,22 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
+from app import agent_worker_claims as worker_claims
+from app import agent_worker_orchestrator as orchestrator
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
 from app.agent_worker_container_validation import ContainerValidationPolicy
 from app.agent_worker_github_branch import GitHubBranchCreateResult
 from app.agent_worker_github_pr import GitHubPullRequestCreateResult
 from app.agent_worker_orchestrator import run_approved_agent_task_worker_flow
 from app.agent_worker_validation_runner import CommandExecutionResult
+from app.approval_repository import PostgresApprovalDecisionRepository, SQLiteApprovalDecisionRepository
 from app.models import AgentProvider, ApprovalRequest, FileChange, Project, RiskAssessment, RiskLevel
+from app.postgres_audit_repository import PostgresAuditEventRepository
 from app.store import store
 
 
@@ -126,6 +133,11 @@ class UnavailableContainerRuntime:
         raise AssertionError("container runtime should not run when unavailable")
 
 
+class FakePostgresRuntimeConnector:
+    def connect(self):
+        raise AssertionError("test connector must not be invoked")
+
+
 def setup_function() -> None:
     store.reset()
 
@@ -169,6 +181,89 @@ def _approved_task(approval: ApprovalRequest) -> AgentTask:
     store.agent_tasks[task.id] = task
     store.persist()
     return task
+
+
+def test_orchestrator_rejects_different_postgres_runtimes_before_task_lookup_or_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_repository = PostgresAgentTaskRepository(FakePostgresRuntimeConnector().connect)
+    approval_repository = PostgresApprovalDecisionRepository(FakePostgresRuntimeConnector().connect)
+    lookups: list[object] = []
+    audit_before = list(store.audit_events)
+
+    def unexpected_task_lookup(task_id, repository=None):
+        lookups.append((task_id, repository))
+        pytest.fail("different PostgreSQL runtimes must be rejected before task lookup")
+
+    monkeypatch.setattr(orchestrator, "_task", unexpected_task_lookup)
+
+    with pytest.raises(ValueError, match="share the same PostgreSQL connection factory"):
+        run_approved_agent_task_worker_flow(
+            task_id="postgres-task",
+            task_repository=task_repository,
+            approval_repository=approval_repository,
+        )
+
+    assert lookups == []
+    assert store.audit_events == audit_before
+
+
+def test_orchestrator_accepts_same_runtime_postgres_pair_before_task_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakePostgresRuntimeConnector()
+    task_repository = PostgresAgentTaskRepository(runtime.connect)
+    approval_repository = PostgresApprovalDecisionRepository(runtime.connect)
+    audit_repository = PostgresAuditEventRepository(runtime.connect)
+    lookups: list[object] = []
+
+    def expected_task_lookup(task_id, repository=None):
+        lookups.append((task_id, repository))
+        return None
+
+    monkeypatch.setattr(orchestrator, "_task", expected_task_lookup)
+    result = run_approved_agent_task_worker_flow(
+        task_id="postgres-task",
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+        audit_repository=audit_repository,
+    )
+
+    assert result.success is False
+    assert result.reason == "Agent task not found."
+    assert lookups == [("postgres-task", task_repository)]
+
+
+@pytest.mark.parametrize("repository_mode", ["missing", "sqlite"])
+def test_orchestrator_requires_postgres_pair_in_postgres_auth_mode_before_task_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    repository_mode: str,
+) -> None:
+    monkeypatch.setattr(
+        worker_claims,
+        "get_settings",
+        lambda: type("Settings", (), {"is_production": False, "postgres_auth_enabled": True})(),
+    )
+    task_repository = SQLiteAgentTaskRepository(store._connect) if repository_mode == "sqlite" else None
+    approval_repository = (
+        SQLiteApprovalDecisionRepository(store._connect) if repository_mode == "sqlite" else None
+    )
+    lookups: list[object] = []
+
+    def unexpected_task_lookup(task_id, repository=None):
+        lookups.append((task_id, repository))
+        pytest.fail("PostgreSQL mode mismatch must be rejected before task lookup")
+
+    monkeypatch.setattr(orchestrator, "_task", unexpected_task_lookup)
+
+    with pytest.raises(ValueError, match="PostgreSQL task and approval repositories"):
+        run_approved_agent_task_worker_flow(
+            task_id="must-not-read-local-store",
+            task_repository=task_repository,
+            approval_repository=approval_repository,
+        )
+
+    assert lookups == []
 
 
 def test_orchestrator_runs_branch_files_validation_and_pr_steps() -> None:

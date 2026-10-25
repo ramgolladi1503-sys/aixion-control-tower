@@ -12,9 +12,13 @@ from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
 
 import app.agent_worker_validation_runner as validation_runner
+import app.agent_worker_claims as worker_claims
 from app.agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
-from app.approval_repository import PostgresApprovalDecisionRepository
+from app.approval_repository import (
+    PostgresApprovalDecisionRepository,
+    SQLiteApprovalDecisionRepository,
+)
 from app.postgres_database import run_postgres_migrations
 from app.agent_worker_validation_runner import (
     CommandExecutionResult,
@@ -510,23 +514,110 @@ def test_postgres_validation_runner_rolls_back_pass_event_when_audit_fails(
     assert not any(event.task_id == task.id for event in store.agent_task_events.values())
 
 
-@pytest.mark.parametrize("use_sqlite_repository", [False, True])
+@pytest.mark.parametrize("repository_mode", ["missing", "sqlite"])
 def test_postgres_auth_validation_runner_rejects_legacy_sqlite_authority(
     monkeypatch: pytest.MonkeyPatch,
-    use_sqlite_repository: bool,
+    repository_mode: str,
 ) -> None:
     monkeypatch.setattr(
-        validation_runner,
+        worker_claims,
         "get_settings",
         lambda: type("Settings", (), {"is_production": False, "postgres_auth_enabled": True})(),
     )
-    task_repository = (
-        SQLiteAgentTaskRepository(store._connect) if use_sqlite_repository else None
+    task_repository = SQLiteAgentTaskRepository(store._connect) if repository_mode == "sqlite" else None
+    approval_repository = (
+        SQLiteApprovalDecisionRepository(store._connect) if repository_mode == "sqlite" else None
     )
 
-    with pytest.raises(ValueError, match="runtime-bound PostgreSQL task and approval repositories"):
+    with pytest.raises(ValueError, match="PostgreSQL task and approval repositories"):
         run_agent_worker_validation_commands(
             task_id="must-not-read-from-legacy-store",
             task_repository=task_repository,
-            approval_repository=None,
+            approval_repository=approval_repository,
         )
+
+
+class _ValidationRuntimeConnector:
+    def connect(self):
+        raise AssertionError("test connector must not be invoked")
+
+
+def test_validation_runner_rejects_postgres_repositories_from_different_runtimes_before_claim_or_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        worker_claims,
+        "get_settings",
+        lambda: type("Settings", (), {"is_production": True, "postgres_auth_enabled": True})(),
+    )
+    task_repository = PostgresAgentTaskRepository(_ValidationRuntimeConnector().connect)
+    approval_repository = PostgresApprovalDecisionRepository(_ValidationRuntimeConnector().connect)
+    claims: list[object] = []
+    executions: list[str] = []
+
+    def unexpected_claim(**kwargs):
+        claims.append(kwargs)
+        pytest.fail("different PostgreSQL runtimes must be rejected before claim")
+
+    def unexpected_executor(command: str) -> CommandExecutionResult:
+        executions.append(command)
+        return CommandExecutionResult(command=command, exit_code=0)
+
+    monkeypatch.setattr(validation_runner, "claim_agent_task_for_worker", unexpected_claim)
+
+    with pytest.raises(ValueError, match="share the same PostgreSQL connection factory"):
+        run_agent_worker_validation_commands(
+            task_id="must-not-claim",
+            executor=unexpected_executor,
+            task_repository=task_repository,
+            approval_repository=approval_repository,
+        )
+
+    assert claims == []
+    assert executions == []
+
+
+def test_validation_runner_accepts_same_runtime_postgres_pair_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        worker_claims,
+        "get_settings",
+        lambda: type("Settings", (), {"is_production": True, "postgres_auth_enabled": True})(),
+    )
+    runtime = _ValidationRuntimeConnector()
+    task_repository = PostgresAgentTaskRepository(runtime.connect)
+    approval_repository = PostgresApprovalDecisionRepository(runtime.connect)
+    claims: list[object] = []
+    executions: list[str] = []
+
+    def expected_claim(**kwargs):
+        claims.append(kwargs["repository"])
+        return type(
+            "Claim",
+            (),
+            {
+                "success": False,
+                "task": None,
+                "task_id": kwargs["task_id"],
+                "lease_token": None,
+                "reason": "claim reached with shared PostgreSQL runtime",
+            },
+        )()
+
+    def unexpected_executor(command: str) -> CommandExecutionResult:
+        executions.append(command)
+        return CommandExecutionResult(command=command, exit_code=0)
+
+    monkeypatch.setattr(validation_runner, "claim_agent_task_for_worker", expected_claim)
+    result = run_agent_worker_validation_commands(
+        task_id="postgres-task",
+        executor=unexpected_executor,
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+    )
+
+    assert result.success is False
+    assert result.reason == "claim reached with shared PostgreSQL runtime"
+    assert claims == [task_repository]
+    assert executions == []

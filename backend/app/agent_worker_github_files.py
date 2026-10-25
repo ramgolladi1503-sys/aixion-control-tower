@@ -11,18 +11,18 @@ from typing import Any, Protocol
 import httpx
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
-from .agent_task_repository import AgentTaskRepository, PostgresAgentTaskRepository
+from .agent_task_repository import AgentTaskRepository
 from .agent_worker_branch_plan import _planned_branch_for_task, validate_branch_plan
 from .agent_worker_claims import (
     claim_agent_task_for_worker,
     claim_first_approved_agent_task_for_worker,
     commit_agent_task_worker_outcome,
+    validate_agent_worker_repository_pair,
 )
 from .agent_worker_file_plan import validate_file_patch_plan
 from .approval_decisions import agent_task_repository, approval_decision_repository
-from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
+from .approval_repository import ApprovalDecisionRepository
 from .models import ApprovalRequest, FileChange
-from .settings import get_settings
 
 GITHUB_API_BASE_URL = "https://api.github.com"
 
@@ -179,40 +179,6 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _same_postgres_connector(task_repository: AgentTaskRepository, approval_repository: ApprovalDecisionRepository) -> bool:
-    task_connect = getattr(task_repository, "_connect", None)
-    approval_connect = getattr(approval_repository, "_connect", None)
-    if not callable(task_connect) or not callable(approval_connect):
-        return False
-    if task_connect is approval_connect:
-        return True
-    # Every access to runtime.connect creates a new bound-method object. Match
-    # only the same method implementation bound to the same runtime instance;
-    # do not trust arbitrary callable __eq__ implementations as authority.
-    return (
-        getattr(task_connect, "__self__", None) is not None
-        and getattr(task_connect, "__self__", None) is getattr(approval_connect, "__self__", None)
-        and getattr(task_connect, "__func__", None) is getattr(approval_connect, "__func__", None)
-    )
-
-
-def _repository_pair_error(
-    task_repository: AgentTaskRepository,
-    approval_repository: ApprovalDecisionRepository,
-) -> str | None:
-    task_is_postgres = isinstance(task_repository, PostgresAgentTaskRepository)
-    approval_is_postgres = isinstance(approval_repository, PostgresApprovalDecisionRepository)
-    settings = get_settings()
-    postgres_required = settings.is_production or settings.postgres_auth_enabled
-    if task_is_postgres != approval_is_postgres:
-        return "GitHub file workers require paired PostgreSQL task and approval repositories."
-    if task_is_postgres and not _same_postgres_connector(task_repository, approval_repository):
-        return "GitHub file workers require task and approval repositories to share the same PostgreSQL connection factory."
-    if postgres_required and not (task_is_postgres and approval_is_postgres):
-        return "GitHub file workers require PostgreSQL task and approval repositories in production or PostgreSQL-auth mode."
-    return None
-
-
 def _linked_approval(
     task: AgentTask,
     repository: ApprovalDecisionRepository | None = None,
@@ -328,13 +294,18 @@ def run_agent_worker_github_file_application(
 
     active_task_repository = task_repository or agent_task_repository
     active_approval_repository = approval_repository or approval_decision_repository
-    repository_error = _repository_pair_error(active_task_repository, active_approval_repository)
-    if repository_error:
+    try:
+        validate_agent_worker_repository_pair(
+            active_task_repository,
+            active_approval_repository,
+            worker_name="GitHub file worker",
+        )
+    except ValueError as error:
         return AgentWorkerGitHubFilesResult(
             success=False,
             task_id=task_id,
             worker_id=worker_id,
-            reason=repository_error,
+            reason=str(error),
         )
     claim = (
         claim_first_approved_agent_task_for_worker(
