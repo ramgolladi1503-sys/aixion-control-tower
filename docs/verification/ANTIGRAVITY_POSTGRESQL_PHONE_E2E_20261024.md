@@ -47,7 +47,13 @@ revision; do not carry this PASS forward to code that has not been exercised.
    PostgreSQL transaction, rejects remote/non-test databases, and requires an
    exact tool payload, one matching approval decision, a matching at-most-once
    claim and audit event, matching database-row and payload workspace scope,
-   and a marker newer than the recorded start time:
+   and a fresh chronological evidence chain: approval creation at or after the
+   recorded start time, then approval decision, durable delivery claim, and its
+   audit event. By default, the supplied start time must be no more than 15
+   minutes old when verification runs; `--max-age-seconds` can extend this up
+   to a hard maximum of 1 hour. A stale or timed-out run requires a fresh
+   invocation and marker. The marker's modification time must be at or after
+   the durable delivery claim:
 
    ```sh
    export AIXION_E2E_POSTGRES_DSN='<disposable-local-postgres-dsn>'
@@ -63,11 +69,14 @@ revision; do not carry this PASS forward to code that has not been exercised.
    ```
 
 The verifier is evidence support, not the physical E2E itself. A PASS confirms
-durable approval/claim identity and a fresh marker; the operator must also
+durable approval/claim identity and a fresh marker; its output explicitly sets
+`physical_phone_provider_flow_proven=false` and
+`application_or_hook_revision_proven=false`. The operator must also
 record that the phone displayed and approved this exact request and that the
 same pending Antigravity call resumed. No phone or Antigravity UI is automated
 by the verifier. Any missing row, duplicate event, mismatched invocation/hash,
-workspace, stale marker, remote database, or unreadable state fails nonzero.
+workspace, stale or unordered database timestamp, stale marker, remote database,
+or unreadable state fails nonzero.
 
 ## Limits
 

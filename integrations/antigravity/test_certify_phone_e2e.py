@@ -16,6 +16,7 @@ from integrations.antigravity.certify_phone_e2e import (
 
 @pytest.fixture
 def evidence() -> dict:
+    created_at = datetime.now(timezone.utc) - timedelta(seconds=4)
     invocation = "antigravity:v1:" + "a" * 64
     payload = {
         "id": "approval_0123456789ab",
@@ -46,20 +47,27 @@ def evidence() -> dict:
             "status": "APPROVED",
             "payload": payload,
             "workspace_id": "workspace_test",
+            "created_at": created_at,
         },
         "decision_events": [{
             "approval_id": payload["id"],
             "event_type": "approval.decision",
+            "workspace_id": "workspace_test",
+            "created_at": created_at + timedelta(seconds=1),
             "details": {"new_status": "APPROVED", "approved_payload_hash": payload["approved_payload_hash"]},
         }],
         "claim": {
             "approval_id": payload["id"],
             "source_agent_id": "agent_test",
             "source_invocation_id": invocation,
+            "workspace_id": "workspace_test",
+            "claimed_at": created_at + timedelta(seconds=2),
         },
         "claim_events": [{
             "approval_id": payload["id"],
             "event_type": "approval.delivery_claimed",
+            "workspace_id": "workspace_test",
+            "created_at": created_at + timedelta(seconds=2),
             "details": {
                 "source_agent_id": "agent_test",
                 "source_invocation_id": invocation,
@@ -69,7 +77,12 @@ def evidence() -> dict:
     }
 
 
-def _verify(evidence: dict) -> dict:
+def _verify(
+    evidence: dict,
+    *,
+    started_at: datetime | None = None,
+    max_age_seconds: int = certify_phone_e2e.DEFAULT_MAX_CERTIFICATION_AGE_SECONDS,
+) -> dict:
     return verify_records(
         **evidence,
         expected_approval_id="approval_0123456789ab",
@@ -78,6 +91,8 @@ def _verify(evidence: dict) -> dict:
         expected_workspace_id="workspace_test",
         tool_name="run_command",
         expected_arguments={"command": "mkdir /tmp/aixion-e2e-marker"},
+        expected_started_at=started_at or datetime.now(timezone.utc) - timedelta(seconds=5),
+        max_age_seconds=max_age_seconds,
     )
 
 
@@ -88,6 +103,39 @@ def test_certifier_accepts_exact_approved_and_claimed_invocation(evidence: dict)
     assert result["approved_payload_hash"] == evidence["approval"]["payload"]["approved_payload_hash"]
     assert result["delivery_claim_events"] == 1
     assert result["workspace_id"] == "workspace_test"
+
+
+def test_certifier_rejects_approval_rows_from_a_previous_run_even_with_fresh_marker(evidence: dict) -> None:
+    changed = copy.deepcopy(evidence)
+    previous_run = datetime.now(timezone.utc) - timedelta(hours=1)
+    changed["approval"]["created_at"] = previous_run
+    changed["decision_events"][0]["created_at"] = previous_run + timedelta(seconds=1)
+    changed["claim"]["claimed_at"] = previous_run + timedelta(seconds=2)
+    changed["claim_events"][0]["created_at"] = previous_run + timedelta(seconds=2)
+
+    with pytest.raises(EvidenceError, match="Approval predates this certification run"):
+        _verify(changed)
+
+
+def test_certifier_rejects_start_time_outside_bounded_freshness_window(evidence: dict) -> None:
+    with pytest.raises(EvidenceError, match="outside the fresh-run window"):
+        _verify(evidence, started_at=datetime.now(timezone.utc) - timedelta(hours=2))
+
+
+def test_certifier_rejects_naive_database_timestamp(evidence: dict) -> None:
+    changed = copy.deepcopy(evidence)
+    changed["claim"]["claimed_at"] = changed["claim"]["claimed_at"].replace(tzinfo=None)
+
+    with pytest.raises(EvidenceError, match="Delivery claim time is missing or has no timezone"):
+        _verify(changed)
+
+
+def test_certifier_rejects_delivery_claim_that_predates_decision(evidence: dict) -> None:
+    changed = copy.deepcopy(evidence)
+    changed["claim"]["claimed_at"] = changed["decision_events"][0]["created_at"] - timedelta(seconds=1)
+
+    with pytest.raises(EvidenceError, match="Delivery claim predates the approval decision"):
+        _verify(changed)
 
 
 @pytest.mark.parametrize(
@@ -115,6 +163,7 @@ def test_certifier_rejects_missing_or_mismatched_workspace_scope(
                 expected_workspace_id=value,
                 tool_name="run_command",
                 expected_arguments={"command": "mkdir /tmp/aixion-e2e-marker"},
+                expected_started_at=datetime.now(timezone.utc) - timedelta(seconds=5),
             )
         return
     if scope == "row":
@@ -184,16 +233,26 @@ def test_database_verifier_sets_read_only_before_any_query(
                 return (
                     approval["approval_id"], approval["source_agent_id"],
                     approval["status"], approval["payload"], approval["workspace_id"],
+                    approval["created_at"],
                 )
             if "FROM approval_delivery_claims" in self.current_query:
-                return (claim["approval_id"], claim["source_agent_id"], claim["source_invocation_id"])
+                return (
+                    claim["approval_id"], claim["source_agent_id"], claim["source_invocation_id"],
+                    claim["workspace_id"], claim["claimed_at"],
+                )
             raise AssertionError(f"Unexpected fetchone query: {self.current_query}")
 
         def fetchall(self):
             if "approval.decision" in self.current_query:
-                return [(decision["approval_id"], decision["event_type"], decision["details"])]
+                return [(
+                    decision["approval_id"], decision["event_type"], decision["details"],
+                    decision["workspace_id"], decision["created_at"],
+                )]
             if "approval.delivery_claimed" in self.current_query:
-                return [(claim_event["approval_id"], claim_event["event_type"], claim_event["details"])]
+                return [(
+                    claim_event["approval_id"], claim_event["event_type"], claim_event["details"],
+                    claim_event["workspace_id"], claim_event["created_at"],
+                )]
             raise AssertionError(f"Unexpected fetchall query: {self.current_query}")
 
     class FakeConnection:
@@ -221,16 +280,25 @@ def test_database_verifier_sets_read_only_before_any_query(
         expected_arguments={"command": "mkdir /tmp/aixion-e2e-marker"},
         marker=str(marker),
         started_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+        max_age_seconds=certify_phone_e2e.DEFAULT_MAX_CERTIFICATION_AGE_SECONDS,
     )
 
     result = certify_phone_e2e.verify_database(args)
 
     assert result["result"] == "PASS_DURABLE_APPROVAL_AND_FRESH_MARKER"
+    assert result["physical_phone_provider_flow_proven"] is False
+    assert result["application_or_hook_revision_proven"] is False
     assert queries[0] == "SET TRANSACTION READ ONLY"
     assert len(queries) == 5
 
 
-@pytest.mark.parametrize("mutation", ["changed_arguments", "different_invocation", "missing_claim", "duplicate_claim_event"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "changed_arguments", "different_invocation", "missing_claim", "duplicate_claim_event",
+        "decision_workspace", "claim_workspace", "claim_event_workspace",
+    ],
+)
 def test_certifier_rejects_incomplete_or_mismatched_e2e_evidence(
     evidence: dict, mutation: str
 ) -> None:
@@ -241,6 +309,12 @@ def test_certifier_rejects_incomplete_or_mismatched_e2e_evidence(
         changed["claim"]["source_invocation_id"] += ":other"
     elif mutation == "missing_claim":
         changed["claim"] = None
+    elif mutation == "decision_workspace":
+        changed["decision_events"][0]["workspace_id"] = "workspace_other"
+    elif mutation == "claim_workspace":
+        changed["claim"]["workspace_id"] = "workspace_other"
+    elif mutation == "claim_event_workspace":
+        changed["claim_events"][0]["workspace_id"] = "workspace_other"
     else:
         changed["claim_events"].append(copy.deepcopy(changed["claim_events"][0]))
 

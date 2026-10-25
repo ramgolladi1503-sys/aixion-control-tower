@@ -9,7 +9,7 @@ command's fresh filesystem marker; it cannot replace the human/device proof.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -20,6 +20,10 @@ from typing import Any
 
 class EvidenceError(Exception):
     """The supplied live evidence is incomplete or inconsistent."""
+
+
+DEFAULT_MAX_CERTIFICATION_AGE_SECONDS = 900
+MAX_CERTIFICATION_AGE_SECONDS = 3600
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -44,6 +48,55 @@ def _json_object(value: str) -> dict[str, Any]:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _timestamp_utc(value: Any, *, label: str) -> datetime:
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise EvidenceError(f"{label} is not a valid ISO-8601 timestamp") from exc
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise EvidenceError(f"{label} is missing or has no timezone")
+    return value.astimezone(timezone.utc)
+
+
+def _verify_evidence_freshness(
+    *,
+    approval: dict[str, Any],
+    decision_event: dict[str, Any],
+    claim: dict[str, Any],
+    claim_event: dict[str, Any],
+    started_at: datetime,
+    max_age_seconds: int,
+    now: datetime | None = None,
+) -> dict[str, datetime]:
+    start = _timestamp_utc(started_at, label="Certification start time")
+    current = _timestamp_utc(now or datetime.now(timezone.utc), label="Current time")
+    if type(max_age_seconds) is not int or not 1 <= max_age_seconds <= MAX_CERTIFICATION_AGE_SECONDS:
+        raise EvidenceError(
+            f"Maximum certification age must be from 1 to {MAX_CERTIFICATION_AGE_SECONDS} seconds"
+        )
+    if start > current or current - start > timedelta(seconds=max_age_seconds):
+        raise EvidenceError("Certification start time is in the future or outside the fresh-run window")
+
+    timestamps = {
+        "approval_created_at": _timestamp_utc(approval.get("created_at"), label="Approval creation time"),
+        "decision_created_at": _timestamp_utc(decision_event.get("created_at"), label="Approval decision time"),
+        "claim_created_at": _timestamp_utc(claim.get("claimed_at"), label="Delivery claim time"),
+        "claim_event_created_at": _timestamp_utc(
+            claim_event.get("created_at"), label="Delivery claim audit time"
+        ),
+    }
+    if timestamps["approval_created_at"] < start:
+        raise EvidenceError("Approval predates this certification run")
+    if timestamps["decision_created_at"] < timestamps["approval_created_at"]:
+        raise EvidenceError("Approval decision predates approval creation")
+    if timestamps["claim_created_at"] < timestamps["decision_created_at"]:
+        raise EvidenceError("Delivery claim predates the approval decision")
+    if timestamps["claim_event_created_at"] < timestamps["claim_created_at"]:
+        raise EvidenceError("Delivery claim audit event predates the durable delivery claim")
+    return timestamps
 
 
 def _computed_approved_payload_hash(payload: dict[str, Any]) -> str:
@@ -120,6 +173,8 @@ def verify_records(
     expected_workspace_id: str,
     tool_name: str,
     expected_arguments: dict[str, Any],
+    expected_started_at: datetime,
+    max_age_seconds: int = DEFAULT_MAX_CERTIFICATION_AGE_SECONDS,
 ) -> dict[str, Any]:
     """Validate DB rows after fetching them from one PostgreSQL snapshot."""
     payload = approval.get("payload")
@@ -165,6 +220,7 @@ def verify_records(
     if (
         decision.get("event_type") != "approval.decision"
         or decision.get("approval_id") != expected_approval_id
+        or decision.get("workspace_id") != expected_workspace_id
         or not isinstance(details, dict)
         or details.get("new_status") != "APPROVED"
         or details.get("approved_payload_hash") != approved_hash
@@ -175,6 +231,7 @@ def verify_records(
         raise EvidenceError("No durable at-most-once delivery claim exists")
     if (
         claim.get("approval_id") != expected_approval_id
+        or claim.get("workspace_id") != expected_workspace_id
         or claim.get("source_agent_id") != expected_agent_id
         or claim.get("source_invocation_id") != invocation_id
     ):
@@ -188,12 +245,21 @@ def verify_records(
     if (
         claim_event.get("event_type") != "approval.delivery_claimed"
         or claim_event.get("approval_id") != expected_approval_id
+        or claim_event.get("workspace_id") != expected_workspace_id
         or not isinstance(claim_details, dict)
         or claim_details.get("source_agent_id") != expected_agent_id
         or claim_details.get("source_invocation_id") != invocation_id
         or claim_details.get("approved_payload_hash") != approved_hash
     ):
         raise EvidenceError("Delivery audit event does not match the approved invocation")
+    freshness = _verify_evidence_freshness(
+        approval=approval,
+        decision_event=decision,
+        claim=claim,
+        claim_event=claim_event,
+        started_at=expected_started_at,
+        max_age_seconds=max_age_seconds,
+    )
     return {
         "approval_id": expected_approval_id,
         "agent_id": expected_agent_id,
@@ -203,6 +269,7 @@ def verify_records(
         "approved_payload_hash": approved_hash,
         "decision_events": len(decision_events),
         "delivery_claim_events": len(claim_events),
+        **{key: value.isoformat() for key, value in freshness.items()},
     }
 
 
@@ -229,7 +296,7 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
         with conn.cursor() as cursor:
             cursor.execute("SET TRANSACTION READ ONLY")
             cursor.execute(
-                "SELECT approval_id, source_agent_id, status, payload, workspace_id "
+                "SELECT approval_id, source_agent_id, status, payload, workspace_id, created_at "
                 "FROM approval_requests WHERE approval_id=%s",
                 (args.approval_id,),
             )
@@ -238,35 +305,36 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
                 raise EvidenceError("Approval was not found in the configured PostgreSQL database")
             approval = {
                 "approval_id": row[0], "source_agent_id": row[1], "status": row[2],
-                "payload": row[3], "workspace_id": row[4],
+                "payload": row[3], "workspace_id": row[4], "created_at": row[5],
             }
             cursor.execute(
-                "SELECT approval_id, event_type, details FROM audit_events "
+                "SELECT approval_id, event_type, details, workspace_id, created_at FROM audit_events "
                 "WHERE approval_id=%s AND event_type='approval.decision' "
                 "AND details->>'new_status'='APPROVED'",
                 (args.approval_id,),
             )
             decision_events = [
-                {"approval_id": r[0], "event_type": r[1], "details": r[2]}
+                {"approval_id": r[0], "event_type": r[1], "details": r[2], "workspace_id": r[3], "created_at": r[4]}
                 for r in cursor.fetchall()
             ]
             cursor.execute(
-                "SELECT approval_id, source_agent_id, source_invocation_id "
+                "SELECT approval_id, source_agent_id, source_invocation_id, workspace_id, claimed_at "
                 "FROM approval_delivery_claims WHERE approval_id=%s",
                 (args.approval_id,),
             )
             claim_row = cursor.fetchone()
             claim = None if claim_row is None else {
                 "approval_id": claim_row[0], "source_agent_id": claim_row[1],
-                "source_invocation_id": claim_row[2],
+                "source_invocation_id": claim_row[2], "workspace_id": claim_row[3],
+                "claimed_at": claim_row[4],
             }
             cursor.execute(
-                "SELECT approval_id, event_type, details FROM audit_events "
+                "SELECT approval_id, event_type, details, workspace_id, created_at FROM audit_events "
                 "WHERE approval_id=%s AND event_type='approval.delivery_claimed'",
                 (args.approval_id,),
             )
             claim_events = [
-                {"approval_id": r[0], "event_type": r[1], "details": r[2]}
+                {"approval_id": r[0], "event_type": r[1], "details": r[2], "workspace_id": r[3], "created_at": r[4]}
                 for r in cursor.fetchall()
             ]
         conn.rollback()  # End the enforced read-only transaction without committing.
@@ -283,14 +351,17 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
         expected_workspace_id=args.workspace_id,
         tool_name=args.tool_name,
         expected_arguments=args.expected_arguments,
+        expected_started_at=args.started_at,
+        max_age_seconds=args.max_age_seconds,
     )
     marker = Path(args.marker).expanduser()
     try:
         marker_stat = marker.stat()
     except OSError as exc:
         raise EvidenceError("Expected command-created marker does not exist") from exc
-    if marker_stat.st_mtime < args.started_at.timestamp():
-        raise EvidenceError("Marker predates this certification run; use a fresh unique marker path")
+    claimed_at = _timestamp_utc(result["claim_created_at"], label="Delivery claim time")
+    if marker_stat.st_mtime < claimed_at.timestamp():
+        raise EvidenceError("Marker predates the durable delivery claim; use a fresh unique marker path")
     result["marker_path"] = str(marker.resolve())
     result["marker_mtime_utc"] = datetime.fromtimestamp(
         marker_stat.st_mtime, timezone.utc
@@ -300,6 +371,8 @@ def verify_database(args: argparse.Namespace) -> dict[str, Any]:
         "Confirm Antigravity resumed the same pending call after the phone decision; "
         "this script cannot observe the provider UI."
     )
+    result["physical_phone_provider_flow_proven"] = False
+    result["application_or_hook_revision_proven"] = False
     return result
 
 
@@ -313,6 +386,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-arguments", type=_json_object, required=True)
     parser.add_argument("--marker", required=True, help="Unique path created only by the approved tool call")
     parser.add_argument("--started-at", required=True, type=_parse_timestamp)
+    parser.add_argument(
+        "--max-age-seconds",
+        type=int,
+        default=DEFAULT_MAX_CERTIFICATION_AGE_SECONDS,
+        help=(
+            "Maximum age of --started-at (default: %(default)s; max: "
+            f"{MAX_CERTIFICATION_AGE_SECONDS}). A timed-out run needs a fresh invocation."
+        ),
+    )
     parser.add_argument("--dsn", help="Disposable PostgreSQL DSN; may instead use AIXION_E2E_POSTGRES_DSN")
     args = parser.parse_args(argv)
     try:
