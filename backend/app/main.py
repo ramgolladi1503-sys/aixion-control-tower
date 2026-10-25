@@ -655,6 +655,15 @@ app.state.work_order_repository = work_order_repository
 
 def _work_order_repository_for_route(http_request: Request | None):
     if http_request is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            # Direct calls have no request-bound workspace repository to use.
+            # Do not silently select the legacy module-level SQLite adapter.
+            raise HTTPException(
+                status_code=503,
+                detail="Work-order storage context is temporarily unavailable",
+                headers={"Retry-After": "1"},
+            )
         # Direct function calls in unit tests use the explicit local adapter.
         return work_order_repository
     return work_order_repository_for_request(http_request)

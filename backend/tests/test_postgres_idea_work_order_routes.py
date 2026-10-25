@@ -96,6 +96,48 @@ def test_idea_repository_without_request_retains_local_direct_behavior(
     assert main._idea_repository_for_route(None) is main.idea_repository
 
 
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_work_order_repository_without_request_fails_closed_before_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    class PoisonWorkOrderRepository:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"SQLite work-order repository accessed: {name}")
+
+    monkeypatch.setattr(main, "work_order_repository", PoisonWorkOrderRepository())
+    with pytest.raises(HTTPException) as raised:
+        main._work_order_repository_for_route(None)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+
+
+def test_work_order_repository_without_request_retains_local_direct_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    assert main._work_order_repository_for_route(None) is main.work_order_repository
+
+
 @pytest.fixture
 def postgres_idea_work_order_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[
     tuple[Callable[[], Connection], Workspace, Project]
