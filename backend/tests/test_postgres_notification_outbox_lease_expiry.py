@@ -143,3 +143,63 @@ def test_outbox_claim_recovers_after_worker_restart_before_outcome_persistence(
     assert recovered.push_error is None
     assert recovered.push_lease_expires_at is None
     assert delivered_tokens == ["restart-device-token", "restart-device-token"]
+
+
+def test_outcome_commit_response_loss_does_not_redeliver(
+    outbox_repository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost DB response after commit must not replay an already-sent push."""
+    repository, connect = outbox_repository
+    workspace, _, notification = _seed_notification(connect, user_id="commit-owner")
+    with connect() as conn:
+        _insert_device(conn, workspace, "commit-owner", "commit-device-token")
+
+    monkeypatch.setattr(
+        postgres_notification_dispatcher,
+        "get_settings",
+        lambda: SimpleNamespace(
+            push_dispatch_enabled=True,
+            push_lease_seconds=10,
+            push_max_attempts=4,
+            push_retry_base_seconds=15,
+            push_retry_max_seconds=900,
+        ),
+    )
+    delivered_tokens: list[str] = []
+
+    def sender(*, token: str, **_: object) -> None:
+        delivered_tokens.append(token)
+        return None
+
+    commit_outcome = repository.record_outcome
+    committed_then_response_lost = False
+
+    def lose_response_after_commit(**kwargs: object) -> object:
+        nonlocal committed_then_response_lost
+        result = commit_outcome(**kwargs)
+        if not committed_then_response_lost:
+            committed_then_response_lost = True
+            # The repository transaction has returned (and committed), but the
+            # worker cannot distinguish a lost response from a failed commit.
+            raise RuntimeError("simulated lost response after outcome commit")
+        return result
+
+    monkeypatch.setattr(repository, "record_outcome", lose_response_after_commit)
+    with pytest.raises(RuntimeError, match="lost response after outcome commit"):
+        dispatch_one_postgres_push(repository, sender=sender)
+
+    committed = _persisted_notification(connect, notification.id)
+    assert committed.push_status == "SENT"
+    assert committed.push_attempts == 1
+    assert committed.push_lease_expires_at is None
+    assert delivered_tokens == ["commit-device-token"]
+
+    # Simulate a restarted dispatcher after the ambiguous worker failure. The
+    # terminal row is durable, so it cannot be claimed and sent a second time.
+    restarted_repository = type(repository)(connect)
+    assert dispatch_one_postgres_push(restarted_repository, sender=sender) is None
+    assert delivered_tokens == ["commit-device-token"]
+    final = _persisted_notification(connect, notification.id)
+    assert final.push_status == "SENT"
+    assert final.push_attempts == 1
