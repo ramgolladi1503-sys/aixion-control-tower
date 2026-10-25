@@ -399,6 +399,19 @@ def assert_agent_can(
     *,
     http_request: Request | None = None,
 ) -> None:
+    settings = get_settings()
+    if http_request is None and (
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_auth_enabled", False)
+    ):
+        # Scope validation without a request would use module-level SQLite
+        # project and membership repositories. Authoritative modes must use
+        # the repositories bound to the active application runtime.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="External agent authorization requires an app-bound repository",
+            headers={"Retry-After": "1"},
+        )
     projects = (
         project_repository_for_request(http_request)
         if http_request is not None

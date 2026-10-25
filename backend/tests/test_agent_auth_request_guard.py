@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import agent_auth
 from app import agent_routes
+from app import workspace_access
 from app.agent_credential_models import AgentCreateWithCredentialPolicy, AgentCredentialRecord
 from app.models import AgentAuthType, AgentProvider, AuthUser, ExternalAgent, UserRole
 
@@ -275,3 +276,91 @@ def test_external_agent_credential_services_keep_local_profile_behavior(
         agent, credential=credential, repository=None
     ).enabled
     assert agent.secret_hash is None
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=["production", "postgres-auth"],
+)
+def test_agent_authorization_without_request_fails_before_sqlite_scope_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+) -> None:
+    class ForbiddenRepository:
+        def __getattr__(self, name: str):
+            pytest.fail(f"SQLite scope repository access must not occur: {name}")
+
+    agent = ExternalAgent(
+        id="agent-1",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Antigravity",
+        auth_type=AgentAuthType.API_KEY,
+        created_by_user_id="owner-1",
+        workspace_id="workspace-1",
+        allowed_project_ids=["project-1"],
+        allowed_actions=["CREATE_APPROVAL"],
+        secret_hash="agent-secret-hash",
+    )
+    monkeypatch.setattr(agent_auth, "get_settings", lambda: settings)
+    monkeypatch.setattr(agent_auth, "project_repository", ForbiddenRepository())
+    monkeypatch.setattr(workspace_access, "project_repository", ForbiddenRepository())
+    monkeypatch.setattr(
+        workspace_access, "workspace_membership_repository", ForbiddenRepository()
+    )
+
+    with pytest.raises(HTTPException) as error:
+        agent_auth.assert_agent_can(
+            agent,
+            agent_auth.AgentAction.CREATE_APPROVAL,
+            project_id="project-1",
+            http_request=None,
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+
+
+def test_agent_authorization_without_request_keeps_local_scope_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = ExternalAgent(
+        id="agent-1",
+        provider=AgentProvider.ANTIGRAVITY,
+        display_name="Antigravity",
+        auth_type=AgentAuthType.API_KEY,
+        created_by_user_id="owner-1",
+        workspace_id="workspace-1",
+        allowed_project_ids=["project-1"],
+        allowed_actions=["CREATE_APPROVAL"],
+        secret_hash="agent-secret-hash",
+    )
+    project_repository = SimpleNamespace(
+        get=lambda project_id: SimpleNamespace(
+            id=project_id, workspace_id="workspace-1"
+        )
+    )
+    membership_repository = SimpleNamespace(
+        get_workspace=lambda workspace_id: SimpleNamespace(id=workspace_id)
+    )
+    monkeypatch.setattr(
+        agent_auth,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+    monkeypatch.setattr(agent_auth, "project_repository", project_repository)
+    monkeypatch.setattr(workspace_access, "project_repository", project_repository)
+    monkeypatch.setattr(
+        workspace_access, "workspace_membership_repository", membership_repository
+    )
+    monkeypatch.setattr(agent_auth, "external_agent_scope_is_consistent", lambda *_args, **_kwargs: True)
+
+    agent_auth.assert_agent_can(
+        agent,
+        agent_auth.AgentAction.CREATE_APPROVAL,
+        project_id="project-1",
+        http_request=None,
+    )
