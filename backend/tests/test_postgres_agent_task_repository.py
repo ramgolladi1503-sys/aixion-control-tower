@@ -4,6 +4,7 @@ import os
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from threading import Barrier
 
 import psycopg
@@ -204,6 +205,78 @@ def test_postgres_worker_outcome_rolls_back_task_and_event_on_audit_conflict(age
 
     assert repository.get(task.id) == claimed
     assert repository.list_events(task.id, workspace_id=task.workspace_id) == []
+
+
+def test_postgres_validation_recovery_terminalizes_expired_started_task_once(agent_task_repository) -> None:
+    repository, connect = agent_task_repository
+    task = _seed_approved_task(connect)
+    claimed, reason, _ = repository.claim(
+        task_id=task.id, worker_id="validation-worker", lease_seconds=60,
+    )
+    assert reason == ""
+    assert claimed is not None
+    expired = claimed.model_copy(update={
+        "status": AgentTaskStatus.TESTING,
+        "worker_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=5),
+    })
+    started = AgentTaskEvent(
+        task_id=task.id,
+        event_type=AgentTaskEventType.TESTS_STARTED,
+        status=AgentTaskStatus.TESTING,
+        actor="validation-worker",
+        message="Worker started allowlisted validation commands.",
+        metadata={
+            "worker_id": "validation-worker",
+            "lease_token": claimed.worker_lease_token,
+            "approval_request_id": task.approval_request_id,
+            "runner_type": "validation_command_runner",
+            "validation_policy": {"policy_version": "test"},
+        },
+    )
+    started_audit = AuditEvent(
+        event_type="agent_task.event_recorded",
+        entity_id=task.id,
+        workspace_id=task.workspace_id,
+        actor="validation-worker",
+        details={
+            "event_id": started.id,
+            "status": AgentTaskStatus.TESTING,
+            "message": started.message,
+            "notification_id": None,
+        },
+    )
+    repository.commit_event(expected=claimed, updated=expired, event=started, audit=started_audit)
+
+    recovered = repository.recover_abandoned_validation_tasks(task_id=task.id)
+
+    assert len(recovered) == 1
+    terminal = repository.get(task.id)
+    assert terminal is not None
+    assert terminal.status == AgentTaskStatus.FAILED
+    assert terminal.worker_lease_owner is None
+    assert terminal.worker_lease_expires_at is None
+    assert terminal.worker_lease_token is None
+    recovery_event = next(
+        event for event in repository.list_events(task.id, workspace_id=task.workspace_id)
+        if event.event_type == AgentTaskEventType.FAILED
+    )
+    assert recovery_event.metadata["execution_outcome"] == "UNKNOWN"
+    assert recovery_event.metadata["failure_class"] == "WorkerProcessLost"
+    assert "commands_executed" not in recovery_event.metadata
+    assert recovery_event.metadata["results"] is None
+    assert recovery_event.metadata["results_available"] is False
+    assert recovery_event.metadata["completed_command_count"] is None
+    with connect() as conn:
+        audit = conn.execute(
+            "SELECT event_type,details FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_worker.validation_worker_lost'",
+            (task.id,),
+        ).fetchone()
+    assert audit is not None
+    assert audit[1]["event_id"] == recovery_event.id
+    assert audit[1]["execution_outcome"] == "UNKNOWN"
+    assert audit[1]["commands_completed"] is None
+    assert repository.recover_abandoned_validation_tasks(task_id=task.id) == []
 
 
 def test_postgres_agent_task_creation_rolls_back_on_duplicate_audit_id(agent_task_repository) -> None:

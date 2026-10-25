@@ -267,6 +267,8 @@ class AgentTaskRepository(Protocol):
         event: AgentTaskEvent | None, audit: AuditEvent,
     ) -> None: ...
 
+    def recover_abandoned_validation_tasks(self, *, task_id: str | None = None) -> list[AgentTask]: ...
+
 
 def _validate_worker_outcome_commit(
     expected: AgentTask,
@@ -1451,6 +1453,130 @@ class PostgresAgentTaskRepository:
                 )
         except psycopg.errors.UniqueViolation as exc:
             raise AgentTaskRepositoryConflict("Worker outcome record already exists.") from exc
+
+    def recover_abandoned_validation_tasks(
+        self, *, task_id: str | None = None,
+    ) -> list[AgentTask]:
+        """Fail closed for expired validation leases after a durable TESTS_STARTED event.
+
+        This records an unknown outcome and fences the old lease. It never retries
+        or executes a validation command.
+        """
+        recovered: list[AgentTask] = []
+        with self._connect() as conn:
+            if task_id is None:
+                rows = conn.execute(
+                    "SELECT task_id,workspace_id,project_id,payload FROM agent_tasks "
+                    "WHERE status='TESTING' "
+                    "AND (payload->>'worker_lease_expires_at')::timestamptz <= clock_timestamp() "
+                    "ORDER BY updated_at,task_id FOR UPDATE SKIP LOCKED"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT task_id,workspace_id,project_id,payload FROM agent_tasks "
+                    "WHERE task_id=%s AND status='TESTING' "
+                    "AND (payload->>'worker_lease_expires_at')::timestamptz <= clock_timestamp() "
+                    "FOR UPDATE",
+                    (task_id,),
+                ).fetchall()
+            for row in rows:
+                task = AgentTask.model_validate(row[3])
+                if task.id != row[0] or task.workspace_id != row[1] or task.project_id != row[2]:
+                    raise AgentTaskRepositoryConflict(
+                        "AgentTask identity or ownership does not match its database key."
+                    )
+                if not task.workspace_id or not task.project_id or not task.approval_request_id:
+                    continue
+                started_row = conn.execute(
+                    "SELECT event_id,payload FROM agent_task_events WHERE task_id=%s AND workspace_id=%s "
+                    "AND event_type='TESTS_STARTED' "
+                    "AND payload->'metadata'->>'runner_type'='validation_command_runner' "
+                    "AND payload->'metadata'->>'lease_token'=%s "
+                    "ORDER BY created_at DESC,event_id DESC LIMIT 1",
+                    (task.id, task.workspace_id, task.worker_lease_token),
+                ).fetchone()
+                if started_row is None:
+                    continue
+                started = AgentTaskEvent.model_validate(started_row[1])
+                if (
+                    started.id != started_row[0]
+                    or started.task_id != task.id
+                    or started.event_type != AgentTaskEventType.TESTS_STARTED
+                    or started.metadata.get("runner_type") != "validation_command_runner"
+                    or started.metadata.get("lease_token") != task.worker_lease_token
+                    or started.metadata.get("approval_request_id") != task.approval_request_id
+                ):
+                    raise AgentTaskRepositoryConflict(
+                        "Validation recovery start event does not match the expired task lease."
+                    )
+                now = datetime.now(timezone.utc)
+                failed = AgentTaskEvent(
+                    task_id=task.id,
+                    event_type=AgentTaskEventType.FAILED,
+                    status=AgentTaskStatus.FAILED,
+                    actor="agent-worker-validation-recovery",
+                    message="Validation worker lease expired after tests started; execution outcome is unknown.",
+                    metadata={
+                        "worker_id": started.metadata.get("worker_id"),
+                        "lease_token": task.worker_lease_token,
+                        "approval_request_id": task.approval_request_id,
+                        "planned_command_count": started.metadata.get("command_count"),
+                        "completed_command_count": None,
+                        "results": None,
+                        "results_available": False,
+                        "validation_policy": started.metadata.get("validation_policy", {}),
+                        "runner_type": "validation_command_runner",
+                        "failure_class": "WorkerProcessLost",
+                        "execution_outcome": "UNKNOWN",
+                    },
+                    created_at=now,
+                )
+                updated = task.model_copy(deep=True)
+                updated.status = AgentTaskStatus.FAILED
+                updated.worker_lease_owner = None
+                updated.worker_lease_expires_at = None
+                updated.worker_lease_token = None
+                updated.updated_at = now
+                audit = AuditEvent(
+                    event_type="agent_worker.validation_worker_lost",
+                    entity_id=task.id,
+                    workspace_id=task.workspace_id,
+                    actor="agent-worker-validation-recovery",
+                    details={
+                        "event_id": failed.id,
+                        "approval_request_id": task.approval_request_id,
+                        "commands_completed": None,
+                        "completed_command_count_known": False,
+                        "failure_class": "WorkerProcessLost",
+                        "execution_outcome": "UNKNOWN",
+                        "worker_lease_cleared": True,
+                    },
+                    created_at=now,
+                )
+                changed = conn.execute(
+                    "UPDATE agent_tasks SET status=%s,updated_at=%s,payload=%s "
+                    "WHERE task_id=%s AND workspace_id=%s AND payload=%s",
+                    (updated.status.value, updated.updated_at,
+                     Jsonb(updated.model_dump(mode="json")), task.id,
+                     task.workspace_id, Jsonb(task.model_dump(mode="json"))),
+                )
+                if changed.rowcount != 1:
+                    raise AgentTaskRepositoryConflict("AgentTask changed during validation recovery.")
+                conn.execute(
+                    "INSERT INTO agent_task_events(event_id,task_id,workspace_id,event_type,actor,created_at,payload) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    (failed.id, task.id, task.workspace_id, failed.event_type.value,
+                     failed.actor, failed.created_at, Jsonb(failed.model_dump(mode="json"))),
+                )
+                conn.execute(
+                    "INSERT INTO audit_events(event_id,workspace_id,approval_id,entity_type,entity_id,event_type,"
+                    "actor,details,created_at,payload) VALUES(%s,%s,NULL,'agent_task',%s,%s,%s,%s,%s,%s)",
+                    (audit.id, audit.workspace_id, audit.entity_id, audit.event_type,
+                     audit.actor, Jsonb(audit.details), audit.created_at,
+                     Jsonb(audit.model_dump(mode="json"))),
+                )
+                recovered.append(updated)
+        return recovered
 
     def claim(
         self, *, task_id: str | None, worker_id: str, lease_seconds: int,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -471,6 +472,85 @@ def test_postgres_validation_runner_exception_records_unknown_outcome_and_releas
     assert not any(event.task_id == task.id for event in store.agent_task_events.values())
 
 
+def test_postgres_validation_runner_recovers_expired_started_task_without_rerunning(
+    postgres_validation_repositories,
+) -> None:
+    connect, task_repository, _approval_repository, task, _approval = (
+        postgres_validation_repositories
+    )
+    claimed, reason, _ = task_repository.claim(
+        task_id=task.id, worker_id="abruptly-killed-worker", lease_seconds=60,
+    )
+    assert reason == ""
+    assert claimed is not None
+    expired = claimed.model_copy(update={
+        "status": AgentTaskStatus.TESTING,
+        "worker_lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=5),
+    })
+    started = AgentTaskEvent(
+        task_id=task.id,
+        event_type=AgentTaskEventType.TESTS_STARTED,
+        status=AgentTaskStatus.TESTING,
+        actor="abruptly-killed-worker",
+        message="Worker started allowlisted validation commands.",
+        metadata={
+            "worker_id": "abruptly-killed-worker",
+            "lease_token": claimed.worker_lease_token,
+            "approval_request_id": task.approval_request_id,
+            "runner_type": "validation_command_runner",
+        },
+    )
+    started_audit = AuditEvent(
+        event_type="agent_task.event_recorded",
+        entity_id=task.id,
+        workspace_id=task.workspace_id,
+        actor="abruptly-killed-worker",
+        details={
+            "event_id": started.id,
+            "status": AgentTaskStatus.TESTING,
+            "message": started.message,
+            "notification_id": None,
+        },
+    )
+    task_repository.commit_event(
+        expected=claimed, updated=expired, event=started, audit=started_audit,
+    )
+    executed: list[str] = []
+
+    result = run_agent_worker_validation_commands(
+        task_id=task.id,
+        worker_id="replacement-worker",
+        executor=lambda command: executed.append(command) or CommandExecutionResult(
+            command=command, exit_code=0,
+        ),
+        task_repository=task_repository,
+        approval_repository=_approval_repository,
+    )
+
+    assert executed == []
+    assert result.success is False
+    durable_task = task_repository.get(task.id)
+    assert durable_task is not None
+    assert durable_task.status == AgentTaskStatus.FAILED
+    assert durable_task.worker_lease_token is None
+    events = task_repository.list_events(task.id, workspace_id=task.workspace_id)
+    failed = next(event for event in events if event.event_type == AgentTaskEventType.FAILED)
+    assert failed.metadata["execution_outcome"] == "UNKNOWN"
+    assert failed.metadata["failure_class"] == "WorkerProcessLost"
+    assert failed.metadata["results"] is None
+    assert failed.metadata["completed_command_count"] is None
+    assert "commands_executed" not in failed.metadata
+    with connect() as conn:
+        audit = conn.execute(
+            "SELECT details FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent_worker.validation_worker_lost'",
+            (task.id,),
+        ).fetchone()
+    assert audit is not None
+    assert audit[0]["event_id"] == failed.id
+    assert audit[0]["commands_completed"] is None
+
+
 def test_postgres_validation_runner_rolls_back_pass_event_when_audit_fails(
     postgres_validation_repositories,
 ) -> None:
@@ -588,6 +668,7 @@ def test_validation_runner_accepts_same_runtime_postgres_pair_before_claim(
     runtime = _ValidationRuntimeConnector()
     task_repository = PostgresAgentTaskRepository(runtime.connect)
     approval_repository = PostgresApprovalDecisionRepository(runtime.connect)
+    monkeypatch.setattr(task_repository, "recover_abandoned_validation_tasks", lambda **_kwargs: [])
     claims: list[object] = []
     executions: list[str] = []
 

@@ -346,6 +346,13 @@ def run_agent_worker_validation_commands(
     ):
         raise ValueError("PostgreSQL validation requires a PostgreSQL approval repository.")
 
+    if postgres_mode and isinstance(task_repository, PostgresAgentTaskRepository):
+        # Recover expired TESTING leases before selecting a task. Recovery
+        # terminalizes the stale invocation as UNKNOWN and never runs commands.
+        task_repository.recover_abandoned_validation_tasks(
+            task_id=str(task_id) if task_id else None
+        )
+
     claim = (
         claim_first_approved_agent_task_for_worker(
             worker_id=worker_id, lease_seconds=lease_seconds, repository=task_repository
