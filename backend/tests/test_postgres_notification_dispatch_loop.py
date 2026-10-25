@@ -48,6 +48,7 @@ def test_lifespan_rejects_postgres_notification_worker_without_runtime(monkeypat
             main,
             "get_settings",
             lambda: SimpleNamespace(
+                profile="test",
                 outbox_dispatch_mode="inline",
                 push_dispatch_enabled=True,
                 email_dispatch_enabled=False,
@@ -140,6 +141,7 @@ def test_lifespan_refuses_mixed_notification_producer_repository(monkeypatch) ->
 def test_scheduled_dispatch_mode_does_not_start_in_process_workers(monkeypatch) -> None:
     async def exercise() -> None:
         settings = SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="scheduled",
             push_dispatch_enabled=True,
             email_dispatch_enabled=True,

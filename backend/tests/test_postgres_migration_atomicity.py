@@ -8,7 +8,7 @@ import pytest
 from psycopg import Connection, sql
 
 from app import postgres_database
-from app.postgres_database import PostgresMigration, run_postgres_migrations
+from app.postgres_database import PostgresMigration, _migration_checksum, run_postgres_migrations
 
 
 def test_postgres_migration_chain_bootstraps_empty_schema_and_replays_idempotently() -> None:
@@ -60,6 +60,86 @@ def test_postgres_migration_chain_bootstraps_empty_schema_and_replays_idempotent
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_postgres_migration_chain_upgrades_every_prior_ledger_prefix() -> None:
+    """Every supported applied prefix must upgrade to the current checked-in chain."""
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL migration tests")
+
+    migrations = postgres_database.POSTGRES_MIGRATIONS
+    assert migrations, "migration chain must not be empty"
+    migration_ids = [migration.migration_id for migration in migrations]
+    assert len(migration_ids) == len(set(migration_ids))
+    schemas = [
+        (prefix_length, f"ct_migration_prefix_{prefix_length}_{uuid.uuid4().hex}")
+        for prefix_length in range(len(migrations))
+    ]
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        for _, schema in schemas:
+            admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    def connect_to(schema: str) -> Connection:
+        connection = psycopg.connect(dsn)
+        connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        return connection
+
+    try:
+        for prefix_length, schema in schemas:
+            # Seed exactly the historical ledger prefix, then restore the full
+            # checked-in chain before asserting upgrade behavior.
+            previous_chain = postgres_database.POSTGRES_MIGRATIONS
+            try:
+                postgres_database.POSTGRES_MIGRATIONS = migrations[:prefix_length]
+                seeded_ledger = run_postgres_migrations(lambda: connect_to(schema))
+            finally:
+                postgres_database.POSTGRES_MIGRATIONS = previous_chain
+
+            assert [row["migration_id"] for row in seeded_ledger] == migration_ids[:prefix_length], (
+                f"prefix {prefix_length} did not seed the expected ledger"
+            )
+            upgraded_ledger = run_postgres_migrations(lambda: connect_to(schema))
+            assert [row["migration_id"] for row in upgraded_ledger] == migration_ids, (
+                f"prefix {prefix_length} did not upgrade to the complete ledger"
+            )
+            assert [row["migration_checksum"] for row in upgraded_ledger] == [
+                _migration_checksum(migration) for migration in migrations
+            ], f"prefix {prefix_length} has a missing or changed migration checksum"
+
+            with connect_to(schema) as conn:
+                tables = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema=current_schema() AND table_type='BASE TABLE'"
+                    ).fetchall()
+                }
+                persisted_ledger = conn.execute(
+                    "SELECT migration_id, name, migration_checksum "
+                    "FROM schema_migrations ORDER BY migration_id"
+                ).fetchall()
+            assert {
+                "workspaces",
+                "users",
+                "sessions",
+                "projects",
+                "approval_requests",
+                "agent_tasks",
+                "audit_events",
+            } <= tables, f"prefix {prefix_length} is missing required current tables"
+            assert persisted_ledger == [
+                (
+                    migration.migration_id,
+                    migration.name,
+                    _migration_checksum(migration),
+                )
+                for migration in migrations
+            ], f"prefix {prefix_length} persisted an unexpected final ledger"
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            for _, schema in schemas:
+                admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
 def test_postgres_migration_failure_rolls_back_prior_migrations_and_ledger(

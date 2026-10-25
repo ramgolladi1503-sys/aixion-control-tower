@@ -931,6 +931,7 @@ def test_api_lifespan_starts_and_stops_push_dispatcher(monkeypatch: Any) -> None
         main,
         "get_settings",
         lambda: SimpleNamespace(
+            profile="test",
             outbox_dispatch_mode="inline",
             push_dispatch_enabled=True,
             email_dispatch_enabled=False,
