@@ -28,6 +28,7 @@ from .approval_repository import (
     SQLiteApprovalDecisionRepository,
 )
 from .models import ApprovalStatus, AuditEvent, now_utc
+from .settings import get_settings
 from .store import store
 from .workspace_access import agent_task_workspace_id, approval_workspace_id
 
@@ -67,6 +68,14 @@ def reconcile_linked_approval_tasks(
     if any(provided_repositories) and not all(provided_repositories):
         raise RuntimeError(
             "Approval recovery requires approval, AgentTask, and AgentRun repositories together"
+        )
+    settings = get_settings()
+    if not any(provided_repositories) and (
+        settings.is_production or settings.postgres_auth_enabled
+    ):
+        raise RuntimeError(
+            "Approval recovery requires explicit approval, AgentTask, and AgentRun "
+            "repositories in production or PostgreSQL-auth mode"
         )
     active_approval_repository = (
         approval_repository

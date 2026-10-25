@@ -346,6 +346,47 @@ def test_recovery_fails_closed_for_non_sqlite_repository_bindings() -> None:
     ) == before
 
 
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_recovery_requires_explicit_repositories_before_authoritative_mode_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    _linked_records()
+    before = (
+        dict(store.agent_tasks),
+        dict(store.agent_task_events),
+        dict(store.agent_runs),
+        list(store.audit_events),
+    )
+    monkeypatch.setattr(
+        approval_recovery,
+        "get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "is_production": is_production,
+                "postgres_auth_enabled": postgres_auth_enabled,
+            },
+        )(),
+    )
+
+    with pytest.raises(RuntimeError, match="requires explicit.*repositories"):
+        reconcile_linked_approval_tasks()
+
+    assert (
+        store.agent_tasks,
+        store.agent_task_events,
+        store.agent_runs,
+        store.audit_events,
+    ) == before
+
+
 def test_recovery_rejects_sqlite_repositories_from_different_databases() -> None:
     with pytest.raises(RuntimeError, match="share one SQLite connection provider"):
         reconcile_linked_approval_tasks(
