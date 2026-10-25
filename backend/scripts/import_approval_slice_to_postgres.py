@@ -153,10 +153,49 @@ IMPORT_TABLES = {
     "approval_invocation_lease": ("approval_invocation_leases", "approval_id"),
     "auth_rate_limit_bucket": ("auth_rate_limit_buckets", "bucket_hash"),
 }
+# Exhaustive disposition for every persistent table created by the checked-in
+# SQLite migration chain. Keep partial/metadata states explicit: this importer
+# is intentionally not a production cutover tool.
+SOURCE_TABLE_DISPOSITIONS: dict[str, tuple[str, str | None]] = {
+    "schema_migrations": ("metadata_only", None),
+    "kv_store": ("partial_entity_import", "CORE_TYPES -> entity-specific PostgreSQL tables"),
+    "auth_email_outbox": ("imported", "auth_email_outbox"),
+    "auth_rate_limit_buckets": ("imported", "auth_rate_limit_buckets"),
+    "approval_delivery_claims": ("imported", "approval_delivery_claims"),
+    "approval_delivery_failures": ("imported", "approval_delivery_failures"),
+    "approval_invocation_leases": ("imported", "approval_invocation_leases"),
+}
 
 
 class ImportBlocked(RuntimeError):
     pass
+
+
+def _source_table_coverage(path: Path) -> dict[str, dict[str, str | None]]:
+    """Report dispositions for all persistent tables present in a source snapshot.
+
+    Unknown tables fail before target connection. The migration-chain regression
+    test ensures every application-created table has an explicit disposition.
+    """
+    uri = f"file:{quote(path.resolve().as_posix(), safe='/')}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+        conn.execute("PRAGMA query_only = ON")
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    unclassified = tables - SOURCE_TABLE_DISPOSITIONS.keys()
+    if unclassified:
+        raise ImportBlocked("SQLite source contains persistent tables without an importer disposition")
+    return {
+        name: {
+            "disposition": SOURCE_TABLE_DISPOSITIONS[name][0],
+            "target": SOURCE_TABLE_DISPOSITIONS[name][1],
+        }
+        for name in sorted(tables)
+    }
 
 
 def _native_invocation_drain_summary(
@@ -724,6 +763,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     _validate_source(path)
     initial_stat = path.stat()
     digest = _sha256_file(path)
+    source_table_coverage = _source_table_coverage(path)
     report = audit(path)
     if report.get("status") != "STRUCTURAL_REVIEW_PASSED":
         unresolved_worker_audits = [
@@ -1504,6 +1544,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         "status": "DRY_RUN_VALIDATED",
         "scope": SCOPE,
         "source_sha256": digest,
+        "source_table_coverage": source_table_coverage,
         "source_counts": source_counts,
         "planned_counts": imported_counts,
         "derived_workspace_scope_counts": dict(sorted(derived_workspace_scope_counts.items())),

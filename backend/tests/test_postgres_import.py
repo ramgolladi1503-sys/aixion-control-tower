@@ -13,6 +13,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from app.database_migrations import run_migrations
 from app.agent_run_models import (
     AgentRun, AgentRunEvent, AgentRunEventType, AgentRunStatus, AgentRunStep,
     AgentRunStepType,
@@ -49,7 +50,9 @@ from scripts.import_approval_slice_to_postgres import (
     CORE_TYPES,
     ENTITY_TYPES,
     ImportBlocked,
+    SOURCE_TABLE_DISPOSITIONS,
     _target_is_remote,
+    _source_table_coverage,
     apply_import,
     build_invocation_drain_report,
     build_plan,
@@ -101,6 +104,41 @@ def test_sqlite_persistent_entities_are_accounted_for_by_import_inventory():
     )
     assert "agent_run_fault" in importer_accounted_types
     assert documented_exclusions.isdisjoint(importer_accounted_types)
+
+
+def test_every_migration_created_sqlite_table_has_an_explicit_import_disposition(tmp_path):
+    path = tmp_path / "migration-schema.sqlite3"
+    with sqlite3.connect(path) as conn:
+        run_migrations(conn)
+        migration_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+
+    assert migration_tables == set(SOURCE_TABLE_DISPOSITIONS)
+    assert SOURCE_TABLE_DISPOSITIONS["schema_migrations"] == ("metadata_only", None)
+    assert SOURCE_TABLE_DISPOSITIONS["kv_store"][0] == "partial_entity_import"
+    assert {
+        table
+        for table, (disposition, _target) in SOURCE_TABLE_DISPOSITIONS.items()
+        if disposition == "imported"
+    } == migration_tables - {"schema_migrations", "kv_store"}
+
+    observed = _source_table_coverage(path)
+    assert set(observed) == migration_tables
+    assert observed["kv_store"]["disposition"] == "partial_entity_import"
+
+
+def test_source_table_coverage_fails_closed_for_unclassified_table(tmp_path):
+    path = tmp_path / "new-persistent-table.sqlite3"
+    with sqlite3.connect(path) as conn:
+        run_migrations(conn)
+        conn.execute("CREATE TABLE future_persistent_state (value TEXT NOT NULL)")
+
+    with pytest.raises(ImportBlocked, match="without an importer disposition"):
+        _source_table_coverage(path)
 
 
 @pytest.fixture(autouse=True)
@@ -555,6 +593,11 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     assert plan["status"] == "DRY_RUN_VALIDATED"
     assert plan["migration_authorized"] is False
     assert plan["snapshot_certified"] is False
+    assert plan["source_table_coverage"]["kv_store"] == {
+        "disposition": "partial_entity_import",
+        "target": "CORE_TYPES -> entity-specific PostgreSQL tables",
+    }
+    assert plan["source_table_coverage"]["schema_migrations"]["disposition"] == "metadata_only"
     assert plan["partial"] is False
     assert plan["omitted_counts"].get("notification", 0) == 0
     assert plan["planned_counts"]["approval_request"] == 1
@@ -749,7 +792,7 @@ def test_plan_refuses_unknown_sqlite_table_before_postgres_connection(tmp_path, 
         "scripts.import_approval_slice_to_postgres.psycopg.connect",
         forbidden_target_connection,
     )
-    with pytest.raises(ImportBlocked, match="structural audit did not pass") as exc_info:
+    with pytest.raises(ImportBlocked, match="without an importer disposition") as exc_info:
         build_plan(path)
 
     assert unknown_table not in str(exc_info.value)
