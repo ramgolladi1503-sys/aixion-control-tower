@@ -213,6 +213,7 @@ def test_real_codex_permission_hook_allows_only_after_durable_phone_decision(
                 "AIXION_AGENT_TOKEN": agent_token,
                 "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
                 "AIXION_PROJECT_ID": project_id,
+                "AIXION_CODEX_WORKSPACE_PATH": str(BACKEND_ROOT.parent),
                 "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "60",
             }
         )
@@ -222,6 +223,7 @@ def test_real_codex_permission_hook_allows_only_after_durable_phone_decision(
 
         permission_request = {
             "hook_event_name": "PermissionRequest",
+            "cwd": str(BACKEND_ROOT.parent),
             "permission_mode": "default",
             "session_id": "codex-session-process-flow",
             "turn_id": "codex-turn-process-flow",
@@ -372,6 +374,7 @@ def test_codex_permission_hook_recovers_approved_decision_after_api_process_rest
                 "AIXION_AGENT_TOKEN": agent_token,
                 "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
                 "AIXION_PROJECT_ID": project_id,
+                "AIXION_CODEX_WORKSPACE_PATH": str(BACKEND_ROOT.parent),
                 "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "60",
             }
         )
@@ -381,6 +384,7 @@ def test_codex_permission_hook_recovers_approved_decision_after_api_process_rest
 
         permission_request = {
             "hook_event_name": "PermissionRequest",
+            "cwd": str(BACKEND_ROOT.parent),
             "permission_mode": "default",
             "session_id": "codex-session-restart-flow",
             "turn_id": "codex-turn-restart-flow",
@@ -544,6 +548,7 @@ def test_real_codex_permission_hook_denies_without_claim_or_tool_side_effect(
                 "AIXION_AGENT_TOKEN": agent_token,
                 "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
                 "AIXION_PROJECT_ID": project_id,
+                "AIXION_CODEX_WORKSPACE_PATH": str(BACKEND_ROOT.parent),
                 "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "60",
             }
         )
@@ -554,6 +559,7 @@ def test_real_codex_permission_hook_denies_without_claim_or_tool_side_effect(
         command = f"touch {shlex.quote(str(marker_path))}"
         permission_request = {
             "hook_event_name": "PermissionRequest",
+            "cwd": str(BACKEND_ROOT.parent),
             "permission_mode": "default",
             "session_id": "codex-session-process-deny",
             "turn_id": "codex-turn-process-deny",

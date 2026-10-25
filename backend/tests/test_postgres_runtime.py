@@ -383,32 +383,31 @@ def test_migration_command_upgrades_from_a_prior_known_revision(
     assert retained_project == (workspace_id, project_payload)
 
 
-def test_migration_command_upgrades_documented_pg0033_state_to_current_schema(
+def test_migration_command_upgrades_documented_pg0034_state_to_current_schema(
     postgres_schema: tuple[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     schema, connect = postgres_schema
     migrations = postgres_database.POSTGRES_MIGRATIONS
-    current_index = next(
+    next_index = next(
         index for index, migration in enumerate(migrations)
-        if migration.migration_id == "pg_0034_agent_run_pull_request_intents"
+        if migration.migration_id == "pg_0035_legacy_notification_targets"
     )
-    assert current_index == len(migrations) - 1
-    assert migrations[current_index - 1].migration_id == "pg_0033_agent_run_validation_intents"
-    prior_migrations = migrations[:current_index]
+    assert next_index == len(migrations) - 1
+    assert migrations[next_index - 1].migration_id == "pg_0034_agent_run_pull_request_intents"
+    prior_migrations = migrations[:next_index]
 
-    # This is the documented supported upgrade boundary. Keep representative
-    # application data in the prior schema and exercise the guarded operator
-    # command, not only the lower-level migration runner.
+    # Model the supported pg_0034 schema and verify the guarded operator
+    # command applies pg_0035 while preserving representative application data.
     monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", prior_migrations)
     run_postgres_migrations(connect)
-    workspace_id = "workspace_pg0033_operator_upgrade_fixture"
-    project_id = "project_pg0033_operator_upgrade_fixture"
+    workspace_id = "workspace_pg0034_operator_upgrade_fixture"
+    project_id = "project_pg0034_operator_upgrade_fixture"
     workspace_payload = {
         "id": workspace_id,
         "name": "Prior supported workspace",
-        "owner_user_id": "user_pg0033_operator_upgrade_fixture",
-        "metadata": {"source": "pg_0033", "must_survive": True},
+        "owner_user_id": "user_pg0034_operator_upgrade_fixture",
+        "metadata": {"source": "pg_0034", "must_survive": True},
     }
     project_payload = {
         "id": project_id,

@@ -168,11 +168,13 @@ def test_codex_hook_real_http_decision_consumes_once_and_replay_denies(
                 "AIXION_AGENT_TOKEN": agent_token,
                 "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
                 "AIXION_PROJECT_ID": project_id,
+                "AIXION_CODEX_WORKSPACE_PATH": str(REPOSITORY_ROOT),
                 "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "30",
             }
         )
         event = {
             "hook_event_name": "PermissionRequest",
+            "cwd": str(REPOSITORY_ROOT),
             "permission_mode": "default",
             "session_id": "codex-http-replay-session",
             "turn_id": "codex-http-replay-turn",

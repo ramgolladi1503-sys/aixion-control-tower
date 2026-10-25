@@ -287,6 +287,7 @@ def _hook_environment(
         "AIXION_AGENT_TOKEN": token,
         "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
         "AIXION_PROJECT_ID": project_id,
+        "AIXION_CODEX_WORKSPACE_PATH": str(REPOSITORY_ROOT),
         "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "30",
     }
 
@@ -433,6 +434,7 @@ def test_codex_hook_restart_reattaches_same_live_postgres_invocation_once(
         environment = _hook_environment(base_url, project.id, agent_id, token)
         event = {
             "hook_event_name": "PermissionRequest",
+            "cwd": str(REPOSITORY_ROOT),
             "permission_mode": "default",
             "session_id": "codex-postgres-hook-restart-session",
             "turn_id": "codex-postgres-hook-restart-turn",
@@ -567,6 +569,7 @@ def test_identified_codex_invocation_survives_postgres_api_restart_and_consumes_
         environment = _hook_environment(base_url, project.id, agent_id, token)
         event = {
             "hook_event_name": "PermissionRequest",
+            "cwd": str(REPOSITORY_ROOT),
             "permission_mode": "default",
             "session_id": "codex-postgres-restart-session",
             "turn_id": "codex-postgres-restart-turn",
@@ -663,6 +666,7 @@ def test_codex_dead_hook_expired_lease_rejects_review_and_isolates_next_invocati
         environment = _hook_environment(base_url, project.id, agent_id, token)
         original_event = {
             "hook_event_name": "PermissionRequest",
+            "cwd": str(REPOSITORY_ROOT),
             "permission_mode": "default",
             "session_id": "codex-dead-hook-session",
             "turn_id": "codex-dead-hook-turn",
@@ -835,6 +839,7 @@ def test_callback_without_provider_call_id_cannot_reuse_approval_after_hook_rest
         environment = _hook_environment(base_url, project.id, agent_id, token)
         event = {
             "hook_event_name": "PermissionRequest",
+            "cwd": str(REPOSITORY_ROOT),
             "permission_mode": "default",
             "session_id": "codex-callback-restart-session",
             "turn_id": "codex-callback-restart-turn",

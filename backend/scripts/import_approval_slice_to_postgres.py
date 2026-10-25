@@ -244,7 +244,9 @@ def _block_unsupported_notifications(records: dict[str, dict[str, dict[str, Any]
     """
     unsupported = []
     for notification_id, payload in records.get("notification", {}).items():
-        if payload.get("entity_type") in {"approval_request", "agent_task"}:
+        if payload.get("entity_type") in {
+            "approval_request", "agent_task", "project", "device_registration",
+        }:
             continue
         unsupported.append(hashlib.sha256(notification_id.encode("utf-8")).hexdigest())
     if unsupported:
@@ -1196,6 +1198,16 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             parent = tasks.get(entity_id)
             if not parent:
                 raise ImportBlocked(f"notification/{notification_id} references an unimported AgentTask")
+        elif entity_type == "project":
+            parent = projects.get(entity_id)
+            if not parent:
+                raise ImportBlocked(f"notification/{notification_id} references an unimported project")
+        elif entity_type == "device_registration":
+            parent = devices.get(entity_id)
+            if not parent:
+                raise ImportBlocked(
+                    f"notification/{notification_id} references an unimported device registration"
+                )
         else:  # Defensive consistency check; preflight should have rejected it.
             raise ImportBlocked("notification entity type changed after source preflight")
         if payload.get("workspace_id") != parent.get("workspace_id"):
@@ -1212,6 +1224,13 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             and user_id not in {None, parent.get("created_by_user_id")}
         ):
             raise ImportBlocked(f"notification/{notification_id} user does not own its AgentTask")
+        if (
+            entity_type == "device_registration"
+            and user_id not in {None, parent.get("user_id")}
+        ):
+            raise ImportBlocked(
+                f"notification/{notification_id} user does not own its device registration"
+            )
         supported_notifications[notification_id] = payload
     selected["notification"] = supported_notifications
 
@@ -1532,10 +1551,12 @@ def _insert_payload(conn: psycopg.Connection, kind: str, entity_id: str, payload
         model = Notification.model_validate(payload)
         approval_id = model.entity_id if model.entity_type == "approval_request" else None
         task_id = model.entity_id if model.entity_type == "agent_task" else None
+        project_id = model.entity_id if model.entity_type == "project" else None
+        device_id = model.entity_id if model.entity_type == "device_registration" else None
         conn.execute(
-            "INSERT INTO notifications(notification_id,workspace_id,user_id,approval_id,task_id,entity_type,status,attempts,next_attempt_at,lease_expires_at,created_at,payload) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (entity_id, model.workspace_id, model.user_id, approval_id, task_id,
+            "INSERT INTO notifications(notification_id,workspace_id,user_id,approval_id,task_id,project_id,device_id,entity_type,status,attempts,next_attempt_at,lease_expires_at,created_at,payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (entity_id, model.workspace_id, model.user_id, approval_id, task_id, project_id, device_id,
              model.entity_type, model.push_status, model.push_attempts,
              model.push_next_attempt_at, model.push_lease_expires_at, model.created_at,
              Jsonb(model.model_dump(mode="json"))),

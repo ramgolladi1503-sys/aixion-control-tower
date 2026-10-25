@@ -1699,6 +1699,29 @@ POSTGRES_MIGRATIONS = (
             "CREATE TRIGGER trg_agent_run_pull_request_status_transition BEFORE UPDATE OF status ON agent_run_pull_request_intents FOR EACH ROW EXECUTE FUNCTION aixion_agent_run_pull_request_status_transition()",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0035_legacy_notification_targets",
+        name="Preserve workspace-scoped project and device notifications",
+        statements=(
+            "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS project_id TEXT",
+            "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS device_id TEXT",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_device_registrations_id_workspace "
+            "ON device_registrations(device_id,workspace_id)",
+            "ALTER TABLE notifications DROP CONSTRAINT IF EXISTS notifications_entity_target_check",
+            "ALTER TABLE notifications DROP CONSTRAINT IF EXISTS notifications_payload_entity_id_check",
+            "ALTER TABLE notifications ADD CONSTRAINT notifications_project_scope_fk "
+            "FOREIGN KEY (project_id,workspace_id) REFERENCES projects(project_id,workspace_id) ON DELETE RESTRICT",
+            "ALTER TABLE notifications ADD CONSTRAINT notifications_device_scope_fk "
+            "FOREIGN KEY (device_id,workspace_id) REFERENCES device_registrations(device_id,workspace_id) ON DELETE RESTRICT",
+            "ALTER TABLE notifications ADD CONSTRAINT notifications_entity_target_check CHECK ("
+            "(entity_type='approval_request' AND approval_id IS NOT NULL AND task_id IS NULL AND project_id IS NULL AND device_id IS NULL) OR "
+            "(entity_type='agent_task' AND task_id IS NOT NULL AND approval_id IS NULL AND project_id IS NULL AND device_id IS NULL) OR "
+            "(entity_type='project' AND project_id IS NOT NULL AND approval_id IS NULL AND task_id IS NULL AND device_id IS NULL) OR "
+            "(entity_type='device_registration' AND device_id IS NOT NULL AND approval_id IS NULL AND task_id IS NULL AND project_id IS NULL))",
+            "ALTER TABLE notifications ADD CONSTRAINT notifications_payload_entity_id_check "
+            "CHECK (payload ? 'entity_id' AND payload->>'entity_id' = COALESCE(approval_id,task_id,project_id,device_id))",
+        ),
+    ),
 )
 
 

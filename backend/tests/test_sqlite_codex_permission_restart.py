@@ -155,6 +155,7 @@ def _hook_environment(base_url: str, project_id: str, agent_id: str, token: str)
         "AIXION_AGENT_TOKEN": token,
         "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
         "AIXION_PROJECT_ID": project_id,
+        "AIXION_CODEX_WORKSPACE_PATH": str(REPOSITORY_ROOT),
         "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "30",
     }
 
@@ -340,9 +341,12 @@ def _audit_count(db_path: Path, approval_id: str, event_type: str) -> int:
     return int(row[0])
 
 
-def _permission_event(*, tool_use_id: str | None) -> dict[str, Any]:
+def _permission_event(
+    *, tool_use_id: str | None, cwd: Path = REPOSITORY_ROOT
+) -> dict[str, Any]:
     event: dict[str, Any] = {
         "hook_event_name": "PermissionRequest",
+        "cwd": str(cwd),
         "permission_mode": "default",
         "session_id": "codex-sqlite-restart-session",
         "turn_id": "codex-sqlite-restart-turn",
@@ -386,7 +390,9 @@ def test_installed_codex_permission_hook_survives_api_restart_and_fails_closed_o
         )
         environment = _hook_environment(base_url, project_id, agent_id, token)
         environment["HOME"] = str(home)
-        event = _permission_event(tool_use_id=f"codex-installed-{decision_value}-27")
+        event = _permission_event(
+            tool_use_id=f"codex-installed-{decision_value}-27", cwd=workspace
+        )
 
         hook_process = _launch_installed_hook(command, event, environment, workspace)
         approval = _wait_for_approval(db_path, agent_id=agent_id, process=hook_process)

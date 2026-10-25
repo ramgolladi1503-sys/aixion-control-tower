@@ -1385,8 +1385,10 @@ def test_postgres_codex_hook_denies_lost_consume_response_and_same_invocation_re
         "AIXION_AGENT_TOKEN": codex_token,
         "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
         "AIXION_PROJECT_ID": project.id,
+        "AIXION_CODEX_WORKSPACE_PATH": str(Path(__file__).parents[2]),
         "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "5",
     }
+    event["cwd"] = str(Path(__file__).parents[2])
 
     with patch.object(codex_hook, "_request", side_effect=request), patch.object(
         codex_hook.time, "sleep"

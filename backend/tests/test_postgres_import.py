@@ -60,6 +60,7 @@ def _snapshot(
     *,
     include_omitted=True,
     include_unsupported_notifications=False,
+    include_legacy_notifications=False,
     include_trust=False,
     include_delivery_state=False,
     include_rate_limits=False,
@@ -201,9 +202,24 @@ def _snapshot(
     if include_unsupported_notifications:
         rows.append(("notification", "n3", {
             "id": "n3", "title": "Project event", "body": "Unsupported legacy event",
-            "entity_type": "project", "entity_id": "p1", "workspace_id": "ws1",
+            "entity_type": "unsupported_legacy_type", "entity_id": "p1", "workspace_id": "ws1",
             "status": "UNREAD", "push_status": "PENDING", "created_at": now,
         }))
+    if include_legacy_notifications:
+        rows.extend([
+            ("notification", "project_notice", {
+                "id": "project_notice", "title": "Project updated", "body": "Project scope notice",
+                "entity_type": "project", "entity_id": "p1", "workspace_id": "ws1",
+                "user_id": "u1", "status": "READ", "push_status": "SENT",
+                "push_attempts": 1, "created_at": now,
+            }),
+            ("notification", "device_notice", {
+                "id": "device_notice", "title": "Device registered", "body": "Device scope notice",
+                "entity_type": "device_registration", "entity_id": "d1", "workspace_id": "ws1",
+                "user_id": "u1", "status": "UNREAD", "push_status": "NO_DEVICE",
+                "push_attempts": 2, "created_at": now,
+            }),
+        ])
     if include_trust:
         approved = ApprovalRequest.model_validate({
             **approval,
@@ -510,7 +526,7 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     }
 
 
-@pytest.mark.parametrize("unsupported_type", ["project", "device_registration"])
+@pytest.mark.parametrize("unsupported_type", ["unsupported_legacy_type"])
 def test_plan_blocks_unsupported_notification_before_target_access(
     tmp_path, monkeypatch, unsupported_type,
 ):
@@ -1022,6 +1038,76 @@ def test_apply_import_and_retry_are_transactional_and_idempotent(tmp_path, postg
         assert task_notification[9]["push_status"] == "RETRY_WAIT"
         assert task_notification[9]["push_attempts"] == 4
         assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 1
+
+
+def test_import_preserves_project_and_device_notifications_idempotently_and_scoped(
+    tmp_path, postgres_import_dsn,
+):
+    path = tmp_path / "snapshot_with_legacy_notifications.sqlite3"
+    _snapshot(path, include_legacy_notifications=True)
+    plan, selected, digest = build_plan(path)
+    assert plan["planned_counts"]["notification"] == 4
+    assert selected["notification"]["project_notice"]["entity_type"] == "project"
+    assert selected["notification"]["device_notice"]["entity_type"] == "device_registration"
+
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        rows = conn.execute(
+            "SELECT notification_id,workspace_id,user_id,entity_type,approval_id,task_id,"
+            "project_id,device_id,status,attempts,payload FROM notifications "
+            "WHERE notification_id IN ('project_notice','device_notice') ORDER BY notification_id"
+        ).fetchall()
+        assert len(rows) == 2
+        device_notice, project_notice = rows
+        assert device_notice[:10] == (
+            "device_notice", "ws1", "u1", "device_registration", None, None,
+            None, "d1", "NO_DEVICE", 2,
+        )
+        assert device_notice[10]["entity_id"] == "d1"
+        assert project_notice[:10] == (
+            "project_notice", "ws1", "u1", "project", None, None,
+            "p1", None, "SENT", 1,
+        )
+        assert project_notice[10]["entity_id"] == "p1"
+        assert conn.execute(
+            "SELECT count(*) FROM notifications WHERE notification_id IN ('project_notice','device_notice')"
+        ).fetchone()[0] == 2
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "entity_id", "user_id", "expected_error"),
+    [
+        ("project", "missing_project", "u1", "references an unimported project"),
+        ("device_registration", "d1", "u2", "does not own its device registration"),
+    ],
+)
+def test_plan_rejects_unscoped_project_or_device_notification(
+    tmp_path, entity_type, entity_id, user_id, expected_error,
+):
+    path = tmp_path / f"bad_{entity_type}_notification.sqlite3"
+    _snapshot(path, include_legacy_notifications=True)
+    with sqlite3.connect(path) as conn:
+        if entity_type == "device_registration":
+            user = json.loads(conn.execute(
+                "SELECT payload FROM kv_store WHERE entity_type='user' AND entity_id='u1'"
+            ).fetchone()[0])
+            user.update(id="u2", email="reviewer@example.test")
+            conn.execute(
+                "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES('user','u2',?)",
+                (json.dumps(user),),
+            )
+        payload = json.loads(conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='notification' AND entity_id='project_notice'"
+        ).fetchone()[0])
+        payload.update(entity_type=entity_type, entity_id=entity_id, user_id=user_id)
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='notification' AND entity_id='project_notice'",
+            (json.dumps(payload),),
+        )
+    with pytest.raises(ImportBlocked, match=expected_error):
+        build_plan(path)
 
 
 def test_import_preserves_workspace_scoped_agent_task_and_run_audits(tmp_path, postgres_import_dsn):
