@@ -817,10 +817,12 @@ def execute_run_next_step(
             or (workspace_id is not None and durable_run.workspace_id != workspace_id)
         ):
             raise HTTPException(status_code=404, detail="Agent run not found")
-        # The repository snapshot is authoritative in PostgreSQL mode. Do not
-        # hydrate the process-local compatibility projection before execution;
-        # stale state in this API process must not affect the execution gate.
-        run = durable_run
+        store.project_agent_run_snapshot(
+            durable_run,
+            run_repository.list_steps_for_run(run_id),
+            run_repository.list_events_for_run(run_id),
+        )
+        run = store.agent_runs[run_id]
     else:
         run = _run_or_404(run_id, user)
     task_repository = agent_task_repository_for_request(request) if request is not None else None

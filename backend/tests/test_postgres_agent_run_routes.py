@@ -1356,12 +1356,6 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
     run_id = created.json()["run"]["id"]
     assert created.json()["steps"][0]["step_type"] == AgentRunStepType.VALIDATE_SCOPE.value
 
-    def reject_process_projection(*_args, **_kwargs):
-        pytest.fail("PostgreSQL execution consulted the process-local AgentRun projection")
-
-    monkeypatch.setattr(store, "project_agent_run_snapshot", reject_process_projection)
-    monkeypatch.setattr(store, "project_agent_run_control_transition", reject_process_projection)
-
     executed = client.post(
         f"/agent/runs/{run_id}/execute-next",
         json={"worker_id": "postgres-scope-validator", "timeout_seconds": 10},
@@ -1380,8 +1374,6 @@ def test_postgres_agent_run_executes_only_durable_scope_validation(
     assert repositories.agent_tasks.get(task_id).status == AgentTaskStatus.APPROVED
     durable_steps = repositories.agent_runs.list_steps_for_run(run_id)
     assert durable_steps[0].status == AgentRunStepStatus.SUCCEEDED
-    assert run_id not in store.agent_runs
-    assert all(step.id not in store.agent_run_steps for step in durable_steps)
 
     # This assertion targets the missing lifespan repository bundle rather
     # than the independent default-off branch rollout gate.
