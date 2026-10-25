@@ -265,6 +265,104 @@ def _source_kv_entity_coverage(
     return coverage
 
 
+def _resolve_audit_event_parent(
+    event_type: str | None,
+    entity_id: str | None,
+    *,
+    workspace_id: str | None,
+    sessions: dict[str, dict[str, Any]],
+    users: dict[str, dict[str, Any]],
+    tasks: dict[str, dict[str, Any]],
+    runs: dict[str, dict[str, Any]],
+    devices: dict[str, dict[str, Any]],
+    agents: dict[str, dict[str, Any]],
+    approvals: dict[str, dict[str, Any]],
+    projects: dict[str, dict[str, Any]],
+    work_orders: dict[str, dict[str, Any]],
+    ideas: dict[str, dict[str, Any]],
+    connectors: dict[str, dict[str, Any]],
+    invites: dict[str, dict[str, Any]],
+    workspaces: dict[str, dict[str, Any]],
+    mcp_servers: dict[str, dict[str, Any]],
+    mcp_pending: dict[str, dict[str, Any]],
+    test_runs: dict[str, dict[str, Any]],
+) -> tuple[str | None, dict[str, Any] | None, str]:
+    """Resolve the audit parent using the exact precedence used by import.
+
+    The third result distinguishes event-type rules from the legacy entity-ID
+    fallback and also carries explicit unresolved cases for read-only review.
+    """
+    if event_type == "agent_worker.container_validation_configured":
+        return None, None, "path_keyed_without_task_parent"
+    if isinstance(event_type, str) and event_type.startswith("agent_worker."):
+        parent = tasks.get(entity_id)
+        return "agent_task", parent, "event_type_rule"
+    if event_type == "auth.session_revoked":
+        session = sessions.get(entity_id)
+        user = users.get(session.get("user_id")) if session else None
+        if session is not None and not user:
+            return "auth_session", None, "missing_session_owner"
+        if session is not None and user is not None:
+            return "auth_session", {**session, "workspace_id": user.get("workspace_id")}, "event_type_rule"
+    if event_type in {
+        "notification.device_registered",
+        "notification.device_reassigned",
+        "notification.device_unregistered",
+        "notification.device_token_invalidated",
+    }:
+        parent = devices.get(entity_id)
+        if parent is not None:
+            return "device_registration", parent, "event_type_rule"
+        if event_type == "notification.device_unregistered" and workspace_id:
+            workspace = workspaces.get(workspace_id)
+            if workspace is not None:
+                return "device_registration", {**workspace, "workspace_id": workspace_id}, "device_unregister_workspace_scope"
+        return "device_registration", None, "event_type_rule"
+    if entity_id in users and event_type in {
+        "auth.account_deletion_requested",
+        "auth.role_updated",
+        "auth.sessions_revoked",
+    }:
+        return "user", users[entity_id], "event_type_rule"
+    if event_type in {
+        "agent.registered",
+        "agent.token_rotated",
+        "agent.token_revoked",
+        "agent.auth_failed",
+        "agent.rate_limited",
+    }:
+        return "external_agent", agents.get(entity_id), "event_type_rule"
+
+    candidates = (
+        ("approval_request", approvals),
+        ("project", projects),
+        ("work_order", work_orders),
+        ("idea", ideas),
+        ("agent_connector", connectors),
+        ("invite", invites),
+        ("workspace", workspaces),
+        ("mcp_child_server", mcp_servers),
+        ("mcp_pending_request", mcp_pending),
+    )
+    for parent_type, collection in candidates:
+        parent = collection.get(entity_id)
+        if parent is not None:
+            if parent_type == "workspace":
+                parent = {**parent, "workspace_id": entity_id}
+            return parent_type, parent, "entity_id_fallback"
+    parent = test_runs.get(entity_id)
+    if parent is not None:
+        approval = approvals.get(parent.get("approval_request_id"))
+        if approval is None:
+            return "test_run", None, "missing_test_run_approval"
+        return "test_run", {**parent, "workspace_id": approval.get("workspace_id")}, "entity_id_fallback"
+    if isinstance(event_type, str) and event_type.startswith("agent_task."):
+        return "agent_task", tasks.get(entity_id), "event_type_rule"
+    if isinstance(event_type, str) and event_type.startswith("agent_run."):
+        return "agent_run", runs.get(entity_id), "event_type_rule"
+    return None, None, "unresolved_parent"
+
+
 def _native_invocation_drain_summary(
     approvals: dict[str, dict[str, Any]],
     delivery_claims: dict[str, dict[str, Any]],
@@ -444,19 +542,181 @@ def build_invocation_drain_report(
     }
 
 
-def _write_drain_report(path: Path, report: dict[str, Any]) -> None:
-    """Create a private report without replacing an existing operator artifact."""
+def build_audit_event_inventory_report(path: Path) -> dict[str, Any]:
+    """Inventory audit parent/scope evidence from one owner-only SQLite snapshot.
+
+    This helper only reads the local source. It does not connect to PostgreSQL
+    and deliberately excludes audit IDs, actors, details, payloads, and tokens.
+    Generic ID-based parent matches are labeled so they cannot be mistaken for
+    an explicit event-writer contract.
+    """
+    _validate_source(path)
+    _source_table_coverage(path)
+    _source_kv_entity_type_counts(path)
+    initial_stat = path.stat()
+    digest = _sha256_file(path)
+    records = _read_records(path)
+
+    workspaces = records.get("workspace", {})
+    users = records.get("user", {})
+    sessions = records.get("session", {})
+    approvals = records.get("approval_request", {})
+    tasks = records.get("agent_task", {})
+    runs = records.get("agent_run", {})
+    devices = records.get("device_registration", {})
+    agents = records.get("external_agent", {})
+    projects = records.get("project", {})
+    work_orders = records.get("work_order", {})
+    ideas = records.get("idea", {})
+    connectors = records.get("agent_connector", {})
+    invites = records.get("invite", {})
+    mcp_servers = records.get("mcp_child_server", {})
+    mcp_pending = records.get("mcp_pending_request", {})
+    test_runs = records.get("test_run", {})
+
+    rows: list[dict[str, Any]] = []
+    for _audit_id, event in records.get("audit_event", {}).items():
+        event_type = event.get("event_type")
+        entity_id = event.get("entity_id")
+        workspace_id = event.get("workspace_id")
+        if not isinstance(event_type, str) or not isinstance(entity_id, str):
+            rows.append({
+                "event_type": event_type if isinstance(event_type, str) else None,
+                "entity_id": entity_id if isinstance(entity_id, str) else None,
+                "workspace_id": workspace_id if isinstance(workspace_id, str) else None,
+                "parent_entity_type": None,
+                "parent_resolution": "none",
+                "parent_exists": False,
+                "parent_identity_match": None,
+                "parent_workspace_exists": False,
+                "workspace_match": False if workspace_id is not None else None,
+                "classification": "invalid_event_identity",
+            })
+            continue
+        workspace_id = workspace_id if isinstance(workspace_id, str) else None
+        parent_type, parent, resolution = _resolve_audit_event_parent(
+            event_type if isinstance(event_type, str) else None,
+            entity_id if isinstance(entity_id, str) else None,
+            workspace_id=workspace_id,
+            sessions=sessions,
+            users=users,
+            tasks=tasks,
+            runs=runs,
+            devices=devices,
+            agents=agents,
+            approvals=approvals,
+            projects=projects,
+            work_orders=work_orders,
+            ideas=ideas,
+            connectors=connectors,
+            invites=invites,
+            workspaces=workspaces,
+            mcp_servers=mcp_servers,
+            mcp_pending=mcp_pending,
+            test_runs=test_runs,
+        )
+        parent_exists = parent is not None and resolution != "device_unregister_workspace_scope"
+        # Workspace records are keyed by workspace_id in the source/target
+        # persistence contract. The resolver annotates that key explicitly;
+        # use it for identity evidence rather than assuming every parent uses
+        # the generic model `id` field.
+        identity_key = "workspace_id" if parent_type == "workspace" else "id"
+        parent_identity = parent.get(identity_key) if parent_exists else None
+        parent_identity_match = (
+            parent_identity == entity_id
+            if isinstance(parent_identity, str)
+            else None
+        )
+        parent_workspace_id = None
+        if parent is not None:
+            if parent_type == "workspace":
+                parent_workspace_id = entity_id
+            else:
+                candidate_scope = parent.get("workspace_id")
+                parent_workspace_id = candidate_scope if isinstance(candidate_scope, str) else None
+        parent_workspace_exists = (
+            parent_workspace_id in workspaces if parent_workspace_id is not None else False
+        )
+
+        if resolution == "path_keyed_without_task_parent":
+            classification = "path_keyed_no_parent"
+        elif parent is None:
+            classification = (
+                "unscoped_parent_not_found" if workspace_id is None else "parent_not_found"
+            )
+        elif parent_exists and parent_identity_match is not True:
+            classification = "parent_identity_mismatch_or_missing"
+        elif workspace_id is None:
+            classification = "event_workspace_missing"
+        elif parent_workspace_id is None:
+            classification = "parent_workspace_unresolved"
+        elif workspace_id != parent_workspace_id:
+            classification = "workspace_mismatch"
+        elif workspace_id not in workspaces:
+            classification = "workspace_not_found_in_snapshot"
+        elif resolution == "device_unregister_workspace_scope":
+            classification = "explicit_workspace_scope_without_live_device_parent"
+        elif resolution == "entity_id_fallback":
+            classification = "same_workspace_parent_via_entity_id_fallback"
+        else:
+            classification = "same_workspace_parent_verified"
+
+        rows.append({
+            "event_type": event_type,
+            "entity_id": entity_id,
+            "workspace_id": workspace_id,
+            "parent_entity_type": parent_type,
+            "parent_resolution": resolution,
+            "parent_exists": parent_exists,
+            "parent_identity_match": parent_identity_match,
+            "parent_workspace_exists": parent_workspace_exists,
+            "workspace_match": (
+                workspace_id == parent_workspace_id
+                if workspace_id is not None and parent_workspace_id is not None
+                else None
+            ),
+            "classification": classification,
+        })
+
+    final_stat = path.stat()
+    final_digest = _sha256_file(path)
+    if (
+        (initial_stat.st_dev, initial_stat.st_ino, initial_stat.st_size, initial_stat.st_mtime_ns)
+        != (final_stat.st_dev, final_stat.st_ino, final_stat.st_size, final_stat.st_mtime_ns)
+        or digest != final_digest
+    ):
+        raise ImportBlocked("source snapshot changed during audit inventory; discard it and create a stable snapshot")
+    rows.sort(key=lambda row: (
+        row["event_type"] or "",
+        row["entity_id"] or "",
+        row["workspace_id"] or "",
+        row["classification"],
+    ))
+    return {
+        "report_version": 1,
+        "source_snapshot_sha256": digest,
+        "source_snapshot_size_bytes": initial_stat.st_size,
+        "read_only": True,
+        "migration_authorized": False,
+        "audit_event_count": len(rows),
+        "classification_counts": dict(sorted(Counter(row["classification"] for row in rows).items())),
+        "events": rows,
+    }
+
+
+def _write_private_report(path: Path, report: dict[str, Any]) -> None:
+    """Create an owner-only report without replacing an existing artifact."""
     parent = path.parent
     if not parent.exists() or parent.is_symlink():
-        raise ImportBlocked("drain report parent must be an existing real directory")
+        raise ImportBlocked("report parent must be an existing real directory")
     parent_stat = parent.stat()
     if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid():
-        raise ImportBlocked("drain report parent must be a directory owned by the current user")
+        raise ImportBlocked("report parent must be a directory owned by the current user")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags, 0o600)
     except FileExistsError as exc:
-        raise ImportBlocked("drain report already exists; choose a new path") from exc
+        raise ImportBlocked("report already exists; choose a new path") from exc
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
@@ -1370,132 +1630,56 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     for event_id, payload in records.get("audit_event", {}).items():
         entity_id = payload.get("entity_id")
         event_type = payload.get("event_type")
-        # Authentication event names identify their parent domain. Resolve
-        # these before generic ID lookups because SQLite IDs are only unique
-        # within an entity type; a user/session ID can legally collide with an
-        # approval ID and must not become an approval audit by precedence.
-        if isinstance(event_type, str) and event_type.startswith("agent_worker."):
-            if event_type == "agent_worker.container_validation_configured":
-                raise ImportBlocked(
-                    f"audit_event/{event_id} is a path-keyed worker configuration event without a task parent"
-                )
-            parent = tasks.get(entity_id)
-            if not parent:
-                raise ImportBlocked(
-                    f"audit_event/{event_id} references an unimported AgentTask worker parent"
-                )
-            entity_type = "agent_task"
-        elif entity_id in sessions and event_type == "auth.session_revoked":
-            session = sessions[entity_id]
-            user = users.get(session.get("user_id"))
-            if not user or user.get("workspace_id") != payload.get("workspace_id"):
-                raise ImportBlocked(
-                    f"audit_event/{event_id} references a missing or mismatched session owner"
-                )
-            parent = {**session, "workspace_id": user.get("workspace_id")}
-            entity_type = "auth_session"
-        elif event_type in {
-            "notification.device_registered",
-            "notification.device_reassigned",
-            "notification.device_unregistered",
-            "notification.device_token_invalidated",
-        }:
-            # Device IDs are only unique within their entity type. Resolve
-            # lifecycle events by their explicit domain before generic ID
-            # matches (for example, a device ID may equal an approval ID).
-            parent = devices.get(entity_id)
-            if parent is None:
-                # Unregister removes the current device row in the same
-                # transaction that appends its immutable audit record. In
-                # that case, the explicit workspace is the remaining scope
-                # proof; require that workspace in this snapshot. If a device
-                # with this ID does remain, the common check below rejects a
-                # cross-workspace audit.
-                workspace_id = payload.get("workspace_id")
-                workspace = workspaces.get(workspace_id)
-                if not workspace_id or workspace is None:
-                    raise ImportBlocked(
-                        f"audit_event/{event_id} references an unscoped device lifecycle event"
-                    )
-                parent = {**workspace, "workspace_id": workspace_id}
-            entity_type = "device_registration"
-        elif entity_id in users and event_type in {
-            "auth.account_deletion_requested",
-            "auth.role_updated",
-            "auth.sessions_revoked",
-        }:
-            parent = users[entity_id]
-            entity_type = "user"
-        elif event_type in {
-            "agent.registered",
-            "agent.token_rotated",
-            "agent.token_revoked",
-            "agent.auth_failed",
-            "agent.rate_limited",
-        }:
-            # Agent IDs can collide with approval/project IDs in legacy
-            # SQLite. Resolve these security events by their explicit domain.
-            # Authentication failures and rate limits omit workspace_id in
-            # legacy AuditEvent payloads; only a matching registered agent
-            # provides a safe tenant scope for those records.
-            parent = agents.get(entity_id)
-            if parent is None:
-                raise ImportBlocked(
-                    f"audit_event/{event_id} references an unimported external agent"
-                )
-            entity_type = "external_agent"
-        elif entity_id in approvals:
-            parent = approvals[entity_id]
-            entity_type = "approval_request"
-        elif entity_id in projects:
-            parent = projects[entity_id]
-            entity_type = "project"
-        elif entity_id in work_orders:
-            parent = work_orders[entity_id]
-            entity_type = "work_order"
-        elif entity_id in ideas:
-            parent = ideas[entity_id]
-            entity_type = "idea"
-        elif entity_id in connectors:
-            parent = connectors[entity_id]
-            entity_type = "agent_connector"
-        elif entity_id in selected.get("invite", {}):
-            parent = selected["invite"][entity_id]
-            entity_type = "invite"
-        elif entity_id in workspaces:
-            # Workspace-level security/configuration events have no narrower
-            # parent record. Preserve them only when the workspace itself is
-            # present in this snapshot; the exact workspace match below is the
-            # ownership proof used by the target audit_events FK.
-            parent = {**workspaces[entity_id], "workspace_id": entity_id}
-            entity_type = "workspace"
-        elif entity_id in mcp_servers:
-            parent = mcp_servers[entity_id]
-            entity_type = "mcp_child_server"
-        elif entity_id in mcp_pending:
-            parent = mcp_pending[entity_id]
-            entity_type = "mcp_pending_request"
-        elif entity_id in test_runs:
-            approval = approvals.get(test_runs[entity_id].get("approval_request_id"))
-            if not approval:
-                raise ImportBlocked(f"audit_event/{event_id} references an unimported test-run approval")
-            parent = {**test_runs[entity_id], "workspace_id": approval.get("workspace_id")}
-            entity_type = "test_run"
-        elif (
-            isinstance(payload.get("event_type"), str)
-            and payload["event_type"].startswith("agent_task.")
-            and entity_id in tasks
+        entity_type, parent, resolution = _resolve_audit_event_parent(
+            event_type if isinstance(event_type, str) else None,
+            entity_id if isinstance(entity_id, str) else None,
+            workspace_id=payload.get("workspace_id") if isinstance(payload.get("workspace_id"), str) else None,
+            sessions=sessions,
+            users=users,
+            tasks=tasks,
+            runs=runs,
+            devices=devices,
+            agents=agents,
+            approvals=approvals,
+            projects=projects,
+            work_orders=work_orders,
+            ideas=ideas,
+            connectors=connectors,
+            invites=selected.get("invite", {}),
+            workspaces=workspaces,
+            mcp_servers=mcp_servers,
+            mcp_pending=mcp_pending,
+            test_runs=test_runs,
+        )
+        if resolution == "path_keyed_without_task_parent":
+            raise ImportBlocked(
+                f"audit_event/{event_id} is a path-keyed worker configuration event without a task parent"
+            )
+        if resolution == "missing_session_owner":
+            raise ImportBlocked(
+                f"audit_event/{event_id} references a missing or mismatched session owner"
+            )
+        if resolution == "missing_test_run_approval":
+            raise ImportBlocked(f"audit_event/{event_id} references an unimported test-run approval")
+        if event_type == "auth.session_revoked" and parent is not None and (
+            parent.get("workspace_id") != payload.get("workspace_id")
         ):
-            parent = tasks[entity_id]
-            entity_type = "agent_task"
-        elif (
-            isinstance(payload.get("event_type"), str)
-            and payload["event_type"].startswith("agent_run.")
-            and entity_id in runs
-        ):
-            parent = runs[entity_id]
-            entity_type = "agent_run"
-        else:
+            raise ImportBlocked(
+                f"audit_event/{event_id} references a missing or mismatched session owner"
+            )
+        if entity_type == "device_registration" and parent is None:
+            raise ImportBlocked(
+                f"audit_event/{event_id} references an unscoped device lifecycle event"
+            )
+        if entity_type == "external_agent" and parent is None:
+            raise ImportBlocked(
+                f"audit_event/{event_id} references an unimported external agent"
+            )
+        if isinstance(event_type, str) and event_type.startswith("agent_worker.") and parent is None:
+            raise ImportBlocked(
+                f"audit_event/{event_id} references an unimported AgentTask worker parent"
+            )
+        if parent is None or entity_type is None:
             continue
         if payload.get("workspace_id") is None and entity_type == "agent_task" and isinstance(
             event_type, str
@@ -2351,6 +2535,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="write a private read-only native invocation drain report; never imports data",
     )
+    parser.add_argument(
+        "--write-audit-event-inventory-report",
+        type=Path,
+        help="write a redacted read-only audit parent inventory from the local SQLite snapshot",
+    )
     parser.add_argument("--apply", action="store_true", help="write the validated partial slice")
     parser.add_argument("--confirm-source-snapshot", action="store_true", help="assert an operator-created coordinated snapshot")
     parser.add_argument("--allow-partial-slice", action="store_true", help="acknowledge omitted entity types")
@@ -2358,12 +2547,39 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.write_invocation_drain_report is not None:
-            if args.apply or args.confirm_source_snapshot or args.allow_partial_slice or args.allow_remote_staging:
+            if (
+                args.write_audit_event_inventory_report is not None
+                or args.apply
+                or args.confirm_source_snapshot
+                or args.allow_partial_slice
+                or args.allow_remote_staging
+            ):
                 raise ImportBlocked("invocation drain report mode cannot be combined with import or apply options")
             report = build_invocation_drain_report(args.source)
-            _write_drain_report(args.write_invocation_drain_report, report)
+            _write_private_report(args.write_invocation_drain_report, report)
             print(json.dumps(report, sort_keys=True, indent=2))
             return 0 if report["status"] == "READY_FOR_OWNER_REVIEW" else 2
+        if args.write_audit_event_inventory_report is not None:
+            if (
+                args.write_invocation_drain_report is not None
+                or args.apply
+                or args.confirm_source_snapshot
+                or args.allow_partial_slice
+                or args.allow_remote_staging
+            ):
+                raise ImportBlocked(
+                    "audit event inventory mode cannot be combined with import or other report options"
+                )
+            report = build_audit_event_inventory_report(args.source)
+            _write_private_report(args.write_audit_event_inventory_report, report)
+            print(json.dumps({
+                "status": "AUDIT_EVENT_INVENTORY_WRITTEN",
+                "report_path": str(args.write_audit_event_inventory_report),
+                "source_snapshot_sha256": report["source_snapshot_sha256"],
+                "audit_event_count": report["audit_event_count"],
+                "classification_counts": report["classification_counts"],
+            }, sort_keys=True))
+            return 0
         plan, records, digest = build_plan(args.source)
         if args.apply:
             dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "")

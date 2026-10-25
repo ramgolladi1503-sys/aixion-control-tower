@@ -53,6 +53,7 @@ from scripts.import_approval_slice_to_postgres import (
     _target_is_remote,
     _source_table_coverage,
     apply_import,
+    build_audit_event_inventory_report,
     build_invocation_drain_report,
     build_plan,
     main,
@@ -719,6 +720,132 @@ def test_invocation_drain_report_is_read_only_hash_bound_and_records_clear_outco
     assert report["approved_unconsumed_invocation_count"] == 0
     assert report["unverifiable_native_invocation_count"] == 0
     assert report["unverifiable_approval_id_sha256"] == []
+
+
+def test_audit_event_inventory_report_is_redacted_read_only_and_owner_only(
+    tmp_path, monkeypatch, capsys
+):
+    path = tmp_path / "audit-source.sqlite3"
+    _snapshot(path)
+    before = path.read_bytes()
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(mode=0o700)
+    report_path = report_dir / "audit-event-inventory.json"
+
+    def forbidden_connect(*args, **kwargs):
+        raise AssertionError("read-only audit inventory must not connect to PostgreSQL")
+
+    monkeypatch.setattr(psycopg, "connect", forbidden_connect)
+    result = main([
+        "--source", str(path), "--write-audit-event-inventory-report", str(report_path),
+    ])
+
+    assert result == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "AUDIT_EVENT_INVENTORY_WRITTEN" in captured.out
+    assert str(report_path) in captured.out
+    assert "owner@example.test" not in captured.out
+    assert "test-device-token" not in captured.out
+    assert "ws1" not in captured.out
+    stdout_summary = json.loads(captured.out)
+    assert set(stdout_summary) == {
+        "status", "report_path", "source_snapshot_sha256",
+        "audit_event_count", "classification_counts",
+    }
+    assert "a1" not in stdout_summary.values()
+    assert path.read_bytes() == before
+    assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
+    text = report_path.read_text(encoding="utf-8")
+    report = json.loads(text)
+    assert report["read_only"] is True
+    assert report["migration_authorized"] is False
+    assert report["audit_event_count"] == len(report["events"])
+    assert sum(report["classification_counts"].values()) == report["audit_event_count"]
+    assert "owner@example.test" not in text
+    assert "test-device-token" not in text
+    assert "secret_ref" not in text
+    assert '"details"' not in text
+    assert '"actor"' not in text
+    for event in report["events"]:
+        assert set(event) == {
+            "event_type", "entity_id", "workspace_id", "parent_entity_type",
+            "parent_resolution", "parent_exists", "parent_identity_match",
+            "parent_workspace_exists",
+            "workspace_match", "classification",
+        }
+
+
+def test_audit_event_inventory_classifies_unscoped_unknown_and_mismatched_rows(tmp_path):
+    path = tmp_path / "audit-unclassified.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES('audit_event',?,?)",
+            [
+                (
+                    "unknown-unscoped",
+                    json.dumps({
+                        "id": "unknown-unscoped", "event_type": "future.event",
+                        "entity_id": "no-such-parent", "workspace_id": None,
+                        "actor": "must-not-leak@example.test", "details": {"token": "redact-me"},
+                    }),
+                ),
+                (
+                    "known-mismatch",
+                    json.dumps({
+                        "id": "known-mismatch", "event_type": "approval.decision",
+                        "entity_id": "a1", "workspace_id": "other-workspace",
+                        "actor": "must-not-leak@example.test", "details": {"token": "redact-me"},
+                    }),
+                ),
+            ],
+        )
+    os.chmod(path, 0o600)
+
+    report = build_audit_event_inventory_report(path)
+    rows = {row["entity_id"]: row for row in report["events"]}
+
+    assert rows["no-such-parent"]["classification"] == "unscoped_parent_not_found"
+    assert rows["no-such-parent"]["parent_resolution"] == "unresolved_parent"
+    assert rows["no-such-parent"]["workspace_id"] is None
+    assert rows["a1"]["classification"] == "workspace_mismatch"
+    assert rows["a1"]["parent_entity_type"] == "approval_request"
+    assert rows["a1"]["parent_identity_match"] is True
+    assert rows["a1"]["parent_workspace_exists"] is True
+    assert rows["a1"]["workspace_match"] is False
+    assert "must-not-leak@example.test" not in json.dumps(report)
+    assert "redact-me" not in json.dumps(report)
+
+
+def test_audit_event_inventory_verifies_workspace_parent_identity(tmp_path):
+    path = tmp_path / "audit-workspace-parent.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-workspace-settings-inventory",
+        "event_type": "workspace.settings_updated",
+        "entity_id": "ws1",
+        "workspace_id": "ws1",
+        "actor": "owner@example.test",
+        "details": {"setting": "approval_expiry"},
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES('audit_event',?,?)",
+            (event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    report = build_audit_event_inventory_report(path)
+    row = next(item for item in report["events"] if item["entity_id"] == "ws1")
+
+    assert row["parent_entity_type"] == "workspace"
+    assert row["parent_resolution"] == "entity_id_fallback"
+    assert row["parent_exists"] is True
+    assert row["parent_identity_match"] is True
+    assert row["parent_workspace_exists"] is True
+    assert row["workspace_match"] is True
+    assert row["classification"] == "same_workspace_parent_via_entity_id_fallback"
 
 
 def test_invocation_drain_report_persists_blocked_pending_state_without_source_mutation(
