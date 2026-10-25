@@ -20,6 +20,20 @@ fail without blocking the tool. This adapter emits an explicit `deny` on
 configuration errors, malformed input, API errors, payload changes, revoked
 credentials, and timeout.
 
+## Install target versus verified runtime
+
+The installer writes a project-local Codex hook definition to
+`<project>/.codex/hooks.json`; it does not connect to Codex App Server, attach
+to an existing conversation, or take over a running session. Automated tests
+launch the hook command with synthetic `PermissionRequest` JSON and exercise
+the Control Tower API. They do not launch Codex CLI or the native Codex
+desktop app. Therefore neither runtime is certified to invoke this adapter
+and resume the same task after a phone decision. Treat Codex Desktop phone
+approval as unverified until an installed desktop session produces the real
+event and the same native task is observed continuing after approval (and
+stopping after denial). Reviewing or trusting the hook in Codex only confirms
+that the configuration is accepted; it is not runtime-flow evidence.
+
 ## Supported scope and limits
 
 - Initial host support is macOS with local Codex and a token in macOS Keychain.
@@ -102,12 +116,14 @@ credentials, and timeout.
      --check
    ```
 
-4. Open the project in Codex, review and trust the hook through Codex's hook
-   review UI/`/hooks`, and verify Codex lists the `PermissionRequest` hook.
-   Use an action that normally produces a Codex permission prompt. Confirm the
-   exact tool and arguments appear on the phone, then test approve and reject.
-   Also test a network interruption and timeout; neither may execute the
-   original tool.
+4. In the Codex runtime you intend to use, review and trust the hook through
+   Codex's hook review UI or `/hooks` in the CLI, and confirm it lists the
+   `PermissionRequest` hook. This verifies configuration only. The CLI and
+   native desktop runtime flows remain unverified by this repository's
+   automated tests. Before relying on either, run a harmless action that
+   normally produces a permission prompt and prove that the exact request
+   appears on the phone, approval resumes that same task, and denial prevents
+   that same action. Also verify network interruption and timeout fail closed.
 
 To remove this integration, run `setup_workspace.py --workspace
 "/absolute/path/to/project" --remove`. It removes only its own managed entry
