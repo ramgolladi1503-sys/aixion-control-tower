@@ -114,7 +114,24 @@ def _task_repository_for_route(http_request: Request | None) -> AgentTaskReposit
             )
         # Direct function calls in unit tests use the explicit local adapter.
         return agent_task_repository
-    return agent_task_repository_for_request(http_request)
+    try:
+        repository = agent_task_repository_for_request(http_request)
+    except RuntimeError:
+        # Repository selection is an authority boundary. A missing or
+        # mismatched lifespan binding must not become an unhandled 500 (or
+        # trigger a caller-side compatibility fallback).
+        raise HTTPException(
+            status_code=503,
+            detail="AgentTask repository is unavailable",
+            headers={"Retry-After": "1"},
+        ) from None
+    if not isinstance(repository, (SQLiteAgentTaskRepository, PostgresAgentTaskRepository)):
+        raise HTTPException(
+            status_code=503,
+            detail="AgentTask repository is unsupported",
+            headers={"Retry-After": "1"},
+        )
+    return repository
 
 
 def _approval_repository_for_route(

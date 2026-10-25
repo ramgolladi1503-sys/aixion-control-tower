@@ -52,6 +52,54 @@ def test_missing_request_fails_closed_before_returning_sqlite_task_repository(
     assert store.audit_events == before[3]
 
 
+def test_request_bound_task_repository_failure_is_retryable_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    def reject_missing_runtime(_request: object) -> object:
+        raise RuntimeError("PostgreSQL AgentTask repository is unavailable or mismatched")
+
+    monkeypatch.setattr(agent_task_routes, "agent_task_repository_for_request", reject_missing_runtime)
+
+    with pytest.raises(HTTPException) as raised:
+        agent_task_routes._task_repository_for_route(request)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert raised.value.detail == "AgentTask repository is unavailable"
+
+
+def test_request_bound_task_repository_rejects_unsupported_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        agent_task_routes, "agent_task_repository_for_request", lambda _request: object()
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        agent_task_routes._task_repository_for_route(request)
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "AgentTask repository is unsupported"
+
+
+def test_request_bound_local_task_repository_remains_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = agent_task_routes.agent_task_repository
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(agent_task_repository=repository))
+    )
+    monkeypatch.setattr(
+        "app.application_repository_access.get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=False),
+    )
+
+    assert agent_task_routes._task_repository_for_route(request) is repository
+
+
 @pytest.mark.parametrize(
     "settings",
     [
