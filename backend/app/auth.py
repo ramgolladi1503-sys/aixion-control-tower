@@ -154,7 +154,17 @@ def _request_from_context(request: Request) -> Request:
 
 
 def postgres_auth_repository(request: Request | None):
-    if not get_settings().postgres_auth_enabled:
+    settings = get_settings()
+    if request is None and (
+        getattr(settings, "is_production", False)
+        or getattr(settings, "postgres_auth_enabled", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL auth repository requires an app-bound request",
+            headers={"Retry-After": "1"},
+        )
+    if not settings.postgres_auth_enabled:
         return None
     return application_repositories_for_request(request).auth
 
