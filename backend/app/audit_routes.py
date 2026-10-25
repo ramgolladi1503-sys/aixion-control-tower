@@ -62,6 +62,17 @@ def _audit_repository_for_route(
     request: Request | None, *, allow_postgres_reads: bool = False
 ) -> AuditEventRepository:
     if request is None:
+        settings = get_settings()
+        if getattr(settings, "is_production", False) or getattr(
+            settings, "postgres_auth_enabled", False
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Audit repository request context is required when production "
+                    "or PostgreSQL authentication is enabled."
+                ),
+            )
         return _local_audit_repository
     if get_settings().postgres_auth_enabled:
         if not allow_postgres_reads:

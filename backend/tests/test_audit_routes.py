@@ -290,3 +290,55 @@ def test_audit_and_recovery_reads_fail_closed_when_postgres_auth_is_selected_wit
     assert [response.status_code for response in responses] == [503] * len(responses)
     assert "authoritative recovery repository" in responses[4].json()["detail"]
     assert "unified audit writer" in responses[5].json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=["production", "postgres-auth"],
+)
+def test_audit_route_rejects_missing_request_context_without_sqlite_fallback(
+    monkeypatch: pytest.MonkeyPatch, settings: SimpleNamespace
+) -> None:
+    from fastapi import HTTPException
+
+    from app import audit_routes
+
+    monkeypatch.setattr(audit_routes, "get_settings", lambda: settings)
+
+    def unexpected_audit_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite audit repository must not be read without request context")
+
+    monkeypatch.setattr(
+        audit_routes._local_audit_repository,
+        "list_for_workspace",
+        unexpected_audit_read,
+    )
+    monkeypatch.setattr(
+        audit_routes._local_audit_repository,
+        "get_for_workspace",
+        unexpected_audit_read,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        audit_routes.query_audit_events(request=None, user=None)  # type: ignore[arg-type]
+
+    assert raised.value.status_code == 503
+    assert "request context is required" in raised.value.detail
+
+
+def test_audit_repository_keeps_local_direct_behavior_without_production_or_postgres_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import audit_routes
+
+    monkeypatch.setattr(
+        audit_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+
+    assert audit_routes._audit_repository_for_route(None) is audit_routes._local_audit_repository
