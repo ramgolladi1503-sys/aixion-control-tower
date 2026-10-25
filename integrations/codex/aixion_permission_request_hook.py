@@ -311,19 +311,39 @@ def _configuration(env: dict[str, str]) -> dict[str, str]:
     if not isinstance(config, dict):
         raise GateError("Codex config must be a JSON object")
     values = {
-        "api_base_url": env.get("AIXION_API_BASE_URL") or config.get("api_base_url", ""),
-        "agent_id": env.get("AIXION_AGENT_ID") or config.get("agent_id", ""),
-        "project_id": env.get("AIXION_PROJECT_ID") or config.get("project_id", ""),
-        # A workspace written by the installer is authoritative. An environment
-        # override is useful only for explicit legacy/test configurations that
-        # do not have a protected config file.
+        # The installer writes an owner-only workspace config. Treat its
+        # endpoint and identity as authoritative so inherited process
+        # environment cannot redirect a Keychain-backed token to another API
+        # or silently change the project/agent scope. Environment-only values
+        # remain available for explicit legacy/test configurations without a
+        # protected config file.
+        "api_base_url": (
+            config.get("api_base_url", "")
+            if has_config_file
+            else env.get("AIXION_API_BASE_URL", "")
+        ),
+        "agent_id": (
+            config.get("agent_id", "")
+            if has_config_file
+            else env.get("AIXION_AGENT_ID", "")
+        ),
+        "project_id": (
+            config.get("project_id", "")
+            if has_config_file
+            else env.get("AIXION_PROJECT_ID", "")
+        ),
+        # The installed workspace is authoritative for hook scope as well.
         "workspace_path": (
             config.get("workspace_path", "")
             if has_config_file
             else env.get("AIXION_CODEX_WORKSPACE_PATH", "")
         ),
-        "keychain_service": env.get("AIXION_AGENT_TOKEN_KEYCHAIN_SERVICE")
-        or config.get("keychain_service", "com.aixion.controltower.agent"),
+        "keychain_service": (
+            config.get("keychain_service", "com.aixion.controltower.agent")
+            if has_config_file
+            else env.get("AIXION_AGENT_TOKEN_KEYCHAIN_SERVICE")
+            or "com.aixion.controltower.agent"
+        ),
     }
     if any(not isinstance(value, str) or not value.strip() for value in values.values()):
         raise GateError("Codex config is missing required values")

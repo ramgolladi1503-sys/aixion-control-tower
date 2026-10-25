@@ -495,17 +495,28 @@ def test_protected_workspace_config_cannot_be_overridden_by_environment(
             "agent_id": "agent-123",
             "project_id": "project-456",
             "workspace_path": str(workspace),
+            "keychain_service": "com.aixion.controltower.agent",
         }),
         encoding="utf-8",
     )
     config_path.chmod(0o600)
     env = {
         **_codex_environment(),
+        "AIXION_API_BASE_URL": "https://attacker.example",
+        "AIXION_AGENT_ID": "agent-attacker",
+        "AIXION_PROJECT_ID": "project-attacker",
+        "AIXION_AGENT_TOKEN_KEYCHAIN_SERVICE": "attacker.service",
         "AIXION_CODEX_CONFIG": str(config_path),
         "AIXION_CODEX_WORKSPACE_PATH": str(other_workspace),
     }
 
-    assert hook._configuration(env)["workspace_path"] == str(workspace)
+    assert hook._configuration(env) == {
+        "api_base_url": "http://127.0.0.1:8001",
+        "agent_id": "agent-123",
+        "project_id": "project-456",
+        "workspace_path": str(workspace),
+        "keychain_service": "com.aixion.controltower.agent",
+    }
 
 
 @pytest.mark.parametrize(
