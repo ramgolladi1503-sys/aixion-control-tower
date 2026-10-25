@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -16,7 +17,7 @@ from .agent_task_repository import PostgresAgentTaskRepository
 from .notification_outbox_repository import PostgresNotificationOutboxRepository
 from .postgres_auth_rate_limits import PostgresAuthRateLimitRepository
 from .postgres_auth_repository import PostgresAuthRepository
-from .postgres_database import POSTGRES_MIGRATIONS, _migration_checksum
+from .postgres_database import PG_MIGRATION_TABLE, POSTGRES_MIGRATIONS, _migration_checksum
 from .postgres_email_outbox_repository import PostgresEmailOutboxRepository
 from .postgres_external_agent_auth_repository import (
     PostgresExternalAgentAuthRepository,
@@ -28,6 +29,19 @@ from .workspace_membership_repository import PostgresWorkspaceMembershipReposito
 from .work_order_repository import PostgresWorkOrderRepository
 
 _APPLICATION_NAME = "aixion-control-tower"
+_CREATE_TABLE_PATTERN = re.compile(
+    r"\bCREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+([a-z_][a-z0-9_]*)\b",
+    re.IGNORECASE,
+)
+
+
+def _required_postgres_relations() -> tuple[str, ...]:
+    """Return every table the applied migrations declare, plus their ledger."""
+    names = {PG_MIGRATION_TABLE}
+    for migration in POSTGRES_MIGRATIONS:
+        for statement in migration.statements:
+            names.update(_CREATE_TABLE_PATTERN.findall(statement))
+    return tuple(sorted(names))
 
 
 @dataclass(frozen=True)
@@ -38,6 +52,7 @@ class PostgresSchemaStatus:
     missing_migration_ids: tuple[str, ...]
     unknown_migration_ids: tuple[str, ...]
     mismatched_migration_ids: tuple[str, ...]
+    missing_relation_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -236,10 +251,22 @@ class PostgresRuntime:
                     ),
                     unknown_migration_ids=(),
                     mismatched_migration_ids=(),
+                    missing_relation_names=_required_postgres_relations(),
                 )
             rows = conn.execute(
                 "SELECT migration_id,name,migration_checksum FROM schema_migrations"
             ).fetchall()
+            missing_relations = tuple(
+                sorted(
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT relation_name "
+                        "FROM unnest(%s::text[]) AS expected(relation_name) "
+                        "WHERE to_regclass(relation_name) IS NULL",
+                        (list(_required_postgres_relations()),),
+                    ).fetchall()
+                )
+            )
 
         expected = {migration.migration_id: migration for migration in POSTGRES_MIGRATIONS}
         applied = {row[0]: row for row in rows}
@@ -258,10 +285,16 @@ class PostgresRuntime:
             )
         )
         return PostgresSchemaStatus(
-            ready=not missing_ids and not unknown_ids and not mismatched_ids,
+            ready=(
+                not missing_ids
+                and not unknown_ids
+                and not mismatched_ids
+                and not missing_relations
+            ),
             migration_ledger_present=True,
             applied_migration_ids=applied_ids,
             missing_migration_ids=missing_ids,
             unknown_migration_ids=unknown_ids,
             mismatched_migration_ids=mismatched_ids,
+            missing_relation_names=missing_relations,
         )

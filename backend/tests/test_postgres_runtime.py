@@ -140,6 +140,28 @@ def test_schema_verification_is_read_only_and_reports_missing_migrations(
     assert schema
 
 
+def test_schema_verification_fails_closed_when_migrated_relation_is_missing(
+    postgres_schema: tuple[str, Any],
+) -> None:
+    _schema, connect = postgres_schema
+    run_postgres_migrations(connect)
+
+    def runtime_connect(_dsn: str, **_kwargs: Any):
+        return connect()
+
+    runtime = PostgresRuntime(_dsn="hidden", profile="test", _connector=runtime_connect)
+    before = runtime.verify_schema()
+    assert before.ready is True
+
+    with connect() as conn:
+        conn.execute("DROP TABLE test_runs")
+
+    status = runtime.verify_schema()
+    assert status.ready is False
+    assert status.missing_migration_ids == ()
+    assert status.missing_relation_names == ("test_runs",)
+
+
 def test_schema_verification_fails_closed_when_migration_ledger_is_absent(
     postgres_schema: tuple[str, Any],
 ) -> None:
