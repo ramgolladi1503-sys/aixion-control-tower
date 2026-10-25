@@ -186,6 +186,28 @@ def test_postgres_auth_selectors_report_unavailable_runtime_as_retryable_503(
     assert "runtime is unavailable" in error.value.detail
 
 
+def test_postgres_auth_selector_rejects_incomplete_bundle_as_retryable_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        auth,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        auth,
+        "application_repositories_for_request",
+        lambda _request: SimpleNamespace(auth=None),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        auth.postgres_auth_repository(object())
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert "unavailable or mismatched" in error.value.detail
+
+
 def test_auth_rate_limit_selector_reports_unavailable_runtime_as_retryable_503(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

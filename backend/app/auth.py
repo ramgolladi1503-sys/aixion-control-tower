@@ -11,6 +11,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from .application_repository_access import application_repositories_for_request
 from .models import AuthUser, SessionToken, User, UserRole, Workspace, now_utc
+from .postgres_auth_repository import PostgresAuthRepository
 from .settings import get_settings
 from .store import store
 from .email_delivery import insert_verification_email, prepare_verification_email
@@ -172,13 +173,20 @@ def postgres_auth_repository(request: Request | None):
     if not postgres_auth_enabled:
         return None
     try:
-        return application_repositories_for_request(request).auth
+        repository = application_repositories_for_request(request).auth
     except RuntimeError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="PostgreSQL auth repository runtime is unavailable",
             headers={"Retry-After": "1"},
         ) from error
+    if not isinstance(repository, PostgresAuthRepository):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL auth repository is unavailable or mismatched",
+            headers={"Retry-After": "1"},
+        )
+    return repository
 
 
 def postgres_workspace_membership_repository(request: Request | None):
