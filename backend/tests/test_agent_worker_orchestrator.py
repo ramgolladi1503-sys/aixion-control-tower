@@ -234,6 +234,31 @@ def test_orchestrator_accepts_same_runtime_postgres_pair_before_task_lookup(
     assert lookups == [("postgres-task", task_repository)]
 
 
+def test_orchestrator_rejects_foreign_postgres_audit_runtime_before_task_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakePostgresRuntimeConnector()
+    task_repository = PostgresAgentTaskRepository(runtime.connect)
+    approval_repository = PostgresApprovalDecisionRepository(runtime.connect)
+    audit_repository = PostgresAuditEventRepository(FakePostgresRuntimeConnector().connect)
+    audit_before = list(store.audit_events)
+
+    def unexpected_task_lookup(task_id, repository=None):
+        pytest.fail("foreign PostgreSQL audit runtime must be rejected before task lookup")
+
+    monkeypatch.setattr(orchestrator, "_task", unexpected_task_lookup)
+
+    with pytest.raises(ValueError, match="must share the same runtime connection factory"):
+        run_approved_agent_task_worker_flow(
+            task_id="postgres-task",
+            task_repository=task_repository,
+            approval_repository=approval_repository,
+            audit_repository=audit_repository,
+        )
+
+    assert store.audit_events == audit_before
+
+
 @pytest.mark.parametrize("repository_mode", ["missing", "sqlite"])
 def test_orchestrator_requires_postgres_pair_in_postgres_auth_mode_before_task_lookup(
     monkeypatch: pytest.MonkeyPatch,

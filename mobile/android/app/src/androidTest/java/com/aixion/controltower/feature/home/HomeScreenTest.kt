@@ -198,6 +198,11 @@ class HomeScreenTest {
         composeRule.onAllNodesWithText("We couldn't load your approvals", substring = true)
             .assertCountEquals(0)
         composeRule.onAllNodesWithText("Current approvals unavailable").assertCountEquals(1)
+        assertTrue(
+            "Home error title should be exposed as a screen-reader heading",
+            composeRule.onNodeWithText("Current approvals unavailable")
+                .fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
         composeRule.onAllNodesWithText(
             "Check your connection, then retry to load the latest requests."
         ).assertCountEquals(1)

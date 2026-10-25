@@ -62,6 +62,26 @@ def _is_postgres_pair(task_repository, approval_repository) -> bool:
     return postgres_pair
 
 
+def _same_postgres_runtime(*repositories) -> bool:
+    """Require repository connection factories to belong to one runtime instance."""
+    connectors = [getattr(repository, "_connect", None) for repository in repositories]
+    if not connectors or not all(callable(connector) for connector in connectors):
+        return False
+    first = connectors[0]
+    for connector in connectors[1:]:
+        if connector is first:
+            continue
+        # Runtime.connect produces a fresh bound-method object at each access.
+        # Match the method implementation and owner, never arbitrary equality.
+        if not (
+            getattr(first, "__self__", None) is not None
+            and getattr(first, "__self__", None) is getattr(connector, "__self__", None)
+            and getattr(first, "__func__", None) is getattr(connector, "__func__", None)
+        ):
+            return False
+    return True
+
+
 def _task(task_id: str | None, task_repository=None) -> AgentTask | None:
     if task_id is None:
         return None
@@ -276,6 +296,12 @@ def run_approved_agent_task_worker_flow(
         raise ValueError("PostgreSQL orchestration requires its runtime-bound audit repository.")
     if audit_repository is not None and not isinstance(audit_repository, PostgresAuditEventRepository):
         raise ValueError("Orchestration audit repository is not supported.")
+    if postgres_mode and not _same_postgres_runtime(
+        task_repository, approval_repository, audit_repository
+    ):
+        raise ValueError(
+            "PostgreSQL orchestration task, approval, and audit repositories must share the same runtime connection factory."
+        )
     task = _task(task_id, task_repository)
     if task is None:
         return AgentWorkerOrchestrationResult(success=False, task_id=task_id, worker_id=worker_id, reason="Agent task not found.")

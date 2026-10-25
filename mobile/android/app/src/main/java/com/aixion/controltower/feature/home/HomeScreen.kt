@@ -261,6 +261,7 @@ private fun ErrorPanel(
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = title,
+            modifier = Modifier.semantics { heading() },
             color = palette.ink,
             style = MaterialTheme.typography.titleMedium
         )
