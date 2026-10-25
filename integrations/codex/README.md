@@ -72,6 +72,11 @@ credentials, and timeout.
      --project-id "project_..."
    ```
 
+   Existing installations must rerun the same command after upgrading. The
+   installer adds the canonical workspace path to the protected config and
+   preserves the existing hook and Keychain credential. No credential reset
+   is needed. Until this metadata is present, the hook fails closed.
+
    If the project already has `.codex/hooks.json`, the installer requires the
    file to be owned by the current user and not writable by group or other
    users. It refuses installation without changing either the hook file or
@@ -108,8 +113,10 @@ Control Tower if it is no longer needed.
 
 ## Configuration and validation
 
-The protected JSON config contains `api_base_url`, `agent_id`, and
-`project_id`; it contains no secret. The optional timeout environment variable
+The protected JSON config contains `api_base_url`, `agent_id`, `project_id`,
+and the canonical `workspace_path`; it contains no secret. The hook requires
+Codex's documented `cwd` field and permits the workspace root or a real
+subdirectory after symlink resolution. The optional timeout environment variable
 is `AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS` (default 600, range 1–900 seconds).
 During the wait, the hook honors API `Retry-After` responses and retries
 ambiguous decision `GET` failures with exponential delays of 2, 4, then at most

@@ -247,7 +247,11 @@ fun ApprovalDetailContent(
         // Keep decision controls outside the request scroll surface at every height.
         // The compact panel below reduces supporting copy so it remains usable in
         // landscape, split-screen, and large-text configurations.
-        val compactViewport = maxHeight < 500.dp
+        val compactViewport = shouldUseCompactDecisionPanel(
+            maxHeight = maxHeight,
+            maxWidth = maxWidth,
+            fontScale = LocalDensity.current.fontScale
+        )
         Column(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
                 state = requestListState,
@@ -965,6 +969,12 @@ private fun DecisionContextLine(label: String, value: String) {
 internal fun shouldStackDecisionContext(maxWidth: androidx.compose.ui.unit.Dp, fontScale: Float): Boolean =
     maxWidth < 360.dp || fontScale >= 1.5f
 
+internal fun shouldUseCompactDecisionPanel(
+    maxHeight: androidx.compose.ui.unit.Dp,
+    maxWidth: androidx.compose.ui.unit.Dp,
+    fontScale: Float
+): Boolean = maxHeight < 500.dp || (maxWidth < 400.dp && fontScale >= 1.5f)
+
 @Composable
 private fun DecisionContextBody(label: String, value: String) {
     val palette = LocalTowerPalette.current
@@ -1081,7 +1091,8 @@ private fun DecisionPanel(
             modifier = Modifier
                 .fillMaxWidth()
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "Decision context: $approvalProvider, $approvalTitle, request ${shortSafeApprovalId(approvalId)}, risk ${approvalRisk.name.lowercase().replace('_', ' ')}."
+                    val titleContext = if (compactLayout) "" else ", $approvalTitle"
+                    contentDescription = "Decision context: $approvalProvider$titleContext, request ${shortSafeApprovalId(approvalId)}, risk ${approvalRisk.name.lowercase().replace('_', ' ')}."
                 }
                 .testTag("approval-decision-identity"),
             horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),

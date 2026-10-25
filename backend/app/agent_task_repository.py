@@ -274,6 +274,39 @@ def _validate_worker_outcome_commit(
     event: AgentTaskEvent | None,
     audit: AuditEvent,
 ) -> None:
+    validation_execution_failed = (
+        event is not None
+        and updated.status == AgentTaskStatus.FAILED
+        and event.event_type == AgentTaskEventType.TESTS_FAILED
+        and event.status == AgentTaskStatus.FAILED
+        and expected.approval_request_id is not None
+        and event.metadata.get("approval_request_id") == expected.approval_request_id
+        and event.metadata.get("runner_type") == "validation_command_runner"
+        and event.metadata.get("commands_executed") is True
+        and audit.event_type == "agent_worker.validation_run_completed"
+        and audit.details.get("approval_request_id") == expected.approval_request_id
+        and audit.details.get("passed") is False
+    )
+    validation_runner_outcome_unknown = (
+        event is not None
+        and updated.status == AgentTaskStatus.FAILED
+        and event.event_type == AgentTaskEventType.FAILED
+        and event.status == AgentTaskStatus.FAILED
+        and expected.approval_request_id is not None
+        and event.metadata.get("approval_request_id") == expected.approval_request_id
+        and event.metadata.get("runner_type") == "validation_command_runner"
+        and "commands_executed" not in event.metadata
+        and isinstance(event.metadata.get("results"), list)
+        and event.metadata.get("command_count") == len(event.metadata.get("results", []))
+        and event.metadata.get("execution_outcome") == "UNKNOWN"
+        and isinstance(event.metadata.get("failure_class"), str)
+        and bool(event.metadata.get("failure_class"))
+        and audit.event_type == "agent_worker.validation_runner_failed"
+        and audit.details.get("approval_request_id") == expected.approval_request_id
+        and audit.details.get("commands_completed") == event.metadata.get("command_count")
+        and audit.details.get("execution_outcome") == "UNKNOWN"
+        and audit.details.get("failure_class") == event.metadata.get("failure_class")
+    )
     if (
         not expected.workspace_id
         or not expected.project_id
@@ -291,20 +324,8 @@ def _validate_worker_outcome_commit(
                         updated.status == AgentTaskStatus.READY_FOR_PR
                         and event.event_type == AgentTaskEventType.PR_CREATED
                     )
-                    or (
-                        updated.status == AgentTaskStatus.FAILED
-                        and event.event_type == AgentTaskEventType.TESTS_FAILED
-                        and event.status == AgentTaskStatus.FAILED
-                        and expected.approval_request_id is not None
-                        and event.metadata.get("approval_request_id")
-                        == expected.approval_request_id
-                        and event.metadata.get("runner_type") == "validation_command_runner"
-                        and event.metadata.get("commands_executed") is True
-                        and audit.event_type == "agent_worker.validation_run_completed"
-                        and audit.details.get("approval_request_id")
-                        == expected.approval_request_id
-                        and audit.details.get("passed") is False
-                    )
+                    or validation_execution_failed
+                    or validation_runner_outcome_unknown
                 )
             )
         )

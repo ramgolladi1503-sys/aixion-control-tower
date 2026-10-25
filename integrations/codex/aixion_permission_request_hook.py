@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+from pathlib import Path
 import re
 import stat
 import subprocess
@@ -266,8 +267,9 @@ def _validated_api_base(value: str) -> str:
 
 def _configuration(env: dict[str, str]) -> dict[str, str]:
     config_path = env.get("AIXION_CODEX_CONFIG", DEFAULT_CONFIG_PATH)
+    has_config_file = os.path.lexists(config_path)
     config: Any = {}
-    if os.path.lexists(config_path):
+    if has_config_file:
         try:
             descriptor = os.open(config_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(descriptor, "rb") as stream:
@@ -301,14 +303,54 @@ def _configuration(env: dict[str, str]) -> dict[str, str]:
         "api_base_url": env.get("AIXION_API_BASE_URL") or config.get("api_base_url", ""),
         "agent_id": env.get("AIXION_AGENT_ID") or config.get("agent_id", ""),
         "project_id": env.get("AIXION_PROJECT_ID") or config.get("project_id", ""),
+        # A workspace written by the installer is authoritative. An environment
+        # override is useful only for explicit legacy/test configurations that
+        # do not have a protected config file.
+        "workspace_path": (
+            config.get("workspace_path", "")
+            if has_config_file
+            else env.get("AIXION_CODEX_WORKSPACE_PATH", "")
+        ),
         "keychain_service": env.get("AIXION_AGENT_TOKEN_KEYCHAIN_SERVICE")
         or config.get("keychain_service", "com.aixion.controltower.agent"),
     }
     if any(not isinstance(value, str) or not value.strip() for value in values.values()):
         raise GateError("Codex config is missing required values")
-    values = {key: value.strip() for key, value in values.items()}
+    values = {
+        key: value if key == "workspace_path" else value.strip()
+        for key, value in values.items()
+    }
     values["api_base_url"] = _validated_api_base(values["api_base_url"])
+    workspace_path = Path(values["workspace_path"])
+    if not workspace_path.is_absolute():
+        raise GateError("Codex config workspace path must be absolute")
+    try:
+        canonical_workspace = workspace_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise GateError("Codex config workspace path is unavailable") from exc
+    if not canonical_workspace.is_dir() or str(canonical_workspace) != values["workspace_path"]:
+        raise GateError("Codex config workspace path must be a canonical directory")
+    values["workspace_path"] = str(canonical_workspace)
     return values
+
+
+def _validate_event_workspace(event: dict[str, Any], config: dict[str, str]) -> None:
+    """Require Codex's documented session cwd to remain inside the installed project."""
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not cwd.strip():
+        raise GateError("Codex permission request is missing its session working directory")
+    session_path = Path(cwd)
+    if not session_path.is_absolute():
+        raise GateError("Codex permission request working directory must be absolute")
+    try:
+        canonical_session = session_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise GateError("Codex permission request working directory is unavailable") from exc
+    if not canonical_session.is_dir():
+        raise GateError("Codex permission request working directory is not a directory")
+    workspace = Path(config["workspace_path"])
+    if not canonical_session.is_relative_to(workspace):
+        raise GateError("Codex permission request is outside the installed workspace")
 
 
 def _agent_token(env: dict[str, str], config: dict[str, str]) -> str:
@@ -673,6 +715,7 @@ def _run(
     diagnostics["correlation_id"] = _short_correlation_id(source_invocation_id)
 
     config = _configuration(env)
+    _validate_event_workspace(event, config)
     token = _agent_token(env, config)
     safe_tool = re.sub(r"[^A-Za-z0-9_.:-]", "_", tool_name)[:120]
     body = {

@@ -38,6 +38,7 @@ ENV = {
     "AIXION_AGENT_TOKEN": "test-token",
     "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
     "AIXION_PROJECT_ID": "project-codex-test",
+    "AIXION_CODEX_WORKSPACE_PATH": str(ROOT.resolve()),
 }
 
 
@@ -291,6 +292,7 @@ def test_unknown_hash_version_fails_closed() -> None:
 def _event(args: object | None = None) -> dict:
     return {
         "hook_event_name": "PermissionRequest",
+        "cwd": str(ROOT.resolve()),
         "permission_mode": "default",
         "session_id": "session-123",
         "turn_id": "turn-456",
@@ -298,6 +300,67 @@ def _event(args: object | None = None) -> dict:
         "tool_name": "Bash",
         "tool_input": {"command": "touch approved.txt"} if args is None else args,
     }
+
+
+@pytest.mark.parametrize("cwd", [None, "relative/project", "/tmp"])
+def test_codex_hook_rejects_missing_or_foreign_cwd_before_token_or_network(
+    cwd: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    event = _event()
+    if cwd is None:
+        event.pop("cwd")
+    else:
+        event["cwd"] = cwd
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("workspace mismatch must fail before credentials or network access")
+
+    monkeypatch.setattr(hook, "_agent_token", forbidden)
+    monkeypatch.setattr(hook, "_request", forbidden)
+    with pytest.raises(hook.GateError, match="working directory|outside the installed workspace"):
+        hook.run(event, ENV)
+
+
+def test_codex_hook_canonicalizes_session_subdirectory_symlinks(tmp_path: Path) -> None:
+    workspace = ROOT.resolve()
+    alias = tmp_path / "workspace-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    event = _event()
+    event["cwd"] = str(alias / "backend" / "tests")
+
+    hook._validate_event_workspace(event, {"workspace_path": str(workspace)})
+
+
+def test_codex_hook_rejects_symlink_cwd_that_escapes_workspace(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = tmp_path / "outside-alias"
+    alias.symlink_to(outside, target_is_directory=True)
+
+    event = _event()
+    event["cwd"] = str(alias)
+    with pytest.raises(hook.GateError, match="outside the installed workspace"):
+        hook._validate_event_workspace(event, {"workspace_path": str(ROOT.resolve())})
+
+
+def test_protected_legacy_config_fails_closed_even_with_workspace_environment(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "legacy-codex-config.json"
+    config_path.write_text(json.dumps({
+        "api_base_url": ENV["AIXION_API_BASE_URL"],
+        "agent_id": ENV["AIXION_AGENT_ID"],
+        "project_id": ENV["AIXION_PROJECT_ID"],
+    }), encoding="utf-8")
+    config_path.chmod(0o600)
+    env = {
+        **ENV,
+        "AIXION_CODEX_CONFIG": str(config_path),
+        "AIXION_CODEX_WORKSPACE_PATH": str(ROOT.resolve()),
+    }
+
+    with pytest.raises(hook.GateError, match="config is missing required values"):
+        hook._configuration(env)
 
 
 def _record(body: dict, *, status: str = "PENDING_REVIEW") -> dict:
@@ -916,6 +979,49 @@ def test_setup_and_remove_preserve_unrelated_codex_hooks(tmp_path: Path) -> None
     assert setup.remove_workspace(workspace, home=home) == (True, True)
     remaining = json.loads(hooks_path.read_text())
     assert remaining == {"hooks": {"SessionStart": [{"matcher": "startup", "hooks": []}]}}
+
+
+def test_setup_persists_canonical_workspace_and_upgrades_legacy_config(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real-parent"
+    workspace = real_parent / "project"
+    workspace.mkdir(parents=True)
+    parent_alias = tmp_path / "parent-alias"
+    parent_alias.symlink_to(real_parent, target_is_directory=True)
+    home = tmp_path / "home"
+    home.mkdir()
+
+    config_path, _ = setup.install_workspace(
+        parent_alias / "project", api_base_url="https://api.example.test",
+        agent_id="agent-codex-test", project_id="project-codex-test", home=home,
+    )
+    config = json.loads(config_path.read_text())
+    assert config["workspace_path"] == str(workspace.resolve())
+
+    # Existing installed users can rerun setup with unchanged registration
+    # values; the installer adds the new binding without touching Keychain.
+    legacy_config = {key: value for key, value in config.items() if key != "workspace_path"}
+    config_path.write_text(json.dumps(legacy_config), encoding="utf-8")
+    config_path.chmod(0o600)
+    setup.install_workspace(
+        parent_alias / "project", api_base_url="https://api.example.test",
+        agent_id="agent-codex-test", project_id="project-codex-test", home=home,
+    )
+    assert json.loads(config_path.read_text())["workspace_path"] == str(workspace.resolve())
+
+
+def test_setup_rejects_workspace_that_is_itself_a_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    alias = tmp_path / "project-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    home = tmp_path / "home"
+    home.mkdir()
+
+    with pytest.raises(setup.SetupError, match="not a symlink"):
+        setup.install_workspace(
+            alias, api_base_url="https://api.example.test",
+            agent_id="agent-codex-test", project_id="project-codex-test", home=home,
+        )
 
 
 def test_remove_rejects_symlinked_home_without_mutating_managed_files(tmp_path: Path) -> None:

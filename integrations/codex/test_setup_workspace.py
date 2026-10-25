@@ -61,7 +61,37 @@ def test_install_is_workspace_scoped_idempotent_and_preserves_unrelated_hooks(
         "api_base_url": "http://127.0.0.1:8004",
         "agent_id": "agent_test_codex",
         "project_id": "project_test_codex",
+        "workspace_path": str(workspace.resolve()),
     }
+
+
+def test_install_records_canonical_workspace_when_parent_uses_symlink(tmp_path: Path) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    real_parent = tmp_path / "real-parent"
+    workspace = real_parent / "project"
+    workspace.mkdir(parents=True)
+    parent_alias = tmp_path / "parent-alias"
+    parent_alias.symlink_to(real_parent, target_is_directory=True)
+
+    config_path, _ = _install(parent_alias / "project", home)
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["workspace_path"] == str(workspace.resolve())
+
+
+def test_install_rejects_workspace_path_that_is_itself_a_symlink(tmp_path: Path) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    workspace_alias = tmp_path / "project-alias"
+    workspace_alias.symlink_to(workspace, target_is_directory=True)
+
+    with pytest.raises(setup.SetupError, match="not a symlink"):
+        _install(workspace_alias, home)
+
+    assert not (home / ".config").exists()
 
 
 def test_install_refuses_shared_writable_hooks_without_partial_config_or_mutation(

@@ -452,7 +452,7 @@ def test_postgres_validation_runner_exception_records_unknown_outcome_and_releas
     failed = next(event for event in events if event.event_type == AgentTaskEventType.FAILED)
     assert failed.status == AgentTaskStatus.FAILED
     assert failed.metadata["execution_outcome"] == "UNKNOWN"
-    assert failed.metadata["commands_executed"] is False
+    assert "commands_executed" not in failed.metadata
     assert failed.metadata["results"] == []
     assert "private command output" not in str(failed.model_dump())
     with connect() as conn:

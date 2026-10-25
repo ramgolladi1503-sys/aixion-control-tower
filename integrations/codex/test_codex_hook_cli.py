@@ -409,6 +409,7 @@ def test_missing_or_malformed_session_context_denies_before_api_request(
 def _codex_event() -> dict:
     return {
         "hook_event_name": "PermissionRequest",
+        "cwd": str(Path.cwd().resolve()),
         "permission_mode": "default",
         "session_id": "session-1",
         "turn_id": "turn-2",
@@ -423,10 +424,85 @@ def _codex_environment() -> dict[str, str]:
         "AIXION_API_BASE_URL": "http://127.0.0.1:8001",
         "AIXION_AGENT_ID": "agent-123",
         "AIXION_PROJECT_ID": "project-456",
+        "AIXION_CODEX_WORKSPACE_PATH": str(Path.cwd().resolve()),
         "AIXION_AGENT_TOKEN": "test-token",
         "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
         "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "30",
     }
+
+
+@pytest.mark.parametrize("cwd", [None, "relative/project", "/definitely/not/the/installed/project"])
+def test_run_rejects_missing_or_mismatched_workspace_before_credentials_or_network(
+    monkeypatch: pytest.MonkeyPatch, cwd: str | None
+) -> None:
+    event = _codex_event()
+    if cwd is None:
+        event.pop("cwd")
+    else:
+        event["cwd"] = cwd
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("workspace mismatch must be rejected before token or network access")
+
+    monkeypatch.setattr(hook, "_agent_token", forbidden)
+    monkeypatch.setattr(hook, "_request", forbidden)
+
+    with pytest.raises(hook.GateError, match="working directory|outside the installed workspace"):
+        hook.run(event, _codex_environment())
+
+
+def test_event_workspace_accepts_symlink_alias_to_session_subdirectory(tmp_path: Path) -> None:
+    workspace = Path.cwd().resolve()
+    alias = tmp_path / "workspace-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    event = _codex_event()
+    event["cwd"] = str(alias / "integrations" / "codex")
+    config = {"workspace_path": str(workspace)}
+
+    hook._validate_event_workspace(event, config)
+
+
+def test_event_workspace_rejects_symlink_escape_from_installed_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = Path.cwd().resolve()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = workspace / ".codex-test-outside-alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    try:
+        event = _codex_event()
+        event["cwd"] = str(alias)
+        with pytest.raises(hook.GateError, match="outside the installed workspace"):
+            hook._validate_event_workspace(event, {"workspace_path": str(workspace)})
+    finally:
+        alias.unlink(missing_ok=True)
+
+
+def test_protected_workspace_config_cannot_be_overridden_by_environment(
+    tmp_path: Path,
+) -> None:
+    workspace = Path.cwd().resolve()
+    other_workspace = tmp_path / "other-project"
+    other_workspace.mkdir()
+    config_path = tmp_path / "codex-workspace.json"
+    config_path.write_text(
+        json.dumps({
+            "api_base_url": "http://127.0.0.1:8001",
+            "agent_id": "agent-123",
+            "project_id": "project-456",
+            "workspace_path": str(workspace),
+        }),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+    env = {
+        **_codex_environment(),
+        "AIXION_CODEX_CONFIG": str(config_path),
+        "AIXION_CODEX_WORKSPACE_PATH": str(other_workspace),
+    }
+
+    assert hook._configuration(env)["workspace_path"] == str(workspace)
 
 
 @pytest.mark.parametrize(

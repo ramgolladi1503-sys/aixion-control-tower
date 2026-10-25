@@ -504,8 +504,11 @@ def run_agent_worker_validation_commands(
             AgentTaskEventType.FAILED,
             AgentTaskStatus.FAILED,
             "Validation runner failed; command execution outcome is unknown.",
-            results=None,
+            results=results,
         )
+        # Preserve the completed result prefix while avoiding a false boolean
+        # claim about whether the command that raised actually executed.
+        finished.metadata.pop("commands_executed", None)
         finished.metadata.update(
             {
                 "failure_class": type(runner_failure).__name__,
@@ -529,6 +532,7 @@ def run_agent_worker_validation_commands(
                 "lease_token": lease_token,
                 "approval_request_id": approval.id,
                 "failure_class": type(runner_failure).__name__,
+                "commands_completed": len(results),
                 "execution_outcome": "UNKNOWN",
             },
         )

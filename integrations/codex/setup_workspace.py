@@ -166,7 +166,10 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
     config_dir = config_path.parent
     config = {"api_base_url": _api_url(api_base_url),
               "agent_id": _identifier("Agent ID", agent_id),
-              "project_id": _identifier("Project ID", project_id)}
+              "project_id": _identifier("Project ID", project_id),
+              # Bind the protected registration to the installer-resolved
+              # project path. Codex may report a session cwd below this root.
+              "workspace_path": str(workspace)}
     # Validate existing operator-owned files before creating the managed config
     # directory or writing either installation file.
     hooks_file = _read_json(hooks_path, allow_missing=True, reject_shared_write=True)
@@ -182,15 +185,20 @@ def install_workspace(workspace: Path, *, api_base_url: str, agent_id: str,
     if managed and managed != [expected_entry]:
         raise SetupError(f"Hook {HOOK_NAME!r} already exists with different contents")
     config_exists = os.path.lexists(config_path)
+    existing_config = None
     if config_exists:
         existing_config = _read_json(config_path, allow_missing=False, require_private=True)
-        if existing_config != config:
-            raise SetupError("Workspace Codex config exists with different values; refusing overwrite")
+    legacy_config = {key: value for key, value in config.items() if key != "workspace_path"}
+    config_upgrade = config_exists and existing_config == legacy_config
+    if config_exists and existing_config != config and not config_upgrade:
+        raise SetupError("Workspace Codex config exists with different values; refusing overwrite")
     _ensure_config_dir(home, config_dir)
     config_created = False
     if not config_exists:
         _atomic_write(config_path, (json.dumps(config, indent=2) + "\n").encode(), 0o600)
         config_created = True
+    elif config_upgrade:
+        _atomic_write(config_path, (json.dumps(config, indent=2) + "\n").encode(), 0o600)
     if not managed:
         hooks["PermissionRequest"] = [*existing_entries, entry]
         hooks_file["hooks"] = hooks

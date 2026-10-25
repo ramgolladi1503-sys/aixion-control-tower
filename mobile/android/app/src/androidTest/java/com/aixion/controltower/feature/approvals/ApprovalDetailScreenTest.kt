@@ -604,7 +604,7 @@ class ApprovalDetailScreenTest {
         val identity = composeRule.onNodeWithTag("approval-decision-identity")
         identity.assertIsDisplayed()
         assertEquals(
-            listOf("Decision context: ANTIGRAVITY, Review protected production rollout, request ail-test, risk high."),
+            listOf("Decision context: ANTIGRAVITY, request ail-test, risk high."),
             identity.fetchSemanticsNode().config[SemanticsProperties.ContentDescription]
         )
         composeRule.onNodeWithText("Request ail-test").assertIsDisplayed()
@@ -630,6 +630,41 @@ class ApprovalDetailScreenTest {
             .assertTextContains("Review request")
         assertEquals(deny.top, composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot.top)
         assertEquals(approve.top, composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot.top)
+    }
+
+    @Test
+    fun largeTextOnNormalHeightNarrowViewportUsesCompactFooterWithoutDuplicateUtterance() {
+        val request = approval(ApprovalStatus.REQUESTED).copy(
+            title = "Review protected production rollout",
+            sourceProvider = "ANTIGRAVITY",
+            risk = RiskLevel.HIGH
+        )
+        composeRule.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(360.dp).height(800.dp).testTag("approval-large-text-viewport")) {
+                    ApprovalDetailContent(request, null, {}, {}, {})
+                }
+            }
+        }
+
+        val review = composeRule.onNodeWithTag("approval-decision-identity-title")
+        review.assertIsDisplayed()
+        assertEquals(
+            listOf("Review request: Review protected production rollout from Antigravity, request ail-test, risk high."),
+            review.fetchSemanticsNode().config[SemanticsProperties.ContentDescription]
+        )
+        val identity = composeRule.onNodeWithTag("approval-decision-identity")
+        identity.assertIsDisplayed()
+        assertEquals(
+            listOf("Decision context: ANTIGRAVITY, request ail-test, risk high."),
+            identity.fetchSemanticsNode().config[SemanticsProperties.ContentDescription]
+        )
+
+        val viewport = composeRule.onNodeWithTag("approval-large-text-viewport").fetchSemanticsNode().boundsInRoot
+        val panel = composeRule.onNodeWithTag("approval-decision-panel").fetchSemanticsNode().boundsInRoot
+        assertTrue("Large-text decision footer should remain inside the normal-height viewport", panel.bottom <= viewport.bottom)
+        composeRule.onNodeWithText("Deny").assertIsDisplayed()
+        composeRule.onNodeWithText("Approve request").assertIsDisplayed()
     }
 
     @Test
