@@ -4,6 +4,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.aixion.controltower.MainActivity
@@ -85,10 +86,18 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
                 notificationId = notificationId
             )
 
-        val requestCode = (notificationId ?: entityId).hashCode()
+        // PendingIntent identity uses Intent.filterEquals(), which includes data URI.
+        // Do not reduce an opaque server ID to String.hashCode(): distinct approval
+        // notifications can collide and then retarget one another's tap action.
+        val stableNotificationId = notificationId ?: entityId
+        intent.data = Uri.Builder()
+            .scheme(NOTIFICATION_URI_SCHEME)
+            .authority(NOTIFICATION_URI_AUTHORITY)
+            .appendPath(stableNotificationId)
+            .build()
         val pendingIntent = PendingIntent.getActivity(
             this,
-            requestCode,
+            0,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -103,8 +112,14 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
 
-        manager.notify(requestCode, notification)
+        // Use the exact opaque ID as the NotificationManager tag. The integer ID
+        // is constant; tag + ID together preserve per-notification replacement
+        // without a lossy 32-bit hash.
+        manager.notify(notificationTag(stableNotificationId), NOTIFICATION_ID, notification)
     }
+
+    private fun notificationTag(notificationId: String): String =
+        "$NOTIFICATION_TAG_PREFIX$notificationId"
 
     companion object {
         private const val TAG = "AixionFCM"
@@ -112,5 +127,9 @@ class ControlTowerMessagingService : FirebaseMessagingService() {
         private const val PENDING_FCM_TOKEN = "pending_fcm_token"
         private const val PUSH_TOKEN_KEY_ALIAS = "com.aixion.controltower.push.token.v1"
         private const val CHANNEL_ID = ApprovalNotificationChannel.ID
+        private const val NOTIFICATION_URI_SCHEME = "aixion-control-tower"
+        private const val NOTIFICATION_URI_AUTHORITY = "approval-notification"
+        private const val NOTIFICATION_TAG_PREFIX = "aixion-approval:"
+        private const val NOTIFICATION_ID = 1
     }
 }

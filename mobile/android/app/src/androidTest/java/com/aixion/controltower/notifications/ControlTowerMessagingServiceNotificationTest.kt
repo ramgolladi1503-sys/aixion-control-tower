@@ -14,6 +14,7 @@ import com.google.firebase.messaging.RemoteMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -28,8 +29,8 @@ class ControlTowerMessagingServiceNotificationTest {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val approvalId = "approval_device_test_42"
         val notificationId = "notification_device_test_42"
-        val requestCode = notificationId.hashCode()
-        manager.cancel(requestCode)
+        val notificationTag = notificationTag(notificationId)
+        manager.cancel(notificationTag, NOTIFICATION_ID)
 
         try {
             val message = RemoteMessage.Builder("approval@aixion")
@@ -42,7 +43,9 @@ class ControlTowerMessagingServiceNotificationTest {
 
             createMessagingService(context).onMessageReceived(message)
 
-            val posted = manager.activeNotifications.singleOrNull { it.id == requestCode }
+            val posted = manager.activeNotifications.singleOrNull {
+                it.tag == notificationTag && it.id == NOTIFICATION_ID
+            }
             assertNotNull("Approval push should create a notification", posted)
             val notification = requireNotNull(posted).notification
             assertEquals("Aixion Control Tower", notification.extras.getCharSequence("android.title"))
@@ -73,7 +76,66 @@ class ControlTowerMessagingServiceNotificationTest {
                 instrumentation.removeMonitor(activityMonitor)
             }
         } finally {
-            manager.cancel(requestCode)
+            manager.cancel(notificationTag, NOTIFICATION_ID)
+        }
+    }
+
+    @Test
+    fun collidingStringHashesKeepDistinctApprovalNotificationsAndPendingIntents() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        grantNotificationPermissionIfNeeded(instrumentation, context)
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notificationIds = listOf("notification_Aa", "notification_BB")
+        val approvalIds = listOf("approval_Aa", "approval_BB")
+        assertEquals(
+            "Test IDs must exercise the Java hash collision",
+            notificationIds[0].hashCode(),
+            notificationIds[1].hashCode()
+        )
+        notificationIds.forEach { manager.cancel(notificationTag(it), NOTIFICATION_ID) }
+
+        try {
+            val service = createMessagingService(context)
+            fun deliver(index: Int) {
+                service.onMessageReceived(
+                    RemoteMessage.Builder("approval@aixion")
+                        .addData("entity_type", "approval_request")
+                        .addData("entity_id", approvalIds[index])
+                        .addData("notification_id", notificationIds[index])
+                        .build()
+                )
+            }
+
+            deliver(0)
+            deliver(1)
+
+            var active = manager.activeNotifications
+                .filter { it.tag in notificationIds.map(::notificationTag) }
+                .associateBy { it.tag }
+            assertEquals("Distinct approvals must remain independently visible", 2, active.size)
+            val first = requireNotNull(active[notificationTag(notificationIds[0])]).notification.contentIntent
+            val second = requireNotNull(active[notificationTag(notificationIds[1])]).notification.contentIntent
+            assertNotNull(first)
+            assertNotNull(second)
+            assertNotEquals("Hash-colliding approvals must not share a tap target", first, second)
+
+            // Redelivery is idempotent for the same notification: replace its card,
+            // while keeping the other colliding notification and its target intact.
+            deliver(1)
+            val afterRedelivery = manager.activeNotifications
+                .filter { it.tag in notificationIds.map(::notificationTag) }
+                .associateBy { it.tag }
+            assertEquals("Same-ID redelivery should replace only its card", 2, afterRedelivery.size)
+            assertNotEquals(
+                "Each active card must retain a distinct tap target",
+                requireNotNull(afterRedelivery[notificationTag(notificationIds[0])])
+                    .notification.contentIntent,
+                requireNotNull(afterRedelivery[notificationTag(notificationIds[1])])
+                    .notification.contentIntent
+            )
+        } finally {
+            notificationIds.forEach { manager.cancel(notificationTag(it), NOTIFICATION_ID) }
         }
     }
 
@@ -82,8 +144,8 @@ class ControlTowerMessagingServiceNotificationTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val testIds = listOf("not-an-approval", "invalid-approval-id")
-        val requestCodes = testIds.map(String::hashCode)
-        requestCodes.forEach(manager::cancel)
+        val notificationTags = testIds.map(::notificationTag)
+        notificationTags.forEach { manager.cancel(it, NOTIFICATION_ID) }
 
         try {
             val service = createMessagingService(context)
@@ -102,11 +164,11 @@ class ControlTowerMessagingServiceNotificationTest {
                     .build()
             )
 
-            val postedIds = manager.activeNotifications.map { it.id }
-            assertTrue("Non-approval entity must be ignored", requestCodes[0] !in postedIds)
-            assertTrue("Malformed approval reference must fail closed", requestCodes[1] !in postedIds)
+            val postedTags = manager.activeNotifications.map { it.tag }
+            assertTrue("Non-approval entity must be ignored", notificationTags[0] !in postedTags)
+            assertTrue("Malformed approval reference must fail closed", notificationTags[1] !in postedTags)
         } finally {
-            requestCodes.forEach(manager::cancel)
+            notificationTags.forEach { manager.cancel(it, NOTIFICATION_ID) }
         }
     }
 
@@ -132,5 +194,8 @@ class ControlTowerMessagingServiceNotificationTest {
 
     private companion object {
         const val ACTIVITY_START_TIMEOUT_MS = 5_000L
+        const val NOTIFICATION_ID = 1
+
+        fun notificationTag(notificationId: String): String = "aixion-approval:$notificationId"
     }
 }
