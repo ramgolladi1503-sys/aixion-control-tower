@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.auth_rate_limits import consume_auth_rate_limit
@@ -109,8 +110,12 @@ def test_auth_route_fails_closed_when_postgres_rate_limit_runtime_is_missing(
     )
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(postgres_runtime=None)))
 
-    with pytest.raises(RuntimeError, match="runtime is unavailable"):
+    with pytest.raises(HTTPException) as error:
         _limit(request, "auth.login.ip", "192.0.2.2", 4)
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert "runtime is unavailable" in error.value.detail
 
 
 def test_auth_route_uses_rate_limit_repository_from_lifespan_bundle(
