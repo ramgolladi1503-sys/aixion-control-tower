@@ -1126,12 +1126,21 @@ def test_postgres_reviewer_from_other_workspace_cannot_decide_approval(
             "FROM notifications WHERE approval_id=%s ORDER BY notification_id",
             (approval_id,),
         ).fetchall()
+        claims_before = connection.execute(
+            "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()[0]
 
-    response = client.post(
+    read_response = client.get(f"/approvals/{approval_id}")
+    assert read_response.status_code == 404, read_response.text
+    assert read_response.json().get("detail") == "Approval request not found"
+
+    decision_response = client.post(
         f"/approvals/{approval_id}/decision",
         json={"decision": "approve", "reason": "cross-workspace attempt"},
     )
-    assert response.status_code == 404, response.text
+    assert decision_response.status_code == 404, decision_response.text
+    assert decision_response.json().get("detail") == "Approval request not found"
 
     with connect() as connection:
         approval_after = connection.execute(
@@ -1153,12 +1162,17 @@ def test_postgres_reviewer_from_other_workspace_cannot_decide_approval(
             "FROM notifications WHERE approval_id=%s ORDER BY notification_id",
             (approval_id,),
         ).fetchall()
+        claims_after = connection.execute(
+            "SELECT count(*) FROM approval_delivery_claims WHERE approval_id=%s",
+            (approval_id,),
+        ).fetchone()[0]
 
     assert approval_before is not None and approval_before[0] == ApprovalStatus.PENDING_REVIEW.value
     assert approval_after == approval_before
     assert audit_after == audit_before
     assert notifications_after == notifications_before
     assert outbox_after == outbox_before
+    assert claims_before == claims_after == 0
     assert not any(row[1] == "approval.decision" for row in audit_after)
     assert len(notifications_after) == 1  # creation notification only; no decision notification
 
