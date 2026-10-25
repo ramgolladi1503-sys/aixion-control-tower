@@ -246,7 +246,7 @@ jobs:
           printf '%s\n' "$output"
           test "$status" -ne 0
           printf '%s' "$output" | grep -F \
-            "implement and configure the PostgreSQL store before production startup"
+            "finish the PostgreSQL cutover and operational gates before production startup"
 
       - name: Show production compose logs on failure
         if: failure()

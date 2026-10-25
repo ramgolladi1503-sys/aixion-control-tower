@@ -690,7 +690,8 @@ def test_complete_github_app_configuration_can_replace_static_token(
     assert settings.github_token_configured is False
     assert settings.github_app_configured is True
     assert any(
-        "finish the PostgreSQL cutover and operational gates" in error
+        "finish the PostgreSQL cutover and operational gates before production startup"
+        in error
         for error in settings.validation_errors
     )
     assert any("Production verification email requires" in error for error in settings.validation_errors)
