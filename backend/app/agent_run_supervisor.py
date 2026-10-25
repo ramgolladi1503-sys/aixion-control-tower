@@ -918,9 +918,10 @@ def _ready_step(
     run: AgentRun,
     *,
     pending_events: list[AgentRunEvent] | None = None,
+    steps: list[AgentRunStep] | None = None,
 ) -> AgentRunStep | None:
     now = _now()
-    for step in _run_steps(run.id):
+    for step in steps if steps is not None else _run_steps(run.id):
         if (
             step.status == AgentRunStepStatus.RETRY_WAIT
             and step.next_retry_at
@@ -1705,6 +1706,17 @@ def execute_next_step(
         run_steps = active_run_repository.list_steps_for_run(run_id)
         run_events = active_run_repository.list_events_for_run(run_id)
         store.project_agent_run_snapshot(run, run_steps, run_events)
+        current_step = None
+        if run.current_step_id is not None:
+            matching_steps = [step for step in run_steps if step.id == run.current_step_id]
+            if len(matching_steps) != 1:
+                raise AgentRunConflict(
+                    "PostgreSQL AgentRun current step is missing or ambiguous in its durable step list."
+                )
+            # Execution policy must use the same durable snapshot as the run. The
+            # process-local store above is only a compatibility projection and may
+            # not select which step the PostgreSQL scheduler executes.
+            current_step = matching_steps[0]
     elif isinstance(active_run_repository, SQLiteAgentRunRepository):
         if run_repository is None:
             run = store.agent_runs.get(run_id)
@@ -1726,10 +1738,12 @@ def execute_next_step(
         raise AgentRunConflict("PostgreSQL RUN_VALIDATION injection is unavailable for SQLite runs.")
     if postgres_pull_request_coordinator is not None and not postgres_repository_execution:
         raise AgentRunConflict("PostgreSQL CREATE_PULL_REQUEST injection is unavailable for SQLite runs.")
+    if not postgres_repository_execution:
+        current_step = store.agent_run_steps.get(run.current_step_id or "")
     if postgres_repository_execution and not postgres_run_validation_enabled() and (
         postgres_validation_coordinator is not None
         or (
-            (current_step := store.agent_run_steps.get(run.current_step_id or "")) is not None
+            current_step is not None
             and current_step.step_type == AgentRunStepType.RUN_VALIDATION
         )
     ):
@@ -1738,7 +1752,6 @@ def execute_next_step(
             "AIXION_POSTGRES_RUN_VALIDATION_ENABLED rollout gate."
         )
     if postgres_repository_execution:
-        current_step = store.agent_run_steps.get(run.current_step_id or "")
         if current_step is None or current_step.step_type not in {
             AgentRunStepType.VALIDATE_SCOPE,
             AgentRunStepType.VERIFY_RESULT,
@@ -1834,14 +1847,24 @@ def execute_next_step(
         durable_run = active_run_repository.get(run_id)
         if durable_run is None:
             raise AgentRunConflict("AgentRun disappeared after its lease was acquired.")
+        durable_steps = active_run_repository.list_steps_for_run(run_id)
         store.project_agent_run_snapshot(
             durable_run,
-            active_run_repository.list_steps_for_run(run_id),
+            durable_steps,
             active_run_repository.list_events_for_run(run_id),
         )
-        run = store.agent_runs[run_id]
+        run = durable_run
     retry_ready_events: list[AgentRunEvent] = []
-    step = _ready_step(run, pending_events=retry_ready_events)
+    step = _ready_step(
+        run,
+        pending_events=retry_ready_events,
+        steps=durable_steps if postgres_repository_execution else None,
+    )
+    if postgres_repository_execution:
+        # Retry readiness can update a durable snapshot object while it is being
+        # selected. Mirror that result only after the scheduler has selected it
+        # from PostgreSQL, so subsequent transition builders see the same cache.
+        store.project_agent_run_snapshot(run, durable_steps, _run_events(run.id))
     if step is None:
         release_run_lease(
             run,

@@ -14,6 +14,7 @@ from app import agent_run_supervisor
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_run_models import (
+    AgentRun,
     AgentRunCreate,
     AgentRunEventType,
     AgentRunStatus,
@@ -38,6 +39,7 @@ from app.agent_run_supervisor import (
     release_run_lease,
     resume_agent_run,
     retry_agent_run_step,
+    _ready_step,
 )
 from app.agent_run_repository import AgentRunRepositoryConflict, PostgresAgentRunRepository
 from app.approval_decisions import (
@@ -84,6 +86,139 @@ def test_postgres_run_scheduler_does_not_fall_back_to_stale_process_local_run(
 
     assert looked_up == ["stale-local-run"]
     assert list(store.agent_runs) == ["stale-local-run"]
+
+
+def test_postgres_run_scheduler_uses_durable_current_step_not_compatibility_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = AgentRun(
+        id="pg-scheduler-run",
+        task_id="pg-scheduler-task",
+        current_step_id="pg-scheduler-current-step",
+    )
+    durable_step = AgentRunStep(
+        id=run.current_step_id,
+        run_id=run.id,
+        task_id=run.task_id,
+        sequence=1,
+        step_type=AgentRunStepType.CREATE_BRANCH,
+        idempotency_key="durable-step-key",
+    )
+    stale_local_step = durable_step.model_copy(
+        update={"step_type": AgentRunStepType.VALIDATE_SCOPE}
+    )
+    repository = object.__new__(PostgresAgentRunRepository)
+    monkeypatch.setattr(
+        agent_run_supervisor,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(PostgresAgentRunRepository, "get", lambda *_args: run)
+    monkeypatch.setattr(
+        PostgresAgentRunRepository,
+        "list_steps_for_run",
+        lambda *_args: [durable_step],
+    )
+    monkeypatch.setattr(PostgresAgentRunRepository, "list_events_for_run", lambda *_args: [])
+    monkeypatch.setattr(
+        PostgresAgentRunRepository,
+        "acquire_lease",
+        lambda *_args, **_kwargs: pytest.fail("unsupported durable step must not be claimed"),
+    )
+    monkeypatch.setattr(agent_run_supervisor, "agent_run_repository", repository)
+    monkeypatch.setattr(
+        agent_run_supervisor.store,
+        "project_agent_run_snapshot",
+        lambda *_args, **_kwargs: None,
+    )
+    store.agent_run_steps[stale_local_step.id] = stale_local_step
+
+    with pytest.raises(AgentRunConflict, match="currently supports only"):
+        execute_next_step(
+            run.id,
+            worker_id="worker-postgres",
+            run_repository=repository,
+        )
+
+
+@pytest.mark.parametrize("duplicate_durable_step", [False, True])
+def test_postgres_run_scheduler_fails_closed_when_current_step_is_not_unique(
+    monkeypatch: pytest.MonkeyPatch,
+    duplicate_durable_step: bool,
+) -> None:
+    run = AgentRun(
+        id="pg-scheduler-missing-step-run",
+        task_id="pg-scheduler-missing-step-task",
+        current_step_id="missing-durable-step",
+    )
+    repository = object.__new__(PostgresAgentRunRepository)
+    durable_step = AgentRunStep(
+        id=run.current_step_id,
+        run_id=run.id,
+        task_id=run.task_id,
+        sequence=1,
+        step_type=AgentRunStepType.CREATE_BRANCH,
+        idempotency_key="durable-step-key",
+    )
+    durable_steps = (
+        [durable_step, durable_step.model_copy()]
+        if duplicate_durable_step
+        else []
+    )
+    monkeypatch.setattr(
+        agent_run_supervisor,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(PostgresAgentRunRepository, "get", lambda *_args: run)
+    monkeypatch.setattr(
+        PostgresAgentRunRepository,
+        "list_steps_for_run",
+        lambda *_args: durable_steps,
+    )
+    monkeypatch.setattr(PostgresAgentRunRepository, "list_events_for_run", lambda *_args: [])
+    monkeypatch.setattr(agent_run_supervisor, "agent_run_repository", repository)
+    store.agent_run_steps[run.current_step_id] = AgentRunStep(
+        id=run.current_step_id,
+        run_id=run.id,
+        task_id=run.task_id,
+        sequence=1,
+        step_type=AgentRunStepType.VALIDATE_SCOPE,
+        idempotency_key="stale-local-step-key",
+    )
+
+    with pytest.raises(AgentRunConflict, match="missing or ambiguous in its durable step list"):
+        execute_next_step(
+            run.id,
+            worker_id="worker-postgres",
+            run_repository=repository,
+        )
+
+
+def test_ready_step_uses_explicit_durable_snapshot_when_supplied() -> None:
+    run = AgentRun(
+        id="pg-ready-step-run",
+        task_id="pg-ready-step-task",
+        current_step_id="pg-ready-step-id",
+    )
+    durable_step = AgentRunStep(
+        id=run.current_step_id,
+        run_id=run.id,
+        task_id=run.task_id,
+        sequence=1,
+        step_type=AgentRunStepType.VALIDATE_SCOPE,
+        status=AgentRunStepStatus.READY,
+        idempotency_key="durable-ready-step",
+    )
+    stale_local_step = durable_step.model_copy(
+        update={"status": AgentRunStepStatus.FAILED}
+    )
+    store.agent_run_steps[stale_local_step.id] = stale_local_step
+
+    selected = _ready_step(run, steps=[durable_step])
+
+    assert selected is durable_step
+    assert stale_local_step.status == AgentRunStepStatus.FAILED
 
 
 @pytest.mark.parametrize(
