@@ -72,7 +72,14 @@ def _limit(request: Request, bucket: str, identifier: str, maximum: int) -> None
     settings = get_settings()
     postgres_repository = None
     if settings.postgres_auth_rate_limits_enabled or settings.postgres_auth_enabled:
-        postgres_repository = application_repositories_for_request(request).auth_rate_limits
+        try:
+            postgres_repository = application_repositories_for_request(request).auth_rate_limits
+        except RuntimeError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL auth rate-limit runtime is unavailable",
+                headers={"Retry-After": "1"},
+            ) from error
     enforce_auth_rate_limit(
         bucket=bucket,
         identifier=identifier,

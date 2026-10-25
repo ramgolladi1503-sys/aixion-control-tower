@@ -171,7 +171,14 @@ def postgres_auth_repository(request: Request | None):
         )
     if not postgres_auth_enabled:
         return None
-    return application_repositories_for_request(request).auth
+    try:
+        return application_repositories_for_request(request).auth
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL auth repository runtime is unavailable",
+            headers={"Retry-After": "1"},
+        ) from error
 
 
 def postgres_workspace_membership_repository(request: Request | None):
@@ -191,10 +198,21 @@ def postgres_workspace_membership_repository(request: Request | None):
             detail="PostgreSQL workspace membership requires an app-bound request",
             headers={"Retry-After": "1"},
         )
-    repositories = application_repositories_for_request(request)
+    try:
+        repositories = application_repositories_for_request(request)
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL workspace membership runtime is unavailable",
+            headers={"Retry-After": "1"},
+        ) from error
     repository = repositories.workspace_membership
     if repository is None:
-        raise RuntimeError("PostgreSQL auth is enabled but workspace membership is unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="PostgreSQL workspace membership repository is unavailable",
+            headers={"Retry-After": "1"},
+        )
     return repository
 
 

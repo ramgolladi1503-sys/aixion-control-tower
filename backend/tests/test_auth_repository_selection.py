@@ -154,3 +154,63 @@ def test_production_auth_selectors_require_enabled_postgres_runtime(
     assert error.value.status_code == 503
     assert error.value.headers == {"Retry-After": "1"}
     assert "requires PostgreSQL" in error.value.detail
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [auth.postgres_auth_repository, auth.postgres_workspace_membership_repository],
+    ids=["auth", "workspace-membership"],
+)
+def test_postgres_auth_selectors_report_unavailable_runtime_as_retryable_503(
+    monkeypatch: pytest.MonkeyPatch,
+    selector,
+) -> None:
+    monkeypatch.setattr(
+        auth,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        auth,
+        "application_repositories_for_request",
+        lambda _request: (_ for _ in ()).throw(
+            RuntimeError("PostgreSQL application repository runtime is unavailable")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        selector(object())
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert "runtime is unavailable" in error.value.detail
+
+
+def test_auth_rate_limit_selector_reports_unavailable_runtime_as_retryable_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import auth_routes
+
+    monkeypatch.setattr(
+        auth_routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=True,
+            auth_rate_limit_window_seconds=60,
+        ),
+    )
+    monkeypatch.setattr(
+        auth_routes,
+        "application_repositories_for_request",
+        lambda _request: (_ for _ in ()).throw(
+            RuntimeError("PostgreSQL application repository runtime is unavailable")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        auth_routes._limit(object(), "auth.login.ip", "127.0.0.1", 10)
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert "rate-limit runtime is unavailable" in error.value.detail
