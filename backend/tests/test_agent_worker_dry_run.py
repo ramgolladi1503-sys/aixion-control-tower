@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app import agent_worker_dry_run as dry_run_module
 from app.agent_worker_dry_run import run_agent_worker_dry_run
 from app.models import (
     AgentProvider,
@@ -93,6 +97,58 @@ def test_dry_run_refuses_without_task_selector() -> None:
 
     assert result.success is False
     assert result.reason == "Provide task_id or set first_approved=true."
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_dry_run_fails_closed_before_claim_or_store_mutation_in_authoritative_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    task = _approved_task()
+    original_status = task.status
+    original_lease = (
+        task.worker_lease_owner,
+        task.worker_lease_token,
+        task.worker_lease_expires_at,
+    )
+    original_events = dict(store.agent_task_events)
+    original_audits = list(store.audit_events)
+    monkeypatch.setattr(
+        dry_run_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    def unexpected_claim(**_kwargs: object) -> object:
+        pytest.fail("dry-run must refuse before attempting a task claim")
+
+    monkeypatch.setattr(dry_run_module, "claim_agent_task_for_worker", unexpected_claim)
+    monkeypatch.setattr(dry_run_module, "claim_first_approved_agent_task_for_worker", unexpected_claim)
+
+    result = run_agent_worker_dry_run(task_id=task.id, worker_id="test-worker")
+
+    assert result.success is False
+    assert result.reason == (
+        "Dry-run worker is unavailable in production or PostgreSQL auth mode; "
+        "use a durable PostgreSQL worker path."
+    )
+    assert result.task_id == task.id
+    assert store.agent_tasks[task.id].status == original_status
+    assert (
+        store.agent_tasks[task.id].worker_lease_owner,
+        store.agent_tasks[task.id].worker_lease_token,
+        store.agent_tasks[task.id].worker_lease_expires_at,
+    ) == original_lease
+    assert store.agent_task_events == original_events
+    assert store.audit_events == original_audits
 
 
 def test_dry_run_refuses_missing_task() -> None:

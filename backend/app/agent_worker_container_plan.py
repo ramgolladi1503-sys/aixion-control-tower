@@ -9,6 +9,7 @@ from typing import Any
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
 from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
 from .models import AuditEvent
+from .settings import get_settings
 from .store import store
 
 
@@ -168,6 +169,18 @@ def run_agent_worker_container_execution_plan_dry_run(
     policy_error = validate_container_execution_policy(active_policy)
     if policy_error:
         return ContainerExecutionPlanResult(success=False, worker_id=worker_id, policy=active_policy, reason=policy_error)
+
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        return ContainerExecutionPlanResult(
+            success=False,
+            worker_id=worker_id,
+            policy=active_policy,
+            reason=(
+                "Container execution planning requires a durable repository-bound event and audit path; "
+                "the legacy global-store worker is unavailable in production or PostgreSQL-auth mode."
+            ),
+        )
 
     claim = (
         claim_first_approved_agent_task_for_worker(worker_id=worker_id, lease_seconds=lease_seconds)
