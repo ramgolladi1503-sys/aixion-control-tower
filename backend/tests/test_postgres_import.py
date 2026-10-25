@@ -59,6 +59,7 @@ def _snapshot(
     path,
     *,
     include_omitted=True,
+    include_unsupported_notifications=False,
     include_trust=False,
     include_delivery_state=False,
     include_rate_limits=False,
@@ -164,11 +165,6 @@ def _snapshot(
             "entity_type": "agent_task", "entity_id": "t1", "workspace_id": "ws1",
             "user_id": "u1", "status": "UNREAD", "push_status": "PENDING", "created_at": now,
         }),
-        ("notification", "n3", {
-            "id": "n3", "title": "Project event", "body": "Unsupported legacy event",
-            "entity_type": "project", "entity_id": "p1", "workspace_id": "ws1",
-            "status": "UNREAD", "push_status": "PENDING", "created_at": now,
-        }),
         ("device_registration", "d1", {
             "id": "d1", "user_id": "u1", "workspace_id": "ws1", "platform": "android",
             "token": "test-device-token", "created_at": now, "updated_at": now,
@@ -202,6 +198,12 @@ def _snapshot(
     ]
     if include_omitted:
         rows.append(("session", "s1", {"id": "s1", "user_id": "u1", "token_hash": "hash", "created_at": now, "expires_at": now}))
+    if include_unsupported_notifications:
+        rows.append(("notification", "n3", {
+            "id": "n3", "title": "Project event", "body": "Unsupported legacy event",
+            "entity_type": "project", "entity_id": "p1", "workspace_id": "ws1",
+            "status": "UNREAD", "push_status": "PENDING", "created_at": now,
+        }))
     if include_trust:
         approved = ApprovalRequest.model_validate({
             **approval,
@@ -464,7 +466,7 @@ def postgres_import_dsn():
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
-def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
+def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     path = tmp_path / "snapshot.sqlite3"
     _snapshot(path)
     before = path.read_bytes()
@@ -475,8 +477,8 @@ def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
     assert plan["status"] == "DRY_RUN_VALIDATED"
     assert plan["migration_authorized"] is False
     assert plan["snapshot_certified"] is False
-    assert plan["partial"] is True
-    assert plan["omitted_counts"]["notification"] == 1
+    assert plan["partial"] is False
+    assert plan["omitted_counts"].get("notification", 0) == 0
     assert plan["planned_counts"]["approval_request"] == 1
     assert plan["planned_counts"]["user"] == 1
     assert plan["planned_counts"]["invite"] == 1
@@ -506,6 +508,48 @@ def test_plan_is_read_only_and_labels_partial_scope(tmp_path):
         "approved_unconsumed_invocation_count": 0,
         "approved_unconsumed_approval_id_sha256": [],
     }
+
+
+@pytest.mark.parametrize("unsupported_type", ["project", "device_registration"])
+def test_plan_blocks_unsupported_notification_before_target_access(
+    tmp_path, monkeypatch, unsupported_type,
+):
+    path = tmp_path / "unsupported_notification.sqlite3"
+    _snapshot(path, include_unsupported_notifications=True)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='notification' AND entity_id='n3'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload.update(
+            {
+                "entity_type": unsupported_type,
+                "title": "PRIVATE_NOTIFICATION_TITLE",
+                "body": "PRIVATE_NOTIFICATION_BODY",
+            }
+        )
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='notification' AND entity_id='n3'",
+            (json.dumps(payload),),
+        )
+
+    def unexpected_target_connection(*_args, **_kwargs):
+        pytest.fail("unsupported notification barrier must run before opening PostgreSQL")
+
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.psycopg.connect",
+        unexpected_target_connection,
+    )
+    with pytest.raises(ImportBlocked, match="unsupported notification records block PostgreSQL import") as exc_info:
+        build_plan(path)
+
+    reason = str(exc_info.value)
+    assert "count=1" in reason
+    assert hashlib.sha256(b"n3").hexdigest() in reason
+    assert "n3" not in reason
+    assert unsupported_type not in reason
+    assert "PRIVATE_NOTIFICATION_TITLE" not in reason
+    assert "PRIVATE_NOTIFICATION_BODY" not in reason
 
 
 def test_plan_rejects_payload_identity_that_differs_from_sqlite_key(tmp_path):
@@ -894,6 +938,30 @@ def test_target_remote_detection_includes_hostaddr_and_multi_host(dsn, expected)
 def test_apply_import_and_retry_are_transactional_and_idempotent(tmp_path, postgres_import_dsn):
     path = tmp_path / "snapshot.sqlite3"
     _snapshot(path)
+    retry_at = (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()
+    with sqlite3.connect(path) as source:
+        for notification_id, changes in (
+            ("n1", {"user_id": "u1", "status": "READ", "push_status": "SENT", "push_attempts": 2}),
+            (
+                "n2",
+                {
+                    "status": "UNREAD",
+                    "push_status": "RETRY_WAIT",
+                    "push_attempts": 4,
+                    "push_next_attempt_at": retry_at,
+                },
+            ),
+        ):
+            row = source.execute(
+                "SELECT payload FROM kv_store WHERE entity_type='notification' AND entity_id=?",
+                (notification_id,),
+            ).fetchone()
+            payload = json.loads(row[0])
+            payload.update(changes)
+            source.execute(
+                "UPDATE kv_store SET payload=? WHERE entity_type='notification' AND entity_id=?",
+                (json.dumps(payload), notification_id),
+            )
     plan, selected, digest = build_plan(path)
 
     apply_import(postgres_import_dsn, digest, plan, selected)
@@ -936,6 +1004,23 @@ def test_apply_import_and_retry_are_transactional_and_idempotent(tmp_path, postg
         assert conn.execute(
             "SELECT task_id FROM notifications WHERE notification_id='n2'"
         ).fetchone()[0] == "t1"
+        imported = conn.execute(
+            "SELECT notification_id,workspace_id,user_id,approval_id,task_id,entity_type,status,"
+            "attempts,next_attempt_at,payload FROM notifications ORDER BY notification_id"
+        ).fetchall()
+        approval_notification, task_notification = imported
+        assert approval_notification[:8] == (
+            "n1", "ws1", "u1", "a1", None, "approval_request", "SENT", 2,
+        )
+        assert approval_notification[9]["status"] == "READ"
+        assert approval_notification[9]["push_status"] == "SENT"
+        assert task_notification[:8] == (
+            "n2", "ws1", "u1", None, "t1", "agent_task", "RETRY_WAIT", 4,
+        )
+        assert task_notification[8] == datetime.fromisoformat(retry_at)
+        assert task_notification[9]["status"] == "UNREAD"
+        assert task_notification[9]["push_status"] == "RETRY_WAIT"
+        assert task_notification[9]["push_attempts"] == 4
         assert conn.execute("SELECT count(*) FROM sqlite_import_runs").fetchone()[0] == 1
 
 

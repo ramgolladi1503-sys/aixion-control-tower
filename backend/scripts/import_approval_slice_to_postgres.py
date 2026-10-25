@@ -236,6 +236,25 @@ def _read_records(path: Path) -> dict[str, dict[str, dict[str, Any]]]:
     return records
 
 
+def _block_unsupported_notifications(records: dict[str, dict[str, dict[str, Any]]]) -> None:
+    """Refuse source notification types without a durable PostgreSQL target.
+
+    Diagnostics contain only a count and stable fingerprints, never source IDs,
+    entity types, titles, or bodies.
+    """
+    unsupported = []
+    for notification_id, payload in records.get("notification", {}).items():
+        if payload.get("entity_type") in {"approval_request", "agent_task"}:
+            continue
+        unsupported.append(hashlib.sha256(notification_id.encode("utf-8")).hexdigest())
+    if unsupported:
+        fingerprints = ",".join(sorted(unsupported))
+        raise ImportBlocked(
+            "unsupported notification records block PostgreSQL import "
+            f"(count={len(unsupported)}; sha256_fingerprints={fingerprints})"
+        )
+
+
 def _read_email_outbox(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
     """Read encrypted outbox rows without decrypting verification material."""
     uri = f"file:{quote(path.resolve().as_posix(), safe='/')}?mode=ro"
@@ -488,6 +507,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             )
         raise ImportBlocked("read-only structural audit did not pass; review its findings first")
     records = _read_records(path)
+    _block_unsupported_notifications(records)
     selected = {key: value for key, value in records.items() if key in CORE_TYPES}
     # kv_store has its own composite key in addition to the entity's payload
     # identity. Refuse snapshots where those identities diverge: otherwise a
@@ -1162,8 +1182,8 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         ):
             raise ImportBlocked(f"approval_delivery_failure/{approval_id} is missing its matching audit event")
 
-    # Import only notifications whose parent is part of this supported snapshot.
-    # The database schema currently supports approval and AgentTask notifications.
+    # Import notifications only after the preflight above has established that
+    # every row uses a currently supported PostgreSQL target type.
     supported_notifications: dict[str, dict[str, Any]] = {}
     for notification_id, payload in records.get("notification", {}).items():
         entity_type = payload.get("entity_type")
@@ -1176,8 +1196,8 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             parent = tasks.get(entity_id)
             if not parent:
                 raise ImportBlocked(f"notification/{notification_id} references an unimported AgentTask")
-        else:
-            continue
+        else:  # Defensive consistency check; preflight should have rejected it.
+            raise ImportBlocked("notification entity type changed after source preflight")
         if payload.get("workspace_id") != parent.get("workspace_id"):
             raise ImportBlocked(f"notification/{notification_id} has mismatched workspace")
         user_id = payload.get("user_id")
