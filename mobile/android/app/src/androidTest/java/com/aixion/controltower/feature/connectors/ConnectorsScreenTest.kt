@@ -60,16 +60,15 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Open Antigravity setup").assertExists()
         composeRule.onNodeWithText(
-            "A local phone approval passed on an earlier build. This build has not been phone-tested, and delivery while away from the Mac is unverified."
+            "Set up the connector on the computer running Antigravity. Keep that computer available so a decision can return to the waiting session."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Open Codex setup").performScrollTo().assertExists()
+        composeRule.onNodeWithText("View setup only (unverified)").performScrollTo().assertExists()
         composeRule.onNodeWithText(
-            "Codex Desktop phone approvals and returning a decision to the same task are unverified. Do not rely on this flow yet."
+            "Codex Desktop phone approval delivery and returning a decision to the same task are not verified. This setup page does not establish a live approval connection. Do not rely on it for live work."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Not verified").assertExists()
+        composeRule.onNodeWithText("Unverified · not a live connection").assertExists()
         composeRule.onNodeWithText("Not verified").performScrollTo().assertIsDisplayed()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
-        composeRule.onNodeWithText("Codex Desktop not verified").performScrollTo().assertExists()
         composeRule.onNodeWithText("When an approval arrives").performScrollTo().assertExists()
 
         composeRule.onAllNodesWithText("Other integrations and webhooks").assertCountEquals(0)
@@ -123,7 +122,7 @@ class ConnectorsScreenTest {
         }
 
         composeRule.onNodeWithText("Open Antigravity setup").performScrollTo().performClick()
-        composeRule.onNodeWithText("Open Codex setup").performScrollTo().performClick()
+        composeRule.onNodeWithText("View setup only (unverified)").performScrollTo().performClick()
 
         composeRule.runOnIdle {
             assertEquals(listOf("ANTIGRAVITY", "CODEX"), navigationRequests)
@@ -138,10 +137,11 @@ class ConnectorsScreenTest {
         composeRule.onAllNodesWithText("Not verified").assertCountEquals(1)
         composeRule.onNodeWithText("Earlier build tested").assertDoesNotExist()
         composeRule.onNodeWithText(
-            "A local phone approval passed on an earlier build. This build has not been phone-tested, and delivery while away from the Mac is unverified."
+            "Set up the connector on the computer running Antigravity. Keep that computer available so a decision can return to the waiting session."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Phone test passed locally").assertDoesNotExist()
-        composeRule.onNodeWithText("Codex Desktop not verified").assertExists()
+        composeRule.onNodeWithText("Unverified · not a live connection").assertExists()
+        composeRule.onNodeWithText("View setup only (unverified)").assertExists()
         composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Connected").assertCountEquals(0)

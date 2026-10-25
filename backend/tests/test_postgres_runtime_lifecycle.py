@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import fields, replace
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 
@@ -11,7 +13,6 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app import main
 from app.application_repositories import ApplicationRepositories
-from app.notification_outbox_repository import PostgresNotificationOutboxRepository
 
 
 class FakeRuntime:
@@ -19,32 +20,13 @@ class FakeRuntime:
         self.ready = ready
         self.opened = False
         self.closed = False
-        self.email_outbox = object()
-        self.notification_outbox = object.__new__(PostgresNotificationOutboxRepository)
-        self.repositories = SimpleNamespace(
-            email_outbox=self.email_outbox,
-            notification_outbox=self.notification_outbox,
-            approval_decisions=object(),
-            agent_tasks=object(),
-            agent_runs=object(),
-            agent_run_faults=object(),
-            agent_run_apply_change_intents=object(),
-            agent_run_validation_intents=object(),
-            agent_run_pull_request_intents=object(),
-            projects=object(),
-            workspace_membership=object(),
-            external_agent_auth=object(),
-            work_orders=object(),
-            ideas=object(),
-            audit_events=object(),
-            test_runs=object(),
-            connectors=object(),
-            mcp_child_servers=object(),
-            mcp_pending_requests=object(),
-            trust=object(),
-            trust_events=object(),
-            agent_run_branch_intents=object(),
-        )
+
+        def unexpected_connect():
+            raise AssertionError("Lifecycle setup must not connect through a repository")
+
+        self.repositories = ApplicationRepositories.from_connector(unexpected_connect)
+        self.email_outbox = self.repositories.email_outbox
+        self.notification_outbox = self.repositories.notification_outbox
 
     def open(self, *, wait: bool = False) -> None:
         assert wait is True
@@ -175,7 +157,18 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
         dispatched.set()
 
     monkeypatch.setattr(main, "email_dispatch_loop", dispatch_loop)
-    application = SimpleNamespace(state=SimpleNamespace())
+    class SQLiteTestRepository:
+        pass
+
+    prior_bindings = {
+        state_name: (
+            None
+            if state_name == "notification_outbox_repository"
+            else SQLiteTestRepository()
+        )
+        for state_name in main._POSTGRES_APP_STATE_BINDINGS
+    }
+    application = SimpleNamespace(state=SimpleNamespace(**prior_bindings))
 
     async def exercise() -> None:
         async with main.lifespan(application):
@@ -195,8 +188,8 @@ def test_postgres_auth_lifecycle_uses_runtime_email_outbox(
         assert runtime.closed is True
         assert application.state.postgres_runtime is None
         assert application.state.postgres_repositories is None
-        for state_name in main._POSTGRES_APP_STATE_BINDINGS:
-            assert not hasattr(application.state, state_name)
+        for state_name, previous_repository in prior_bindings.items():
+            assert getattr(application.state, state_name) is previous_repository
 
     asyncio.run(exercise())
 
@@ -215,7 +208,7 @@ def test_postgres_auth_lifecycle_fails_closed_for_missing_repository_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = FakeRuntime()
-    runtime.repositories.trust_events = None
+    runtime.repositories = replace(runtime.repositories, trust_events=None)
     monkeypatch.setattr(
         main,
         "get_settings",
@@ -233,12 +226,70 @@ def test_postgres_auth_lifecycle_fails_closed_for_missing_repository_binding(
     application = SimpleNamespace(state=SimpleNamespace())
 
     async def exercise() -> None:
-        with pytest.raises(RuntimeError, match="repository bundle is incomplete"):
+        with pytest.raises(RuntimeError, match="missing or mismatched adapters"):
             async with main.lifespan(application):
                 pytest.fail("Lifespan must reject an incomplete PostgreSQL repository bundle")
 
     asyncio.run(exercise())
 
+    assert runtime.opened is True
+    assert runtime.closed is True
+    assert application.state.postgres_runtime is None
+    assert application.state.postgres_repositories is None
+    for state_name in main._POSTGRES_APP_STATE_BINDINGS:
+        assert not hasattr(application.state, state_name)
+
+
+def test_postgres_application_repository_binding_contract_tracks_typed_bundle() -> None:
+    bundle_fields = {field.name for field in fields(ApplicationRepositories)}
+    bundle_types = get_type_hints(ApplicationRepositories)
+    mapped_fields = set(main._POSTGRES_APP_STATE_BINDINGS.values())
+
+    assert set(bundle_types) == bundle_fields
+    assert mapped_fields <= bundle_fields
+    # These adapters are consumed directly by request and worker paths rather
+    # than through `_POSTGRES_APP_STATE_BINDINGS`.
+    assert {"auth_rate_limits", "email_outbox"} <= bundle_fields
+
+
+@pytest.mark.parametrize(
+    "repository_name",
+    [field.name for field in fields(ApplicationRepositories)],
+)
+@pytest.mark.parametrize("invalid_adapter", [None, object()])
+def test_postgres_auth_lifecycle_rejects_every_missing_or_mismatched_adapter(
+    repository_name: str,
+    invalid_adapter: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeRuntime()
+    runtime.repositories = replace(
+        runtime.repositories,
+        **{repository_name: invalid_adapter},
+    )
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            outbox_dispatch_mode="scheduled",
+            push_dispatch_enabled=False,
+            email_dispatch_enabled=False,
+            postgres_runtime_probe_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=True,
+        ),
+    )
+    monkeypatch.setattr(
+        main.PostgresRuntime, "from_environment", staticmethod(lambda: runtime)
+    )
+    application = SimpleNamespace(state=SimpleNamespace())
+
+    async def exercise() -> None:
+        with pytest.raises(RuntimeError, match="missing or mismatched adapters"):
+            async with main.lifespan(application):
+                pytest.fail("Lifespan must reject an invalid PostgreSQL adapter")
+
+    asyncio.run(exercise())
     assert runtime.opened is True
     assert runtime.closed is True
     assert application.state.postgres_runtime is None

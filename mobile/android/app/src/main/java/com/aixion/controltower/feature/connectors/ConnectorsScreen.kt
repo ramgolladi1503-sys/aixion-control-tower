@@ -40,8 +40,19 @@ import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 internal fun providerSetupDescription(provider: String): String = when (provider) {
     "ANTIGRAVITY" -> "Set up the connector on the computer running Antigravity. Keep that computer available so a decision can return to the waiting session."
-    "CODEX" -> "Codex Desktop phone approvals are not verified yet. Do not rely on this connection for live work until setup is confirmed."
+    "CODEX" -> "Codex Desktop phone approval delivery and returning a decision to the same task are not verified. This setup page does not establish a live approval connection. Do not rely on it for live work."
     else -> "Choose a supported provider and complete setup on the computer where the agent runs."
+}
+
+internal fun providerSetupStatus(provider: String): String = when (provider) {
+    "CODEX" -> "Unverified · not a live connection"
+    else -> "Not verified"
+}
+
+internal fun providerSetupButtonLabel(provider: String): String = when (provider) {
+    "ANTIGRAVITY" -> "Open Antigravity setup"
+    "CODEX" -> "View setup only (unverified)"
+    else -> "View setup"
 }
 
 @Composable
@@ -198,19 +209,19 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupCard(
             name = "Antigravity",
-            status = "Not verified",
+            status = providerSetupStatus("ANTIGRAVITY"),
             statusColor = palette.caution,
             description = providerSetupDescription("ANTIGRAVITY"),
-            buttonLabel = "Open Antigravity setup",
+            buttonLabel = providerSetupButtonLabel("ANTIGRAVITY"),
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         ProviderSetupCard(
             name = "Codex",
-            status = "Codex Desktop not verified",
+            status = providerSetupStatus("CODEX"),
             statusColor = palette.caution,
             description = providerSetupDescription("CODEX"),
-            buttonLabel = "Open Codex setup",
+            buttonLabel = providerSetupButtonLabel("CODEX"),
             onClick = { onOpenAgentAccess("CODEX") }
         )
     }

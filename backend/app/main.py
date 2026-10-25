@@ -7,7 +7,9 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
+from typing import get_type_hints
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 
@@ -42,6 +44,7 @@ from .application_repository_access import (
     work_order_repository_for_request,
     workspace_id_for_request,
 )
+from .application_repositories import ApplicationRepositories
 from .approval_decisions import (
     agent_run_repository,
     agent_task_repository,
@@ -204,6 +207,34 @@ _POSTGRES_APP_STATE_BINDINGS = {
 _STATE_BINDING_MISSING = object()
 
 
+def _validate_postgres_repository_bundle(
+    postgres_runtime: PostgresRuntime,
+) -> ApplicationRepositories:
+    """Fail closed unless the runtime exposes the complete typed repository bundle."""
+    repositories = getattr(postgres_runtime, "repositories", None)
+    if not isinstance(repositories, ApplicationRepositories):
+        raise RuntimeError(
+            "PostgreSQL application repository bundle is unavailable or mismatched"
+        )
+
+    repository_types = get_type_hints(ApplicationRepositories)
+    expected_names = {field.name for field in fields(ApplicationRepositories)}
+    if set(repository_types) != expected_names:
+        raise RuntimeError("PostgreSQL application repository contract is inconsistent")
+
+    mismatched = [
+        name
+        for name, repository_type in repository_types.items()
+        if not isinstance(getattr(repositories, name, None), repository_type)
+    ]
+    if mismatched:
+        raise RuntimeError(
+            "PostgreSQL application repository bundle contains missing or mismatched "
+            f"adapters: {', '.join(sorted(mismatched))}"
+        )
+    return repositories
+
+
 def _set_approval_recovery_state(
     application: FastAPI,
     *,
@@ -362,11 +393,14 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 raise RuntimeError(
                     "PostgreSQL runtime probe failed: migration schema is incomplete or mismatched"
                 )
+            postgres_repositories = _validate_postgres_repository_bundle(
+                postgres_runtime
+            )
         except Exception:
             postgres_runtime.close()
             raise
         application.state.postgres_runtime = postgres_runtime
-        application.state.postgres_repositories = postgres_runtime.repositories
+        application.state.postgres_repositories = postgres_repositories
         if settings.postgres_auth_rate_limits_enabled:
             logger.info("PostgreSQL-backed authentication rate limiting enabled")
     dispatch_task: asyncio.Task[None] | None = None
