@@ -3,10 +3,15 @@ package com.aixion.controltower.core.ui.components
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.semantics.SemanticsActions
@@ -18,9 +23,12 @@ import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.theme.ControlTowerTheme
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import kotlin.math.roundToInt
 
 class ApprovalCardPreviewTest {
     @get:Rule
@@ -60,6 +68,46 @@ class ApprovalCardPreviewTest {
         composeRule.onNodeWithText("Open full request before deciding").assertExists()
         composeRule.onNodeWithText("Review long request").assertExists()
         composeRule.onNodeWithText("Medium").assertExists()
+    }
+
+    @Test
+    fun requestPreviewUsesTheExistingSoftSurfaceAccent() {
+        val approval = ApprovalSummary(
+            id = "approval_preview_surface",
+            projectName = "Project",
+            title = "Review request",
+            summary = "Review the exact requested action.",
+            agentName = "Antigravity",
+            targetBranch = "main",
+            status = ApprovalStatus.REQUESTED,
+            risk = RiskLevel.LOW,
+            files = emptyList(),
+            requiredActions = emptyList(),
+            testPlan = emptyList(),
+            rollbackPlan = "Revert"
+        )
+        var expectedAccent = Color.Unspecified
+
+        composeRule.setContent {
+            ControlTowerTheme {
+                expectedAccent = LocalTowerPalette.current.surfaceSubtle
+                Box(modifier = Modifier.width(320.dp)) {
+                    ApprovalCard(approval = approval)
+                }
+            }
+        }
+
+        val bounds = composeRule.onNodeWithTag("approval-card-summary-preview")
+            .fetchSemanticsNode().boundsInRoot
+        val image = composeRule.onRoot().captureToImage().toPixelMap()
+        val sampleX = (bounds.left + 4f).roundToInt().coerceIn(0, image.width - 1)
+        val sampleY = (bounds.top + bounds.height / 2f).roundToInt().coerceIn(0, image.height - 1)
+
+        assertEquals(
+            "Request preview should use the existing calm pastel surface token",
+            expectedAccent.toArgb(),
+            image[sampleX, sampleY].toArgb()
+        )
     }
 
     @Test

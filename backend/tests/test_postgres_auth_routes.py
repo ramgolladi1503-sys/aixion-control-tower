@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 
@@ -167,6 +168,53 @@ with TestClient(main.app) as client:
         check=False,
     )
     assert observed_in_child.returncode == 0, observed_in_child.stderr
+
+
+def test_concurrent_postgres_account_registration_creates_one_workspace_and_one_verification_email(
+    postgres_auth_runtime: tuple[PostgresAuthRepository, Callable[[], Connection], str, str],
+) -> None:
+    _repository, connect, _dsn, _schema = postgres_auth_runtime
+    email = f"concurrent-register-{uuid.uuid4().hex}@example.com"
+    password = "Concurrent-Register-Local-Postgres-Password-842!"
+    before_users = set(store.users)
+    before_workspaces = set(store.workspaces)
+
+    def register_once(display_name: str) -> tuple[int, dict]:
+        # Deliberately do not enter TestClient's lifespan: this fixture binds
+        # an isolated app-state runtime directly and must not open a second
+        # environment-selected PostgreSQL connection pool.
+        client = TestClient(app)
+        try:
+            response = client.post(
+                "/auth/register",
+                json={"email": email, "password": password, "display_name": display_name},
+            )
+            return response.status_code, response.json()
+        finally:
+            client.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(register_once, ("First owner", "Concurrent owner")))
+
+    assert sorted(status_code for status_code, _body in outcomes) == [200, 409]
+    successful = next(body for status_code, body in outcomes if status_code == 200)
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT user_id,workspace_id FROM users WHERE normalized_email=%s",
+            (email.lower(),),
+        ).fetchall()
+        assert len(rows) == 1
+        user_id, workspace_id = rows[0]
+        assert user_id == successful["user"]["id"]
+        assert workspace_id == successful["user"]["workspace_id"]
+        assert conn.execute(
+            "SELECT payload->>'owner_user_id' FROM workspaces WHERE workspace_id=%s", (workspace_id,)
+        ).fetchone() == (user_id,)
+        assert conn.execute(
+            "SELECT count(*) FROM auth_email_outbox WHERE recipient=%s", (email.lower(),)
+        ).fetchone()[0] == 1
+    assert set(store.users) == before_users
+    assert set(store.workspaces) == before_workspaces
 
 
 def test_postgres_logout_revokes_only_current_session_with_durable_audit(
