@@ -6,6 +6,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertTextContains
@@ -18,6 +19,7 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalDensity
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
@@ -68,6 +70,50 @@ class ApprovalCardPreviewTest {
         composeRule.onNodeWithText("Open full request before deciding").assertExists()
         composeRule.onNodeWithText("Review long request").assertExists()
         composeRule.onNodeWithText("Medium").assertExists()
+    }
+
+    @Test
+    fun pendingApprovalStatusUsesCautionSurfaceAccent() {
+        val approval = ApprovalSummary(
+            id = "approval_pending_status_color",
+            projectName = "Control Tower",
+            title = "Review requested command",
+            summary = "Run the requested command in this project.",
+            agentName = "Antigravity",
+            targetBranch = "main",
+            status = ApprovalStatus.REQUESTED,
+            risk = RiskLevel.LOW,
+            files = emptyList(),
+            requiredActions = emptyList(),
+            testPlan = emptyList(),
+            rollbackPlan = "Revert"
+        )
+        var expectedSurfaceColor = Color.Unspecified
+        var sampleInsetPx = 0f
+
+        composeRule.setContent {
+            ControlTowerTheme {
+                val palette = LocalTowerPalette.current
+                expectedSurfaceColor = palette.caution.copy(alpha = 0.11f).compositeOver(palette.surfaceRaised)
+                sampleInsetPx = with(LocalDensity.current) { 5.dp.toPx() }
+                Box(modifier = Modifier.width(320.dp)) {
+                    ApprovalCard(approval = approval)
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("Requested").assertExists()
+        val statusBounds = composeRule.onNodeWithTag("approval-card-status-badge")
+            .fetchSemanticsNode().boundsInRoot
+        val image = composeRule.onRoot().captureToImage().toPixelMap()
+        val sampleX = (statusBounds.left + sampleInsetPx).roundToInt().coerceIn(0, image.width - 1)
+        val sampleY = statusBounds.center.y.roundToInt().coerceIn(0, image.height - 1)
+
+        assertEquals(
+            "A waiting approval should use the caution-tinted status surface",
+            expectedSurfaceColor.toArgb(),
+            image[sampleX, sampleY].toArgb()
+        )
     }
 
     @Test

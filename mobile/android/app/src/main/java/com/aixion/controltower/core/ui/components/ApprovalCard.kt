@@ -31,9 +31,11 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerRadius
 import com.aixion.controltower.core.ui.theme.TowerSpacing
+import com.aixion.controltower.core.ui.theme.TowerPalette
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
@@ -154,11 +156,13 @@ fun ApprovalCard(
             horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
+            val statusLabel = approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }
             StatusBadge(
-                label = approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() },
-                color = palette.inkMuted,
+                label = statusLabel,
+                color = approvalStatusColor(approval.status, palette),
                 fontSize = MaterialTheme.typography.labelLarge.fontSize,
-                uppercase = false
+                uppercase = false,
+                modifier = Modifier.testTag("approval-card-status-badge")
             )
             StatusBadge(
                 label = when {
@@ -183,6 +187,32 @@ fun ApprovalCard(
         }
     }
 }
+
+internal fun approvalStatusColor(status: ApprovalStatus, palette: TowerPalette): Color =
+    when (status) {
+        ApprovalStatus.REQUESTED,
+        ApprovalStatus.PENDING_REVIEW,
+        ApprovalStatus.REVISION_REQUESTED -> palette.caution
+
+        ApprovalStatus.APPROVED,
+        ApprovalStatus.APPLIED,
+        ApprovalStatus.TESTS_PASSED,
+        ApprovalStatus.MERGED -> palette.positive
+
+        ApprovalStatus.DENIED,
+        ApprovalStatus.REJECTED,
+        ApprovalStatus.BLOCKED,
+        ApprovalStatus.FAILED,
+        ApprovalStatus.TESTS_FAILED -> palette.danger
+
+        ApprovalStatus.EXECUTING,
+        ApprovalStatus.READY_FOR_PR,
+        ApprovalStatus.TESTS_RUNNING -> palette.info
+
+        ApprovalStatus.EXPIRED,
+        ApprovalStatus.CANCELLED,
+        ApprovalStatus.UNKNOWN -> palette.inkMuted
+    }
 
 @Composable
 private fun ApprovalCardPanel(
