@@ -27,12 +27,13 @@ object TowerSpacing {
 
 object TowerRadius {
     val sm = 12.dp
-    val md = 16.dp
-    val lg = 24.dp
-    val xl = 24.dp
+    val md = 20.dp
+    val lg = 28.dp
+    val xl = 32.dp
 }
 
 object TowerLayout {
+    val authFormMaxWidth = 480.dp
     val compactContentMaxWidth = 640.dp
     val expandedContentMaxWidth = 720.dp
     val compactBreakpoint = 600.dp

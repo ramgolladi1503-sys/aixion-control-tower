@@ -7,7 +7,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,15 +26,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
-import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
-import com.aixion.controltower.core.ui.components.TowerHeroPanel
+import com.aixion.controltower.core.ui.components.TowerDivider
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
@@ -176,43 +173,32 @@ private fun ConnectorStep(number: String, title: String, detail: String) {
 @Composable
 private fun ConnectorsHero() {
     val palette = LocalTowerPalette.current
-    TowerHeroPanel {
-        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-            val showBrandMark = maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
-            Row(verticalAlignment = Alignment.Top) {
-                Column(modifier = if (showBrandMark) Modifier.weight(1f) else Modifier.fillMaxWidth()) {
-                    StatusBadge(label = "Set up a project", color = palette.brand, uppercase = false)
-                    Spacer(modifier = Modifier.height(TowerSpacing.md))
-                    Text(
-                        text = "Connect an agent",
-                        modifier = Modifier.semantics { heading() },
-                        color = palette.ink,
-                        style = MaterialTheme.typography.headlineLarge
-                    )
-                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                    Text(
-                        text = "Choose the provider used by this project. Complete setup on the computer where the agent runs.",
-                        color = palette.inkMuted,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-                if (showBrandMark) {
-                    Spacer(modifier = Modifier.padding(horizontal = TowerSpacing.xs))
-                    ForgedLogoMark(
-                        modifier = Modifier.testTag("connect-hero-logo"),
-                        size = 44.dp,
-                        color = palette.ink.copy(alpha = 0.78f)
-                    )
-                }
-            }
-        }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = TowerSpacing.sm)
+    ) {
+        StatusBadge(label = "Set up a project", color = palette.brand, uppercase = false)
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Text(
+            text = "Connect an agent",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.headlineLarge
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = "Choose the provider used by this project. Complete setup on the computer where the agent runs.",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
 
 @Composable
 private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
     val palette = LocalTowerPalette.current
-    TowerPanel {
+    TowerPanel(modifier = Modifier.testTag("provider-setup-panel")) {
         Text(
             text = "Choose a provider",
             modifier = Modifier.semantics { heading() },
@@ -220,7 +206,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             style = MaterialTheme.typography.titleLarge
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        ProviderSetupCard(
+        ProviderSetupOption(
             name = "Antigravity",
             status = providerSetupStatus("ANTIGRAVITY"),
             statusColor = palette.caution,
@@ -228,8 +214,10 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             buttonLabel = providerSetupButtonLabel("ANTIGRAVITY"),
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        TowerDivider(modifier = Modifier.height(1.dp))
         Spacer(modifier = Modifier.height(TowerSpacing.md))
-        ProviderSetupCard(
+        ProviderSetupOption(
             name = "Codex",
             status = providerSetupStatus("CODEX"),
             statusColor = palette.caution,
@@ -241,7 +229,7 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
 }
 
 @Composable
-private fun ProviderSetupCard(
+private fun ProviderSetupOption(
     name: String,
     status: String,
     statusColor: androidx.compose.ui.graphics.Color,
@@ -250,22 +238,24 @@ private fun ProviderSetupCard(
     onClick: () -> Unit
 ) {
     val palette = LocalTowerPalette.current
-    TowerPanel(elevated = true) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("provider-option-${name.lowercase()}"),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+    ) {
         Text(
             text = name,
             modifier = Modifier.semantics { heading() },
             color = palette.ink,
             style = MaterialTheme.typography.titleMedium
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
         StatusBadge(label = status, color = statusColor, uppercase = false)
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
             text = description,
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Button(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
             Text(buttonLabel)
         }

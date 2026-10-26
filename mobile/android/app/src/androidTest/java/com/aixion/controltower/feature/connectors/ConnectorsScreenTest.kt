@@ -179,7 +179,7 @@ class ConnectorsScreenTest {
     }
 
     @Test
-    fun connectHeroKeepsBrandMarkBesideCopyOnRegularWidth() {
+    fun connectHeaderAndProviderOptionsUseAFlatHierarchyOnRegularWidth() {
         composeRule.setContent {
             CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1f)) {
                 Box(modifier = Modifier.width(500.dp)) {
@@ -188,7 +188,20 @@ class ConnectorsScreenTest {
             }
         }
 
-        composeRule.onNodeWithTag("connect-hero-logo").assertExists()
+        composeRule.onNodeWithTag("connect-hero-logo").assertDoesNotExist()
+        composeRule.onNodeWithTag("provider-setup-panel").assertExists()
+        composeRule.onNodeWithTag("provider-option-antigravity").assertExists()
+        composeRule.onNodeWithTag("provider-option-codex").assertExists()
+
+        val panel = composeRule.onNodeWithTag("provider-setup-panel")
+            .fetchSemanticsNode().boundsInRoot
+        val antigravity = composeRule.onNodeWithTag("provider-option-antigravity")
+            .fetchSemanticsNode().boundsInRoot
+        val codex = composeRule.onNodeWithTag("provider-option-codex")
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue("Provider options stay within one shared panel", antigravity.left >= panel.left && antigravity.right <= panel.right)
+        assertTrue("The second provider stays within the shared panel", codex.left >= panel.left && codex.right <= panel.right)
+        assertTrue("Provider options remain separate sibling groups", antigravity.bottom < codex.top)
     }
 
     @Test

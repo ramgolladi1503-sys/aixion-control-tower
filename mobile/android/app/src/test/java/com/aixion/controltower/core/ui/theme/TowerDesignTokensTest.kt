@@ -44,7 +44,9 @@ class TowerDesignTokensTest {
 
     @Test
     fun releaseOneCardAndSpacingTokensFollowTheDesignContract() {
-        assertEquals(16.dp, TowerRadius.md)
+        assertEquals(20.dp, TowerRadius.md)
+        assertEquals(28.dp, TowerRadius.lg)
+        assertEquals(32.dp, TowerRadius.xl)
         assertEquals(16.dp, TowerSpacing.lg)
 
         listOf(

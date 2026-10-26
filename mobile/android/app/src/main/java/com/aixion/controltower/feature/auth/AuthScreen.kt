@@ -11,7 +11,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardActions
@@ -63,6 +65,7 @@ import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerPalette
+import com.aixion.controltower.core.ui.theme.TowerLayout
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
@@ -105,6 +108,7 @@ internal fun AuthFormViewport(content: @Composable () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .background(palette.canvas)
+            .imePadding()
     ) {
         val viewportHeight = maxHeight
         Column(
@@ -119,7 +123,13 @@ internal fun AuthFormViewport(content: @Composable () -> Unit) {
                     .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
                 contentAlignment = Alignment.Center
             ) {
-                content()
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = TowerLayout.authFormMaxWidth)
+                        .fillMaxWidth()
+                ) {
+                    content()
+                }
             }
         }
     }
@@ -262,9 +272,9 @@ internal fun AuthFormContent(
             style = MaterialTheme.typography.bodyMedium
         )
 
-        TowerPanel(
-            modifier = Modifier.testTag("auth-form-panel"),
-            elevated = true
+        Column(
+            modifier = Modifier.testTag("auth-form-fields"),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
         ) {
             OutlinedTextField(
                 value = state.email,

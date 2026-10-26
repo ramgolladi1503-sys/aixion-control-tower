@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
@@ -335,9 +336,11 @@ class ApprovalDetailScreenTest {
             Triple("CODEX", "tool_call", "codex://tool/shell"),
             Triple("OTHER", "mcp_tool_call", "mcp://workspace/update")
         )
+        val request = mutableStateOf(approval(ApprovalStatus.REQUESTED))
+        composeRule.setContent { ApprovalDetailContent(request.value, null, {}, {}, {}) }
 
         toolRequests.forEach { (provider, changeType, path) ->
-            val request = approval(ApprovalStatus.REQUESTED).copy(
+            request.value = approval(ApprovalStatus.REQUESTED).copy(
                 sourceProvider = provider,
                 files = listOf(
                     FileChangeSummary(
@@ -348,7 +351,7 @@ class ApprovalDetailScreenTest {
                     )
                 )
             )
-            composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
+            composeRule.waitForIdle()
 
             composeRule.onNodeWithTag("approval-exact-tool-request").assertExists()
             composeRule.onNodeWithText("Exact requested tool action").assertExists()

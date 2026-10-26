@@ -14,7 +14,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.heading
@@ -38,9 +38,14 @@ fun TowerPanel(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .shadow(
+                elevation = if (elevated) 2.dp else 0.dp,
+                shape = shape,
+                clip = false
+            )
             .clip(shape)
             .background(background)
-            .border(BorderStroke(1.dp, palette.line.copy(alpha = 0.62f)), shape)
+            .border(BorderStroke(1.dp, palette.line.copy(alpha = 0.46f)), shape)
             .padding(TowerSpacing.lg),
         content = content
     )
@@ -57,15 +62,7 @@ fun TowerHeroPanel(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        palette.surfaceRaised.copy(alpha = 0.98f),
-                        palette.surface.copy(alpha = 0.94f)
-                    )
-                )
-            )
-            .border(BorderStroke(1.dp, palette.line), shape)
+            .background(palette.surfaceSubtle.copy(alpha = 0.52f))
             .padding(TowerSpacing.xl),
         content = content
     )
