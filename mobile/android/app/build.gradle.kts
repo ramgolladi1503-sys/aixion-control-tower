@@ -30,6 +30,17 @@ if (firebaseConfigEnabled) {
 
 val configuredApiBaseUrl = providers.gradleProperty("AIXION_API_BASE_URL").orNull
 val aixionApiBaseUrl = configuredApiBaseUrl ?: "http://10.0.2.2:8000/"
+val apiTimeoutSeconds = providers.gradleProperty("AIXION_API_TIMEOUT_SECONDS")
+    .orElse("30")
+    .map { raw ->
+        val parsed = raw.toIntOrNull()
+            ?: throw GradleException("AIXION_API_TIMEOUT_SECONDS must be an integer from 5 to 120.")
+        if (parsed !in 5..120) {
+            throw GradleException("AIXION_API_TIMEOUT_SECONDS must be an integer from 5 to 120.")
+        }
+        parsed
+    }
+    .get()
 val approvalRefreshIntervalSeconds = providers.gradleProperty("AIXION_APPROVAL_REFRESH_INTERVAL_SECONDS")
     .orElse("15")
     .map { raw ->
@@ -75,6 +86,7 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "AIXION_API_BASE_URL", "\"$aixionApiBaseUrl\"")
+        buildConfigField("int", "AIXION_API_TIMEOUT_SECONDS", apiTimeoutSeconds.toString())
         buildConfigField("int", "AIXION_APPROVAL_REFRESH_INTERVAL_SECONDS", approvalRefreshIntervalSeconds.get().toString())
         buildConfigField("boolean", "AIXION_FIREBASE_CONFIG_ENABLED", firebaseConfigEnabled.toString())
         manifestPlaceholders["cleartextTrafficAllowed"] = "false"

@@ -1,5 +1,6 @@
 package com.aixion.controltower.core.api
 
+import com.aixion.controltower.BuildConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -50,5 +51,16 @@ class BackendConnectionConfigTest {
             "./gradlew assembleDebug -PAIXION_API_BASE_URL=http://192.168.1.20:8000/",
             BackendConnectionConfig.debugBuildCommand("http://192.168.1.20:8000")
         )
+    }
+
+    @Test
+    fun apiClientUsesConfiguredBoundedTimeoutForEveryNetworkPhase() {
+        val expectedMillis = BuildConfig.AIXION_API_TIMEOUT_SECONDS * 1_000
+        val client = ApiClient.newHttpClient()
+
+        assertEquals(expectedMillis, client.connectTimeoutMillis)
+        assertEquals(expectedMillis, client.readTimeoutMillis)
+        assertEquals(expectedMillis, client.writeTimeoutMillis)
+        assertEquals(expectedMillis, client.callTimeoutMillis)
     }
 }
