@@ -1142,13 +1142,23 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         )
     selected = {key: value for key, value in records.items() if key in CORE_TYPES}
     # kv_store has its own composite key in addition to the entity's payload
-    # identity. Refuse snapshots where those identities diverge: otherwise a
-    # later importer stage could validate a payload under one key and write it
-    # under another (or fail only after opening the PostgreSQL target).
+    # identity. Most entity maps are keyed by payload.id. External agent
+    # credentials are intentionally keyed by agent_id in SQLite, however;
+    # their normalized PostgreSQL primary key is payload.id (credential_id).
+    # Validate that documented relationship rather than weakening the
+    # identity guard for other entity kinds.
     for entity_type in ENTITY_TYPES:
         for entity_id, payload in selected.get(entity_type, {}).items():
             payload_id = payload.get("id")
-            if not isinstance(payload_id, str) or payload_id != entity_id:
+            if entity_type == "external_agent_credential":
+                identity_matches = (
+                    isinstance(payload_id, str)
+                    and bool(payload_id)
+                    and payload.get("agent_id") == entity_id
+                )
+            else:
+                identity_matches = isinstance(payload_id, str) and payload_id == entity_id
+            if not identity_matches:
                 raise ImportBlocked(
                     f"{entity_type}/{entity_id} payload identity does not match its SQLite key"
                 )
@@ -2062,7 +2072,7 @@ def _insert_payload(conn: psycopg.Connection, kind: str, entity_id: str, payload
         conn.execute(
             "INSERT INTO external_agent_credentials(credential_id,agent_id,workspace_id,token_expires_at,token_revoked_at,token_rotated_at,last_used_at,failed_auth_count,rate_limit_per_minute,rate_limit_window_started_at,rate_limit_request_count,created_at,updated_at,payload) "
             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (entity_id, model.agent_id, agent[0], model.token_expires_at, model.token_revoked_at,
+            (model.id, model.agent_id, agent[0], model.token_expires_at, model.token_revoked_at,
              model.token_rotated_at, model.last_used_at, model.failed_auth_count,
              model.rate_limit_per_minute, model.rate_limit_window_started_at,
              model.rate_limit_request_count, model.created_at, model.updated_at,
@@ -2540,6 +2550,14 @@ def _first_payload_mismatch(
             expected = {
                 entity_id: ENTITY_TYPES[kind].model_validate(payload).model_dump(mode="json")
                 for entity_id, payload in selected.get(kind, {}).items()
+            }
+        if kind == "external_agent_credential":
+            expected = {
+                model.id: model.model_dump(mode="json")
+                for model in (
+                    ENTITY_TYPES[kind].model_validate(payload)
+                    for payload in selected.get(kind, {}).values()
+                )
             }
         if actual != expected:
             return kind

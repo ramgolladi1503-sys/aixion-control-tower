@@ -165,6 +165,72 @@ def _test_environment() -> dict[str, str]:
     }
 
 
+def test_protected_config_cannot_be_overridden_by_inherited_environment(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "antigravity.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "api_base_url": "https://control.example.test",
+                "agent_id": "agent-installed",
+                "project_id": "project-installed",
+                "keychain_service": "com.aixion.controltower.installed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+    env = {
+        "AIXION_AGENT_CONFIG": str(config_path),
+        "AIXION_API_BASE_URL": "https://attacker.example.test",
+        "AIXION_AGENT_ID": "agent-inherited",
+        "AIXION_PROJECT_ID": "project-inherited",
+        "AIXION_AGENT_TOKEN_KEYCHAIN_SERVICE": "com.attacker.keychain",
+    }
+
+    assert hook._configuration(env, _hook_payload()) == {
+        "api_base_url": "https://control.example.test",
+        "agent_id": "agent-installed",
+        "project_id": "project-installed",
+        "keychain_service": "com.aixion.controltower.installed",
+    }
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gh auth login --with-token arbitrary-value",
+        "deploy --password arbitrary-value",
+        "deploy --password=arbitrary-value",
+        "mysql -phunter2 database",
+        "mysql -p hunter2 database",
+        "mariadb --password hunter2 database",
+    ],
+)
+def test_secret_bearing_cli_options_are_denied_before_network_request(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    payload = _hook_payload()
+    payload["toolCall"]["args"]["command"] = command
+    requests: list[str] = []
+
+    def unexpected_request(method: str, *_args: object, **_kwargs: object) -> dict:
+        requests.append(method)
+        raise AssertionError("Secret-bearing command must not reach the approval API")
+
+    monkeypatch.setattr(hook, "_request", unexpected_request)
+
+    result = hook.run(payload, _test_environment())
+
+    assert result == {
+        "decision": "deny",
+        "reason": "Tool arguments contain a secret-like field; redact it before requesting approval",
+    }
+    assert requests == []
+
+
 def test_diagnostic_approval_id_requires_backend_id_format() -> None:
     assert hook._validated_diagnostic_approval_id("approval_0123456789ab") == "approval_0123456789ab"
     assert hook._validated_diagnostic_approval_id("diagnostic_token_canary") is None

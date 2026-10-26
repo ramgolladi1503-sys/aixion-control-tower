@@ -248,7 +248,9 @@ def _snapshot(
             "allowed_actions": ["CREATE_APPROVAL"], "created_by_user_id": "u1",
             "workspace_id": "ws1", "enabled": True, "created_at": now, "updated_at": now,
         }),
-        ("external_agent_credential", "credential1", {
+        # SQLiteBackedStore.external_agent_credentials is keyed by agent ID;
+        # the model's own ID is the normalized PostgreSQL credential_id.
+        ("external_agent_credential", "agent1", {
             "id": "credential1", "agent_id": "agent1", "created_at": now,
             "updated_at": now,
         }),
@@ -1242,6 +1244,37 @@ def test_plan_rejects_payload_identity_that_differs_from_sqlite_key(tmp_path):
         build_plan(path)
 
 
+def test_plan_accepts_external_credential_map_key_as_agent_id(tmp_path):
+    path = tmp_path / "credential_map_key.sqlite3"
+    _snapshot(path)
+
+    plan, selected, _digest = build_plan(path)
+
+    assert plan["planned_counts"]["external_agent_credential"] == 1
+    assert selected["external_agent_credential"]["agent1"]["id"] == "credential1"
+    assert selected["external_agent_credential"]["agent1"]["agent_id"] == "agent1"
+
+
+def test_plan_rejects_external_credential_whose_agent_id_differs_from_map_key(tmp_path):
+    path = tmp_path / "credential_wrong_agent.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='external_agent_credential' AND entity_id='agent1'"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["agent_id"] = "other-agent"
+        conn.execute(
+            "UPDATE kv_store SET payload=? WHERE entity_type='external_agent_credential' AND entity_id='agent1'",
+            (json.dumps(payload),),
+        )
+
+    # The read-only model audit rejects the broken credential relationship
+    # before the import planner can open a target connection.
+    with pytest.raises(ImportBlocked, match="read-only structural audit did not pass"):
+        build_plan(path)
+
+
 def test_plan_blocks_approved_unconsumed_native_invocation_with_live_lease(tmp_path, monkeypatch):
     path = tmp_path / "live_approved_native_snapshot.sqlite3"
     _snapshot(path)
@@ -1713,6 +1746,10 @@ def test_apply_import_and_retry_are_transactional_and_idempotent(tmp_path, postg
         assert conn.execute("SELECT count(*) FROM test_runs").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM external_agents").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM external_agent_credentials").fetchone()[0] == 1
+        imported_credential = conn.execute(
+            "SELECT credential_id,agent_id,payload->>'id' FROM external_agent_credentials"
+        ).fetchone()
+        assert imported_credential == ("credential1", "agent1", "credential1")
         assert conn.execute("SELECT count(*) FROM device_registrations").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM projects").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 1

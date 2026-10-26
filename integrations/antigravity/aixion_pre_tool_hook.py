@@ -51,6 +51,15 @@ SENSITIVE_VALUE = re.compile(
     r"(?:bearer\s+[A-Za-z0-9._~-]{8,}|(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[\"']?[A-Za-z0-9._~/-]{8,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
     re.I,
 )
+# Command arguments are sent verbatim to the approval API and phone. Reject
+# credential option names even when their values do not resemble known tokens.
+SENSITIVE_OPTION = re.compile(
+    r"(?:^|\s)--?(?:password|passwd|pass|token|access[-_]?token|refresh[-_]?token|"
+    r"api[-_]?key|secret|client[-_]?secret|with[-_]?token)(?=\s|=|:|$)",
+    re.I,
+)
+MYSQL_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?(?:mysql|mariadb)(?=\s|$)", re.I)
+MYSQL_PASSWORD_OPTION = re.compile(r"(?:^|\s)-p\S*(?=\s|=|:|$)")
 READ_ONLY_TOOLS = frozenset({
     "view_file", "list_dir", "find_by_name", "grep_search",
     "search_web", "read_url_content", "list_permissions",
@@ -248,7 +257,14 @@ def _has_sensitive_value(value: Any) -> bool:
         return any(_has_sensitive_value(item) for item in value.values())
     if isinstance(value, list):
         return any(_has_sensitive_value(item) for item in value)
-    return isinstance(value, str) and SENSITIVE_VALUE.search(value) is not None
+    return isinstance(value, str) and (
+        SENSITIVE_VALUE.search(value) is not None
+        or SENSITIVE_OPTION.search(value) is not None
+        or (
+            MYSQL_COMMAND.search(value) is not None
+            and MYSQL_PASSWORD_OPTION.search(value) is not None
+        )
+    )
 
 
 def _has_sensitive_path(args: Any) -> bool:
@@ -658,7 +674,8 @@ def _matches_request_identity(
 def _configuration(env: dict[str, str], payload: dict[str, Any]) -> dict[str, str]:
     config: dict[str, Any] = {}
     config_path = env.get("AIXION_AGENT_CONFIG", DEFAULT_CONFIG_PATH)
-    if os.path.lexists(config_path):
+    has_config_file = os.path.lexists(config_path)
+    if has_config_file:
         try:
             descriptor = os.open(config_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(descriptor, "rb") as stream:
@@ -685,13 +702,28 @@ def _configuration(env: dict[str, str], payload: dict[str, Any]) -> dict[str, st
     )):
         raise GateError("Agent config file or required non-secret environment values are missing")
 
-    values = {
-        "api_base_url": env.get("AIXION_API_BASE_URL") or config.get("api_base_url", ""),
-        "agent_id": env.get("AIXION_AGENT_ID") or config.get("agent_id", ""),
-        "project_id": env.get("AIXION_PROJECT_ID") or config.get("project_id", ""),
-        "keychain_service": env.get("AIXION_AGENT_TOKEN_KEYCHAIN_SERVICE")
-        or config.get("keychain_service", "com.aixion.controltower.agent"),
-    }
+    if has_config_file:
+        # An installed, owner-protected config is the authority for routing and
+        # Keychain identity. Inherited shell variables must not redirect the
+        # credential-bearing request or select another agent/project.
+        values = {
+            "api_base_url": config.get("api_base_url", ""),
+            "agent_id": config.get("agent_id", ""),
+            "project_id": config.get("project_id", ""),
+            "keychain_service": config.get(
+                "keychain_service", "com.aixion.controltower.agent"
+            ),
+        }
+    else:
+        values = {
+            "api_base_url": env.get("AIXION_API_BASE_URL", ""),
+            "agent_id": env.get("AIXION_AGENT_ID", ""),
+            "project_id": env.get("AIXION_PROJECT_ID", ""),
+            "keychain_service": env.get(
+                "AIXION_AGENT_TOKEN_KEYCHAIN_SERVICE",
+                "com.aixion.controltower.agent",
+            ),
+        }
     return {key: str(value).strip() for key, value in values.items()}
 
 
