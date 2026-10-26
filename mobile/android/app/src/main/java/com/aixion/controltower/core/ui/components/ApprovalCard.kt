@@ -118,7 +118,7 @@ fun ApprovalCard(
                 text = summaryPreview,
                 color = palette.inkMuted,
                 style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .semantics { contentDescription = accessiblePreview }

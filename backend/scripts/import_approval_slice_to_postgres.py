@@ -886,12 +886,12 @@ def _read_email_outbox(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
         columns = {
             row[1] for row in conn.execute("PRAGMA table_info(auth_email_outbox)").fetchall()
         }
-        required = {
+        expected = {
             "id", "recipient", "encrypted_code", "status", "attempts", "created_at",
             "next_attempt_at", "lease_expires_at", "sent_at", "last_error",
         }
-        if not required.issubset(columns):
-            raise ImportBlocked("auth_email_outbox schema is incomplete; review source migration state")
+        if columns != expected:
+            raise ImportBlocked("auth_email_outbox schema is unexpected; review source migration state")
         rows = conn.execute(
             "SELECT id,recipient,encrypted_code,status,attempts,created_at,next_attempt_at,"
             "lease_expires_at,sent_at,last_error FROM auth_email_outbox ORDER BY id"
@@ -978,8 +978,8 @@ def _read_delivery_state(
             columns = {
                 row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
             }
-            if not required.issubset(columns):
-                raise ImportBlocked(f"{table} schema is incomplete; review source migration state")
+            if columns != required:
+                raise ImportBlocked(f"{table} schema is unexpected; review source migration state")
             order = "claimed_at" if table == "approval_delivery_claims" else "reported_at"
             rows = conn.execute(f"SELECT * FROM {table} ORDER BY approval_id").fetchall()
             names = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
@@ -1078,8 +1078,11 @@ def _read_auth_rate_limit_buckets(path: Path) -> dict[str, dict[str, int | str]]
         columns = {
             row[1] for row in conn.execute("PRAGMA table_info(auth_rate_limit_buckets)").fetchall()
         }
-        if not {"bucket_hash", "window_start", "request_count"}.issubset(columns):
-            raise ImportBlocked("auth_rate_limit_buckets schema is incomplete; review source migration state")
+        expected = {"bucket_hash", "window_start", "request_count"}
+        if columns != expected:
+            raise ImportBlocked(
+                "auth_rate_limit_buckets schema is unexpected; review source migration state"
+            )
         rows = conn.execute(
             "SELECT bucket_hash,window_start,request_count FROM auth_rate_limit_buckets "
             "ORDER BY bucket_hash,window_start"

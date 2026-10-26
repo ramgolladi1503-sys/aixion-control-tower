@@ -1489,6 +1489,58 @@ def test_plan_rejects_malformed_active_email_ciphertext(tmp_path):
         build_plan(path)
 
 
+def test_plan_rejects_unrecognized_email_outbox_column(tmp_path):
+    path = tmp_path / "snapshot_with_future_outbox_column.sqlite3"
+    _snapshot(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE auth_email_outbox ADD COLUMN future_delivery_state TEXT")
+        conn.execute(
+            "UPDATE auth_email_outbox SET future_delivery_state='must-not-be-dropped' "
+            "WHERE id='email_pending'"
+        )
+
+    with pytest.raises(ImportBlocked, match="auth_email_outbox schema is unexpected"):
+        build_plan(path)
+
+
+@pytest.mark.parametrize(
+    ("table", "column", "snapshot_options", "row_filter"),
+    [
+        (
+            "approval_delivery_claims",
+            "future_claim_state",
+            {"include_omitted": False, "include_trust": True, "include_delivery_state": True},
+            "approval_id='a1'",
+        ),
+        (
+            "approval_delivery_failures",
+            "future_failure_state",
+            {"include_omitted": False, "include_trust": True, "include_delivery_state": True},
+            "approval_id='a1'",
+        ),
+        (
+            "auth_rate_limit_buckets",
+            "future_window_state",
+            {"include_rate_limits": True},
+            "bucket_hash='" + ("c" * 64) + "'",
+        ),
+    ],
+)
+def test_plan_rejects_unrecognized_import_table_columns(
+    tmp_path, table, column, snapshot_options, row_filter
+):
+    path = tmp_path / f"snapshot_with_future_{table}_column.sqlite3"
+    _snapshot(path, **snapshot_options)
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+        conn.execute(
+            f"UPDATE {table} SET {column}='must-not-be-dropped' WHERE {row_filter}"
+        )
+
+    with pytest.raises(ImportBlocked, match=f"{table} schema is unexpected"):
+        build_plan(path)
+
+
 def test_plan_refuses_approval_without_explicit_workspace(tmp_path):
     path = tmp_path / "snapshot.sqlite3"
     _snapshot(path, include_omitted=False)
