@@ -869,6 +869,49 @@ def test_invite_administration_rejects_duplicate_pending_invite(
         assert conn.execute("SELECT count(*) FROM audit_events WHERE event_type='auth.invite_created'").fetchone()[0] == 1
 
 
+def test_concurrent_pending_invite_creation_is_workspace_unique_and_audited_once(
+    auth_repository: tuple[PostgresAuthRepository, Callable[[], Connection]],
+) -> None:
+    repository, connect = auth_repository
+    with connect() as conn:
+        workspace = _insert_workspace(conn)
+        owner = _insert_user(conn, workspace, "owner", role=UserRole.OWNER)
+    barrier = Barrier(2)
+
+    def attempt(index: int) -> str:
+        invite = _new_invite(
+            owner,
+            email="same-reviewer@example.test" if index == 0 else "SAME-REVIEWER@example.test",
+        )
+        barrier.wait(timeout=5)
+        try:
+            repository.create_invite(actor_user_id=owner.id, invite=invite)
+            return "created"
+        except PostgresInviteConflictError:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, (0, 1)))
+
+    assert sorted(results) == ["conflict", "created"]
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT invite_id,workspace_id,normalized_email,status FROM invites"
+        ).fetchall()
+        audit = conn.execute(
+            "SELECT entity_id,workspace_id,details FROM audit_events "
+            "WHERE event_type='auth.invite_created'"
+        ).fetchall()
+    assert len(rows) == 1
+    invite_id, workspace_id, normalized_email, status = rows[0]
+    assert workspace_id == owner.workspace_id
+    assert normalized_email == "same-reviewer@example.test"
+    assert status == InviteStatus.PENDING.value
+    assert len(audit) == 1
+    assert audit[0][0:2] == (invite_id, workspace_id)
+    assert audit[0][2]["email"] == normalized_email
+
+
 def test_listing_invites_persists_expiration_for_own_workspace_only(
     auth_repository: tuple[PostgresAuthRepository, Callable[[], Connection]],
 ) -> None:

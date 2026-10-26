@@ -1792,6 +1792,54 @@ POSTGRES_MIGRATIONS = (
             "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13'))",
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0039_legacy_audit_archive",
+        name="Preserve workspace-verified unresolved SQLite audit history separately",
+        statements=(
+            "ALTER TABLE sqlite_import_runs DROP CONSTRAINT IF EXISTS sqlite_import_runs_scope_check",
+            "ALTER TABLE sqlite_import_runs ADD CONSTRAINT sqlite_import_runs_scope_check "
+            "CHECK (scope IN ('approval_transaction_slice_v1','approval_and_trust_slice_v2',"
+            "'approval_trust_agent_history_v3','approval_trust_agent_history_connectors_v4',"
+            "'approval_auth_agent_history_connectors_v5','approval_auth_agent_history_connectors_email_v6',"
+            "'approval_auth_agent_mcp_connectors_email_v7',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_v8',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_v9',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_v10',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14'))",
+            """
+            CREATE TABLE IF NOT EXISTS legacy_audit_events (
+                source_sha256 TEXT NOT NULL CHECK (length(source_sha256) = 64),
+                event_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE RESTRICT,
+                original_entity_id TEXT NOT NULL,
+                original_event_type TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                details JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                source_payload JSONB NOT NULL,
+                PRIMARY KEY (source_sha256, event_id)
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_legacy_audit_workspace_time "
+            "ON legacy_audit_events(workspace_id, created_at, event_id)",
+            """
+            CREATE OR REPLACE FUNCTION prevent_legacy_audit_event_mutation() RETURNS trigger AS $$
+            BEGIN
+                RAISE EXCEPTION 'legacy audit records are immutable';
+            END;
+            $$ LANGUAGE plpgsql
+            """,
+            "DROP TRIGGER IF EXISTS legacy_audit_event_immutable ON legacy_audit_events",
+            """
+            CREATE TRIGGER legacy_audit_event_immutable
+            BEFORE UPDATE OR DELETE ON legacy_audit_events
+            FOR EACH ROW EXECUTE FUNCTION prevent_legacy_audit_event_mutation()
+            """,
+        ),
+    ),
 )
 
 

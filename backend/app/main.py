@@ -1709,6 +1709,10 @@ def create_test_run(
     user: AuthUser = MaintainerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> TestRun:
+    # Validate the selected write authority first. Requestless production and
+    # PostgreSQL-auth calls must fail before consulting the module-level SQLite
+    # approval adapter below.
+    repository = _test_run_repository_for_route(http_request)
     approval_repository = (
         approval_decision_repository_for_request(http_request)
         if http_request is not None
@@ -1734,7 +1738,6 @@ def create_test_run(
         },
         actor=user.email,
     )
-    repository = _test_run_repository_for_route(http_request)
     repository.create(test_run=test_run, workspace_id=workspace_id, audit_event=audit_event)
     if isinstance(repository, SQLiteTestRunRepository):
         store.test_runs[test_run.id] = test_run

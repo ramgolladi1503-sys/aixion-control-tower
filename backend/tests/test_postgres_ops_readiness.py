@@ -4,7 +4,9 @@ import os
 import logging
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import nullcontext
 from dataclasses import replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import psycopg
@@ -16,7 +18,7 @@ from app.application_repositories import ApplicationRepositories
 from app.postgres_database import run_postgres_migrations
 from app.settings import get_settings
 from app.models import AuthUser, UserRole
-from app.trust_models import TrustEventType
+from app.trust_models import CapabilityLeaseStatus, TrustEventType
 
 
 @pytest.fixture
@@ -157,6 +159,98 @@ def test_postgres_readiness_logs_only_exception_type_for_unavailable_lease_count
     assert readiness.active_capability_leases_available is False
     assert "RuntimeError" in caplog.text
     assert "private connection detail" not in caplog.text
+
+
+def test_production_without_postgres_auth_counts_leases_from_bound_postgres_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    production_settings = replace(
+        get_settings(),
+        profile="production",
+        postgres_auth_enabled=False,
+        postgres_runtime_probe_enabled=True,
+        trust_enforcement=True,
+        lease_signing_key_configured=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: production_settings)
+
+    workspace_id = "workspace-production-readiness"
+    user = AuthUser(
+        id="readiness-owner",
+        email="owner@example.test",
+        display_name="Owner",
+        role=UserRole.OWNER,
+        workspace_id=workspace_id,
+    )
+    connection = SimpleNamespace(transaction=lambda: nullcontext())
+    repositories = ApplicationRepositories.from_connector(lambda: None)
+    count_calls: list[tuple[object, str, datetime]] = []
+
+    def count_bound_postgres_leases(
+        conn: object, *, workspace_id: str, now: datetime
+    ) -> int:
+        count_calls.append((conn, workspace_id, now))
+        return 4
+
+    monkeypatch.setattr(
+        repositories.trust,
+        "count_active_capability_leases",
+        count_bound_postgres_leases,
+    )
+    runtime = SimpleNamespace(
+        repositories=repositories,
+        connect=lambda: nullcontext(connection),
+    )
+    application_state = SimpleNamespace(
+        postgres_runtime=runtime,
+        postgres_repositories=repositories,
+        trust_event_repository=repositories.trust_events,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=application_state))
+    monkeypatch.setattr(
+        ops_routes,
+        "workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+
+    # A conflicting process-local projection must not be used in production.
+    monkeypatch.setattr(
+        ops_routes.store,
+        "capability_leases",
+        {
+            "sqlite-only-lease": SimpleNamespace(
+                status=CapabilityLeaseStatus.ACTIVE,
+                expires_at=datetime.max.replace(tzinfo=timezone.utc),
+            )
+        },
+    )
+    result: dict[str, object] = {}
+
+    def capture_readiness(**kwargs: object) -> SimpleNamespace:
+        result.update(kwargs)
+        return SimpleNamespace(
+            active_capability_leases=kwargs["postgres_active_capability_leases"],
+            active_capability_leases_available=(
+                kwargs["postgres_active_capability_leases"] is not None
+            ),
+            errors=[],
+        )
+
+    monkeypatch.setattr(ops_routes, "build_runtime_readiness", capture_readiness)
+    readiness = ops_routes.get_runtime_readiness(request, user)
+
+    assert len(count_calls) == 1
+    assert count_calls[0][0] is connection
+    assert count_calls[0][1] == workspace_id
+    assert count_calls[0][2].tzinfo is not None
+    assert result["postgres_runtime"] is runtime
+    assert result["application_state"] is application_state
+    assert readiness.active_capability_leases == 4
+    assert readiness.active_capability_leases_available is True
+    assert not any(
+        "capability lease readiness count is unavailable" in error
+        for error in readiness.errors
+    )
 
 
 def test_postgres_readiness_fails_closed_on_mixed_trust_repository_binding(

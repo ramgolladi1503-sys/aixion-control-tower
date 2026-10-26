@@ -12,6 +12,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from app.database_migrations import run_migrations
 from app.agent_run_models import (
@@ -103,26 +104,26 @@ def test_sqlite_persistent_entities_are_accounted_for_by_import_inventory():
         f"{sorted(persistent_types - importer_accounted_types - documented_exclusions)}"
     )
     assert "agent_run_fault" in importer_accounted_types
-    assert SOURCE_KV_ENTITY_DISPOSITIONS["audit_event"][0] == "partial_import"
+    assert SOURCE_KV_ENTITY_DISPOSITIONS["audit_event"][0] == "segregated_import"
     assert SOURCE_KV_ENTITY_DISPOSITIONS["action_consumption"][0] == "derived_import"
     assert documented_exclusions.isdisjoint(importer_accounted_types)
 
 
-def test_entity_coverage_reports_exact_partial_audit_counts():
+def test_entity_coverage_reports_segregated_audit_counts():
     from scripts.import_approval_slice_to_postgres import _source_kv_entity_coverage
 
     coverage = _source_kv_entity_coverage(
         {"audit_event": 5, "approval_request": 1},
-        {"audit_event": 3, "approval_request": 1},
+        {"audit_event": 3, "legacy_audit_event": 1, "approval_request": 1},
     )
 
     assert coverage["audit_event"] == {
-        "disposition": "partial_import",
-        "target": "audit_events",
+        "disposition": "segregated_import",
+        "target": "audit_events + legacy_audit_events",
         "reason": SOURCE_KV_ENTITY_DISPOSITIONS["audit_event"][2],
         "source_count": 5,
-        "imported_count": 3,
-        "omitted_count": 2,
+        "imported_count": 4,
+        "omitted_count": 1,
     }
     assert coverage["approval_request"]["omitted_count"] == 0
 
@@ -612,6 +613,172 @@ def _trust_event_payload():
     return event.model_dump(mode="json")
 
 
+def _add_unlinked_audit(path, *, event_type="legacy.note", workspace_id="ws1"):
+    now = datetime.now(timezone.utc).isoformat()
+    payload = {
+        "id": "legacy-audit-1", "event_type": event_type, "actor": "legacy-actor",
+        "entity_id": "removed-parent", "workspace_id": workspace_id,
+        "details": {"source": "old-store", "note": "preserve verbatim"},
+        "created_at": now,
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES(?,?,?)",
+            ("audit_event", payload["id"], json.dumps(payload)),
+        )
+    return payload
+
+
+def test_plan_segregates_workspace_verified_unlinked_audit_history(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    original = _add_unlinked_audit(path)
+
+    plan, selected, digest = build_plan(path)
+
+    assert plan["planned_counts"]["legacy_audit_event"] == 1
+    assert plan["planned_counts"]["audit_event"] == 8
+    assert plan["omitted_counts"].get("audit_event", 0) == 0
+    legacy = selected["legacy_audit_event"][original["id"]]
+    assert legacy["source_sha256"] == digest
+    assert legacy["workspace_id"] == "ws1"
+    assert legacy["original_entity_id"] == "removed-parent"
+    assert legacy["original_event_type"] == "legacy.note"
+    assert legacy["actor"] == "legacy-actor"
+    assert legacy["details"] == original["details"]
+    assert legacy["created_at"] == original["created_at"]
+    assert legacy["source_payload"]["entity_id"] == "removed-parent"
+    assert original["id"] not in selected["audit_event"]
+
+
+@pytest.mark.parametrize("workspace_id", [None, "not-in-snapshot"])
+def test_plan_blocks_unlinked_audit_without_included_explicit_workspace(tmp_path, workspace_id):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    _add_unlinked_audit(path, workspace_id=workspace_id)
+
+    with pytest.raises(ImportBlocked):
+        build_plan(path)
+
+
+@pytest.mark.parametrize("event_type", ["approval.delivery_claimed", "approval.delivery_failed"])
+def test_plan_blocks_unlinked_sensitive_approval_delivery_audit(tmp_path, event_type):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    _add_unlinked_audit(path, event_type=event_type)
+
+    with pytest.raises(ImportBlocked, match="unresolved sensitive approval delivery event"):
+        build_plan(path)
+
+
+def test_legacy_audit_verifier_keys_rows_by_source_digest(monkeypatch):
+    import scripts.import_approval_slice_to_postgres as importer
+
+    event_id = "same-event-id"
+    source_sha256 = "a" * 64
+    created_at = datetime.now(timezone.utc).isoformat()
+    selected_payload = {
+        "source_sha256": source_sha256, "event_id": event_id, "workspace_id": "ws1",
+        "original_entity_id": "removed-parent", "original_event_type": "legacy.note",
+        "actor": "legacy-actor", "details": {"note": "same"},
+        "created_at": created_at, "source_payload": {"id": event_id},
+    }
+    other_snapshot_row = (
+        "b" * 64, event_id, "ws1", "removed-parent", "legacy.note", "legacy-actor",
+        {"note": "same"}, datetime.fromisoformat(created_at), {"id": event_id},
+    )
+    matching_snapshot_row = (
+        source_sha256, event_id, "ws1", "removed-parent", "legacy.note", "legacy-actor",
+        {"note": "same"}, datetime.fromisoformat(created_at), {"id": event_id},
+    )
+
+    class _Rows:
+        def fetchall(self):
+            return [other_snapshot_row, matching_snapshot_row]
+
+    class _Connection:
+        def execute(self, query):
+            assert "FROM legacy_audit_events" in query
+            return _Rows()
+
+    monkeypatch.setattr(
+        importer, "IMPORT_TABLES", {"legacy_audit_event": ("legacy_audit_events", "event_id")}
+    )
+
+    assert importer._first_payload_mismatch(
+        _Connection(), {"legacy_audit_event": {event_id: selected_payload}}
+    ) == "legacy_audit_event"
+
+
+def test_pg0039_preserves_existing_v13_import_manifest_scope(monkeypatch, postgres_import_dsn):
+    from app import postgres_database
+    from app.postgres_database import run_postgres_migrations
+
+    migrations = postgres_database.POSTGRES_MIGRATIONS
+    pg0039_index = next(
+        index for index, migration in enumerate(migrations)
+        if migration.migration_id == "pg_0039_legacy_audit_archive"
+    )
+    v13_scope = (
+        "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_"
+        "invocation_leases_faults_v13"
+    )
+    v14_scope = (
+        "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_"
+        "invocation_leases_faults_legacy_audit_v14"
+    )
+    monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", migrations[:pg0039_index])
+    run_postgres_migrations(lambda: psycopg.connect(postgres_import_dsn))
+    with psycopg.connect(postgres_import_dsn) as conn:
+        conn.execute(
+            "INSERT INTO sqlite_import_runs(source_sha256,scope,source_counts,imported_counts) "
+            "VALUES(%s,%s,%s,%s)",
+            ("a" * 64, v13_scope, Jsonb({"audit_event": 1}), Jsonb({"audit_event": 1})),
+        )
+
+    monkeypatch.setattr(postgres_database, "POSTGRES_MIGRATIONS", migrations)
+    run_postgres_migrations(lambda: psycopg.connect(postgres_import_dsn))
+    with psycopg.connect(postgres_import_dsn) as conn:
+        conn.execute(
+            "INSERT INTO sqlite_import_runs(source_sha256,scope,source_counts,imported_counts) "
+            "VALUES(%s,%s,%s,%s)",
+            ("b" * 64, v14_scope, Jsonb({"legacy_audit_event": 1}), Jsonb({"legacy_audit_event": 1})),
+        )
+        scopes = conn.execute(
+            "SELECT scope FROM sqlite_import_runs ORDER BY source_sha256"
+        ).fetchall()
+    assert scopes == [(v13_scope,), (v14_scope,)]
+
+
+def test_import_keeps_legacy_audit_immutable_and_idempotent(tmp_path, postgres_import_dsn):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    payload = _add_unlinked_audit(path)
+    plan, selected, digest = build_plan(path)
+
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        row = conn.execute(
+            "SELECT source_sha256,workspace_id,original_entity_id,original_event_type,"
+            "actor,details,created_at,source_payload FROM legacy_audit_events "
+            "WHERE event_id=%s",
+            (payload["id"],),
+        ).fetchone()
+        assert row[0:5] == (digest, "ws1", "removed-parent", "legacy.note", "legacy-actor")
+        assert row[5] == payload["details"]
+        assert row[7]["entity_id"] == "removed-parent"
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_id=%s", (payload["id"],)
+        ).fetchone()[0] == 0
+        with pytest.raises(psycopg.errors.RaiseException, match="legacy audit records are immutable"):
+            conn.execute(
+                "UPDATE legacy_audit_events SET actor='changed' WHERE event_id=%s",
+                (payload["id"],),
+            )
+
+
 @pytest.fixture
 def postgres_import_dsn():
     dsn = os.getenv("AIXION_TEST_POSTGRES_DSN")
@@ -648,12 +815,14 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     assert plan["source_table_coverage"]["schema_migrations"]["disposition"] == "metadata_only"
     entity_coverage = plan["source_kv_entity_coverage"]
     assert set(entity_coverage) == set(SOURCE_KV_ENTITY_DISPOSITIONS)
-    assert entity_coverage["audit_event"]["disposition"] == "partial_import"
-    assert entity_coverage["audit_event"]["target"] == "audit_events"
+    assert entity_coverage["audit_event"]["disposition"] == "segregated_import"
+    assert entity_coverage["audit_event"]["target"] == "audit_events + legacy_audit_events"
     assert entity_coverage["audit_event"]["reason"]
     for kind, coverage in entity_coverage.items():
         source_count = plan["source_counts"].get(kind, 0)
         imported_count = plan["planned_counts"].get(kind, 0)
+        if kind == "audit_event":
+            imported_count += plan["planned_counts"].get("legacy_audit_event", 0)
         assert coverage["source_count"] == source_count
         assert coverage["imported_count"] == imported_count
         assert coverage["omitted_count"] == source_count - imported_count
@@ -1199,7 +1368,7 @@ def test_delivery_state_is_included_and_requires_matching_invocation_audit(tmp_p
 
     plan, selected, digest = build_plan(path)
 
-    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13"
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14"
     assert plan["planned_counts"]["approval_delivery_claim"] == 1
     assert plan["planned_counts"]["approval_delivery_failure"] == 1
     assert plan["planned_counts"]["approval_invocation_lease"] == 1
@@ -2351,7 +2520,7 @@ def test_import_preserves_trust_state_signatures_and_hash_chain(tmp_path, postgr
     _snapshot(path, include_omitted=False, include_trust=True)
     plan, selected, digest = build_plan(path)
 
-    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13"
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14"
     assert plan["planned_counts"]["agent_run"] == 1
     assert plan["planned_counts"]["agent_run_step"] == 1
     assert plan["planned_counts"]["agent_run_event"] == 1

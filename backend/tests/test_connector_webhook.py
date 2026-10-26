@@ -266,6 +266,58 @@ def test_hmac_connector_webhook_rejects_stale_timestamp() -> None:
     assert response.json()["detail"] == "Connector HMAC timestamp is stale"
 
 
+def test_hmac_connector_webhook_rejects_past_skew_boundary_without_consuming_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    payload = _task_payload(project.id)
+    body = _compact_json(payload)
+    now_epoch = 2_000_000_000
+    monkeypatch.setattr("app.connector_webhook.time.time", lambda: now_epoch)
+    boundary_timestamp = now_epoch - 300
+    nonce = "zero_receipt_lifetime"
+
+    response = client.post(
+        f"/connectors/{connector['id']}/webhook",
+        content=body,
+        headers={
+            **_hmac_v1_headers(secret, body, nonce=nonce, timestamp=boundary_timestamp),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Connector HMAC timestamp is stale"
+    assert store.agent_tasks == {}
+    assert nonce not in store.agent_connectors[connector["id"]].config.get("hmac_nonce_history", {})
+
+
+def test_hmac_connector_webhook_keeps_future_skew_boundary_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    payload = _task_payload(project.id)
+    body = _compact_json(payload)
+    now_epoch = 2_000_000_000
+    monkeypatch.setattr("app.connector_webhook.time.time", lambda: now_epoch)
+    boundary_timestamp = now_epoch + 300
+    nonce = "future_skew_boundary"
+    headers = {
+        **_hmac_v1_headers(secret, body, nonce=nonce, timestamp=boundary_timestamp),
+        "Content-Type": "application/json",
+    }
+
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    retry = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert retry.status_code == 200
+    assert retry.json() == first.json()
+    assert len(store.agent_tasks) == 1
+
+
 def test_hmac_connector_webhook_rejects_missing_signature_version() -> None:
     project = _project()
     connector, secret = _connector(project.id, auth_type="HMAC")

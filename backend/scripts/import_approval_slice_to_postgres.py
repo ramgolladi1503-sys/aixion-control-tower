@@ -66,7 +66,7 @@ from app.trust_models import (
     TrustEvent,
 )
 
-SCOPE = "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13"
+SCOPE = "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14"
 ENTITY_TYPES = {
     "workspace": Workspace,
     "user": User,
@@ -104,7 +104,7 @@ CORE_TYPES = {
     "external_agent_credential", "device_registration", "approval_request",
     "agent_task", "agent_task_event", "agent_run", "agent_run_step", "agent_run_event",
     "agent_run_fault",
-    "audit_event", "notification", "capability_lease",
+    "audit_event", "legacy_audit_event", "notification", "capability_lease",
     "reviewer_attestation", "proposed_action", "policy_decision", "action_authorization",
     "action_consumption", "credential_grant", "trust_event",
     "auth_email_outbox",
@@ -138,6 +138,7 @@ IMPORT_TABLES = {
     "agent_run_event": ("agent_run_events", "event_id"),
     "agent_run_fault": ("agent_run_faults", "fault_id"),
     "audit_event": ("audit_events", "event_id"),
+    "legacy_audit_event": ("legacy_audit_events", "event_id"),
     "notification": ("notifications", "notification_id"),
     "capability_lease": ("capability_leases", "lease_id"),
     "reviewer_attestation": ("reviewer_attestations", "attestation_id"),
@@ -168,16 +169,16 @@ SOURCE_TABLE_DISPOSITIONS: dict[str, tuple[str, str | None]] = {
 
 # Explicit coverage for serialized rows in SQLiteBackedStore.kv_store. The
 # Store's persistence calls and the repository write paths are the source of
-# truth; tests compare those source-defined types with this inventory. The
-# importer intentionally filters unsupported audit parents and records that
-# partial disposition instead of silently implying a full audit migration.
+# truth; tests compare those source-defined types with this inventory. Supported
+# audit parents enter the live table; scoped unresolved history is segregated.
 SOURCE_KV_ENTITY_DISPOSITIONS: dict[str, tuple[str, str, str | None]] = {
     kind: (
-        "partial_import" if kind == "audit_event" else "imported",
-        IMPORT_TABLES[kind][0],
+        "segregated_import" if kind == "audit_event" else "imported",
+        "audit_events + legacy_audit_events" if kind == "audit_event" else IMPORT_TABLES[kind][0],
         (
-            "Only events with a supported parent and verified workspace scope are imported; "
-            "unsupported-parent events are omitted."
+            "Supported, workspace-verified parents enter audit_events; unresolved history is "
+            "preserved separately only with explicit in-snapshot workspace scope. Sensitive "
+            "delivery events and unscoped history block import."
             if kind == "audit_event"
             else None
         ),
@@ -251,6 +252,8 @@ def _source_kv_entity_coverage(
     for kind, (disposition, target, reason) in sorted(SOURCE_KV_ENTITY_DISPOSITIONS.items()):
         source_count = source_counts.get(kind, 0)
         imported_count = imported_counts.get(kind, 0)
+        if kind == "audit_event":
+            imported_count += imported_counts.get("legacy_audit_event", 0)
         omitted_count = source_count - imported_count
         if omitted_count < 0:
             raise ImportBlocked(f"imported {kind} count exceeds its SQLite source count")
@@ -1642,8 +1645,11 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     if any(count > 1 for count in linked.values()):
         raise ImportBlocked("more than one AgentTask links to an approval; target schema supports one")
 
-    # Only audit events with a supported, workspace-verified parent are imported.
+    # Live audit events must have a supported, workspace-verified parent.
+    # Unlinked history is kept in a separate immutable table and never receives
+    # an inferred parent or enters the live audit query surface.
     supported_audits: dict[str, dict[str, Any]] = {}
+    legacy_audits: dict[str, dict[str, Any]] = {}
     for event_id, payload in records.get("audit_event", {}).items():
         entity_id = payload.get("entity_id")
         event_type = payload.get("event_type")
@@ -1697,6 +1703,34 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
                 f"audit_event/{event_id} references an unimported AgentTask worker parent"
             )
         if parent is None or entity_type is None:
+            if event_type in {"approval.delivery_claimed", "approval.delivery_failed"}:
+                raise ImportBlocked(
+                    f"audit_event/{event_id} is an unresolved sensitive approval delivery event"
+                )
+            workspace_id = payload.get("workspace_id")
+            if not isinstance(workspace_id, str) or not workspace_id:
+                raise ImportBlocked(
+                    f"audit_event/{event_id} has no explicit workspace for legacy preservation"
+                )
+            if workspace_id not in workspaces:
+                raise ImportBlocked(
+                    f"audit_event/{event_id} workspace is missing or not included in this snapshot"
+                )
+            try:
+                legacy_model = AuditEvent.model_validate(payload)
+            except Exception as error:
+                raise ImportBlocked(f"audit_event/{event_id} is invalid legacy history") from error
+            legacy_audits[event_id] = {
+                "source_sha256": digest,
+                "event_id": event_id,
+                "workspace_id": workspace_id,
+                "original_entity_id": legacy_model.entity_id,
+                "original_event_type": legacy_model.event_type,
+                "actor": legacy_model.actor,
+                "details": legacy_model.details,
+                "created_at": legacy_model.created_at.isoformat(),
+                "source_payload": payload,
+            }
             continue
         if payload.get("workspace_id") is None and entity_type == "agent_task" and isinstance(
             event_type, str
@@ -1713,6 +1747,7 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
         # Entity type is repository context and is not represented in the legacy AuditEvent model.
         supported_audits[event_id] = {**payload, "_import_entity_type": entity_type}
     selected["audit_event"] = supported_audits
+    selected["legacy_audit_event"] = legacy_audits
     audit_by_type: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for payload in supported_audits.values():
         audit_by_type.setdefault((payload.get("event_type", ""), payload.get("entity_id", "")), []).append(payload)
@@ -1795,10 +1830,13 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
     source_counts["approval_delivery_failure"] = len(delivery_failures)
     source_counts["approval_invocation_lease"] = len(invocation_leases)
     source_counts["auth_rate_limit_bucket"] = len(selected["auth_rate_limit_bucket"])
+    source_counts["legacy_audit_event"] = len(legacy_audits)
     source_counts = dict(sorted(source_counts.items()))
     omissions = {kind: count for kind, count in source_counts.items() if kind not in CORE_TYPES and count}
     for kind in CORE_TYPES:
         omitted = source_counts.get(kind, 0) - imported_counts.get(kind, 0)
+        if kind == "audit_event":
+            omitted -= len(legacy_audits)
         if omitted > 0:
             omissions[kind] = omitted
     final_stat = path.stat()
@@ -1840,6 +1878,20 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
 
 
 def _insert_payload(conn: psycopg.Connection, kind: str, entity_id: str, payload: dict[str, Any]) -> None:
+    if kind == "legacy_audit_event":
+        conn.execute(
+            "INSERT INTO legacy_audit_events(source_sha256,event_id,workspace_id,"
+            "original_entity_id,original_event_type,actor,details,created_at,source_payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                payload["source_sha256"], entity_id, payload["workspace_id"],
+                payload["original_entity_id"], payload["original_event_type"],
+                payload["actor"], Jsonb(payload["details"]),
+                datetime.fromisoformat(payload["created_at"]),
+                Jsonb(payload["source_payload"]),
+            ),
+        )
+        return
     if kind == "agent_run_fault":
         model = AgentRunFaultConfig.model_validate(payload)
         parent = conn.execute(
@@ -2288,6 +2340,33 @@ def _first_payload_mismatch(
 ) -> str | None:
     """Return the entity type whose target payloads differ from the source plan."""
     for kind, (table, id_column) in IMPORT_TABLES.items():
+        if kind == "legacy_audit_event":
+            rows = conn.execute(
+                "SELECT source_sha256,event_id,workspace_id,original_entity_id,"
+                "original_event_type,actor,details,created_at,source_payload "
+                "FROM legacy_audit_events"
+            ).fetchall()
+            actual = {
+                (row[0], row[1]): {
+                    "source_sha256": row[0], "event_id": row[1], "workspace_id": row[2],
+                    "original_entity_id": row[3], "original_event_type": row[4],
+                    "actor": row[5], "details": row[6],
+                    "created_at": row[7].astimezone(timezone.utc).isoformat(),
+                    "source_payload": row[8],
+                }
+                for row in rows
+            }
+            expected = {
+                (payload["source_sha256"], event_id): {
+                    **payload,
+                    "created_at": datetime.fromisoformat(payload["created_at"])
+                    .astimezone(timezone.utc).isoformat(),
+                }
+                for event_id, payload in selected.get(kind, {}).items()
+            }
+            if actual != expected:
+                return kind
+            continue
         if kind == "agent_run_fault":
             rows = conn.execute(
                 "SELECT fault_id,workspace_id,run_id,payload FROM agent_run_faults"
@@ -2516,7 +2595,8 @@ def apply_import(dsn: str, digest: str, plan: dict[str, Any], selected: dict[str
                 "approval_delivery_claim", "approval_delivery_failure",
                 "capability_lease", "reviewer_attestation",
                 "proposed_action", "policy_decision", "action_authorization", "action_consumption",
-                "credential_grant", "trust_event", "audit_event", "notification", "auth_email_outbox",
+                "credential_grant", "trust_event", "audit_event", "legacy_audit_event",
+                "notification", "auth_email_outbox",
             )
             for kind in ordering:
                 for entity_id, payload in selected.get(kind, {}).items():

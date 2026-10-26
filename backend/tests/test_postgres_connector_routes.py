@@ -1636,7 +1636,7 @@ def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict
     assert issued.status_code == 200, issued.text
     secret = issued.json()["secret"]
 
-    def send(title: str, nonce: str):
+    def send(title: str, nonce: str, *, timestamp: str | None = None):
         body = json.dumps(
             {
                 "action": "CREATE_AGENT_TASK",
@@ -1646,7 +1646,7 @@ def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict
             },
             separators=(",", ":"),
         ).encode()
-        timestamp = str(int(time.time()))
+        timestamp = timestamp or str(int(time.time()))
         signature = expected_hmac_v1_signature(
             hash_connector_secret(secret), timestamp=timestamp, nonce=nonce, body=body
         )
@@ -1663,7 +1663,12 @@ def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict
         )
 
     previously_consumed_nonce = f"prior_{uuid.uuid4().hex}"
-    accepted = send("Previously committed task", previously_consumed_nonce)
+    accepted_timestamp = str(int(time.time()))
+    accepted = send(
+        "Previously committed task",
+        previously_consumed_nonce,
+        timestamp=accepted_timestamp,
+    )
     assert accepted.status_code == 200, accepted.text
     accepted_body = accepted.json()
 
@@ -1729,9 +1734,25 @@ def test_postgres_webhook_stale_connector_with_unrelated_update_returns_conflict
     assert fresh_nonce not in payload["config"].get("hmac_nonce_history", {})
     assert task_count == 1
 
-    replay = send("Previously committed task", previously_consumed_nonce)
+    # The retry must be the same signed request: nonce, timestamp, and body
+    # digest jointly identify the persisted receipt.
+    replay = send(
+        "Previously committed task",
+        previously_consumed_nonce,
+        timestamp=accepted_timestamp,
+    )
     assert replay.status_code == 200, replay.text
     assert replay.json() == accepted_body
+
+    # The same nonce with a different authenticated timestamp is not the
+    # original request and must not receive its saved response.
+    changed_timestamp_replay = send(
+        "Previously committed task",
+        previously_consumed_nonce,
+        timestamp=str(int(accepted_timestamp) + 1),
+    )
+    assert changed_timestamp_replay.status_code == 401
+    assert changed_timestamp_replay.json()["detail"] == "Connector HMAC nonce has already been used"
 
 
 def test_postgres_hmac_failure_updates_postgres_without_sqlite_persist(

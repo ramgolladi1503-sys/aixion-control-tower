@@ -358,7 +358,15 @@ def _authenticate_hmac_v1(
         raise HTTPException(status_code=401, detail="Invalid connector HMAC nonce")
     timestamp_epoch = _parse_unix_timestamp(timestamp)
     now_epoch = int(time.time())
-    if abs(now_epoch - timestamp_epoch) > HMAC_TIMESTAMP_TOLERANCE_SECONDS:
+    # A request at the past edge of the accepted clock-skew window has no
+    # remaining lifetime for its replay receipt. Accepting it could commit a
+    # webhook action while making an exact retry impossible after a lost
+    # response. Keep the future edge inclusive, but reject once the timestamp
+    # plus the receipt window is no longer in the future.
+    if (
+        timestamp_epoch + HMAC_TIMESTAMP_TOLERANCE_SECONDS <= now_epoch
+        or timestamp_epoch > now_epoch + HMAC_TIMESTAMP_TOLERANCE_SECONDS
+    ):
         raise HTTPException(status_code=401, detail="Connector HMAC timestamp is stale")
     expected = expected_hmac_v1_signature(stored_hash, timestamp=str(timestamp_epoch), nonce=nonce, body=body)
     if not safe_equal(_extract_hmac_signature(signature), expected):

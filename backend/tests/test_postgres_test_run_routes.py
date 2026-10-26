@@ -90,6 +90,39 @@ def test_direct_test_run_repository_keeps_explicit_local_adapter(
     assert main._test_run_repository_for_route(None) is repository
 
 
+def test_direct_test_run_create_fails_before_sqlite_approval_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+
+    class PoisonApprovalRepository:
+        def get(self, _approval_id: str) -> object:
+            raise AssertionError("SQLite approval repository must not be consulted")
+
+    monkeypatch.setattr(main, "approval_decision_repository", PoisonApprovalRepository())
+    monkeypatch.setattr(
+        main,
+        "_approval_for_user",
+        lambda *_args, **_kwargs: pytest.fail(
+            "approval lookup must not run before authority check"
+        ),
+    )
+
+    with pytest.raises(main.HTTPException) as raised:
+        main.create_test_run(
+            payload=SimpleNamespace(approval_request_id="approval_test"),
+            user=SimpleNamespace(id="user_test", email="owner@example.test"),
+            http_request=None,
+        )
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+
+
 @pytest.fixture
 def postgres_test_run_runtime(
     monkeypatch: pytest.MonkeyPatch,

@@ -545,7 +545,7 @@ def get_runtime_readiness(
     runtime = getattr(request.app.state, "postgres_runtime", None)
     postgres_active_capability_leases = None
     settings = get_settings()
-    if settings.postgres_auth_enabled:
+    if settings.postgres_auth_enabled or settings.is_production:
         try:
             repositories = getattr(request.app.state, "postgres_repositories", None)
             trust_repository = getattr(repositories, "trust", None)
