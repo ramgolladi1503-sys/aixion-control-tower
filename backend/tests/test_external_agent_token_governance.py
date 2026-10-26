@@ -348,8 +348,13 @@ def test_default_connector_quota_supports_four_concurrent_approval_waits() -> No
             assert response.status_code == 200, response.text
 
     for approval_id, _invocation_id in approvals:
+        reviewed = client.get(f"/approvals/{approval_id}")
+        assert reviewed.status_code == 200, reviewed.text
+        review_fingerprint = reviewed.json().get("review_fingerprint")
+        assert isinstance(review_fingerprint, str) and review_fingerprint
         decision = client.post(
-            f"/approvals/{approval_id}/decision", json={"decision": "approve"}
+            f"/approvals/{approval_id}/decision",
+            json={"decision": "approve", "review_fingerprint": review_fingerprint},
         )
         assert decision.status_code == 200, decision.text
     for approval_id, _invocation_id in approvals:

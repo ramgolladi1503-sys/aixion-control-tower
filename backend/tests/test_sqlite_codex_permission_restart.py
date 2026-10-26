@@ -313,9 +313,17 @@ def _wait_for_approval(
 
 def _decide(base_url: str, approval_id: str, decision: str) -> dict[str, Any]:
     with httpx.Client(base_url=base_url, timeout=5) as api:
+        reviewed = api.get(f"/approvals/{approval_id}")
+        assert reviewed.status_code == 200, reviewed.text
+        fingerprint = reviewed.json().get("review_fingerprint")
+        assert isinstance(fingerprint, str) and fingerprint
         response = api.post(
             f"/approvals/{approval_id}/decision",
-            json={"decision": decision, "reason": "SQLite subprocess integration test"},
+            json={
+                "decision": decision,
+                "reason": "SQLite subprocess integration test",
+                "review_fingerprint": fingerprint,
+            },
         )
     assert response.status_code == 200, response.text
     return response.json()

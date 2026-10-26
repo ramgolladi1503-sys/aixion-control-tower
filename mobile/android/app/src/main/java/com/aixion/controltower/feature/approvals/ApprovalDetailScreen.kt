@@ -569,9 +569,12 @@ fun ApprovalDetailContent(
                         .verticalScroll(rememberScrollState())
                 ) {
                     Text("Action: ${approval.title}\n${approval.summary}", style = MaterialTheme.typography.bodyLarge)
-                    if (hasExactToolRequest) {
+                    if (approval.files.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
-                        Text("Exact requested tool action", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (hasExactToolRequest) "Exact requested tool action" else "Reviewed file changes",
+                            fontWeight = FontWeight.SemiBold
+                        )
                         approval.files.forEach { file ->
                             Spacer(modifier = Modifier.height(TowerSpacing.xs))
                             Text(
@@ -584,6 +587,23 @@ fun ApprovalDetailContent(
                                 modifier = Modifier.testTag("approval-confirmation-tool-arguments"),
                                 fontFamily = FontFamily.Monospace
                             )
+                            file.newContent?.takeIf { it != file.diff }?.let { content ->
+                                Text(
+                                    if (file.changeType.equals("tool_call", ignoreCase = true) ||
+                                        file.changeType.equals("mcp_tool_call", ignoreCase = true)
+                                    ) {
+                                        "Exact executable arguments"
+                                    } else {
+                                        "Resulting file contents"
+                                    },
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    content.ifEmpty { "(empty content)" },
+                                    modifier = Modifier.testTag("approval-confirmation-executable-content"),
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
                         }
                     }
                     Spacer(modifier = Modifier.height(TowerSpacing.md))

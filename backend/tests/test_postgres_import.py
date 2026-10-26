@@ -1019,6 +1019,60 @@ def test_audit_event_inventory_verifies_workspace_parent_identity(tmp_path):
     assert row["classification"] == "same_workspace_parent_via_entity_id_fallback"
 
 
+def test_plan_imports_project_created_audit_via_same_workspace_entity_fallback(tmp_path):
+    path = tmp_path / "project-created-audit.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-project-created-fallback",
+        "event_type": "project.created",
+        "entity_id": "p1",
+        "workspace_id": "ws1",
+        "actor": "owner@example.test",
+        "details": {"name": "Project"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES('audit_event',?,?)",
+            (event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    plan, selected, _digest = build_plan(path)
+
+    imported_event = selected["audit_event"][event["id"]]
+    assert plan["planned_counts"]["audit_event"] == 9
+    assert imported_event["_import_entity_type"] == "project"
+    assert imported_event["entity_id"] == "p1"
+    assert imported_event["workspace_id"] == "ws1"
+
+
+@pytest.mark.parametrize("workspace_id", ["ws2", None])
+def test_plan_rejects_project_created_audit_with_foreign_or_missing_workspace(
+    tmp_path, workspace_id
+):
+    path = tmp_path / f"project-created-audit-invalid-{workspace_id}.sqlite3"
+    _snapshot(path)
+    event = {
+        "id": "audit-project-created-invalid-scope",
+        "event_type": "project.created",
+        "entity_id": "p1",
+        "workspace_id": workspace_id,
+        "actor": "owner@example.test",
+        "details": {"name": "Project"},
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO kv_store(entity_type,entity_id,payload) VALUES('audit_event',?,?)",
+            (event["id"], json.dumps(event)),
+        )
+    os.chmod(path, 0o600)
+
+    with pytest.raises(ImportBlocked):
+        build_plan(path)
+
+
 def test_audit_event_inventory_rejects_source_mutation_during_preflight(tmp_path, monkeypatch):
     import scripts.import_approval_slice_to_postgres as importer
 

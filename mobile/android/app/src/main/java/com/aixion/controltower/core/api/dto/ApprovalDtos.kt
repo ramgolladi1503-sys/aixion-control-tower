@@ -3,7 +3,8 @@ package com.aixion.controltower.core.api.dto
 data class FileChangeDto(
     val path: String,
     val change_type: String = "update",
-    val diff: String
+    val diff: String,
+    val new_content: String? = null
 )
 
 data class RiskAssessmentDto(

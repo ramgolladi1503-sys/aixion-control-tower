@@ -174,6 +174,25 @@ def _stop_sqlite_approval_api(
     assert process.exitcode == 0
 
 
+def _decide_with_current_fingerprint(
+    api_base: str, approval_id: str, decision: str, reason: str
+) -> httpx.Response:
+    """Review and decide through one API process using its current fingerprint."""
+    with httpx.Client(base_url=api_base, timeout=10) as client:
+        reviewed = client.get(f"/approvals/{approval_id}")
+        assert reviewed.status_code == 200, reviewed.text
+        fingerprint = reviewed.json().get("review_fingerprint")
+        assert isinstance(fingerprint, str) and fingerprint
+        return client.post(
+            f"/approvals/{approval_id}/decision",
+            json={
+                "decision": decision,
+                "reason": reason,
+                "review_fingerprint": fingerprint,
+            },
+        )
+
+
 def _launch_hook_process(payload: dict[str, Any], environment: dict[str, str]) -> subprocess.Popen[str]:
     """Launch a fresh hook interpreter with one provider payload on stdin."""
     read_fd, write_fd = os.pipe()
@@ -342,11 +361,9 @@ def test_antigravity_invocation_recovers_once_after_sqlite_api_process_restart(
 
         second_server = start_server()
         environment["AIXION_API_BASE_URL"] = second_server[2]
-        with httpx.Client(timeout=10) as client:
-            decision = client.post(
-                f"{second_server[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "test after SQLite restart"},
-            )
+        decision = _decide_with_current_fingerprint(
+            second_server[2], approval_id, "approve", "test after SQLite restart"
+        )
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == "APPROVED"
 
@@ -517,14 +534,12 @@ def test_blocked_antigravity_invocation_survives_sqlite_api_restart(
             second_server = start_server(first_port)
             assert second_server[2] == first_server[2]
 
-            with httpx.Client(timeout=10) as client:
-                decision_response = client.post(
-                    f"{second_server[2]}/approvals/{approval_identity['id']}/decision",
-                    json={
-                        "decision": decision_value,
-                        "reason": "test decision after API process restart",
-                    },
-                )
+            decision_response = _decide_with_current_fingerprint(
+                second_server[2],
+                approval_identity["id"],
+                decision_value,
+                "test decision after API process restart",
+            )
             assert decision_response.status_code == 200, decision_response.text
             hook_thread.join(timeout=15)
 
@@ -712,14 +727,9 @@ def test_installed_antigravity_command_runs_same_invocation_approval_flow(
             time.sleep(0.7)
             server = start_server(original_port)
             assert server[2] == f"http://127.0.0.1:{original_port}"
-            with httpx.Client(timeout=10) as client:
-                decision_response = client.post(
-                    f"{server[2]}/approvals/{approval_id}/decision",
-                    json={
-                        "decision": decision_value,
-                        "reason": "installer-to-hook integration test",
-                    },
-                )
+            decision_response = _decide_with_current_fingerprint(
+                server[2], approval_id, decision_value, "installer-to-hook integration test"
+            )
             assert decision_response.status_code == 200, decision_response.text
             assert decision_response.json()["status"] == (
                 "APPROVED" if decision_value == "approve" else "DENIED"
@@ -877,11 +887,9 @@ def test_antigravity_hook_process_relaunch_recovers_exact_approved_invocation(
         assert recovered_approvals[0]["status"] == "PENDING_REVIEW"
         assert recovered_process.poll() is None, "recovered hook exited before a decision"
 
-        with httpx.Client(timeout=10) as client:
-            decision_response = client.post(
-                f"{server[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "approve after hook relaunch"},
-            )
+        decision_response = _decide_with_current_fingerprint(
+            server[2], approval_id, "approve", "approve after hook relaunch"
+        )
         assert decision_response.status_code == 200, decision_response.text
         assert decision_response.json()["status"] == "APPROVED"
 
@@ -1100,11 +1108,9 @@ def test_hook_process_crash_after_consume_commit_fails_closed_on_relaunch(
         )
         approval = approvals[0]
         assert approval["status"] == "PENDING_REVIEW"
-        with httpx.Client(timeout=10) as client:
-            decision = client.post(
-                f"{server[2]}/approvals/{approval['id']}/decision",
-                json={"decision": "approve", "reason": "test crash window"},
-            )
+        decision = _decide_with_current_fingerprint(
+            server[2], approval["id"], "approve", "test crash window"
+        )
         assert decision.status_code == 200, decision.text
 
         assert consume_committed.wait(timeout=10), "consume was not committed by the API"

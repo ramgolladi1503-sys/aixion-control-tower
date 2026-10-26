@@ -1,6 +1,7 @@
 package com.aixion.controltower.data.repository
 
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
+import com.aixion.controltower.core.api.dto.FileChangeDto
 import com.aixion.controltower.core.api.dto.RiskAssessmentDto
 import com.aixion.controltower.core.model.ApprovalDashboardBucket
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -59,6 +60,23 @@ class ApprovalSafetyMapperTest {
 
         assertEquals("antigravity:session-7:tool-19", approval.sourceInvocationId)
         assertEquals("2026-10-21T12:30:00Z", approval.expiresAt)
+    }
+
+    @Test
+    fun approvalMappingPreservesExecutableFileContentSeparatelyFromDiff() {
+        val approval = approval(status = "PENDING_REVIEW", risk = "HIGH").copy(
+            files = listOf(
+                FileChangeDto(
+                    path = "antigravity://tool/write_to_file",
+                    change_type = "tool_call",
+                    diff = "harmless displayed diff",
+                    new_content = "actual executable content"
+                )
+            )
+        ).toUiSummary()
+
+        assertEquals("harmless displayed diff", approval.files.single().diff)
+        assertEquals("actual executable content", approval.files.single().newContent)
     }
 }
 

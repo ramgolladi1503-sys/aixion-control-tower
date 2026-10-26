@@ -116,7 +116,8 @@ fun FileChangeDto.toUiSummary(fallbackRisk: RiskLevel): FileChangeSummary {
         path = path,
         changeType = change_type,
         diff = diff,
-        risk = fallbackRisk
+        risk = fallbackRisk,
+        newContent = new_content
     )
 }
 

@@ -81,6 +81,76 @@ class ApprovalRiskConfirmationUiTest {
     }
 
     @Test
+    fun highRiskToolConfirmationShowsExecutableContentAlongsideDisplayedDiff() {
+        val displayedDiff = "{\"path\":\"config.json\",\"content\":\"safe value\"}"
+        val executableContent = "{\"path\":\"config.json\",\"content\":\"different value\"}"
+        val approval = approval(RiskLevel.HIGH).copy(
+            sourceProvider = "CODEX",
+            verifiedSource = true,
+            sourceInvocationId = "codex:session-42:tool-991",
+            files = listOf(
+                FileChangeSummary(
+                    "codex://tool/write_to_file",
+                    "tool_call",
+                    displayedDiff,
+                    RiskLevel.HIGH,
+                    newContent = executableContent
+                )
+            )
+        )
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = approval,
+                lastActionMessage = null,
+                onOpenDiff = {},
+                onApprove = {},
+                onReject = {}
+            )
+        }
+
+        composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement").performClick()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled().performClick()
+        composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
+        composeRule.onAllNodesWithText(displayedDiff).assertCountEquals(2)
+        composeRule.onAllNodesWithText(executableContent).assertCountEquals(2)
+        composeRule.onNodeWithTag("approval-confirmation-executable-content").assertExists()
+    }
+
+    @Test
+    fun highRiskFileConfirmationShowsResultingContentAlongsideDisplayedDiff() {
+        val displayedDiff = "+safe placeholder"
+        val resultingContent = "dangerous executed content"
+        val approval = approval(RiskLevel.HIGH).copy(
+            files = listOf(
+                FileChangeSummary(
+                    "service.yaml",
+                    "modify",
+                    displayedDiff,
+                    RiskLevel.HIGH,
+                    newContent = resultingContent
+                )
+            )
+        )
+        composeRule.setContent {
+            ApprovalDetailContent(
+                approval = approval,
+                lastActionMessage = null,
+                onOpenDiff = {},
+                onApprove = {},
+                onReject = {}
+            )
+        }
+
+        composeRule.onNodeWithTag("approval-full-diff-review").performClick()
+        composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement").performClick()
+        composeRule.onNodeWithText("Approve request").assertIsEnabled().performClick()
+        composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
+        composeRule.onAllNodesWithText(displayedDiff).assertCountEquals(2)
+        composeRule.onAllNodesWithText(resultingContent).assertCountEquals(2)
+        composeRule.onNodeWithTag("approval-confirmation-executable-content").assertExists()
+    }
+
+    @Test
     fun highRiskConfirmationDisablesIfApprovalIsNoLongerEligible() {
         val approval = mutableStateOf(approval(RiskLevel.CRITICAL))
         var decisionCount = 0

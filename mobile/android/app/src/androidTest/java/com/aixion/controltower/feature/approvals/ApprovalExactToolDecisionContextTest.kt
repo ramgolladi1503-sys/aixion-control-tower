@@ -31,6 +31,7 @@ class ApprovalExactToolDecisionContextTest {
         val expiresAt = "2099-01-02T03:04:05Z"
         val longArgument = "x".repeat(180)
         val payload = "{\"command\":\"run --token $longArgument\"}"
+        val executableContent = "{\"path\":\"src/unsafe.txt\",\"content\":\"different executed payload\"}"
         val approval = ApprovalSummary(
             id = "approval-context-order-test",
             projectName = "Workspace",
@@ -41,7 +42,15 @@ class ApprovalExactToolDecisionContextTest {
             targetBranch = "release/1.0",
             status = ApprovalStatus.REQUESTED,
             risk = RiskLevel.LOW,
-            files = listOf(FileChangeSummary("antigravity://tool/run_command", "tool_call", payload, RiskLevel.LOW)),
+            files = listOf(
+                FileChangeSummary(
+                    "antigravity://tool/run_command",
+                    "tool_call",
+                    payload,
+                    RiskLevel.LOW,
+                    newContent = executableContent
+                )
+            ),
             requiredActions = emptyList(),
             testPlan = emptyList(),
             rollbackPlan = "",
@@ -57,6 +66,7 @@ class ApprovalExactToolDecisionContextTest {
         }
 
         val payloadNode = composeRule.onNodeWithText(payload)
+        val executableContentNode = composeRule.onNodeWithText(executableContent)
         val actionHeading = composeRule.onNodeWithText("Exact requested tool action")
         val wrapToggle = composeRule.onNodeWithTag("approval-payload-wrap-toggle")
         val context = composeRule.onNodeWithTag("approval-exact-tool-decision-context")
@@ -69,6 +79,8 @@ class ApprovalExactToolDecisionContextTest {
             actionHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
         )
         payloadNode.assertExists()
+        composeRule.onNodeWithText("Exact executable arguments").assertExists()
+        executableContentNode.assertExists()
         wrapToggle.assertIsOn()
         composeRule.onNodeWithTag("approval-unbroken-payload-wrapped-0").assertExists()
         composeRule.onNodeWithTag("approval-unbroken-payload-scroll-0").assertDoesNotExist()
@@ -95,10 +107,15 @@ class ApprovalExactToolDecisionContextTest {
         approve.assertIsNotEnabled()
 
         val payloadBottom = payloadNode.fetchSemanticsNode().boundsInRoot.bottom
+        val executableContentBottom = executableContentNode.fetchSemanticsNode().boundsInRoot.bottom
         val contextTop = context.fetchSemanticsNode().boundsInRoot.top
         val contextBottom = context.fetchSemanticsNode().boundsInRoot.bottom
         val acknowledgementTop = acknowledgement.fetchSemanticsNode().boundsInRoot.top
-        assertTrue("Exact payload must precede reviewer context", payloadBottom <= contextTop)
+        assertTrue(
+            "Displayed diff must precede executable content",
+            payloadBottom <= executableContentNode.fetchSemanticsNode().boundsInRoot.top
+        )
+        assertTrue("Executable content must precede reviewer context", executableContentBottom <= contextTop)
         assertTrue("Reviewer context must precede acknowledgement", contextBottom <= acknowledgementTop)
 
         acknowledgement.performClick()

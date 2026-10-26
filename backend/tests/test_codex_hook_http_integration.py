@@ -101,6 +101,16 @@ def _run_hook(event: dict, environment: dict[str, str]) -> dict:
     return json.loads(lines[-1])
 
 
+def _review_fingerprint(api: httpx.Client, approval_id: str) -> str:
+    preflight = api.get(f"/approvals/{approval_id}")
+    assert preflight.status_code == 200, preflight.text
+    reviewed = preflight.json()
+    assert reviewed["id"] == approval_id
+    fingerprint = reviewed.get("review_fingerprint")
+    assert isinstance(fingerprint, str) and fingerprint.startswith("sha256:review-v1:")
+    return fingerprint
+
+
 def test_codex_hook_real_http_decision_consumes_once_and_replay_denies(
     tmp_path: Path,
 ) -> None:
@@ -228,9 +238,13 @@ def test_codex_hook_real_http_decision_consumes_once_and_replay_denies(
             assert approval["files"][0]["diff"] == json.dumps(
                 event["tool_input"], sort_keys=True, separators=(",", ":")
             )
+            review_fingerprint = _review_fingerprint(api, approval["id"])
             decision = api.post(
                 f"/approvals/{approval['id']}/decision",
-                json={"decision": "approve"},
+                json={
+                    "decision": "approve",
+                    "review_fingerprint": review_fingerprint,
+                },
             )
             assert decision.status_code == 200, decision.text
             assert decision.json()["status"] == "APPROVED"

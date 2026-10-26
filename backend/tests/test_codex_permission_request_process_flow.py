@@ -90,6 +90,16 @@ def _stop_api(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+def _review_fingerprint(api: httpx.Client, approval_id: str) -> str:
+    preflight = api.get(f"/approvals/{approval_id}")
+    assert preflight.status_code == 200, preflight.text
+    reviewed = preflight.json()
+    assert reviewed["id"] == approval_id
+    fingerprint = reviewed.get("review_fingerprint")
+    assert isinstance(fingerprint, str) and fingerprint.startswith("sha256:review-v1:")
+    return fingerprint
+
+
 class _DecisionGateProxy(ThreadingHTTPServer):
     """Forward hook traffic while holding its first decision read for restart."""
 
@@ -278,9 +288,13 @@ def test_real_codex_permission_hook_allows_only_after_durable_phone_decision(
                 "Codex hook returned before a reviewer decision was recorded"
             )
 
+            review_fingerprint = _review_fingerprint(api, approval["id"])
             decision = api.post(
                 f"/approvals/{approval['id']}/decision",
-                json={"decision": "approve"},
+                json={
+                    "decision": "approve",
+                    "review_fingerprint": review_fingerprint,
+                },
             )
             assert decision.status_code == 200, decision.text
             assert decision.json()["status"] == "APPROVED"
@@ -433,9 +447,13 @@ def test_codex_permission_hook_recovers_approved_decision_after_api_process_rest
             assert proxy.decision_reads == 1
             assert hook_process.poll() is None
 
+            review_fingerprint = _review_fingerprint(api, approval["id"])
             decision = api.post(
                 f"/approvals/{approval['id']}/decision",
-                json={"decision": "approve"},
+                json={
+                    "decision": "approve",
+                    "review_fingerprint": review_fingerprint,
+                },
             )
             assert decision.status_code == 200, decision.text
             assert decision.json()["status"] == "APPROVED"
@@ -612,9 +630,13 @@ def test_real_codex_permission_hook_denies_without_claim_or_tool_side_effect(
                 "Codex hook returned before a reviewer decision was recorded"
             )
 
+            review_fingerprint = _review_fingerprint(api, approval["id"])
             decision = api.post(
                 f"/approvals/{approval['id']}/decision",
-                json={"decision": "reject"},
+                json={
+                    "decision": "reject",
+                    "review_fingerprint": review_fingerprint,
+                },
             )
             assert decision.status_code == 200, decision.text
             assert decision.json()["status"] == "DENIED"

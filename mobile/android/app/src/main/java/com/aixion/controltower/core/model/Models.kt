@@ -78,7 +78,8 @@ data class FileChangeSummary(
     val path: String,
     val changeType: String,
     val diff: String,
-    val risk: RiskLevel
+    val risk: RiskLevel,
+    val newContent: String? = null
 )
 
 data class ApprovalSummary(

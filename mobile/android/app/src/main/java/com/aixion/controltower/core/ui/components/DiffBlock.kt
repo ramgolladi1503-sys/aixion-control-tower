@@ -37,7 +37,8 @@ import com.aixion.controltower.core.ui.theme.TowerSpacing
 @Composable
 fun DiffBlock(file: FileChangeSummary, modifier: Modifier = Modifier) {
     val palette = LocalTowerPalette.current
-    var wrapLongPayloadLines by remember(file.diff) { mutableStateOf(true) }
+    var wrapLongPayloadLines by remember(file.diff, file.newContent) { mutableStateOf(true) }
+    val executableContent = file.newContent?.takeIf { it != file.diff }
     val hasHorizontallyScrollablePayload = file.diff
         .lineSequence()
         .any(::containsLongUnbrokenPayloadToken)
@@ -98,6 +99,37 @@ fun DiffBlock(file: FileChangeSummary, modifier: Modifier = Modifier) {
                         )
                     }
                 }
+            }
+        }
+        if (executableContent != null) {
+            Spacer(modifier = Modifier.height(TowerSpacing.md))
+            Text(
+                text = if (file.changeType.equals("tool_call", ignoreCase = true) ||
+                    file.changeType.equals("mcp_tool_call", ignoreCase = true)
+                ) {
+                    "Exact executable arguments"
+                } else {
+                    "Resulting file contents"
+                },
+                color = palette.ink,
+                style = MaterialTheme.typography.titleSmall
+            )
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+            SelectionContainer {
+                Text(
+                    text = executableContent.ifEmpty { "(empty content)" },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.surfaceRaised, RoundedCornerShape(TowerRadius.md))
+                        .border(1.dp, palette.line.copy(alpha = 0.62f), RoundedCornerShape(TowerRadius.md))
+                        .padding(TowerSpacing.md)
+                        .testTag("approval-executable-content"),
+                    color = palette.inkMuted,
+                    fontSize = 14.sp,
+                    fontFamily = FontFamily.Monospace,
+                    lineHeight = 21.sp,
+                    softWrap = true
+                )
             }
         }
         if (hasHorizontallyScrollablePayload) {
