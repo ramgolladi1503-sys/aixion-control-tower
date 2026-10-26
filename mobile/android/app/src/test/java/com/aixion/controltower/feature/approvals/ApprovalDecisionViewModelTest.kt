@@ -29,6 +29,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+private const val REVIEW_FINGERPRINT = "sha256:review-v1:test"
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class ApprovalDecisionViewModelTest {
     @Test
@@ -72,6 +74,7 @@ class ApprovalDecisionViewModelTest {
 
             assertEquals("A rapid second tap must not issue another server decision.", 1, api.decisionCalls)
             assertEquals(listOf(REQUEST_ID), api.decisionApprovalIds)
+            assertEquals(listOf(REVIEW_FINGERPRINT), api.decisionReviewFingerprints)
         } finally {
             Dispatchers.resetMain()
         }
@@ -530,6 +533,7 @@ class ApprovalDecisionViewModelTest {
     private class RecordingApprovalApi : BaseFakeControlTowerApi() {
         var decisionCalls = 0
         val decisionApprovalIds = mutableListOf<String>()
+        val decisionReviewFingerprints = mutableListOf<String>()
         val statusApprovalIds = mutableListOf<String>()
         var decideResult: suspend (String, DecisionRequestDto) -> ApprovalRequestDto = { id, payload ->
             approvalDto(id, when (payload.decision) {
@@ -562,6 +566,7 @@ class ApprovalDecisionViewModelTest {
         ): ApprovalRequestDto {
             decisionCalls += 1
             decisionApprovalIds += approvalId
+            decisionReviewFingerprints += payload.review_fingerprint
             return decideResult(approvalId, payload)
         }
     }
@@ -611,7 +616,8 @@ private fun approvalDto(id: String, status: String) = ApprovalRequestDto(
     source_session_id = "session-1",
     source_invocation_id = "invocation-1",
     expires_at = "2099-01-01T00:00:00Z",
-    verified_source = true
+    verified_source = true,
+    review_fingerprint = REVIEW_FINGERPRINT
 )
 
 private fun approvalSummary(id: String) = ApprovalSummary(
@@ -633,5 +639,6 @@ private fun approvalSummary(id: String) = ApprovalSummary(
     sourceInvocationId = "invocation-1",
     expiresAt = "2099-01-01T00:00:00Z",
     verifiedSource = true,
-    projectId = "project-1"
+    projectId = "project-1",
+    reviewFingerprint = REVIEW_FINGERPRINT
 )
