@@ -3,9 +3,9 @@
 **Snapshot:** 2026-10-27
 **Repository:** `ramgolladi1503-sys/aixion-control-tower`
 **PR:** [#204](https://github.com/ramgolladi1503-sys/aixion-control-tower/pull/204), open, draft, unmerged
-**Current PR head:** `ac1332bb4b13d9dfaa0f62baa5fb92d9a3e62509` (checked 2026-10-27); all 8 currently reported PR checks completed successfully. The prior Android UI evidence at `fb107baa2b36a4d3643b1a992f76f5701aa58f88` is historical and is not current-head certification.
+**Last verified PR #204 head:** `ac1332bb4b13d9dfaa0f62baa5fb92d9a3e62509` (checked 2026-10-27); all 8 checks then reported were successful. A separate checkpoint branch `ram/pre-billing-execution` was pushed at `a908a40b`; no CI result is available for that commit. GitHub CLI re-check returned HTTP 401, so PR state was not refreshed after publishing the branch. The prior Android UI evidence at `fb107baa2b36a4d3643b1a992f76f5701aa58f88` is historical and is not current-head certification.
 **Worktree:** `/Volumes/TradeBotFast/AixionControlTower/goal-workstreams/android-design`
-**Working-tree changes:** This acceptance-matrix checkpoint is modified locally and not yet committed. Android short-viewport changes and focused instrumentation assertions are committed at the verified PR head.
+**Working-tree changes:** Clean after checkpoint commit `a908a40b` was pushed to the separate branch above. Android short-viewport changes and focused instrumentation assertions are in the earlier verified history.
 **Scope:** `docs/PRE_BILLING_WORK_LOCK.md`. No billing, cloud changes, production data, deployment, or merge.
 
 Statuses apply to the complete exit gate shown. A passing focused test proves only its named subgate.
@@ -27,7 +27,7 @@ The two Android API 35 emulators are online (`5554`, `5556`). A single exact foc
 
 ## Exact-head CI evidence
 
-At current PR head `ac1332bb4b13d9dfaa0f62baa5fb92d9a3e62509`, all **8 currently reported CI checks completed successfully**. Historical Android JVM (**222 tests**) and focused instrumentation (**2 tests**) were run at `fb107baa2b36a4d3643b1a992f76f5701aa58f88`; the broader approval-detail class was not certified because multiple failures were observed. A new exact-head focused test process on emulator `5554` is live but has not reached test execution. Green CI and old focused tests do not close Slice 1's runtime authority gap or satisfy real provider/device acceptance.
+At last verified PR #204 head `ac1332bb4b13d9dfaa0f62baa5fb92d9a3e62509`, all **8 then-reported CI checks completed successfully**. Checkpoint commit `a908a40b` is on a separate pushed branch and has no verified CI result. Historical Android JVM (**222 tests**) and focused instrumentation (**2 tests**) were run at `fb107baa2b36a4d3643b1a992f76f5701aa58f88`; the broader approval-detail class was not certified because multiple failures were observed. A new focused test process on emulator `5554` is live but has not reached test execution. Green CI and old focused tests do not close Slice 1's runtime authority gap or satisfy real provider/device acceptance.
 
 ## Immediate critical path
 
