@@ -85,7 +85,7 @@ internal fun HomeContent(
             .fillMaxSize()
             .background(palette.canvas)
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)
     ) {
         item {
             HomeHeader(
@@ -95,7 +95,7 @@ internal fun HomeContent(
 
         if (shouldShowHomeStatusHero(state)) {
             item {
-                TowerHeroPanel {
+                TowerHeroPanel(compact = true) {
                     HomeStatusHero(state = state)
                 }
             }
@@ -207,7 +207,7 @@ private fun HomeStatusHeroCopy(state: HomeUiState, modifier: Modifier = Modifier
                     liveRegion = LiveRegionMode.Polite
                 },
             color = palette.ink,
-            style = MaterialTheme.typography.headlineLarge
+            style = MaterialTheme.typography.headlineMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
@@ -230,7 +230,7 @@ internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            text = "Set up Antigravity or Codex for the project on the computer where the agent runs. Keep that computer online while approvals are pending.",
+            text = "Set up Antigravity or Codex on the computer running the project. Keep that computer available so a phone decision can return to the waiting task.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )

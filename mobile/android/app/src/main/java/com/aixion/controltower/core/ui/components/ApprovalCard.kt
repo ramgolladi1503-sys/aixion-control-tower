@@ -15,7 +15,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -40,11 +39,24 @@ fun ApprovalCard(
     val clickableModifier = if (onClick != null) {
         modifier.clickable(
             role = Role.Button,
-            onClickLabel = "Review this approval request",
+            onClickLabel = "Open the full request before deciding",
             onClick = onClick
         )
     } else {
         modifier
+    }
+    val exactToolRequest = approval.hasExactToolRequestPayload
+    val summaryPreview = if (exactToolRequest) {
+        "Tool action is hidden in this preview."
+    } else {
+        approval.summary.ifBlank { "Request summary unavailable." }
+    }
+    val accessiblePreview = if (exactToolRequest) {
+        "Exact tool action preview. Tool action is hidden here."
+    } else {
+        val boundedSummary = summaryPreview.trim().take(MAX_ACCESSIBLE_PREVIEW_CHARS)
+        val previewSuffix = if (summaryPreview.trim().length > MAX_ACCESSIBLE_PREVIEW_CHARS) "…" else ""
+        "Request overview preview: $boundedSummary$previewSuffix. This may be incomplete."
     }
 
     TowerPanel(modifier = clickableModifier.testTag("approval-card"), elevated = true) {
@@ -64,7 +76,7 @@ fun ApprovalCard(
             )
         }
         Text(
-            text = "Project · ${approval.projectName.ifBlank { "Not provided" }}",
+            text = approval.projectName.ifBlank { "Project not provided" },
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodySmall,
             maxLines = 2,
@@ -78,42 +90,48 @@ fun ApprovalCard(
             text = approval.title,
             color = palette.ink,
             style = MaterialTheme.typography.titleMedium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.semantics { heading() }
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(
-            text = "Request preview",
-            color = palette.inkMuted,
-            style = MaterialTheme.typography.labelSmall
-        )
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text(
-            text = approval.summary,
-            color = palette.inkMuted,
-            style = MaterialTheme.typography.bodyLarge,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
+        Column(
             modifier = Modifier
-                .clearAndSetSemantics {
-                    contentDescription = "Request summary: ${approval.summary}"
-                }
-                .testTag("approval-card-summary-preview")
-        )
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
+                .fillMaxWidth()
+                .testTag("approval-card-summary-preview"),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+        ) {
+            Text(
+                text = if (exactToolRequest) "Exact tool action · preview only" else "Request overview · preview only",
+                color = palette.inkMuted,
+                style = MaterialTheme.typography.labelLarge
+            )
+            Text(
+                text = summaryPreview,
+                color = palette.inkMuted,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .semantics { contentDescription = accessiblePreview }
+                    .testTag("approval-card-preview-content")
+            )
+        }
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         val now = Instant.now()
         val expired = approvalExpiredAt(approval.expiresAt, now)
         val expiryLabel = formatApprovalExpiry(approval.expiresAt, now)
         Text(
             text = expiryLabel,
             color = if (expired || expiryLabel == EXPIRY_UNAVAILABLE) palette.caution else palette.inkMuted,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.semantics {
                 if (expired) {
                     contentDescription = "$expiryLabel. Request deadline passed; open details to check its current status."
                 }
             }
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.lg))
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
             verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
@@ -138,7 +156,7 @@ fun ApprovalCard(
         if (onClick != null) {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
             Text(
-                text = "Review request",
+                text = "Open full request before deciding",
                 color = palette.brand,
                 style = MaterialTheme.typography.labelLarge,
                 textAlign = TextAlign.End,
@@ -149,6 +167,7 @@ fun ApprovalCard(
 }
 
 private const val EXPIRY_UNAVAILABLE = "Expiry unavailable"
+private const val MAX_ACCESSIBLE_PREVIEW_CHARS = 160
 
 private fun parseApprovalExpiry(expiresAt: String?): Instant? =
     expiresAt?.takeIf(String::isNotBlank)

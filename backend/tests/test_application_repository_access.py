@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import psycopg
+from fastapi import HTTPException
 
 import app.application_repository_access as repository_access
 from app.application_repository_access import (
@@ -887,6 +889,52 @@ def test_workspace_membership_resolution_uses_postgres_snapshot(
     )
 
     assert repository_access.workspace_id_for_request(user, request) == workspace_id
+
+
+def test_workspace_membership_postgres_outage_is_retryable_without_sqlite_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailablePostgresMembership(PostgresWorkspaceMembershipRepository):
+        def __init__(self) -> None:
+            pass
+
+        def snapshot(self, *, user_id: str, claimed_workspace_id: str | None):
+            raise psycopg.OperationalError("injected membership database outage")
+
+    class ForbiddenSQLiteMembership:
+        def snapshot(self, **kwargs):
+            pytest.fail("PostgreSQL outage must not fall back to SQLite membership")
+
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "workspace_membership", UnavailablePostgresMembership())
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=repositories),
+                postgres_repositories=repositories,
+                workspace_membership_repository=ForbiddenSQLiteMembership(),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(auth_enabled=True, postgres_auth_enabled=True),
+    )
+    user = AuthUser(
+        id="pg-user",
+        email="pg-user@example.com",
+        display_name="PG User",
+        role=UserRole.OWNER,
+        workspace_id="pg-workspace",
+    )
+
+    with pytest.raises(HTTPException) as error:
+        repository_access.workspace_id_for_request(user, request)
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert error.value.detail == "PostgreSQL workspace membership runtime is unavailable"
 
 
 def test_workspace_membership_repository_keeps_local_binding(

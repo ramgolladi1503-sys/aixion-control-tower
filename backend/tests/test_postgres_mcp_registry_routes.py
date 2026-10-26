@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import Connection, sql
 from psycopg.types.json import Jsonb
@@ -17,6 +18,48 @@ from app.mcp_gateway_routes import child_received_count_for_test
 from app.models import AuthUser, Project, User, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
 from app.store import store
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production-misconfiguration", "missing-postgres-runtime"],
+)
+def test_mcp_registry_repository_failure_is_retryable_and_never_uses_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        "app.application_repository_access.get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    def unexpected_sqlite_construction(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("SQLite MCP repository must not be constructed")
+
+    monkeypatch.setattr(
+        mcp_registry_routes, "SQLiteMCPChildServerRepository", unexpected_sqlite_construction
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=None,
+                postgres_repositories=None,
+                mcp_child_server_repository=None,
+            )
+        )
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        mcp_registry_routes._repository_for_route(request)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert raised.value.detail == "MCP registry storage is temporarily unavailable"
 
 
 @pytest.fixture

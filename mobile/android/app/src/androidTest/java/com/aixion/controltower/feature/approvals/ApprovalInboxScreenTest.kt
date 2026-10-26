@@ -388,11 +388,22 @@ class ApprovalInboxScreenTest {
         inboxList.performScrollToNode(hasText("Pending approval"))
         composeRule.onAllNodesWithText("Aixion Control Tower").assertCountEquals(3)
         composeRule.onAllNodesWithContentDescription("Request summary: Regression approval summary")
-            .assertCountEquals(3)
+            .assertCountEquals(0)
+        composeRule.onAllNodesWithTag("approval-card-summary-preview").assertCountEquals(3)
+        composeRule.onAllNodesWithTag("approval-card-preview-content").assertCountEquals(3)
+        composeRule.onAllNodesWithText("Request overview · preview only").assertCountEquals(3)
+        composeRule.onAllNodesWithText("Open full request before deciding").assertCountEquals(3)
+        composeRule.onAllNodesWithTag("approval-card-preview-content").fetchSemanticsNodes().forEach { node ->
+            assertTrue(
+                "Inbox overview must announce that it may be incomplete",
+                node.config[SemanticsProperties.ContentDescription].any { it.contains("may be incomplete") }
+            )
+        }
+        composeRule.onAllNodesWithText("Approve request").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Deny").assertCountEquals(0)
         composeRule.onAllNodesWithText("Low").assertCountEquals(3)
         composeRule.onNodeWithText("Pending review").assertExists()
-        composeRule.onAllNodesWithText("Review request").assertCountEquals(3)
-        composeRule.onAllNodesWithText("Review request").fetchSemanticsNodes().forEach { node ->
+        composeRule.onAllNodesWithText("Open full request before deciding").fetchSemanticsNodes().forEach { node ->
             assertEquals(Role.Button, node.config[SemanticsProperties.Role])
         }
     }
@@ -469,7 +480,7 @@ class ApprovalInboxScreenTest {
         composeRule.onNodeWithText("Refreshing approval").assertExists()
         composeRule.onNodeWithText("Refreshing. Requests are read-only until sync completes.").assertExists()
         composeRule.onNodeWithText("1 pending").assertExists()
-        composeRule.onAllNodesWithText("Review request").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Open full request before deciding").assertCountEquals(0)
     }
 
     @Test
@@ -609,7 +620,7 @@ class ApprovalInboxScreenTest {
         )
         composeRule.onAllNodesWithText("Previously loaded request").assertCountEquals(0)
         composeRule.onAllNodesWithText("1 pending").assertCountEquals(0)
-        composeRule.onAllNodesWithText("Review request").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Open full request before deciding").assertCountEquals(0)
         composeRule.onNodeWithText("Retry approvals").assertExists()
     }
 

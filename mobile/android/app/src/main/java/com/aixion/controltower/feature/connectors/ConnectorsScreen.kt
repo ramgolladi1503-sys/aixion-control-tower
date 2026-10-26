@@ -32,15 +32,15 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.ui.components.StatusBadge
-import com.aixion.controltower.core.ui.components.TowerDivider
+import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 internal fun providerSetupDescription(provider: String): String = when (provider) {
-    "ANTIGRAVITY" -> "Antigravity's local pre-tool hook is the supported approval path. Install it on the computer running this project, and keep that computer, session, and API reachable while a request waits."
-    "CODEX" -> "Codex Desktop phone approval delivery and returning a decision to the same task are not verified. This setup page does not establish a live approval connection. Do not rely on it for live work."
+    "ANTIGRAVITY" -> "Use Antigravity's local pre-tool hook. Install it on the agent computer and keep the session and API reachable while requests wait."
+    "CODEX" -> "Native Codex phone delivery and same-task return are unverified. This setup does not establish a live approval connection."
     else -> "Choose a supported provider and complete setup on the computer where the agent runs."
 }
 
@@ -173,18 +173,14 @@ private fun ConnectorStep(number: String, title: String, detail: String) {
 @Composable
 private fun ConnectorsHero() {
     val palette = LocalTowerPalette.current
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = TowerSpacing.sm)
-    ) {
+    TowerHeroPanel(compact = true) {
         StatusBadge(label = "Set up a project", color = palette.brand, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Text(
             text = "Connect an agent",
             modifier = Modifier.semantics { heading() },
             color = palette.ink,
-            style = MaterialTheme.typography.headlineLarge
+            style = MaterialTheme.typography.headlineMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
@@ -198,14 +194,18 @@ private fun ConnectorsHero() {
 @Composable
 private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
     val palette = LocalTowerPalette.current
-    TowerPanel(modifier = Modifier.testTag("provider-setup-panel")) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("provider-setup-panel"),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)
+    ) {
         Text(
             text = "Choose a provider",
             modifier = Modifier.semantics { heading() },
             color = palette.ink,
             style = MaterialTheme.typography.titleLarge
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         ProviderSetupOption(
             name = "Antigravity",
             status = providerSetupStatus("ANTIGRAVITY"),
@@ -214,9 +214,6 @@ private fun ProviderSetupPanel(onOpenAgentAccess: (String) -> Unit) {
             buttonLabel = providerSetupButtonLabel("ANTIGRAVITY"),
             onClick = { onOpenAgentAccess("ANTIGRAVITY") }
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        TowerDivider(modifier = Modifier.height(1.dp))
-        Spacer(modifier = Modifier.height(TowerSpacing.md))
         ProviderSetupOption(
             name = "Codex",
             status = providerSetupStatus("CODEX"),
@@ -238,26 +235,27 @@ private fun ProviderSetupOption(
     onClick: () -> Unit
 ) {
     val palette = LocalTowerPalette.current
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag("provider-option-${name.lowercase()}"),
-        verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+    TowerPanel(
+        modifier = Modifier.testTag("provider-option-${name.lowercase()}"),
+        elevated = true
     ) {
-        Text(
-            text = name,
-            modifier = Modifier.semantics { heading() },
-            color = palette.ink,
-            style = MaterialTheme.typography.titleMedium
-        )
-        StatusBadge(label = status, color = statusColor, uppercase = false)
-        Text(
-            text = description,
-            color = palette.inkMuted,
-            style = MaterialTheme.typography.bodyMedium
-        )
-        Button(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
-            Text(buttonLabel)
+        Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
+            Text(
+                text = name,
+                modifier = Modifier.semantics { heading() },
+                color = palette.ink,
+                style = MaterialTheme.typography.titleMedium
+            )
+            StatusBadge(label = status, color = statusColor, uppercase = false)
+            Text(
+                text = description,
+                color = palette.inkMuted,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(modifier = Modifier.height(TowerSpacing.xs))
+            Button(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+                Text(buttonLabel)
+            }
         }
     }
 }

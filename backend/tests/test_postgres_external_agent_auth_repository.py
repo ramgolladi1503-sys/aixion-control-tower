@@ -5,7 +5,7 @@ import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Barrier
+from threading import Barrier, Event, current_thread
 
 import psycopg
 import pytest
@@ -22,6 +22,7 @@ from app.models import (
     AgentProvider,
     AuditEvent,
     ExternalAgent,
+    ExternalAgentPublic,
     Workspace,
     now_utc,
 )
@@ -192,10 +193,8 @@ def test_create_commits_agent_credential_and_registration_audit_together(agent_r
     assert row == (workspace_id, "external_agent", agent.id, "agent.registered", audit_event.actor)
 
 
-@pytest.mark.parametrize("event_type", ["agent.token_rotated", "agent.token_revoked"])
-def test_token_mutation_rejects_stale_snapshot_after_authentication(
-    agent_repository, event_type: str
-) -> None:
+def test_token_rotation_rejects_stale_snapshot_after_authentication(agent_repository) -> None:
+    event_type = "agent.token_rotated"
     repository, connect, workspace_id, owner_id = agent_repository
     agent, credential, raw_token = _agent_and_credential(workspace_id, owner_id)
     _create_agent(repository, agent, credential)
@@ -250,6 +249,152 @@ def test_token_mutation_rejects_stale_snapshot_after_authentication(
         assert conn.execute(
             "SELECT count(*) FROM audit_events WHERE entity_id=%s AND event_type=%s",
             (agent.id, event_type),
+        ).fetchone()[0] == 0
+
+
+def test_revoke_waits_for_authentication_and_preserves_its_accounting(agent_repository) -> None:
+    repository, connect, workspace_id, owner_id = agent_repository
+    agent, credential, raw_token = _agent_and_credential(workspace_id, owner_id)
+    _create_agent(repository, agent, credential)
+    # Match the owner route: it reads a snapshot before authentication accounts
+    # for a request, then attempts revocation from that now-stale snapshot.
+    revoke_agent = agent.model_copy(deep=True)
+    revoke_credential = credential.model_copy(deep=True)
+    auth_accounted = Event()
+    release_auth = Event()
+    revoke_started = Event()
+
+    class PausingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+        def execute(self, query, *args, **kwargs):
+            result = self.connection.execute(query, *args, **kwargs)
+            if (
+                current_thread().name.startswith("auth-accounting_")
+                and isinstance(query, str)
+                and query.startswith("UPDATE external_agent_credentials SET")
+            ):
+                auth_accounted.set()
+                if not release_auth.wait(timeout=10):
+                    raise TimeoutError("test did not release auth transaction")
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+    controlled_repository = PostgresExternalAgentAuthRepository(
+        lambda: PausingConnection(connect())
+    )
+
+    def authenticate() -> AgentAuthenticationResult:
+        return controlled_repository.authenticate_and_consume(
+            agent_id=agent.id,
+            token=raw_token,
+            occurred_at=now_utc(),
+            window_seconds=60,
+            require_workspace=True,
+        )
+
+    def revoke() -> ExternalAgentPublic:
+        revoke_started.set()
+        return revoke_external_agent_token(
+            revoke_agent,
+            credential=revoke_credential,
+            repository=controlled_repository,
+            actor="owner@example.test",
+        )
+
+    try:
+        with ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="auth-accounting"
+        ) as executor:
+            auth_future = executor.submit(authenticate)
+            assert auth_accounted.wait(timeout=10)
+            # Route execution now competes for the same rows while the auth
+            # transaction is still uncommitted and holds both row locks.
+            revoke_future = executor.submit(revoke)
+            assert revoke_started.wait(timeout=10)
+            release_auth.set()
+            auth_result = auth_future.result(timeout=10)
+            public_agent = revoke_future.result(timeout=10)
+    finally:
+        release_auth.set()
+
+    assert auth_result.reason is None
+    assert public_agent.id == agent.id
+    current = repository.get(agent.id)
+    assert current is not None
+    current_agent, current_credential = current
+    assert current_agent.secret_hash is None
+    assert current_credential.token_revoked_at is not None
+    assert current_credential.last_used_at == auth_result.credential.last_used_at
+    assert current_credential.rate_limit_request_count == 1
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent.token_revoked'",
+            (agent.id,),
+        ).fetchone()[0] == 1
+
+
+def test_revoke_rejects_stale_snapshot_after_token_rotation(agent_repository) -> None:
+    repository, connect, workspace_id, owner_id = agent_repository
+    agent, credential, _ = _agent_and_credential(workspace_id, owner_id)
+    _create_agent(repository, agent, credential)
+    stale_agent = agent.model_copy(deep=True)
+    stale_credential = credential.model_copy(deep=True)
+    rotated_at = now_utc() + timedelta(seconds=1)
+    rotated_agent = agent.model_copy(
+        update={
+            "secret_hash": hashlib.sha256(b"replacement-after-stale-revoke").hexdigest(),
+            "updated_at": rotated_at,
+        }
+    )
+    rotated_credential = credential.model_copy(
+        update={"token_rotated_at": rotated_at, "updated_at": rotated_at}
+    )
+    rotation_event = AuditEvent(
+        event_type="agent.token_rotated",
+        actor="owner@example.test",
+        entity_id=agent.id,
+        workspace_id=workspace_id,
+        details={},
+        created_at=rotated_at,
+    )
+    repository.update(
+        agent=rotated_agent,
+        credential=rotated_credential,
+        audit_event=rotation_event,
+        expected_agent=agent,
+        expected_credential=credential,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        revoke_external_agent_token(
+            stale_agent,
+            credential=stale_credential,
+            repository=repository,
+            actor="owner@example.test",
+        )
+
+    assert error.value.status_code == 409
+    current = repository.get(agent.id)
+    assert current is not None
+    assert current[0].secret_hash == rotated_agent.secret_hash
+    assert current[1].token_rotated_at == rotated_at
+    assert current[1].token_revoked_at is None
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE entity_id=%s "
+            "AND event_type='agent.token_revoked'",
+            (agent.id,),
         ).fetchone()[0] == 0
 
 

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import main
+from app import trust_routes
 from app.application_repositories import ApplicationRepositories
-from app.models import AgentProvider, RiskLevel
+from app.models import AgentProvider, AuthUser, RiskLevel, UserRole
 from app.settings import get_settings
 from app.store import store
 from app.trust_models import (
@@ -106,4 +108,66 @@ def test_lifespan_scorecard_route_reads_its_bound_postgres_snapshot(
     assert card["allowed_actions"] == 1
     assert card["scope_adherence_rate"] == 1.0
     assert set(store.proposed_actions) == before_actions
+
+
+@pytest.mark.parametrize(
+    ("path", "reporting_builder_name"),
+    [
+        ("/trust/scorecards", "build_reliability_scorecards"),
+        ("/trust/exceptions", "build_exception_queue"),
+    ],
+)
+def test_trust_reporting_routes_fail_closed_without_postgres_request_bundle(
+    path: str,
+    reporting_builder_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = replace(
+        get_settings(),
+        profile="test",
+        auth_enabled=True,
+        postgres_auth_enabled=True,
+        postgres_runtime_probe_enabled=False,
+    )
+    monkeypatch.setattr(trust_routes, "get_settings", lambda: settings)
+
+    # Skip the app lifespan so these requests exercise the missing-runtime
+    # state directly. Explicitly clear every binding checked by the reporting
+    # selector in case another test left state on the shared FastAPI instance.
+    for state_name in (
+        "postgres_runtime",
+        "postgres_repositories",
+        "trust_repository",
+        "agent_task_repository",
+        "agent_run_repository",
+    ):
+        monkeypatch.setattr(main.app.state, state_name, None, raising=False)
+
+    reviewer = AuthUser(
+        id="trust-reporting-reviewer",
+        email="reviewer@example.test",
+        display_name="Trust reporting reviewer",
+        role=UserRole.REVIEWER,
+        workspace_id="workspace-trust-reporting",
+    )
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        trust_routes.ReviewerDependency.dependency,
+        lambda: reviewer,
+    )
+
+    reporting_builder = Mock(name=reporting_builder_name)
+    monkeypatch.setattr(trust_routes, reporting_builder_name, reporting_builder)
+
+    # Calling TestClient without entering its context manager avoids running the
+    # lifespan, which would otherwise install a PostgreSQL runtime for this case.
+    client = TestClient(main.app)
+    try:
+        response = client.get(path)
+    finally:
+        client.close()
+
+    assert response.status_code == 503, response.text
+    assert "complete app-bound PostgreSQL runtime" in response.json()["detail"]
+    reporting_builder.assert_not_called()
 

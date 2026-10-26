@@ -253,6 +253,7 @@ class PostgresExternalAgentAuthRepository:
             raise ValueError("Audited external-agent updates require their original snapshots")
 
         with self._connect() as conn:
+            effective_credential = credential
             if audit_event is not None:
                 current_agent_row = conn.execute(
                     "SELECT payload,agent_id,workspace_id,provider,auth_type,enabled,secret_hash "
@@ -273,12 +274,42 @@ class PostgresExternalAgentAuthRepository:
                     )
                 current_agent = self._agent_from_row(current_agent_row)
                 current_credential = self._credential_from_row(current_credential_row)
-                if (
-                    current_agent != expected_agent
-                    or current_credential != expected_credential
-                ):
+                if current_agent != expected_agent:
                     raise PostgresExternalAgentConflictError(
                         "External-agent credentials changed; reload and retry"
+                    )
+                if current_credential != expected_credential:
+                    # Authentication serializes on these same rows and updates
+                    # usage/failure accounting. A revoke based on the owner
+                    # route's earlier read may safely preserve those changes,
+                    # but must still conflict with any credential-policy or
+                    # token-identity change (including a prior revoke/rotate).
+                    accounting_fields = {
+                        "last_used_at",
+                        "failed_auth_count",
+                        "last_auth_failed_at",
+                        "rate_limit_window_started_at",
+                        "rate_limit_request_count",
+                        "updated_at",
+                    }
+                    current_snapshot = current_credential.model_dump(
+                        exclude=accounting_fields
+                    )
+                    expected_snapshot = expected_credential.model_dump(
+                        exclude=accounting_fields
+                    )
+                    if (
+                        audit_event.event_type != "agent.token_revoked"
+                        or current_snapshot != expected_snapshot
+                    ):
+                        raise PostgresExternalAgentConflictError(
+                            "External-agent credentials changed; reload and retry"
+                        )
+                    effective_credential = current_credential.model_copy(
+                        update={
+                            "token_revoked_at": credential.token_revoked_at,
+                            "updated_at": credential.updated_at,
+                        }
                     )
             agent_result = conn.execute(
                 "UPDATE external_agents SET created_by_user_id=%s,provider=%s,auth_type=%s,"
@@ -300,16 +331,16 @@ class PostgresExternalAgentAuthRepository:
                 "rate_limit_window_started_at=%s,rate_limit_request_count=%s,updated_at=%s,payload=%s "
                 "WHERE agent_id=%s AND workspace_id=%s",
                 (
-                    credential.token_expires_at,
-                    credential.token_revoked_at,
-                    credential.token_rotated_at,
-                    credential.last_used_at,
-                    credential.failed_auth_count,
-                    credential.rate_limit_per_minute,
-                    credential.rate_limit_window_started_at,
-                    credential.rate_limit_request_count,
-                    credential.updated_at,
-                    Jsonb(credential.model_dump(mode="json")),
+                    effective_credential.token_expires_at,
+                    effective_credential.token_revoked_at,
+                    effective_credential.token_rotated_at,
+                    effective_credential.last_used_at,
+                    effective_credential.failed_auth_count,
+                    effective_credential.rate_limit_per_minute,
+                    effective_credential.rate_limit_window_started_at,
+                    effective_credential.rate_limit_request_count,
+                    effective_credential.updated_at,
+                    Jsonb(effective_credential.model_dump(mode="json")),
                     agent.id,
                     agent.workspace_id,
                 ),

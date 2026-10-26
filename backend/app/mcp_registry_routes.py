@@ -27,7 +27,16 @@ def _repository_for_route(http_request: Request | None) -> MCPChildServerReposit
         _require_local_direct_access()
         # Preserve direct local/test calls while HTTP routes use explicit app state.
         return SQLiteMCPChildServerRepository(store._connect)
-    return mcp_child_server_repository_for_request(http_request)
+    try:
+        return mcp_child_server_repository_for_request(http_request)
+    except RuntimeError as exc:
+        # A selected PostgreSQL runtime is an authority boundary. A missing or
+        # mismatched binding must be retryable and must not select SQLite.
+        raise HTTPException(
+            status_code=503,
+            detail="MCP registry storage is temporarily unavailable",
+            headers={"Retry-After": "1"},
+        ) from exc
 
 
 def _require_local_direct_access() -> None:

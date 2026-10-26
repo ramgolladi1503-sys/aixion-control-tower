@@ -119,6 +119,14 @@ jobs:
       - name: Build Android debug APK
         run: ./gradlew assembleDebug
 
+      - name: Upload Android debug APK for this exact CI revision
+        uses: actions/upload-artifact@v4
+        with:
+          name: aixion-android-debug-${{ github.sha }}
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Verify Android release blocks missing Firebase config
         shell: bash
         run: |

@@ -31,7 +31,7 @@ fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier, readable: Boolean 
         label = if (readable) risk.name.toSentenceCase() else risk.name,
         color = color,
         modifier = modifier,
-        fontSize = 14.sp,
+        fontSize = 13.sp,
         uppercase = !readable
     )
 }
@@ -41,7 +41,7 @@ fun StatusBadge(
     label: String,
     color: Color,
     modifier: Modifier = Modifier,
-    fontSize: TextUnit = 14.sp,
+    fontSize: TextUnit = 13.sp,
     uppercase: Boolean = true
 ) {
     Box(
@@ -56,7 +56,7 @@ fun StatusBadge(
             fontSize = fontSize,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = if (uppercase) 0.8.sp else 0.sp,
-            lineHeight = (fontSize.value * 1.35f).sp
+        lineHeight = (fontSize.value * 1.4f).sp
         )
     }
 }
@@ -77,5 +77,5 @@ fun SourceBadge(approval: ApprovalSummary, modifier: Modifier = Modifier) {
         approval.sourceProvider == "MANUAL" -> "Manual source"
         else -> "Unverified: ${approval.sourceLabel}"
     }
-    StatusBadge(label = label, color = color, modifier = modifier, fontSize = 14.sp, uppercase = false)
+    StatusBadge(label = label, color = color, modifier = modifier, fontSize = 13.sp, uppercase = false)
 }

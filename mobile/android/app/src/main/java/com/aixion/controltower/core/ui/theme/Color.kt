@@ -23,21 +23,21 @@ internal data class TowerPalette(
 
 internal val LightTowerPalette = TowerPalette(
     canvas = Color(0xFFF4F2EC),
-    surface = Color(0xFFFBFAF6),
+    surface = Color(0xFFFAFAF5),
     surfaceRaised = Color(0xFFFFFFFF),
-    surfaceSubtle = Color(0xFFEAE8E0),
+    surfaceSubtle = Color(0xFFE8EDE5),
     ink = Color(0xFF20241F),
-    inkMuted = Color(0xFF596057),
+    inkMuted = Color(0xFF586157),
     // Keep disabled labels readable while pairing them with a state label/icon.
     inkDisabled = Color(0xFF646A60),
     // Control outlines must remain distinguishable on every light surface.
-    line = Color(0xFF777D73),
-    brand = Color(0xFF53664D),
+    line = Color(0xFF737C70),
+    brand = Color(0xFF526858),
     onBrand = Color(0xFFFFFFFF),
-    positive = Color(0xFF286348),
-    caution = Color(0xFF805600),
-    danger = Color(0xFFA23F35),
-    info = Color(0xFF3B6178)
+    positive = Color(0xFF35664F),
+    caution = Color(0xFF765723),
+    danger = Color(0xFF984E45),
+    info = Color(0xFF456777)
 )
 
 /** Warm charcoal companion to the paper/olive light palette. */
@@ -45,13 +45,13 @@ internal val DarkTowerPalette = TowerPalette(
     canvas = Color(0xFF171A16),
     surface = Color(0xFF20241F),
     surfaceRaised = Color(0xFF292E28),
-    surfaceSubtle = Color(0xFF343B33),
+    surfaceSubtle = Color(0xFF30382F),
     ink = Color(0xFFE9EEE5),
     inkMuted = Color(0xFFC2C9BE),
     inkDisabled = Color(0xFFAAB2A5),
     // Control outlines must remain distinguishable on every dark surface.
     line = Color(0xFF7F8A7B),
-    brand = Color(0xFFA9C19B),
+    brand = Color(0xFFB1C8A6),
     onBrand = Color(0xFF1C261A),
     positive = Color(0xFF79D5A4),
     caution = Color(0xFFF3C96D),

@@ -288,7 +288,7 @@ def test_postgres_mcp_initialize_and_tools_list_use_bound_repositories(
 def test_postgres_mcp_transport_hides_foreign_workspace_projects(
     postgres_mcp_transport_runtime,
 ) -> None:
-    connect, workspace, _project, _user, _repositories = postgres_mcp_transport_runtime
+    connect, workspace, _project, _user, repositories = postgres_mcp_transport_runtime
     foreign_workspace = Workspace(
         id=f"workspace_{uuid.uuid4().hex}",
         name="Foreign workspace",
@@ -316,12 +316,96 @@ def test_postgres_mcp_transport_hides_foreign_workspace_projects(
     client = TestClient(main.app)
     response = client.post(
         f"/mcp/{foreign_project.id}/jsonrpc",
-        json={"jsonrpc": "2.0", "id": "foreign", "method": "tools/list"},
+        json={
+            "jsonrpc": "2.0",
+            "id": "foreign",
+            "method": "tools/call",
+            "params": {
+                "name": "write_file",
+                "server_name": "foreign-child",
+                "arguments": {"path": "must-not-write.txt", "content": "blocked"},
+                "session_id": "foreign-session",
+            },
+        },
     )
     client.close()
 
     assert response.status_code == 404
     assert workspace.id != foreign_workspace.id
+    assert repositories.mcp_pending_requests.list_for_workspace(
+        workspace.id, project_id=_project.id
+    ) == []
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_requests WHERE workspace_id=%s",
+            (foreign_workspace.id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM mcp_pending_requests WHERE workspace_id=%s",
+            (foreign_workspace.id,),
+        ).fetchone() == (0,)
+
+
+def test_postgres_mcp_tools_call_fails_closed_without_matching_runtime_before_sqlite_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = AuthUser(
+        id="mcp-missing-runtime-user",
+        email="mcp-missing-runtime@example.test",
+        display_name="MCP Missing Runtime",
+        role=UserRole.OWNER,
+        workspace_id="mcp-missing-runtime-workspace",
+    )
+    settings = SimpleNamespace(is_production=False, postgres_auth_enabled=True)
+    monkeypatch.setattr(mcp_gateway_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        "app.application_repository_access.get_settings", lambda: settings
+    )
+    monkeypatch.setattr(main.app.state, "postgres_runtime", None, raising=False)
+    monkeypatch.setattr(main.app.state, "postgres_repositories", None, raising=False)
+    monkeypatch.setitem(
+        main.app.dependency_overrides,
+        mcp_transport_routes.MaintainerDependency.dependency,
+        lambda: user,
+    )
+
+    class ForbiddenLocalMap(dict):
+        def _forbidden(self, *_args, **_kwargs):
+            raise AssertionError("PostgreSQL MCP tools/call accessed process-local state")
+
+        __contains__ = _forbidden
+        get = _forbidden
+        values = _forbidden
+        items = _forbidden
+        __iter__ = _forbidden
+
+    monkeypatch.setattr(store, "projects", ForbiddenLocalMap())
+    monkeypatch.setattr(store, "mcp_child_servers", ForbiddenLocalMap())
+    monkeypatch.setattr(store, "mcp_pending_requests", ForbiddenLocalMap())
+    monkeypatch.setattr(store, "approval_requests", ForbiddenLocalMap())
+    monkeypatch.setattr(store, "notifications", ForbiddenLocalMap())
+
+    client = TestClient(main.app)
+    try:
+        response = client.post(
+            "/mcp/missing-runtime-project/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "id": "missing-runtime-mcp-call",
+                "method": "tools/call",
+                "params": {
+                    "name": "pg_registry_tool",
+                    "server_name": "missing-runtime-child",
+                    "arguments": {},
+                    "session_id": "missing-runtime-session",
+                },
+            },
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 503, response.text
+    assert "MCP server registry is unavailable" in response.json()["detail"]
 
 
 def test_postgres_mcp_read_only_tool_uses_scoped_registry_without_approval_or_sqlite_projection(
@@ -466,6 +550,9 @@ def test_postgres_mcp_tools_call_waits_for_durable_approval_and_forwards_once(
 ) -> None:
     _connect, workspace, project, _user, repositories = postgres_mcp_transport_runtime
     server = _register_server(repositories, project, workspace)
+    before_local_pending = dict(store.mcp_pending_requests)
+    before_local_approvals = dict(store.approval_requests)
+    before_local_audits = {event.id for event in store.audit_events}
 
     call_payload = {
         "jsonrpc": "2.0",
@@ -525,6 +612,77 @@ def test_postgres_mcp_tools_call_waits_for_durable_approval_and_forwards_once(
     assert structured["result"]["server_name"] == server.name
     assert repositories.mcp_pending_requests.get(pending.id).status.value == "FORWARDED"
     assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == 1
+    assert project.id not in store.projects
+    assert server.id not in store.mcp_child_servers
+    assert store.mcp_pending_requests == before_local_pending
+    assert store.approval_requests == before_local_approvals
+    assert {event.id for event in store.audit_events} == before_local_audits
+
+
+def test_postgres_mcp_tools_call_rolls_back_approval_pending_audit_and_outbox_together(
+    postgres_mcp_transport_runtime,
+) -> None:
+    connect, workspace, project, _user, repositories = postgres_mcp_transport_runtime
+    server = _register_server(repositories, project, workspace)
+    with connect() as connection:
+        connection.execute(
+            "CREATE FUNCTION reject_mcp_approval_notification() RETURNS trigger "
+            "LANGUAGE plpgsql AS $$ BEGIN "
+            "IF NEW.entity_type = 'approval_request' THEN "
+            "RAISE EXCEPTION 'injected MCP notification failure'; "
+            "END IF; RETURN NEW; END $$"
+        )
+        connection.execute(
+            "CREATE TRIGGER reject_mcp_approval_notification "
+            "BEFORE INSERT ON notifications FOR EACH ROW "
+            "EXECUTE FUNCTION reject_mcp_approval_notification()"
+        )
+
+    before_pending = dict(store.mcp_pending_requests)
+    before_approvals = dict(store.approval_requests)
+    before_audits = {event.id for event in store.audit_events}
+    client = TestClient(main.app)
+    try:
+        response = client.post(
+            f"/mcp/{project.id}/jsonrpc",
+            json={
+                "jsonrpc": "2.0",
+                "id": "mcp-notification-rollback-001",
+                "method": "tools/call",
+                "params": {
+                    "name": "pg_registry_tool",
+                    "server_name": server.name,
+                    "arguments": {},
+                    "session_id": "mcp-notification-rollback-session",
+                },
+            },
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 503, response.text
+    with connect() as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM approval_requests WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM mcp_pending_requests WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM notifications WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s "
+            "AND event_type='mcp.approval_requested'",
+            (workspace.id,),
+        ).fetchone() == (0,)
+    assert store.mcp_pending_requests == before_pending
+    assert store.approval_requests == before_approvals
+    assert {event.id for event in store.audit_events} == before_audits
+    assert mcp_gateway_routes.child_received_count_for_server_for_test(server.name) == 0
 
 
 def test_postgres_mcp_tools_call_approved_dispatches_once_to_http_jsonrpc_child_and_returns_exact_result(

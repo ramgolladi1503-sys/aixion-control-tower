@@ -792,7 +792,17 @@ def _idea_repository_for_route(http_request: Request | None) -> IdeaRepository:
             )
         # Direct function calls in local tests use the explicit local adapter.
         return idea_repository
-    return idea_repository_for_request(http_request)
+    try:
+        return idea_repository_for_request(http_request)
+    except RuntimeError as exc:
+        # Repository selection is an authority boundary. A missing or
+        # mismatched PostgreSQL runtime must be retryable and must not leak as
+        # an unhandled 500 or fall back to the module-level SQLite adapter.
+        raise HTTPException(
+            status_code=503,
+            detail="Idea storage is temporarily unavailable",
+            headers={"Retry-After": "1"},
+        ) from exc
 
 
 def _approval_workspace_id(request: ApprovalRequest) -> str | None:

@@ -49,6 +49,7 @@ import com.aixion.controltower.core.ui.ForegroundRefreshEffect
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerPanel
+import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
@@ -198,21 +199,35 @@ fun ApprovalInboxContent(
             .fillMaxSize()
             .background(palette.canvas)
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)
     ) {
         item {
-            Text(
-                text = when (selectedSection) {
-                    ApprovalInboxSection.NEEDS_REVIEW -> "Needs your decision"
-                    ApprovalInboxSection.HISTORY -> "Decision history"
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("approval-inbox-heading")
-                    .semantics { heading() },
-                color = palette.ink,
-                style = MaterialTheme.typography.headlineMedium
-            )
+            TowerHeroPanel(
+                modifier = Modifier.testTag("approval-inbox-heading-panel"),
+                compact = true
+            ) {
+                Text(
+                    text = when (selectedSection) {
+                        ApprovalInboxSection.NEEDS_REVIEW -> "Needs your decision"
+                        ApprovalInboxSection.HISTORY -> "Decision history"
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("approval-inbox-heading")
+                        .semantics { heading() },
+                    color = palette.ink,
+                    style = MaterialTheme.typography.headlineSmall
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.xs))
+                Text(
+                    text = when (selectedSection) {
+                        ApprovalInboxSection.NEEDS_REVIEW -> "Review the exact request before deciding."
+                        ApprovalInboxSection.HISTORY -> "Recorded decisions and their delivery status."
+                    },
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
 
         item {
@@ -307,16 +322,17 @@ fun ApprovalInboxContent(
             }
         }
 
-        if (
-            !state.hasError &&
-            selectedSection == ApprovalInboxSection.NEEDS_REVIEW &&
-            (pendingCount > 0 || blocked.isNotEmpty())
-        ) item {
+        item {
             FlowRow(
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
-                verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
             ) {
-                if (pendingCount > 0) {
+                if (
+                    !state.hasError &&
+                    selectedSection == ApprovalInboxSection.NEEDS_REVIEW &&
+                    pendingCount > 0
+                ) {
                     StatusBadge(
                         "$pendingCount pending",
                         palette.caution,
@@ -325,18 +341,14 @@ fun ApprovalInboxContent(
                         modifier = Modifier.testTag("approval-inbox-pending-count")
                     )
                 }
-                if (blocked.isNotEmpty()) {
-                    StatusBadge("Status blocked ${blocked.size}", palette.danger, fontSize = MaterialTheme.typography.labelLarge.fontSize, uppercase = false)
+                if (!state.hasError && selectedSection == ApprovalInboxSection.NEEDS_REVIEW && blocked.isNotEmpty()) {
+                    StatusBadge(
+                        "Status blocked ${blocked.size}",
+                        palette.danger,
+                        fontSize = MaterialTheme.typography.labelLarge.fontSize,
+                        uppercase = false
+                    )
                 }
-            }
-        }
-
-        item {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
-                verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
-            ) {
                 ApprovalInboxSection.entries.forEach { section ->
                     FilterChip(
                         selected = selectedSection == section,
@@ -781,40 +793,49 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
 @Composable
 private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
     val palette = LocalTowerPalette.current
-    Text("Verified request", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
-    Text(
-        snapshot.title?.takeIf(String::isNotBlank) ?: "Untitled request",
-        color = palette.ink,
-        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
-        modifier = Modifier.testTag("approval-history-request-title")
-    )
-    Text(snapshot.summary?.takeIf(String::isNotBlank) ?: "Request summary unavailable", color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
-    val provider = listOfNotNull(
-        snapshot.sourceAgentName?.takeIf(String::isNotBlank) ?: snapshot.agentName?.takeIf(String::isNotBlank),
-        snapshot.sourceProvider?.takeIf(String::isNotBlank)
-    ).distinct().joinToString(" · ")
-    if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, style = MaterialTheme.typography.bodySmall)
-    val risk = snapshot.riskLevel.name.lowercase().replaceFirstChar { it.uppercase() }
-    StatusBadge(
-        if (snapshot.riskLevel == RiskLevel.UNKNOWN) "Risk unavailable" else "$risk risk",
-        color = if (snapshot.riskLevel == RiskLevel.UNKNOWN) palette.caution else palette.brand,
-        fontSize = MaterialTheme.typography.labelLarge.fontSize,
-        uppercase = false
-    )
-    snapshot.targetBranch?.takeIf(String::isNotBlank)?.let { branch ->
-        Text("Target branch · $branch", color = palette.inkMuted, style = MaterialTheme.typography.bodySmall)
-    }
-    if (snapshot.files.isNotEmpty()) {
-        Text("Affected files", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
-        snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, style = MaterialTheme.typography.bodySmall) }
-    }
-    if (snapshot.testPlan.isNotEmpty()) {
-        Text("Test plan", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
-        snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge) }
-    }
-    snapshot.rollbackPlan?.takeIf(String::isNotBlank)?.let { plan ->
-        Text("Rollback plan", color = palette.ink, style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.SemiBold))
-        Text(plan, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(palette.surfaceSubtle.copy(alpha = 0.48f))
+            .padding(TowerSpacing.md),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+    ) {
+        Text("Verified request", color = palette.ink, style = MaterialTheme.typography.labelLarge)
+        Text(
+            snapshot.title?.takeIf(String::isNotBlank) ?: "Untitled request",
+            color = palette.ink,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.testTag("approval-history-request-title")
+        )
+        Text(snapshot.summary?.takeIf(String::isNotBlank) ?: "Request summary unavailable", color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
+        val provider = listOfNotNull(
+            snapshot.sourceAgentName?.takeIf(String::isNotBlank) ?: snapshot.agentName?.takeIf(String::isNotBlank),
+            snapshot.sourceProvider?.takeIf(String::isNotBlank)
+        ).distinct().joinToString(" · ")
+        if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, style = MaterialTheme.typography.bodySmall)
+        val risk = snapshot.riskLevel.name.lowercase().replaceFirstChar { it.uppercase() }
+        StatusBadge(
+            if (snapshot.riskLevel == RiskLevel.UNKNOWN) "Risk unavailable" else "$risk risk",
+            color = if (snapshot.riskLevel == RiskLevel.UNKNOWN) palette.caution else palette.brand,
+            fontSize = MaterialTheme.typography.labelLarge.fontSize,
+            uppercase = false
+        )
+        snapshot.targetBranch?.takeIf(String::isNotBlank)?.let { branch ->
+            Text("Target branch · $branch", color = palette.inkMuted, style = MaterialTheme.typography.bodySmall)
+        }
+        if (snapshot.files.isNotEmpty()) {
+            Text("Affected files", color = palette.ink, style = MaterialTheme.typography.labelLarge)
+            snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, style = MaterialTheme.typography.bodySmall) }
+        }
+        if (snapshot.testPlan.isNotEmpty()) {
+            Text("Test plan", color = palette.ink, style = MaterialTheme.typography.labelLarge)
+            snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium) }
+        }
+        snapshot.rollbackPlan?.takeIf(String::isNotBlank)?.let { plan ->
+            Text("Rollback plan", color = palette.ink, style = MaterialTheme.typography.labelLarge)
+            Text(plan, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 

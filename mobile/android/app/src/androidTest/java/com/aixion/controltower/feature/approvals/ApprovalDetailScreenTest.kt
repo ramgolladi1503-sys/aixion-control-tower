@@ -689,11 +689,22 @@ class ApprovalDetailScreenTest {
     @Test
     fun ordinaryFileApprovalRetainsFileChangesSection() {
         val request = approval(ApprovalStatus.REQUESTED)
-        composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
+        composeRule.setContent {
+            Box(modifier = Modifier.width(400.dp).height(1200.dp)) {
+                ApprovalDetailContent(request, null, {}, {}, {})
+            }
+        }
 
         composeRule.onNodeWithTag("approval-exact-tool-request").assertDoesNotExist()
-        composeRule.onNodeWithTag("approval-file-changes").performScrollTo().assertExists()
-        composeRule.onNodeWithText("File changes").assertExists()
+        val actionSection = composeRule.onNodeWithTag("approval-file-changes").assertIsDisplayed()
+        val requestContext = composeRule.onNodeWithTag("approval-detail-request-context").assertIsDisplayed()
+        assertTrue(
+            "The requested file change should appear before secondary request metadata",
+            actionSection.fetchSemanticsNode().boundsInRoot.top <
+                requestContext.fetchSemanticsNode().boundsInRoot.top
+        )
+        composeRule.onNodeWithText("File changes").assertIsDisplayed()
+        composeRule.onNodeWithText("A detail screen state test.").assertExists()
         composeRule.onNodeWithText("+test").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
     }
@@ -803,7 +814,7 @@ class ApprovalDetailScreenTest {
     }
 
     @Test
-    fun longTitleCannotPushNormalViewportDecisionActionsOffScreenAndRemainsAccessible() {
+    fun longTitleAppearsOnceAndNormalViewportDecisionActionsRemainReachable() {
         val longTitle = "Review approval for " + "production deployment configuration ".repeat(18)
         composeRule.setContent {
             Box(modifier = Modifier.width(360.dp).height(800.dp).testTag("approval-long-title-viewport")) {
@@ -817,14 +828,15 @@ class ApprovalDetailScreenTest {
             }
         }
 
-        val repeatedTitle = composeRule.onNodeWithTag("approval-decision-identity-title")
-        repeatedTitle.assertIsDisplayed()
-        val maxTitleHeightPx = with(composeRule.density) { 52.dp.toPx() }
-        assertTrue(
-            "The repeated footer title should use at most two lines",
-            repeatedTitle.fetchSemanticsNode().boundsInRoot.height <= maxTitleHeightPx
-        )
-        composeRule.onNodeWithContentDescription("Approval title: $longTitle").assertExists()
+        composeRule.onNodeWithTag("approval-decision-identity-title").assertDoesNotExist()
+        composeRule.onAllNodesWithText(longTitle).assertCountEquals(1)
+        composeRule.onNodeWithText(longTitle).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(
+            "Approve request ail-test from Antigravity: $longTitle. Risk: low. Invocation: ail-test."
+        ).assertExists()
+        composeRule.onNodeWithContentDescription(
+            "Deny request ail-test from Antigravity: $longTitle. Risk: low. Invocation: ail-test."
+        ).assertExists()
         composeRule.onNodeWithText("Deny").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
 

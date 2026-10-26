@@ -2,6 +2,7 @@ package com.aixion.controltower.core.ui.theme
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,6 +15,16 @@ class TowerThemeContractTest {
         assertEquals(FontFamily.Serif, TowerTypography.headlineMedium.fontFamily)
         assertTrue("Body text should use the platform sans-serif default", TowerTypography.bodyLarge.fontFamily == null)
         assertTrue("Interactive labels should use the platform sans-serif default", TowerTypography.labelLarge.fontFamily == null)
+    }
+
+    @Test
+    fun supportingLabelStylesUseAReadableAscendingScale() {
+        assertEquals(12.sp, TowerTypography.labelSmall.fontSize)
+        assertEquals(13.sp, TowerTypography.labelMedium.fontSize)
+        assertEquals(14.sp, TowerTypography.labelLarge.fontSize)
+        assertEquals(16.sp, TowerTypography.labelSmall.lineHeight)
+        assertEquals(18.sp, TowerTypography.labelMedium.lineHeight)
+        assertEquals(20.sp, TowerTypography.labelLarge.lineHeight)
     }
 
     @Test

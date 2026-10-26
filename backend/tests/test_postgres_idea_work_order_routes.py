@@ -99,6 +99,47 @@ def test_idea_repository_without_request_retains_local_direct_behavior(
 @pytest.mark.parametrize(
     ("is_production", "postgres_auth_enabled"),
     [(True, False), (False, True)],
+    ids=["production-misconfiguration", "missing-postgres-runtime"],
+)
+def test_idea_repository_runtime_failure_is_retryable_and_never_uses_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        "app.application_repository_access.get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    class PoisonIdeaRepository:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"SQLite idea repository accessed: {name}")
+
+    monkeypatch.setattr(main, "idea_repository", PoisonIdeaRepository())
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=None,
+                postgres_repositories=None,
+                idea_repository=None,
+            )
+        )
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        main._idea_repository_for_route(request)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert raised.value.detail == "Idea storage is temporarily unavailable"
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
     ids=["production", "postgres-auth"],
 )
 def test_work_order_repository_without_request_fails_closed_before_sqlite(

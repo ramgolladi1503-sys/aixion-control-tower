@@ -4,6 +4,7 @@ import hashlib
 import secrets
 from datetime import timedelta
 
+import psycopg
 from fastapi import Header, HTTPException, Request, status
 
 from .agent_credential_models import (
@@ -341,18 +342,37 @@ def require_external_agent(
             detail="External agent authentication runtime is unavailable",
             headers={"Retry-After": "5"},
         )
-    repository = (
-        agent_auth_repository
-        if http_request is None
-        else external_agent_auth_repository_for_request(http_request)
-    )
-    result = repository.authenticate_and_consume(
-        agent_id=x_aixion_agent_id,
-        token=x_aixion_agent_token,
-        occurred_at=now_utc(),
-        window_seconds=int(AGENT_RATE_LIMIT_WINDOW.total_seconds()),
-        require_workspace=settings.is_production,
-    )
+    try:
+        repository = (
+            agent_auth_repository
+            if http_request is None
+            else external_agent_auth_repository_for_request(http_request)
+        )
+    except RuntimeError as error:
+        # A missing or mismatched lifespan binding is an unavailable
+        # authentication authority, not an invalid credential. Keep the
+        # response retryable and fail before the local credential map is read.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="External agent authentication runtime is unavailable",
+            headers={"Retry-After": "1"},
+        ) from error
+    try:
+        result = repository.authenticate_and_consume(
+            agent_id=x_aixion_agent_id,
+            token=x_aixion_agent_token,
+            occurred_at=now_utc(),
+            window_seconds=int(AGENT_RATE_LIMIT_WINDOW.total_seconds()),
+            require_workspace=settings.is_production,
+        )
+    except psycopg.Error as error:
+        # A selected PostgreSQL repository that cannot answer is an unavailable
+        # auth authority, never an invalid credential or reason to retry SQLite.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="External agent authentication runtime is unavailable",
+            headers={"Retry-After": "1"},
+        ) from error
     if isinstance(repository, SQLiteExternalAgentAuthRepository):
         if result.agent is not None:
             store.external_agents[result.agent.id] = result.agent

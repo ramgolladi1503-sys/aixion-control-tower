@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+import psycopg
 from fastapi import HTTPException, status
 
 from .application_repositories import ApplicationRepositories
@@ -424,10 +425,19 @@ def workspace_id_for_request(user: AuthUser, request: _RequestState | None) -> s
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="PostgreSQL workspace membership runtime is unavailable",
             ) from exc
-        return resolve_workspace_id_for_user(
-            user,
-            membership_repository=membership_repository,
-        )
+        try:
+            return resolve_workspace_id_for_user(
+                user,
+                membership_repository=membership_repository,
+            )
+        except psycopg.Error as exc:
+            # A selected PostgreSQL membership authority that cannot answer is
+            # unavailable, never a reason to resolve scope from local SQLite.
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgreSQL workspace membership runtime is unavailable",
+                headers={"Retry-After": "1"},
+            ) from exc
     if request is None or not getattr(settings, "auth_enabled", False):
         return resolve_workspace_id_for_user(user)
     return resolve_workspace_id_for_user(

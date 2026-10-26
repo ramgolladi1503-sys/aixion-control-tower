@@ -61,11 +61,11 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Codex").performScrollTo().assertExists()
         composeRule.onNodeWithText("Open Antigravity setup").assertExists()
         composeRule.onNodeWithText(
-            "Antigravity's local pre-tool hook is the supported approval path. Install it on the computer running this project, and keep that computer, session, and API reachable while a request waits."
+            "Use Antigravity's local pre-tool hook. Install it on the agent computer and keep the session and API reachable while requests wait."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("View setup only (unverified)").performScrollTo().assertExists()
         composeRule.onNodeWithText(
-            "Codex Desktop phone approval delivery and returning a decision to the same task are not verified. This setup page does not establish a live approval connection. Do not rely on it for live work."
+            "Native Codex phone delivery and same-task return are unverified. This setup does not establish a live approval connection."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Unverified · not a live connection").assertExists()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
@@ -142,7 +142,7 @@ class ConnectorsScreenTest {
         composeRule.onAllNodesWithText("Supported hook · setup required").assertCountEquals(1)
         composeRule.onNodeWithText("Earlier build tested").assertDoesNotExist()
         composeRule.onNodeWithText(
-            "Antigravity's local pre-tool hook is the supported approval path. Install it on the computer running this project, and keep that computer, session, and API reachable while a request waits."
+            "Use Antigravity's local pre-tool hook. Install it on the agent computer and keep the session and API reachable while requests wait."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Phone test passed locally").assertDoesNotExist()
         composeRule.onNodeWithText("Unverified · not a live connection").assertExists()

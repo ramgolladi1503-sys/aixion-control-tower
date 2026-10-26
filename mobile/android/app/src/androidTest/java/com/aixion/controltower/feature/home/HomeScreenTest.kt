@@ -190,7 +190,7 @@ class HomeScreenTest {
             connectionHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
         )
         composeRule.onNodeWithText(
-            "Set up Antigravity or Codex for the project on the computer where the agent runs. Keep that computer online while approvals are pending."
+            "Set up Antigravity or Codex on the computer running the project. Keep that computer available so a phone decision can return to the waiting task."
         ).assertExists()
         composeRule.onAllNodesWithText("manage the computers", substring = true).assertCountEquals(0)
         composeRule.onAllNodesWithText("Connected").assertCountEquals(0)

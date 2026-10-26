@@ -28,6 +28,30 @@ class TowerSurfaceDesignTest {
     val composeRule = createComposeRule()
 
     @Test
+    fun compactHeroReducesPaddingWithoutChangingItsCopy() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                Column(modifier = Modifier.width(360.dp)) {
+                    TowerHeroPanel(modifier = Modifier.testTag("standard-hero")) {
+                        Text("Needs your decision", modifier = Modifier.testTag("standard-hero-copy"))
+                    }
+                    TowerHeroPanel(compact = true, modifier = Modifier.testTag("compact-hero")) {
+                        Text("Needs your decision", modifier = Modifier.testTag("compact-hero-copy"))
+                    }
+                }
+            }
+        }
+
+        val standard = composeRule.onNodeWithTag("standard-hero").fetchSemanticsNode().boundsInRoot
+        val compact = composeRule.onNodeWithTag("compact-hero").fetchSemanticsNode().boundsInRoot
+        val standardCopy = composeRule.onNodeWithTag("standard-hero-copy").fetchSemanticsNode().boundsInRoot
+        val compactCopy = composeRule.onNodeWithTag("compact-hero-copy").fetchSemanticsNode().boundsInRoot
+
+        assertTrue("Compact hero keeps the same message", standardCopy.height == compactCopy.height)
+        assertTrue("Compact hero removes excess vertical padding", compact.height < standard.height)
+    }
+
+    @Test
     fun warmSurfacesContainWrappedLargeTextAtCompactWidth() {
         composeRule.setContent {
             ControlTowerTheme {

@@ -39,13 +39,13 @@ fun TowerPanel(
         modifier = modifier
             .fillMaxWidth()
             .shadow(
-                elevation = if (elevated) 2.dp else 0.dp,
+                elevation = if (elevated) 1.dp else 0.dp,
                 shape = shape,
                 clip = false
             )
             .clip(shape)
             .background(background)
-            .border(BorderStroke(1.dp, palette.line.copy(alpha = 0.46f)), shape)
+            .border(BorderStroke(1.dp, palette.line.copy(alpha = 0.34f)), shape)
             .padding(TowerSpacing.lg),
         content = content
     )
@@ -54,16 +54,17 @@ fun TowerPanel(
 @Composable
 fun TowerHeroPanel(
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
     val palette = LocalTowerPalette.current
-    val shape = RoundedCornerShape(TowerRadius.xl)
+    val shape = RoundedCornerShape(if (compact) TowerRadius.md else TowerRadius.lg)
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(palette.surfaceSubtle.copy(alpha = 0.52f))
-            .padding(TowerSpacing.xl),
+            .background(palette.surfaceSubtle.copy(alpha = 0.72f))
+            .padding(if (compact) TowerSpacing.lg else TowerSpacing.xl),
         content = content
     )
 }

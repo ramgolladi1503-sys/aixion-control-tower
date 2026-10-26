@@ -128,7 +128,9 @@ internal fun AuthFormViewport(content: @Composable () -> Unit) {
                         .widthIn(max = TowerLayout.authFormMaxWidth)
                         .fillMaxWidth()
                 ) {
-                    content()
+                    TowerPanel(elevated = true) {
+                        content()
+                    }
                 }
             }
         }
@@ -138,7 +140,7 @@ internal fun AuthFormViewport(content: @Composable () -> Unit) {
 @Composable
 internal fun AccountHero(state: AuthUiState) {
     val palette = LocalTowerPalette.current
-    TowerHeroPanel {
+    TowerHeroPanel(compact = true) {
         BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
             val showBrandMark = maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
             Row(verticalAlignment = Alignment.Top) {
@@ -158,7 +160,7 @@ internal fun AccountHero(state: AuthUiState) {
                         text = AuthUxCopy.heroTitle(state),
                         modifier = Modifier.semantics { heading() },
                         color = palette.ink,
-                        style = MaterialTheme.typography.headlineLarge
+                        style = MaterialTheme.typography.headlineMedium
                     )
                     Spacer(modifier = Modifier.height(TowerSpacing.sm))
                     Text(
@@ -186,13 +188,11 @@ internal fun AccountInfoPanel(
 ) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        StatusBadge(label = "Signed in", color = palette.positive, uppercase = false)
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             "Account information",
             modifier = Modifier.semantics { heading() },
             color = palette.ink,
-            style = MaterialTheme.typography.titleMedium
+            style = MaterialTheme.typography.titleLarge
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
