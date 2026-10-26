@@ -19,6 +19,7 @@ import pytest
 from psycopg import sql
 
 from app.models import AgentProvider, ApprovalStatus, AuthUser, UserRole
+from test_postgres_approval_route_flow import _post_reviewed_approval_decision
 
 pytest_plugins = ("test_postgres_approval_route_flow",)
 
@@ -303,9 +304,12 @@ def test_lifespan_owned_postgres_approval_survives_api_restart_and_resumes_once(
         # original API process is still serving. The database assertion below
         # is the durability boundary for the subsequent process restart.
         with httpx.Client(timeout=15) as client:
-            decision = client.post(
-                f"{first[2]}/approvals/{approval_id}/decision",
-                json={"decision": decision_value, "reason": "restart recovery E2E"},
+            decision = _post_reviewed_approval_decision(
+                client,
+                approval_id,
+                decision=decision_value,
+                reason="restart recovery E2E",
+                base_url=first[2],
             )
         assert decision.status_code == 200, decision.text
         expected_status = (

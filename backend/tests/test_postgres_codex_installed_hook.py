@@ -19,6 +19,7 @@ from app import agent_routes, main
 from app.agent_credential_models import AgentCredentialRecord
 from app.models import AgentProvider, AuditEvent, ApprovalStatus, new_id
 from test_postgres_approval_route_flow import (
+    _post_reviewed_approval_decision,
     _start_postgres_approval_http_api,
     _stop_postgres_approval_http_api,
 )
@@ -250,12 +251,12 @@ def test_installed_codex_permission_request_uses_postgres_for_exact_decision_and
         api_base_url = server[2]
 
         with httpx.Client(timeout=10) as client:
-            response = client.post(
-                f"{api_base_url}/approvals/{approval_id}/decision",
-                json={
-                    "decision": decision,
-                    "reason": "installed Codex PostgreSQL integration test",
-                },
+            response = _post_reviewed_approval_decision(
+                client,
+                approval_id,
+                decision=decision,
+                reason="installed Codex PostgreSQL integration test",
+                base_url=api_base_url,
             )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == expected_status
@@ -624,9 +625,12 @@ def test_installed_codex_callback_without_documented_call_id_cannot_reuse_approv
         lost_process = None
 
         with httpx.Client(timeout=10) as client:
-            decision = client.post(
-                f"{api_base_url}/approvals/{old_approval_id}/decision",
-                json={"decision": "approve", "reason": "Prior callback lost."},
+            decision = _post_reviewed_approval_decision(
+                client,
+                old_approval_id,
+                decision="approve",
+                reason="Prior callback lost.",
+                base_url=api_base_url,
             )
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == ApprovalStatus.APPROVED.value

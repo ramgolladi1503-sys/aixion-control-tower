@@ -193,6 +193,9 @@ def test_locked_workspace_snapshot_requires_transaction_and_is_workspace_scoped(
             ) is None
 
     with connect() as conn:
+        # The fixture's SET search_path starts a transaction; psycopg only
+        # allows autocommit to change while the connection is idle.
+        conn.rollback()
         conn.autocommit = True
         with pytest.raises(ValueError, match="require a transaction"):
             repository.get_for_workspace_for_update(

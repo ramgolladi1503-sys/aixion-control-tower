@@ -35,6 +35,7 @@ from app.postgres_database import run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
 from app.settings import get_settings
 from app.store import store
+from test_postgres_approval_route_flow import _post_reviewed_approval_decision
 
 
 @pytest.fixture
@@ -300,9 +301,11 @@ def test_lifespan_routes_antigravity_approval_to_postgres_inbox_without_sqlite_p
         assert inbox_rows[0]["entity_id"] == approval["id"]
         assert inbox_rows[0]["workspace_id"] == workspace.id
 
-        decision = client.post(
-            f"/approvals/{approval['id']}/decision",
-            json={"decision": "approve", "reason": "Reviewed on the phone"},
+        decision = _post_reviewed_approval_decision(
+            client,
+            approval["id"],
+            decision="approve",
+            reason="Reviewed on the phone",
         )
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == "APPROVED"

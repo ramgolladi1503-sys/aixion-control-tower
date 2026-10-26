@@ -24,6 +24,24 @@ BACKEND_ROOT = Path(__file__).parents[1]
 HOOK_PATH = REPOSITORY_ROOT / "integrations" / "antigravity" / "aixion_pre_tool_hook.py"
 
 
+def _reviewed_decision_payload(
+    client: httpx.Client,
+    *,
+    approval_id: str,
+    decision: str,
+    reason: str,
+) -> dict[str, str]:
+    reviewed = client.get(f"/approvals/{approval_id}")
+    assert reviewed.status_code == 200, reviewed.text
+    fingerprint = reviewed.json().get("review_fingerprint")
+    assert isinstance(fingerprint, str) and fingerprint
+    return {
+        "decision": decision,
+        "reason": reason,
+        "review_fingerprint": fingerprint,
+    }
+
+
 def _free_loopback_port() -> int:
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -402,10 +420,12 @@ def test_antigravity_pending_approval_survives_postgres_api_restart(
         with httpx.Client(base_url=base_url, timeout=5) as reviewer:
             decision = reviewer.post(
                 f"/approvals/{approval['id']}/decision",
-                json={
-                    "decision": decision_value,
-                    "reason": f"PostgreSQL restart {decision_value} integration test",
-                },
+                json=_reviewed_decision_payload(
+                    reviewer,
+                    approval_id=approval["id"],
+                    decision=decision_value,
+                    reason=f"PostgreSQL restart {decision_value} integration test",
+                ),
             )
         assert decision.status_code == 200, decision.text
         expected_status = "APPROVED" if decision_value == "approve" else "DENIED"

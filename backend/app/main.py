@@ -1562,8 +1562,18 @@ def decide_approval(
             if publish_compatibility_state:
                 store.approval_requests.pop(approval_id, None)
             raise HTTPException(status_code=404, detail="Approval request not found")
-        connector_tool_approval = _is_connector_tool_approval(durable_request)
-        expected_review_fingerprint = compute_approval_review_fingerprint(durable_request)
+        # Reconcile this approval from the repository before applying tenant,
+        # lifecycle, and transition checks. The process-local map may be stale
+        # after another request or process commits a timeout/decision.
+        if publish_compatibility_state:
+            store.approval_requests[approval_id] = durable_request
+        approval = _approval_for_user(approval_id, user, repository, http_request)
+
+        # Authorize the reviewer against the current workspace before returning
+        # any fingerprint-specific error. Otherwise a caller who guesses an
+        # approval ID can distinguish a native tool approval from an unknown ID.
+        connector_tool_approval = _is_connector_tool_approval(approval)
+        expected_review_fingerprint = compute_approval_review_fingerprint(approval)
         if connector_tool_approval and not payload.review_fingerprint:
             raise HTTPException(
                 status_code=409,
@@ -1577,12 +1587,6 @@ def decide_approval(
                 status_code=409,
                 detail="Approval changed after it was reviewed. Reload and review the current request before deciding.",
             )
-        # Reconcile this approval from the repository before applying tenant,
-        # lifecycle, and transition checks. The process-local map may be stale
-        # after another request or process commits a timeout/decision.
-        if publish_compatibility_state:
-            store.approval_requests[approval_id] = durable_request
-        approval = _approval_for_user(approval_id, user, repository, http_request)
 
         # `_approval_for_user` performs another durable read. Recheck against
         # that exact object before expiry can write audit/task/notification

@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 
 from app.models import AuthUser, Project, User, UserRole, Workspace
 from app.postgres_database import run_postgres_migrations
+from test_postgres_approval_route_flow import _post_reviewed_approval_decision
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 BACKEND_ROOT = Path(__file__).parents[1]
@@ -368,9 +369,11 @@ def _wait_for_approval(
 
 def _decide(base_url: str, approval_id: str) -> dict[str, Any]:
     with httpx.Client(base_url=base_url, timeout=5) as api:
-        response = api.post(
-            f"/approvals/{approval_id}/decision",
-            json={"decision": "approve", "reason": "PostgreSQL subprocess integration test"},
+        response = _post_reviewed_approval_decision(
+            api,
+            approval_id,
+            decision="approve",
+            reason="PostgreSQL subprocess integration test",
         )
     assert response.status_code == 200, response.text
     return response.json()
@@ -710,9 +713,11 @@ def test_identified_codex_permission_callback_returns_reviewer_denial_without_cl
 
         reason = "Denied by reviewer in PostgreSQL callback regression"
         with httpx.Client(base_url=base_url, timeout=5) as reviewer:
-            response = reviewer.post(
-                f"/approvals/{approval['id']}/decision",
-                json={"decision": "deny", "reason": reason},
+            response = _post_reviewed_approval_decision(
+                reviewer,
+                approval["id"],
+                decision="deny",
+                reason=reason,
             )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == "DENIED"
@@ -859,9 +864,11 @@ def test_codex_dead_hook_expired_lease_rejects_review_and_isolates_next_invocati
         assert before_decision_events == 0
 
         with httpx.Client(base_url=base_url, timeout=5) as reviewer:
-            rejected = reviewer.post(
-                f"/approvals/{old_approval['id']}/decision",
-                json={"decision": "approve", "reason": "stale Codex callback regression"},
+            rejected = _post_reviewed_approval_decision(
+                reviewer,
+                old_approval["id"],
+                decision="approve",
+                reason="stale Codex callback regression",
             )
         assert rejected.status_code == 409, rejected.text
 

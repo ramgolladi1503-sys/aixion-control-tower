@@ -252,13 +252,40 @@ def _race_postgres_approval_http_decision(
         main.app.dependency_overrides[main.ReviewerDependency.dependency] = lambda: user
         barrier.wait(timeout=20)
         with TestClient(main.app) as client:
-            response = client.post(
-                f"/approvals/{approval_id}/decision",
-                json={"decision": decision, "reason": "concurrent route test"},
+            response = _post_reviewed_approval_decision(
+                client,
+                approval_id,
+                decision=decision,
+                reason="concurrent route test",
             )
         results.put((response.status_code, response.text[:500]))
     except BaseException as error:
         results.put((0, f"{type(error).__name__}: {error}"))
+
+
+def _post_reviewed_approval_decision(
+    client,
+    approval_id: str,
+    *,
+    decision: str,
+    reason: str,
+    base_url: str | None = None,
+):
+    """Submit a decision using the exact snapshot fingerprint just reviewed."""
+    root = (base_url or "").rstrip("/")
+    approval_url = f"{root}/approvals/{approval_id}"
+    review = client.get(approval_url)
+    assert review.status_code == 200, review.text
+    fingerprint = review.json().get("review_fingerprint")
+    assert isinstance(fingerprint, str) and fingerprint
+    return client.post(
+        f"{approval_url}/decision",
+        json={
+            "decision": decision,
+            "reason": reason,
+            "review_fingerprint": fingerprint,
+        },
+    )
 
 
 def _retry_antigravity_hook_in_fresh_process(
@@ -618,9 +645,8 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     )
     assert mismatched_heartbeat.status_code == 409
 
-    decision = client.post(
-        f"/approvals/{approval['id']}/decision",
-        json={"decision": "approve"},
+    decision = _post_reviewed_approval_decision(
+        client, approval["id"], decision="approve", reason=""
     )
     assert decision.status_code == 200, decision.text
     assert decision.json()["status"] == "APPROVED"
@@ -629,9 +655,8 @@ def test_postgres_http_approval_flow_stays_in_bound_store(
     # A duplicated mobile tap may submit the same decision again after the
     # first response is delayed or lost. The route must report the terminal
     # conflict without writing a second decision audit or notification.
-    duplicate_decision = client.post(
-        f"/approvals/{approval['id']}/decision",
-        json={"decision": "approve"},
+    duplicate_decision = _post_reviewed_approval_decision(
+        client, approval["id"], decision="approve", reason=""
     )
     assert duplicate_decision.status_code == 409, duplicate_decision.text
     with connect() as connection:
@@ -917,9 +942,11 @@ def test_postgres_approval_history_reads_verified_decision_from_runtime_bundle(
     assert created.status_code == 200, created.text
 
     approval_id = created.json()["id"]
-    decision = client.post(
-        f"/approvals/{approval_id}/decision",
-        json={"decision": "approve", "reason": "Approved in PostgreSQL integration test."},
+    decision = _post_reviewed_approval_decision(
+        client,
+        approval_id,
+        decision="approve",
+        reason="Approved in PostgreSQL integration test.",
     )
     assert decision.status_code == 200, decision.text
     assert decision.json()["approved_payload_hash"]
@@ -1212,9 +1239,8 @@ def test_postgres_hook_denies_lost_consume_response_and_same_invocation_retry(
             approval = response.json()
             if state["approval_id"] is None:
                 state["approval_id"] = approval["id"]
-                decision = client.post(
-                    f"/approvals/{approval['id']}/decision",
-                    json={"decision": "approve"},
+                decision = _post_reviewed_approval_decision(
+                    client, approval["id"], decision="approve", reason=""
                 )
                 assert decision.status_code == 200, decision.text
             else:
@@ -1385,9 +1411,11 @@ def test_postgres_codex_hook_denies_lost_consume_response_and_same_invocation_re
             else:
                 assert approval["id"] == state["approval_id"]
             if state["approve_on_create"]:
-                decision = client.post(
-                    f"/approvals/{approval['id']}/decision",
-                    json={"decision": "approve", "reason": "Codex route integration test"},
+                decision = _post_reviewed_approval_decision(
+                    client,
+                    approval["id"],
+                    decision="approve",
+                    reason="Codex route integration test",
                 )
                 assert decision.status_code == 200, decision.text
                 state["approve_on_create"] = False
@@ -1549,9 +1577,11 @@ def test_postgres_same_invocation_recovers_after_fresh_api_process(
     invocation_id = created["source_invocation_id"]
     assert created["status"] == ApprovalStatus.PENDING_REVIEW
 
-    decision = client.post(
-        f"/approvals/{approval_id}/decision",
-        json={"decision": "approve", "reason": "approve after simulated host restart"},
+    decision = _post_reviewed_approval_decision(
+        client,
+        approval_id,
+        decision="approve",
+        reason="approve after simulated host restart",
     )
     assert decision.status_code == 200, decision.text
     assert decision.json()["status"] == ApprovalStatus.APPROVED
@@ -1657,9 +1687,8 @@ def test_postgres_http_consume_rejects_revocation_after_authentication(
     )
     assert created.status_code == 200, created.text
     approval_id = created.json()["id"]
-    decided = client.post(
-        f"/approvals/{approval_id}/decision",
-        json={"decision": "approve"},
+    decided = _post_reviewed_approval_decision(
+        client, approval_id, decision="approve", reason=""
     )
     assert decided.status_code == 200, decided.text
 
@@ -1818,9 +1847,8 @@ def test_postgres_competing_connector_claims_deliver_approved_invocation_once(
     )
     assert created.status_code == 200, created.text
     approval_id = created.json()["id"]
-    decision = client.post(
-        f"/approvals/{approval_id}/decision",
-        json={"decision": "approve"},
+    decision = _post_reviewed_approval_decision(
+        client, approval_id, decision="approve", reason=""
     )
     assert decision.status_code == 200, decision.text
     approved = repositories.approval_decisions.get(approval_id)
@@ -1951,12 +1979,12 @@ def test_postgres_antigravity_invocation_recovers_after_http_api_server_restart(
 
         second_server = start_server()
         with httpx.Client(timeout=10) as client:
-            decision = client.post(
-                f"{second_server[2]}/approvals/{approval_id}/decision",
-                json={
-                    "decision": "approve",
-                    "reason": "approve after actual API server restart",
-                },
+            decision = _post_reviewed_approval_decision(
+                client,
+                approval_id,
+                decision="approve",
+                reason="approve after actual API server restart",
+                base_url=second_server[2],
             )
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == ApprovalStatus.APPROVED
@@ -2113,9 +2141,12 @@ def test_postgres_antigravity_hook_process_stays_pending_across_api_restart(
         assert restarted_server[2] == first_server[2]
         assert hook_process.poll() is None
         with httpx.Client(timeout=10) as reviewer_client:
-            decision = reviewer_client.post(
-                f"{restarted_server[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "approve after API restart"},
+            decision = _post_reviewed_approval_decision(
+                reviewer_client,
+                approval_id,
+                decision="approve",
+                reason="approve after API restart",
+                base_url=restarted_server[2],
             )
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == ApprovalStatus.APPROVED

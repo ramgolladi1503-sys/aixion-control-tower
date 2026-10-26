@@ -29,6 +29,25 @@ HOOK_PATH = (
 )
 
 
+def _reviewed_decision_payload(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    approval_id: str,
+    decision: str,
+    reason: str,
+) -> dict[str, str]:
+    reviewed = client.get(f"{base_url}/approvals/{approval_id}")
+    assert reviewed.status_code == 200, reviewed.text
+    fingerprint = reviewed.json().get("review_fingerprint")
+    assert isinstance(fingerprint, str) and fingerprint
+    return {
+        "decision": decision,
+        "reason": reason,
+        "review_fingerprint": fingerprint,
+    }
+
+
 def _start_hook_process(payload: dict, environment: dict[str, str]) -> subprocess.Popen:
     process = subprocess.Popen(
         [sys.executable, str(HOOK_PATH)],
@@ -137,10 +156,13 @@ def test_postgres_expired_invocation_lease_blocks_resumed_antigravity_hook_proce
         with httpx.Client(timeout=5) as client:
             decision = client.post(
                 f"{api[2]}/approvals/{approval_id}/decision",
-                json={
-                    "decision": "approve",
-                    "reason": "Decision after the original connector process died",
-                },
+                json=_reviewed_decision_payload(
+                    client,
+                    base_url=api[2],
+                    approval_id=approval_id,
+                    decision="approve",
+                    reason="Decision after the original connector process died",
+                ),
             )
         assert decision.status_code == 409, decision.text
         assert "changed before this decision committed" in decision.json()["detail"]

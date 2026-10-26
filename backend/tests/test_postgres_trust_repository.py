@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import multiprocessing
+import hashlib
 import os
 import queue as queue_module
 import uuid
@@ -28,6 +29,7 @@ from app.agent_run_models import (
 )
 from app.agent_run_creation import build_agent_run_creation_records
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.agent_credential_models import AgentCredentialRecord
 from app.application_repositories import ApplicationRepositories
 from app.approval_integrity import compute_approval_payload_hash
 from app.models import (
@@ -35,6 +37,7 @@ from app.models import (
     AgentProvider,
     ApprovalRequest,
     ApprovalStatus,
+    AuditEvent,
     AuthUser,
     ExternalAgent,
     FileChange,
@@ -2803,22 +2806,29 @@ def test_postgres_external_agent_action_consumption_is_durable_and_workspace_bou
         allowed_actions=[AgentAction.EXECUTE_GITHUB],
         workspace_id=workspace_id,
         created_by_user_id=user.id,
+        secret_hash=hashlib.sha256(b"trust-action-test-token").hexdigest(),
     )
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO external_agents(agent_id,workspace_id,created_by_user_id,"
-            "provider,auth_type,enabled,secret_hash,payload) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
-            (
-                agent.id,
-                workspace_id,
-                user.id,
-                agent.provider.value,
-                agent.auth_type.value,
-                agent.enabled,
-                agent.secret_hash,
-                Jsonb(agent.model_dump(mode="json")),
-            ),
-        )
+    credential = AgentCredentialRecord(agent_id=agent.id)
+    repositories = request.app.state.postgres_repositories
+    repositories.external_agent_auth.create(
+        agent=agent,
+        credential=credential,
+        audit_event=AuditEvent(
+            event_type="agent.registered",
+            actor=user.id,
+            entity_id=agent.id,
+            workspace_id=workspace_id,
+            details={
+                "provider": agent.provider,
+                "display_name": agent.display_name,
+                "auth_type": agent.auth_type,
+                "allowed_project_ids": agent.allowed_project_ids,
+                "allowed_repositories": agent.allowed_repositories,
+                "allowed_actions": agent.allowed_actions,
+            },
+        ),
+    )
+    request.headers = {"x-aixion-agent-token": "trust-action-test-token"}
     lease = create_lease(
         payload.model_copy(update={"agent_id": agent.id}), user, request
     )
@@ -2834,7 +2844,6 @@ def test_postgres_external_agent_action_consumption_is_durable_and_workspace_bou
         paths=["src/approved.py"],
         estimated_runtime_seconds=10,
     )
-    repositories = request.app.state.postgres_repositories
     with connect() as conn:
         with conn.transaction():
             decision, _ = repositories.trust.evaluate_proposed_action(

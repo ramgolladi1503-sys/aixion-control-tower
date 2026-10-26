@@ -33,6 +33,25 @@ HOOK_PATH = (
 )
 
 
+def _reviewed_decision_payload(
+    client: httpx.Client,
+    *,
+    base_url: str,
+    approval_id: str,
+    decision: str,
+    reason: str,
+) -> dict[str, str]:
+    reviewed = client.get(f"{base_url}/approvals/{approval_id}")
+    assert reviewed.status_code == 200, reviewed.text
+    fingerprint = reviewed.json().get("review_fingerprint")
+    assert isinstance(fingerprint, str) and fingerprint
+    return {
+        "decision": decision,
+        "reason": reason,
+        "review_fingerprint": fingerprint,
+    }
+
+
 @pytest.mark.parametrize(
     ("decision", "expected_hook_decision", "expected_status", "expected_claims"),
     [
@@ -178,10 +197,13 @@ def test_installed_antigravity_command_uses_postgres_for_phone_decision(
         with httpx.Client(timeout=10) as client:
             response = client.post(
                 f"{api_base_url}/approvals/{approval_id}/decision",
-                json={
-                    "decision": decision,
-                    "reason": "installed Antigravity PostgreSQL integration test",
-                },
+                json=_reviewed_decision_payload(
+                    client,
+                    base_url=api_base_url,
+                    approval_id=approval_id,
+                    decision=decision,
+                    reason="installed Antigravity PostgreSQL integration test",
+                ),
             )
         assert response.status_code == 200, response.text
         assert response.json()["status"] == expected_status
@@ -547,18 +569,34 @@ def test_installed_antigravity_command_keeps_live_invocation_across_postgres_api
         # interval. This forces its live decision read to observe connection
         # failure, rather than merely restarting the API between polls.
         time.sleep(3)
-        assert process.poll() is None, "hook must remain pending through API unavailability"
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            pytest.fail(
+                "Hook exited while the API was unavailable "
+                f"(exit={process.returncode}, stdout={stdout!r}, stderr={stderr!r})"
+            )
         restart_port_value = httpx.URL(first_server[2]).port
         assert restart_port_value is not None
         restart_port = int(restart_port_value)
         restarted_server = start_server(port=restart_port)
         assert restarted_server[2] == first_server[2]
-        assert process.poll() is None
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            pytest.fail(
+                "Hook exited before the reviewer decision after API restart "
+                f"(exit={process.returncode}, stdout={stdout!r}, stderr={stderr!r})"
+            )
 
         with httpx.Client(timeout=10) as reviewer_client:
             decision = reviewer_client.post(
                 f"{restarted_server[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "approve after API process restart"},
+                json=_reviewed_decision_payload(
+                    reviewer_client,
+                    base_url=restarted_server[2],
+                    approval_id=approval_id,
+                    decision="approve",
+                    reason="approve after API process restart",
+                ),
             )
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == "APPROVED"
@@ -750,7 +788,13 @@ def test_installed_antigravity_hook_relaunch_recovers_exact_postgres_invocation_
         with httpx.Client(timeout=10) as reviewer_client:
             decision = reviewer_client.post(
                 f"{server[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "approve after hook process relaunch"},
+                json=_reviewed_decision_payload(
+                    reviewer_client,
+                    base_url=server[2],
+                    approval_id=approval_id,
+                    decision="approve",
+                    reason="approve after hook process relaunch",
+                ),
             )
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == "APPROVED"
@@ -966,7 +1010,13 @@ def test_installed_antigravity_expired_invocation_lease_rejects_reviewer_decisio
         with httpx.Client(timeout=10) as reviewer_client:
             decision = reviewer_client.post(
                 f"{server[2]}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "attempt after invocation lease expiry"},
+                json=_reviewed_decision_payload(
+                    reviewer_client,
+                    base_url=server[2],
+                    approval_id=approval_id,
+                    decision="approve",
+                    reason="attempt after invocation lease expiry",
+                ),
             )
         assert decision.status_code == 409, decision.text
 
@@ -1088,7 +1138,13 @@ def test_installed_antigravity_expired_invocation_lease_rejects_reviewer_decisio
         with httpx.Client(timeout=10) as reviewer_client:
             fresh_decision = reviewer_client.post(
                 f"{server[2]}/approvals/{fresh_approval_id}/decision",
-                json={"decision": "approve", "reason": "approve fresh invocation only"},
+                json=_reviewed_decision_payload(
+                    reviewer_client,
+                    base_url=server[2],
+                    approval_id=fresh_approval_id,
+                    decision="approve",
+                    reason="approve fresh invocation only",
+                ),
             )
         assert fresh_decision.status_code == 200, fresh_decision.text
         fresh_stdout, fresh_stderr = hook_process.communicate(timeout=20)
@@ -1517,7 +1573,13 @@ def test_installed_antigravity_hook_denies_when_postgres_consume_response_is_los
         with httpx.Client(timeout=10) as reviewer_client:
             decision = reviewer_client.post(
                 f"{api_base_url}/approvals/{approval_id}/decision",
-                json={"decision": "approve", "reason": "lost consume response test"},
+                json=_reviewed_decision_payload(
+                    reviewer_client,
+                    base_url=api_base_url,
+                    approval_id=approval_id,
+                    decision="approve",
+                    reason="lost consume response test",
+                ),
             )
         assert decision.status_code == 200, decision.text
         assert decision.json()["status"] == "APPROVED"

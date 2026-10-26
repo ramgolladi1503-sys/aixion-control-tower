@@ -1,6 +1,7 @@
 package com.aixion.controltower.core.ui.components
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -12,6 +13,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -64,8 +66,8 @@ class ApprovalCardPreviewTest {
             }
         }
 
-        composeRule.onNodeWithTag("approval-card-summary-preview").assertExists()
-        composeRule.onNodeWithTag("approval-card-preview-content").assertExists()
+        composeRule.onNodeWithTag("approval-card-summary-preview", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithTag("approval-card-preview-content", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithText("Request overview · preview only").assertExists()
         composeRule.onNodeWithText("Open full request before deciding").assertExists()
         composeRule.onNodeWithText("Review long request").assertExists()
@@ -203,38 +205,41 @@ class ApprovalCardPreviewTest {
         val otherLongSummary = List(32) { index ->
             "action $index describes the requested change in detail"
         }.joinToString(" ")
-        val firstHeight = renderCardHeight(longSummary)
-        val secondHeight = renderCardHeight(otherLongSummary)
+        val approvals = listOf(longSummary, otherLongSummary).map { summary ->
+            ApprovalSummary(
+                id = "approval_summary_height",
+                projectName = "Project",
+                title = "Review request",
+                summary = summary,
+                agentName = "Antigravity",
+                targetBranch = "main",
+                status = ApprovalStatus.REQUESTED,
+                risk = RiskLevel.MEDIUM,
+                files = emptyList(),
+                requiredActions = emptyList(),
+                testPlan = emptyList(),
+                rollbackPlan = "Revert"
+            )
+        }
 
-        assertTrue(
-            "Long summaries should be capped by the bounded inbox preview",
-            kotlin.math.abs(firstHeight - secondHeight) < 1f
-        )
-    }
-
-    private fun renderCardHeight(summary: String): Float {
-        val approval = ApprovalSummary(
-            id = "approval_summary_height",
-            projectName = "Project",
-            title = "Review request",
-            summary = summary,
-            agentName = "Antigravity",
-            targetBranch = "main",
-            status = ApprovalStatus.REQUESTED,
-            risk = RiskLevel.MEDIUM,
-            files = emptyList(),
-            requiredActions = emptyList(),
-            testPlan = emptyList(),
-            rollbackPlan = "Revert"
-        )
         composeRule.setContent {
             ControlTowerTheme {
-                Box(modifier = Modifier.width(280.dp)) {
-                    ApprovalCard(approval = approval)
+                Column {
+                    approvals.forEach { approval ->
+                        Box(modifier = Modifier.width(280.dp)) {
+                            ApprovalCard(approval = approval)
+                        }
+                    }
                 }
             }
         }
-        return composeRule.onNodeWithTag("approval-card").fetchSemanticsNode().boundsInRoot.height
+
+        val cardNodes = composeRule.onAllNodesWithTag("approval-card").fetchSemanticsNodes()
+        assertEquals("Both approval cards should be rendered", 2, cardNodes.size)
+        assertTrue(
+            "Long summaries should be capped by the bounded inbox preview",
+            kotlin.math.abs(cardNodes[0].boundsInRoot.height - cardNodes[1].boundsInRoot.height) < 1f
+        )
     }
 
     @Test
@@ -326,45 +331,37 @@ class ApprovalCardPreviewTest {
 
         composeRule.setContent {
             ControlTowerTheme {
-                ApprovalCard(
-                    approval = baseApproval.copy(
-                        files = listOf(
-                            FileChangeSummary(
-                                path = "antigravity://tool/run_command",
-                                changeType = "tool_call",
-                                diff = "{\"command\":\"git status\"}",
-                                risk = RiskLevel.LOW
+                Column {
+                    ApprovalCard(
+                        approval = baseApproval.copy(
+                            files = listOf(
+                                FileChangeSummary(
+                                    path = "antigravity://tool/run_command",
+                                    changeType = "tool_call",
+                                    diff = "{\"command\":\"git status\"}",
+                                    risk = RiskLevel.LOW
+                                )
                             )
                         )
                     )
-                )
+                    ApprovalCard(
+                        approval = baseApproval.copy(
+                            files = listOf(FileChangeSummary("README.md", "modify", "", RiskLevel.LOW))
+                        )
+                    )
+                    ApprovalCard(
+                        approval = baseApproval.copy(
+                            files = listOf(
+                                FileChangeSummary("README.md", "modify", "", RiskLevel.LOW),
+                                FileChangeSummary("src/Main.kt", "modify", "", RiskLevel.LOW)
+                            )
+                        )
+                    )
+                }
             }
         }
         composeRule.onNodeWithText("Tool request").assertExists()
-
-        composeRule.setContent {
-            ControlTowerTheme {
-                ApprovalCard(
-                    approval = baseApproval.copy(
-                        files = listOf(FileChangeSummary("README.md", "modify", "", RiskLevel.LOW))
-                    )
-                )
-            }
-        }
         composeRule.onNodeWithText("1 file").assertExists()
-
-        composeRule.setContent {
-            ControlTowerTheme {
-                ApprovalCard(
-                    approval = baseApproval.copy(
-                        files = listOf(
-                            FileChangeSummary("README.md", "modify", "", RiskLevel.LOW),
-                            FileChangeSummary("src/Main.kt", "modify", "", RiskLevel.LOW)
-                        )
-                    )
-                )
-            }
-        }
         composeRule.onNodeWithText("2 files").assertExists()
     }
 }
