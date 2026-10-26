@@ -122,7 +122,7 @@ def dispatch_one_postgres_push(
 
     accepted = 0
     errors: list[str] = []
-    invalid_devices: list[tuple[str, str]] = []
+    invalid_devices: list[tuple[str, str, str, str, str]] = []
     skipped = False
     try:
         devices = repository.list_device_targets(notification)
@@ -165,7 +165,23 @@ def dispatch_one_postgres_push(
                 else:
                     errors.append(error)
                     if error == "FCM_TOKEN_UNREGISTERED":
-                        invalid_devices.append((device.id, device.token))
+                        # Fence cleanup to the registration that received this
+                        # response; the row may be rebound while provider I/O runs.
+                        if not device.user_id or not device.workspace_id or not device.session_id:
+                            logger.warning(
+                                "PostgreSQL push target has incomplete owner scope notification_id=%s",
+                                notification.id,
+                            )
+                            continue
+                        invalid_devices.append(
+                            (
+                                device.id,
+                                device.token,
+                                device.user_id,
+                                device.workspace_id,
+                                device.session_id,
+                            )
+                        )
             except Exception:
                 # Isolate provider failures per device so one broken request cannot
                 # prevent attempts to later recipients. Persist only the bounded

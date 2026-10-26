@@ -162,14 +162,15 @@ class PostgresNotificationOutboxRepository:
         next_attempt_at: datetime | None,
         completed_at: datetime | None = None,
         next_attempt_delay_seconds: int | None = None,
-        invalid_devices: tuple[tuple[str, str], ...] = (),
+        invalid_devices: tuple[tuple[str, str, str, str, str], ...] = (),
     ) -> Notification | None:
         """Persist one claim result and matching dead-token cleanup atomically.
 
-        ``invalid_devices`` contains device ID/token pairs reported unregistered
-        by FCM during this attempt. Cleanup is conditional on the same active
-        outbox claim, and each device is removed only if it still has that
-        token. A stale claim performs neither mutation.
+        ``invalid_devices`` contains device ID, token, owner, workspace, and
+        session snapshots reported unregistered by FCM during this attempt.
+        Cleanup is conditional on the same active outbox claim and exact
+        registration snapshot. A stale claim or concurrently reassigned device
+        performs neither mutation.
         """
         if expected_attempts < 1:
             raise ValueError("expected_attempts must be positive")
@@ -199,11 +200,17 @@ class PostgresNotificationOutboxRepository:
         if any(
             not device_id
             or not token
+            or not user_id
+            or not workspace_id
+            or not session_id
             or len(device_id) > 128
             or len(token) > 4096
-            for device_id, token in invalid_devices
+            or len(user_id) > 128
+            or len(workspace_id) > 128
+            or len(session_id) > 128
+            for device_id, token, user_id, workspace_id, session_id in invalid_devices
         ):
-            raise ValueError("Invalid-device cleanup requires bounded device and token values")
+            raise ValueError("Invalid-device cleanup requires a bounded registration snapshot")
 
         with self._connect() as conn:
             current_time = self._operation_time(conn, current_time)
@@ -223,12 +230,17 @@ class PostgresNotificationOutboxRepository:
                 return None
             notification = Notification.model_validate(row[0])
             self._validate_row(notification, row)
-            for device_id, token in dict.fromkeys(invalid_devices):
+            for device_id, token, user_id, workspace_id, session_id in dict.fromkeys(
+                invalid_devices
+            ):
                 self._invalidate_device_if_token_matches(
                     conn,
                     device_id=device_id,
                     token=token,
                     occurred_at=current_time,
+                    expected_user_id=user_id,
+                    expected_workspace_id=workspace_id,
+                    expected_session_id=session_id,
                 )
             updated = notification.model_copy(
                 update={
@@ -631,12 +643,28 @@ class PostgresNotificationOutboxRepository:
         device_id: str,
         token: str,
         occurred_at: datetime,
+        expected_user_id: str | None = None,
+        expected_workspace_id: str | None = None,
+        expected_session_id: str | None = None,
     ) -> bool:
-        row = conn.execute(
-            "DELETE FROM device_registrations WHERE device_id=%s AND token=%s "
-            "RETURNING payload, device_id, user_id, workspace_id, token, platform, app_version, session_id",
-            (device_id, token),
-        ).fetchone()
+        expected_scope = (expected_user_id, expected_workspace_id, expected_session_id)
+        if any(value is not None for value in expected_scope) and not all(
+            value for value in expected_scope
+        ):
+            raise ValueError("Invalid-device cleanup requires a complete expected owner scope")
+        if all(value is not None for value in expected_scope):
+            row = conn.execute(
+                "DELETE FROM device_registrations WHERE device_id=%s AND token=%s "
+                "AND user_id=%s AND workspace_id=%s AND session_id=%s "
+                "RETURNING payload, device_id, user_id, workspace_id, token, platform, app_version, session_id",
+                (device_id, token, expected_user_id, expected_workspace_id, expected_session_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "DELETE FROM device_registrations WHERE device_id=%s AND token=%s "
+                "RETURNING payload, device_id, user_id, workspace_id, token, platform, app_version, session_id",
+                (device_id, token),
+            ).fetchone()
         if row is None:
             return False
         device = DeviceRegistration.model_validate(row[0])

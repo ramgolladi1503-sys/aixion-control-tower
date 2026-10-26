@@ -316,7 +316,15 @@ def test_claim_uses_attempt_fencing_and_rejects_stale_worker_result(
         push_error=None,
         next_attempt_at=None,
         completed_at=second_started_at + timedelta(seconds=1),
-        invalid_devices=((device.id, "dead-token"),),
+        invalid_devices=(
+            (
+                device.id,
+                device.token,
+                device.user_id,
+                device.workspace_id,
+                device.session_id,
+            ),
+        ),
     )
     assert stale_result is None
     with outbox_repository[1]() as conn:
@@ -868,3 +876,61 @@ def test_postgres_dispatcher_keeps_replaced_token_when_old_token_is_rejected(
             "AND event_type='notification.device_token_invalidated'",
             (device.id,),
         ).fetchone() is None
+
+
+def test_postgres_dispatcher_does_not_delete_same_token_reassigned_across_workspaces(
+    outbox_repository: tuple[PostgresNotificationOutboxRepository, Callable[[], Connection]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, connect = outbox_repository
+    old_workspace, _, notification = _seed_notification(connect, user_id="push-owner-old")
+    new_workspace = Workspace(
+        id=f"workspace_{uuid.uuid4().hex}",
+        name="Reassigned device workspace",
+        owner_user_id="push-owner-new",
+    )
+    token = f"reassigned-token-{uuid.uuid4().hex}"
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+            (new_workspace.id, Jsonb(new_workspace.model_dump(mode="json"))),
+        )
+        new_owner = _insert_user(conn, new_workspace, "push-owner-new")
+        new_session = _insert_session(conn, new_owner.id)
+        device = _insert_device(conn, old_workspace, "push-owner-old", token)
+    monkeypatch.setenv("AIXION_PUSH_DISPATCH_ENABLED", "true")
+
+    def sender(**_: object) -> str:
+        # Re-register the same token under another workspace while the old
+        # workspace's provider request is still in flight.
+        reassigned = repository.register_device(
+            device.model_copy(
+                update={
+                    "user_id": new_owner.id,
+                    "workspace_id": new_workspace.id,
+                    "session_id": new_session.id,
+                    "updated_at": now_utc(),
+                }
+            )
+        )
+        assert reassigned.device.id == device.id
+        return "FCM_TOKEN_UNREGISTERED"
+
+    dispatch_one_postgres_push(repository, now=now_utc(), sender=sender)
+
+    stored_notification = _persisted_notification(connect, notification.id)
+    assert stored_notification.push_status == "FAILED"
+    with connect() as conn:
+        registration = conn.execute(
+            "SELECT user_id,workspace_id,token,session_id FROM device_registrations "
+            "WHERE device_id=%s",
+            (device.id,),
+        ).fetchone()
+        assert registration == (new_owner.id, new_workspace.id, token, new_session.id)
+        events = conn.execute(
+            "SELECT workspace_id,event_type FROM audit_events "
+            "WHERE entity_type='device_registration' AND entity_id=%s "
+            "ORDER BY event_type",
+            (device.id,),
+        ).fetchall()
+        assert events == [(new_workspace.id, "notification.device_reassigned")]
