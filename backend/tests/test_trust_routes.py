@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import os
+from contextlib import contextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 os.environ.setdefault("AIXION_PROFILE", "test")
@@ -16,8 +20,11 @@ from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.approval_integrity import compute_approval_payload_hash
 from app.main import app
 from app.models import (
+    AgentAction,
+    AgentAuthType,
     AuthUser,
     AgentProvider,
+    ExternalAgent,
     ApprovalRequest,
     ApprovalStatus,
     FileChange,
@@ -25,15 +32,19 @@ from app.models import (
     RiskAssessment,
     RiskLevel,
     UserRole,
+    now_utc,
 )
+from app.agent_credential_models import AgentCredentialRecord
 from app.store import store
 from app.trust_models import (
+    ActionConsumption,
     CapabilityActionType,
     ProposedAction,
     ReviewerAttestationCreate,
     ReviewerAttestationDecision,
 )
 from app.trust_routes import (
+    consume_external_agent_action,
     create_attestation,
     evaluate_manual_action,
     get_exact_action_decision,
@@ -167,6 +178,121 @@ def test_flight_recorder_fails_closed_for_incomplete_postgres_bundle(monkeypatch
 
     assert error.value.status_code == 503
     assert "PostgreSQL" in error.value.detail
+
+
+def test_postgres_agent_action_consume_rechecks_grants_after_preflight(monkeypatch) -> None:
+    raw_token = "aixion_agent_route_race_test"
+    stale_agent = ExternalAgent(
+        provider=AgentProvider.CODEX,
+        display_name="Gateway agent",
+        auth_type=AgentAuthType.API_KEY,
+        allowed_actions=[AgentAction.EXECUTE_GITHUB],
+        workspace_id="workspace-route-race",
+        secret_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+    )
+    current_agent = stale_agent.model_copy(deep=True)
+    credential = AgentCredentialRecord(
+        agent_id=stale_agent.id,
+        token_expires_at=now_utc() + timedelta(hours=1),
+    )
+    action = ProposedAction(
+        provider=AgentProvider.CODEX,
+        agent_id=stale_agent.id,
+        workspace_id=stale_agent.workspace_id,
+        project_id="project-route-race",
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository="owner/repo",
+        command="python -m compileall",
+    )
+
+    class Connection:
+        autocommit = False
+
+        def transaction(self):
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+    connection = Connection()
+
+    @contextmanager
+    def connect():
+        yield connection
+
+    class TrustRepository:
+        consumed = False
+
+        @staticmethod
+        def task_actions_enabled():
+            return False
+
+        @staticmethod
+        def get_proposed_action(_conn, action_id, workspace_id, *, for_update=False):
+            assert action_id == action.id
+            assert workspace_id == stale_agent.workspace_id
+            return action
+
+        def consume_effective_action(self, *_args, **_kwargs):
+            self.consumed = True
+            return ActionConsumption()
+
+    class ExternalAuthRepository:
+        def get_for_workspace_for_update(self, _conn, agent_id, *, workspace_id):
+            assert agent_id == stale_agent.id
+            assert workspace_id == stale_agent.workspace_id
+            return current_agent, credential
+
+    trust = TrustRepository()
+    external_auth = ExternalAuthRepository()
+    repositories = SimpleNamespace(trust=trust, external_agent_auth=external_auth)
+    runtime = SimpleNamespace(connect=connect)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/trust/gateway/actions/{action.id}/consume",
+        "headers": [(b"x-aixion-agent-token", raw_token.encode())],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("test", 80),
+        "client": ("test", 1),
+        "http_version": "1.1",
+    }
+    scope["app"] = SimpleNamespace(
+        state=SimpleNamespace(postgres_repositories=repositories)
+    )
+    request = Request(scope)
+
+    monkeypatch.setattr("app.trust_routes._postgres_action_runtime", lambda _request: runtime)
+    monkeypatch.setattr(
+        "app.trust_routes.external_agent_auth_repository_for_request",
+        lambda _request: external_auth,
+    )
+    checks = 0
+
+    def assert_current_agent_can(agent, _action, **_kwargs):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            # Simulate an owner restricting the agent after auth preflight and
+            # before the consume transaction reloads its locked snapshot.
+            current_agent.allowed_actions = []
+            return
+        if AgentAction.EXECUTE_GITHUB not in agent.allowed_actions:
+            raise HTTPException(status_code=403, detail="Agent grant was revoked")
+
+    monkeypatch.setattr("app.trust_routes.assert_agent_can", assert_current_agent_can)
+
+    with pytest.raises(HTTPException) as error:
+        consume_external_agent_action(
+            action.id,
+            ActionConsumption(),
+            agent=stale_agent,
+            request=request,
+        )
+
+    assert error.value.status_code == 403
+    assert checks == 2
+    assert trust.consumed is False
 
 
 def test_lease_gateway_consumption_scorecard_and_flight_recorder_routes() -> None:

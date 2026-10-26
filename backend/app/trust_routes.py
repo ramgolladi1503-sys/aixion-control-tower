@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 from datetime import timedelta
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from .agent_auth import assert_agent_can, require_external_agent
+from .agent_token_lifetime import effective_agent_token_expiry
 from .approval_decisions import approval_decision_repository
 from .approval_repository import SQLiteApprovalDecisionRepository
 from .application_repository_access import (
@@ -16,7 +18,7 @@ from .application_repository_access import (
     workspace_id_for_request,
 )
 from .auth import require_maintainer, require_owner, require_reviewer
-from .models import AgentAction, AuthUser, ExternalAgent, now_utc
+from .models import AgentAction, AgentAuthType, AuthUser, ExternalAgent, now_utc
 from .store import store
 from .trust_action_authorization import (
     ActionAuthorizationConflict,
@@ -917,7 +919,47 @@ def consume_external_agent_action(
             )
             with runtime.connect() as conn:
                 with conn.transaction():
+                    current_auth = external_auth.get_for_workspace_for_update(
+                        conn, agent.id, workspace_id=agent.workspace_id
+                    )
+                    if current_auth is None:
+                        raise HTTPException(
+                            status_code=401, detail="External agent is not active"
+                        )
+                    current_agent, current_credential = current_auth
+                    presented_token = request.headers.get("x-aixion-agent-token", "")
+                    presented_hash = hashlib.sha256(
+                        presented_token.encode("utf-8")
+                    ).hexdigest()
+                    if (
+                        current_agent.id != agent.id
+                        or current_agent.workspace_id != agent.workspace_id
+                        or not current_agent.enabled
+                        or current_agent.auth_type == AgentAuthType.MANUAL
+                        or not current_agent.secret_hash
+                        or current_credential.token_revoked_at is not None
+                        or effective_agent_token_expiry(current_credential) <= now_utc()
+                        or not hmac.compare_digest(current_agent.secret_hash, presented_hash)
+                    ):
+                        raise HTTPException(
+                            status_code=401, detail="External agent is not active"
+                        )
                     if action.task_id:
+                        locked_action, _task, _approval = (
+                            repositories.trust.lock_task_action_binding(
+                                conn,
+                                action_id=action_id,
+                                workspace_id=agent.workspace_id,
+                                task_id=action.task_id,
+                            )
+                        )
+                        assert_agent_can(
+                            current_agent,
+                            AgentAction.EXECUTE_GITHUB,
+                            project_id=locked_action.project_id,
+                            repository_full_name=locked_action.repository,
+                            http_request=request,
+                        )
                         return repositories.trust.consume_task_action(
                             conn,
                             action_id=action_id,
@@ -926,7 +968,7 @@ def consume_external_agent_action(
                             consumption=payload,
                             actor=f"agent:{agent.id}",
                             now=now_utc(),
-                            expected_agent_id=agent.id,
+                            expected_agent_id=current_agent.id,
                         )
                     locked_action = repositories.trust.get_proposed_action(
                         conn, action_id, agent.workspace_id, for_update=True
@@ -947,12 +989,19 @@ def consume_external_agent_action(
                             status_code=409,
                             detail="Run-linked action consumption requires the durable AgentRun execution transaction",
                         )
+                    assert_agent_can(
+                        current_agent,
+                        AgentAction.EXECUTE_GITHUB,
+                        project_id=locked_action.project_id,
+                        repository_full_name=locked_action.repository,
+                        http_request=request,
+                    )
                     return repositories.trust.consume_effective_action(
                         conn,
                         action_id=action_id,
                         workspace_id=agent.workspace_id,
                         consumption=payload,
-                        actor=f"agent:{agent.id}",
+                        actor=f"agent:{current_agent.id}",
                         now=now_utc(),
                     )
         except (ValueError, TrustControlConflict, PostgresTrustRepositoryConflict) as error:

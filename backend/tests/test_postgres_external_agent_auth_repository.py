@@ -176,6 +176,30 @@ def test_create_get_and_workspace_list_round_trip(agent_repository) -> None:
     assert repository.list_for_workspace("another-workspace") == []
 
 
+def test_locked_workspace_snapshot_requires_transaction_and_is_workspace_scoped(
+    agent_repository,
+) -> None:
+    repository, connect, workspace_id, owner_id = agent_repository
+    agent, credential, _ = _agent_and_credential(workspace_id, owner_id)
+    _create_agent(repository, agent, credential)
+
+    with connect() as conn:
+        with conn.transaction():
+            assert repository.get_for_workspace_for_update(
+                conn, agent.id, workspace_id=workspace_id
+            ) == (agent, credential)
+            assert repository.get_for_workspace_for_update(
+                conn, agent.id, workspace_id="another-workspace"
+            ) is None
+
+    with connect() as conn:
+        conn.autocommit = True
+        with pytest.raises(ValueError, match="require a transaction"):
+            repository.get_for_workspace_for_update(
+                conn, agent.id, workspace_id=workspace_id
+            )
+
+
 def test_create_commits_agent_credential_and_registration_audit_together(agent_repository) -> None:
     repository, connect, workspace_id, owner_id = agent_repository
     agent, credential, _ = _agent_and_credential(workspace_id, owner_id)

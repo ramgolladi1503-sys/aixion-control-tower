@@ -158,6 +158,49 @@ class PostgresExternalAgentAuthRepository:
             raise ValueError("External-agent reads require a workspace")
         return self._get(agent_id, workspace_id=workspace_id)
 
+    def get_for_workspace_for_update(
+        self,
+        conn: Connection,
+        agent_id: str,
+        *,
+        workspace_id: str,
+    ) -> tuple[ExternalAgent, AgentCredentialRecord] | None:
+        """Lock and reload an agent and credential inside the caller's transaction.
+
+        Authentication, token rotation, and revocation acquire the agent row
+        before its credential row. Keep this same order so a caller can hold
+        the authorization snapshot stable through a protected database effect.
+        """
+        if not workspace_id:
+            raise ValueError("External-agent reads require a workspace")
+        if conn.autocommit:
+            raise ValueError("External-agent authorization locks require a transaction")
+        agent_row = conn.execute(
+            "SELECT payload,agent_id,workspace_id,provider,auth_type,enabled,secret_hash "
+            "FROM external_agents WHERE agent_id=%s AND workspace_id=%s FOR UPDATE",
+            (agent_id, workspace_id),
+        ).fetchone()
+        if agent_row is None:
+            return None
+        credential_row = conn.execute(
+            "SELECT payload,credential_id,agent_id,workspace_id,token_expires_at,token_revoked_at,"
+            "token_rotated_at,last_used_at,failed_auth_count,rate_limit_per_minute,"
+            "rate_limit_window_started_at,rate_limit_request_count,created_at,updated_at "
+            "FROM external_agent_credentials WHERE agent_id=%s AND workspace_id=%s FOR UPDATE",
+            (agent_id, workspace_id),
+        ).fetchone()
+        if credential_row is None:
+            raise PostgresExternalAgentIntegrityError(
+                "External agent is missing its credential record"
+            )
+        agent = self._agent_from_row(agent_row)
+        credential = self._credential_from_row(credential_row)
+        if agent.id != credential.agent_id or agent.workspace_id != credential_row[3]:
+            raise PostgresExternalAgentIntegrityError(
+                "External-agent credential scope does not match"
+            )
+        return agent, credential
+
     def _get(
         self, agent_id: str, *, workspace_id: str | None
     ) -> tuple[ExternalAgent, AgentCredentialRecord] | None:
