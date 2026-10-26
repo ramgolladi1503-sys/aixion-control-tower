@@ -81,8 +81,8 @@ internal val TowerTypography = Typography(
     bodyMedium = TextStyle(fontSize = 15.sp, lineHeight = 22.sp),
     bodySmall = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
     labelLarge = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
-    labelMedium = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium),
-    labelSmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
+    labelMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
+    labelSmall = TextStyle(fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium)
 )
 
 val TowerCodeTextStyle = TextStyle(
