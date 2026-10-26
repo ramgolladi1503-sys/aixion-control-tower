@@ -118,6 +118,66 @@ def test_auth_route_fails_closed_when_postgres_rate_limit_runtime_is_missing(
     assert "runtime is unavailable" in error.value.detail
 
 
+def test_production_rate_limit_service_fails_before_sqlite_when_repository_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "app.auth_rate_limits.get_settings",
+        lambda: SimpleNamespace(
+            is_production=True,
+            postgres_auth_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        store,
+        "_connect",
+        lambda *_args, **_kwargs: pytest.fail("production rate limit opened SQLite"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL auth rate-limit repository is required",
+    ):
+        consume_auth_rate_limit(
+            bucket="auth.login.ip",
+            identifier="192.0.2.10",
+            limit=4,
+            window_seconds=60,
+            now_epoch=120,
+        )
+
+
+def test_production_auth_route_fails_retryably_without_rate_limit_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "app.auth_routes.get_settings",
+        lambda: SimpleNamespace(
+            is_production=True,
+            postgres_auth_enabled=False,
+            postgres_auth_rate_limits_enabled=False,
+            auth_rate_limit_window_seconds=60,
+        ),
+    )
+    monkeypatch.setattr(
+        store,
+        "_connect",
+        lambda *_args, **_kwargs: pytest.fail("production route opened SQLite"),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    with pytest.raises(HTTPException) as error:
+        _limit(request, "auth.login.ip", "192.0.2.11", 4)
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+
+
 def test_auth_route_uses_rate_limit_repository_from_lifespan_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -154,6 +214,45 @@ def test_auth_route_uses_rate_limit_repository_from_lifespan_bundle(
 
     assert len(repository.calls) == 1
     assert repository.calls[0]["limit"] == 4
+
+
+def test_production_auth_route_selects_rate_limit_repository_when_flags_are_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    class FakeRepository:
+        calls: list[dict[str, object]] = []
+
+        def consume(self, **kwargs: object) -> int | None:
+            self.calls.append(kwargs)
+            return None
+
+    repository = FakeRepository()
+    repositories = object.__new__(ApplicationRepositories)
+    object.__setattr__(repositories, "auth_rate_limits", repository)
+    monkeypatch.setattr(
+        "app.auth_routes.get_settings",
+        lambda: SimpleNamespace(
+            is_production=True,
+            postgres_auth_rate_limits_enabled=False,
+            postgres_auth_enabled=False,
+            auth_rate_limit_window_seconds=60,
+        ),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=SimpleNamespace(repositories=repositories),
+                postgres_repositories=repositories,
+            ),
+        ),
+    )
+
+    _limit(request, "auth.login.ip", "192.0.2.4", 5)
+
+    assert len(repository.calls) == 1
+    assert repository.calls[0]["limit"] == 5
 
 
 def test_login_endpoint_returns_retry_after_after_ip_limit(monkeypatch: pytest.MonkeyPatch) -> None:

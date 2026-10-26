@@ -60,7 +60,8 @@ def consume_auth_rate_limit(
         raise ValueError("Rate-limit bounds must be positive")
     settings = get_settings()
     if (
-        settings.postgres_auth_enabled
+        getattr(settings, "is_production", False)
+        or settings.postgres_auth_enabled
         or settings.postgres_auth_rate_limits_enabled
     ) and postgres_repository is None:
         raise RuntimeError(

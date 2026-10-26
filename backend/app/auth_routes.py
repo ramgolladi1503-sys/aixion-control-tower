@@ -71,7 +71,11 @@ def _request_ip(request: Request) -> str:
 def _limit(request: Request, bucket: str, identifier: str, maximum: int) -> None:
     settings = get_settings()
     postgres_repository = None
-    if settings.postgres_auth_rate_limits_enabled or settings.postgres_auth_enabled:
+    if (
+        getattr(settings, "is_production", False)
+        or settings.postgres_auth_rate_limits_enabled
+        or settings.postgres_auth_enabled
+    ):
         try:
             postgres_repository = application_repositories_for_request(request).auth_rate_limits
         except RuntimeError as error:
