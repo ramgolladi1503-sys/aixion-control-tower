@@ -7,6 +7,7 @@ import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
+import java.time.Instant
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -30,7 +31,9 @@ class ApprovalDecisionTargetSizeTest {
             files = listOf(FileChangeSummary("README.md", "update", "Summary", RiskLevel.LOW)),
             requiredActions = emptyList(),
             testPlan = listOf("Run focused UI tests"),
-            rollbackPlan = "Revert this test change"
+            rollbackPlan = "Revert this test change",
+            sourceProvider = "MANUAL",
+            expiresAt = Instant.now().plusSeconds(10 * 60).toString()
         )
 
         composeRule.setContent {
@@ -45,8 +48,8 @@ class ApprovalDecisionTargetSizeTest {
         }
 
         listOf(
-            "Deny request ize-test from Unknown: Review target size. Risk: low.",
-            "Approve request ize-test from Unknown: Review target size. Risk: low."
+            "Deny request ize-test from Manual: Review target size. Risk: low.",
+            "Approve request ize-test from Manual: Review target size. Risk: low."
         ).forEach { actionLabel ->
             val heightInDp = composeRule.onNodeWithContentDescription(actionLabel)
                 .fetchSemanticsNode()

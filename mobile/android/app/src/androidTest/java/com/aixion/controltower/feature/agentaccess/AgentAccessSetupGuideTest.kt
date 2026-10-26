@@ -123,8 +123,8 @@ class AgentAccessSetupGuideTest {
     @Test
     fun setupProgressTitleAndBadgeStackWithinNarrowLargeTextViewport() {
         composeRule.setContent {
-            Box(modifier = Modifier.width(240.dp)) {
-                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(240.dp)) {
                     ControlTowerTheme {
                         AgentAccessSetupGuide(AgentAccessUiState(loading = false, projectsLoaded = true))
                     }
@@ -140,20 +140,18 @@ class AgentAccessSetupGuideTest {
             "Setup progress should be available through screen-reader heading navigation",
             title.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
         )
-        composeRule.runOnIdle {
-            val titleBounds = title.fetchSemanticsNode().boundsInRoot
-            val badgeBounds = badge.fetchSemanticsNode().boundsInRoot
-            assertTrue("Setup title must fit the viewport", titleBounds.left >= 0f && titleBounds.right <= 240f)
-            assertTrue("Setup status must fit the viewport", badgeBounds.left >= 0f && badgeBounds.right <= 240f)
-            assertTrue("Setup status must sit below the title at large text", badgeBounds.top >= titleBounds.bottom)
-        }
+        val titleBounds = title.fetchSemanticsNode().boundsInRoot
+        val badgeBounds = badge.fetchSemanticsNode().boundsInRoot
+        assertTrue("Setup title must fit the viewport", titleBounds.left >= 0f && titleBounds.right <= 240f)
+        assertTrue("Setup status must fit the viewport", badgeBounds.left >= 0f && badgeBounds.right <= 240f)
+        assertTrue("Setup status must sit below the title at large text", badgeBounds.top >= titleBounds.bottom)
     }
 
     @Test
     fun agentAccessHeroUsesSharedHierarchyAndWrapsAtLargeFontScale() {
         composeRule.setContent {
-            Box(modifier = Modifier.width(240.dp)) {
-                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(240.dp)) {
                     ControlTowerTheme {
                         AgentAccessHero(provider = "ANTIGRAVITY", isLoading = false)
                     }
@@ -171,13 +169,11 @@ class AgentAccessSetupGuideTest {
             "The hero title should be exposed as a heading",
             title.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
         )
-        composeRule.runOnIdle {
-            val titleBounds = title.fetchSemanticsNode().boundsInRoot
-            val bodyBounds = body.fetchSemanticsNode().boundsInRoot
-            assertTrue("The title must wrap within the narrow viewport", titleBounds.left >= 0f && titleBounds.right <= 240f)
-            assertTrue("The setup guidance must wrap within the narrow viewport", bodyBounds.left >= 0f && bodyBounds.right <= 240f)
-            assertTrue("Large text should remain multi-line", bodyBounds.height > titleBounds.height)
-        }
+        val titleBounds = title.fetchSemanticsNode().boundsInRoot
+        val bodyBounds = body.fetchSemanticsNode().boundsInRoot
+        assertTrue("The title must wrap within the narrow viewport", titleBounds.left >= 0f && titleBounds.right <= 240f)
+        assertTrue("The setup guidance must wrap within the narrow viewport", bodyBounds.left >= 0f && bodyBounds.right <= 240f)
+        assertTrue("Large text should remain multi-line", bodyBounds.height > titleBounds.height)
     }
 
     @Test
@@ -204,8 +200,8 @@ class AgentAccessSetupGuideTest {
             token_present = true
         )
         composeRule.setContent {
-            Box(modifier = Modifier.width(240.dp)) {
-                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                Box(modifier = Modifier.width(240.dp)) {
                     ControlTowerTheme {
                         AgentCard(
                             agentSummary = AgentAccessSummary(agent, credential),
@@ -229,12 +225,10 @@ class AgentAccessSetupGuideTest {
             "Disclosure should announce its collapsed state",
             disclosure.fetchSemanticsNode().config[SemanticsProperties.StateDescription] == "Collapsed"
         )
-        composeRule.runOnIdle {
-            assertTrue(
-                "Access detail disclosure should stay within a narrow large-text viewport",
-                disclosure.fetchSemanticsNode().boundsInRoot.right <= 240f
-            )
-        }
+        assertTrue(
+            "Access detail disclosure should stay within a narrow large-text viewport",
+            disclosure.fetchSemanticsNode().boundsInRoot.right <= 240f
+        )
 
         disclosure.performClick()
         val detailsHeading = composeRule.onNodeWithText("Exact access details")

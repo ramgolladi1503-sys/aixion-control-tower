@@ -28,9 +28,10 @@ class TowerContentFrameTest {
         }
 
         val bounds = composeRule.onNodeWithTag("framed-content").fetchSemanticsNode().boundsInRoot
+        val expectedWidthPx = with(composeRule.density) { 240.dp.toPx() }
         composeRule.runOnIdle {
             assertEquals("Compact content should start at the viewport edge", 0f, bounds.left, 1f)
-            assertEquals("Compact content should fill the available width", 240f, bounds.width, 1f)
+            assertEquals("Compact content should fill the available width", expectedWidthPx, bounds.width, 1f)
         }
     }
 }

@@ -2,7 +2,7 @@ package com.aixion.controltower.feature.approvals
 
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.LiveRegionMode
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -46,7 +46,7 @@ class ApprovalDetailExpiryCountdownTest {
             ApprovalDetailContent(request, null, {}, {}, {})
         }
 
-        composeRule.onNodeWithTag("approval-decision-expiry-countdown")
+        composeRule.onNodeWithContentDescription("Approval expires in about 6 hours.")
             .assertExists()
             .assertContentDescriptionEquals("Approval expires in about 6 hours.")
     }
@@ -75,7 +75,7 @@ class ApprovalDetailExpiryCountdownTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
-        val countdown = composeRule.onNodeWithTag("approval-decision-expiry-countdown")
+        val countdown = composeRule.onNodeWithContentDescription("Approval expires in less than five minutes.")
         countdown.assertExists()
         val semantics = countdown.fetchSemanticsNode().config
         assertEquals(LiveRegionMode.Polite, semantics[SemanticsProperties.LiveRegion])
