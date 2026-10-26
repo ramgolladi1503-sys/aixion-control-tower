@@ -130,6 +130,28 @@ def test_certifier_rejects_naive_database_timestamp(evidence: dict) -> None:
         _verify(changed)
 
 
+@pytest.mark.parametrize(
+    ("timestamp_path", "message"),
+    [
+        (("approval", "created_at"), "Approval creation time is in the future"),
+        (("decision_events", 0, "created_at"), "Approval decision time is in the future"),
+        (("claim", "claimed_at"), "Delivery claim time is in the future"),
+        (("claim_events", 0, "created_at"), "Delivery claim audit time is in the future"),
+    ],
+)
+def test_certifier_rejects_future_evidence_timestamps(
+    evidence: dict, timestamp_path: tuple[str | int, ...], message: str
+) -> None:
+    changed = copy.deepcopy(evidence)
+    target = changed
+    for key in timestamp_path[:-1]:
+        target = target[key]
+    target[timestamp_path[-1]] = datetime.now(timezone.utc) + timedelta(minutes=1)
+
+    with pytest.raises(EvidenceError, match=message):
+        _verify(changed)
+
+
 def test_certifier_rejects_delivery_claim_that_predates_decision(evidence: dict) -> None:
     changed = copy.deepcopy(evidence)
     changed["claim"]["claimed_at"] = changed["decision_events"][0]["created_at"] - timedelta(seconds=1)

@@ -88,6 +88,15 @@ def _verify_evidence_freshness(
             claim_event.get("created_at"), label="Delivery claim audit time"
         ),
     }
+    timestamp_labels = {
+        "approval_created_at": "Approval creation time",
+        "decision_created_at": "Approval decision time",
+        "claim_created_at": "Delivery claim time",
+        "claim_event_created_at": "Delivery claim audit time",
+    }
+    for key, timestamp in timestamps.items():
+        if timestamp > current:
+            raise EvidenceError(f"{timestamp_labels[key]} is in the future")
     if timestamps["approval_created_at"] < start:
         raise EvidenceError("Approval predates this certification run")
     if timestamps["decision_created_at"] < timestamps["approval_created_at"]:
