@@ -33,6 +33,7 @@ import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.components.formatApprovalExpiry
+import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import java.time.Instant
 import org.junit.Rule
 import org.junit.Assert.assertEquals
@@ -42,6 +43,41 @@ import org.junit.Test
 class ApprovalDetailScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun expandedApprovalDetailKeepsReviewAndDecisionGateCenteredAndReadable() {
+        composeRule.setContent {
+            Box(
+                modifier = Modifier
+                    .width(900.dp)
+                    .height(1_200.dp)
+                    .testTag("approval-detail-wide-viewport")
+            ) {
+                ControlTowerTheme {
+                    ApprovalDetailContent(
+                        approval = approval(ApprovalStatus.REQUESTED),
+                        lastActionMessage = null,
+                        onOpenDiff = {},
+                        onApprove = {},
+                        onReject = {}
+                    )
+                }
+            }
+        }
+
+        val viewport = composeRule.onNodeWithTag("approval-detail-wide-viewport")
+            .fetchSemanticsNode().boundsInRoot
+        val review = composeRule.onNodeWithTag("approval-detail-list")
+            .fetchSemanticsNode().boundsInRoot
+        val decisionGate = composeRule.onNodeWithTag("approval-decision-panel")
+            .fetchSemanticsNode().boundsInRoot
+        val maxContentWidth = with(composeRule.density) { 720.dp.toPx() }
+
+        assertTrue("Expanded review content should be capped at 720dp", review.width <= maxContentWidth + 1f)
+        assertTrue("The review column should be centered", kotlin.math.abs(review.center.x - viewport.center.x) <= 1f)
+        assertTrue("The decision gate should share the readable content width", decisionGate.width <= maxContentWidth + 1f)
+        assertTrue("The decision gate should remain centered", kotlin.math.abs(decisionGate.center.x - viewport.center.x) <= 1f)
+    }
 
     @Test
     fun approvalTitleIsExposedAsAHeadingForScreenReaderNavigation() {

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -75,6 +76,7 @@ import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
 import com.aixion.controltower.core.ui.components.formatApprovalExpiry
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
+import com.aixion.controltower.core.ui.theme.TowerLayout
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
@@ -310,7 +312,12 @@ fun ApprovalDetailContent(
             maxWidth = maxWidth,
             fontScale = LocalDensity.current.fontScale
         )
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = TowerLayout.expandedContentMaxWidth)
+                .fillMaxSize()
+                .align(Alignment.TopCenter)
+        ) {
             LazyColumn(
                 state = requestListState,
                 modifier = Modifier

@@ -26,6 +26,7 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasText
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
@@ -59,6 +60,31 @@ import java.time.Instant
 class ApprovalInboxScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun expandedInboxContentIsCenteredAndCappedToReadableWidth() {
+        composeRule.setContent {
+            Box(
+                modifier = Modifier
+                    .width(900.dp)
+                    .height(1_000.dp)
+                    .testTag("approval-inbox-wide-viewport")
+            ) {
+                ControlTowerTheme {
+                    ApprovalInboxContent(state = ApprovalsUiState(loading = false))
+                }
+            }
+        }
+
+        val viewport = composeRule.onNodeWithTag("approval-inbox-wide-viewport")
+            .fetchSemanticsNode().boundsInRoot
+        val list = composeRule.onNodeWithTag("approval-inbox-list")
+            .fetchSemanticsNode().boundsInRoot
+        val maxContentWidth = with(composeRule.density) { 720.dp.toPx() }
+
+        assertTrue("Expanded inbox content should be capped at 720dp", list.width <= maxContentWidth + 1f)
+        assertTrue("Expanded inbox content should remain centered", kotlin.math.abs(list.center.x - viewport.center.x) <= 1f)
+    }
 
     @Test
     fun inboxUsesASectionSpecificAccessibleHeading() {

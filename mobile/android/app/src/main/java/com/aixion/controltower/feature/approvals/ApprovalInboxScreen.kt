@@ -52,6 +52,7 @@ import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
+import com.aixion.controltower.core.ui.theme.TowerContentFrame
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 import java.text.DateFormat
 import java.time.Instant
@@ -194,13 +195,19 @@ fun ApprovalInboxContent(
         }
     }
 
-    LazyColumn(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(palette.canvas)
-            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)
     ) {
+        TowerContentFrame {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("approval-inbox-list")
+                    .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)
+            ) {
         item {
             TowerHeroPanel(
                 modifier = Modifier.testTag("approval-inbox-heading-panel"),
@@ -635,6 +642,8 @@ fun ApprovalInboxContent(
                         )
                     }
                 }
+            }
+        }
             }
         }
     }
