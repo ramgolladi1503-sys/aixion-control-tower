@@ -3,9 +3,9 @@
 **Snapshot:** 2026-10-27
 **Repository:** `ramgolladi1503-sys/aixion-control-tower`
 **PR:** [#204](https://github.com/ramgolladi1503-sys/aixion-control-tower/pull/204), open, draft, unmerged
-**Exact PR head:** `cdcec1610f3e76670da1b00672ca36ee79f59966`
+**Verified source baseline:** `cdcec1610f3e76670da1b00672ca36ee79f59966`; the Android timeout update was committed and pushed afterward as `aabf1303131ce97870b92b30086f79ce98866137`.
 **Worktree:** `/Volumes/TradeBotFast/AixionControlTower/goal-workstreams/android-design`
-**Working-tree changes:** Three uncommitted Android API-timeout files; they are not included in the PR head or its CI checks.
+**Working-tree changes:** Clean after the Android timeout and acceptance-matrix commits.
 **Scope:** `docs/PRE_BILLING_WORK_LOCK.md`. No billing, cloud changes, production data, deployment, or merge.
 
 Statuses apply to the complete exit gate shown. A passing focused test proves only its named subgate.
@@ -23,7 +23,7 @@ Statuses apply to the complete exit gate shown. A passing focused test proves on
 
 ## Exact-head CI evidence
 
-At PR head `cdcec1610f3e76670da1b00672ca36ee79f59966`, all reported checks are green. These checks cover the committed PR head only; the uncommitted Android timeout changes are not covered by CI. Green CI does not close Slice 1's runtime authority gap or satisfy real provider/device acceptance gates.
+At prior PR head `cdcec1610f3e76670da1b00672ca36ee79f59966`, all reported checks were green. CI for the pushed Android timeout change at `aabf1303131ce97870b92b30086f79ce98866137` was queued when this snapshot was written. The local build and unit-test result are recorded separately above. Green CI does not close Slice 1's runtime authority gap or satisfy real provider/device acceptance gates.
 
 ## Immediate critical path
 
