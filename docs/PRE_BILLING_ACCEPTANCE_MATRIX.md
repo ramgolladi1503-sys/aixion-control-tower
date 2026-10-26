@@ -2,9 +2,9 @@
 
 **Snapshot:** 2026-10-26
 **Repository:** `ramgolladi1503-sys/aixion-control-tower`, PR #204
-**PR head:** `c9b780246383c5fe86f07ffd6181fd651d1cad59`
+**PR head:** `ed3996b6bd7e295d8353e337b5598cf0d3208086`
 **PR state:** open, draft, unmerged
-**Worktree:** `/Volumes/TradeBotFast/AixionControlTower/goal-workstreams/android-design` at the PR head; importer and Android follow-ups are uncommitted and under validation
+**Worktree:** `/Volumes/TradeBotFast/AixionControlTower/goal-workstreams/android-design` at the PR head; importer and Android follow-ups are committed, with exact-head CI pending
 **Scope:** `docs/PRE_BILLING_WORK_LOCK.md`; no billing, cloud, production-data, deployment, or merge action.
 
 Statuses describe the complete slice gate, not a subset of its tests. `PASS` means the full stated gate is supported by evidence; `UNVERIFIED` means sufficient evidence is absent; `BLOCKED` means a prerequisite prevents valid completion; `FAIL` means current evidence contradicts the gate.
@@ -23,9 +23,9 @@ Statuses describe the complete slice gate, not a subset of its tests. `PASS` mea
 ## Exact-head evidence
 
 - PR #204: [GitHub pull request](https://github.com/ramgolladi1503-sys/aixion-control-tower/pull/204)
-- Source head: `c9b780246383c5fe86f07ffd6181fd651d1cad59`
+- Source head: `ed3996b6bd7e295d8353e337b5598cf0d3208086`
 - PR state: open, draft, unmerged; merge state reported `CLEAN`.
-- Exact-head PR checks: all eight reported checks completed successfully (Android CI build/test, Android debug APK, backend test/validation, staging Terraform validation without cloud access, Mission Control container validation, and expected production-startup refusal).
+- Previous head `c9b7802` had eight successful checks. Checks for `ed3996b` had not started when this matrix was updated; do not treat the previous checks as validation of the new commit.
 - Emulator capture: signed-out debug app screen only; installed APK source SHA was not matched, and no authenticated approval was created or decided.
 - CI success and a rendered login screen do not establish production readiness or native provider continuation.
 
