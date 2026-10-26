@@ -786,12 +786,13 @@ class ApprovalDetailScreenTest {
         val identity = composeRule.onNodeWithTag("approval-decision-identity")
         identity.assertIsDisplayed()
         assertEquals(
-            listOf("Decision context: ANTIGRAVITY, request ail-test, risk high."),
+            listOf("Review request. Decision context: ANTIGRAVITY, request ail-test, risk high."),
             identity.fetchSemanticsNode().config[SemanticsProperties.ContentDescription]
         )
         composeRule.onNodeWithText("Request ail-test").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-decision-identity-title")
-            .assertTextContains("Review request")
+        composeRule.onNodeWithTag("approval-decision-identity-title", useUnmergedTree = true)
+            .assertTextContains("Review request · Antigravity", substring = true)
+        identity.performClick()
         val viewport = composeRule.onNodeWithTag("approval-short-viewport").fetchSemanticsNode().boundsInRoot
         val panel = composeRule.onNodeWithTag("approval-decision-panel").fetchSemanticsNode().boundsInRoot
         val deny = composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot
@@ -808,8 +809,8 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
         identity.assertIsDisplayed()
         composeRule.onNodeWithText("Request ail-test").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-decision-identity-title")
-            .assertTextContains("Review request")
+        composeRule.onNodeWithTag("approval-decision-identity-title", useUnmergedTree = true)
+            .assertTextContains("Review request", substring = true)
         assertEquals(deny.top, composeRule.onNodeWithText("Deny").fetchSemanticsNode().boundsInRoot.top)
         assertEquals(approve.top, composeRule.onNodeWithText("Approve request").fetchSemanticsNode().boundsInRoot.top)
     }
@@ -949,6 +950,7 @@ class ApprovalDetailScreenTest {
             id = "approval-command-987654321",
             title = "Run the requested production shell command",
             sourceProvider = "CODEX",
+            risk = RiskLevel.HIGH,
             files = listOf(
                 FileChangeSummary(
                     path = "codex://tool/shell",
@@ -966,15 +968,11 @@ class ApprovalDetailScreenTest {
             }
         }
 
-        val compactTitle = composeRule.onNodeWithTag("approval-decision-identity-title")
-        compactTitle.assertTextContains("Review request")
+        val compactTitle = composeRule.onNodeWithTag("approval-decision-identity-title", useUnmergedTree = true)
         compactTitle.assertIsDisplayed()
         composeRule.onNodeWithContentDescription(
             "Review request: Run the requested production shell command from Codex, request 87654321, risk high."
         ).assertExists()
-        compactTitle.performClick()
-        composeRule.onNodeWithText("Action: Run the requested production shell command").assertIsDisplayed()
-        composeRule.onNodeWithText("Close").performClick()
         composeRule.onNodeWithTag("approval-decision-identity")
             .assertIsDisplayed()
         composeRule.onNodeWithText("CODEX", useUnmergedTree = true).assertIsDisplayed()
@@ -983,7 +981,7 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
 
-        compactTitle.performClick()
+        composeRule.onNodeWithTag("approval-decision-identity-title").performClick()
 
         composeRule.onNodeWithText("Action: Run the requested production shell command").assertIsDisplayed()
         composeRule.onNodeWithText("Provider: Codex · Request 87654321").assertIsDisplayed()
@@ -993,6 +991,9 @@ class ApprovalDetailScreenTest {
         composeRule.onNodeWithText("deploy --environment production", substring = true)
             .performScrollTo()
             .assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-payload-wrap-toggle")
+            .performScrollTo()
+            .performClick()
         val payloadScroller = composeRule.onNodeWithTag("approval-unbroken-payload-scroll-0")
         payloadScroller.performScrollTo().assertIsDisplayed()
         val scrollRange = payloadScroller.fetchSemanticsNode().config[SemanticsProperties.HorizontalScrollAxisRange]

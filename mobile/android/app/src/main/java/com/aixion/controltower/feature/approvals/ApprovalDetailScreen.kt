@@ -308,6 +308,10 @@ fun ApprovalDetailContent(
             maxWidth = maxWidth,
             fontScale = LocalDensity.current.fontScale
         )
+        // On extremely short screens, preserve a real scroll viewport for the
+        // request details. The fixed footer still keeps request identity and both
+        // decision actions visible; expiry and status details remain in the list.
+        val veryShortViewport = maxHeight < 360.dp
         val horizontalCompactActions = shouldUseHorizontalCompactDecisionActions(
             maxWidth = maxWidth,
             fontScale = LocalDensity.current.fontScale
@@ -542,6 +546,8 @@ fun ApprovalDetailContent(
                         .testTag("approval-decision-panel"),
                     compactLayout = compactViewport,
                     horizontalCompactActions = horizontalCompactActions,
+                    veryShortViewport = veryShortViewport,
+                    exactToolRequest = hasExactToolRequest,
                     showDisabledActions = compactViewport && (
                         isBlocked || hasUnsupportedData || decisionBlockReason != null ||
                             decisionNeedsReconciliation
@@ -1185,12 +1191,14 @@ private fun DecisionPanel(
     modifier: Modifier = Modifier,
     compactLayout: Boolean = false,
     horizontalCompactActions: Boolean = false,
+    veryShortViewport: Boolean = false,
+    exactToolRequest: Boolean = false,
     showDisabledActions: Boolean = false
 ) {
     val palette = LocalTowerPalette.current
     val invocationContext = approvalInvocationAccessibilityContext(approvalInvocationId)
     TowerPanel(modifier = modifier, elevated = true) {
-        if (compactLayout) {
+        if (compactLayout && (!veryShortViewport || exactToolRequest)) {
             TextButton(
                 onClick = onReviewFullRequest,
                 modifier = Modifier
@@ -1211,8 +1219,15 @@ private fun DecisionPanel(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable(
+                    enabled = veryShortViewport && !exactToolRequest,
+                    role = Role.Button,
+                    onClick = onReviewFullRequest
+                )
                 .semantics(mergeDescendants = true) {
-                    contentDescription = "Decision context: $approvalProvider, request ${shortSafeApprovalId(approvalId)}, risk ${approvalRisk.name.lowercase().replace('_', ' ')}."
+                    val reviewAction = if (veryShortViewport && !exactToolRequest) "Review request. " else ""
+                    contentDescription = "$reviewAction" +
+                        "Decision context: $approvalProvider, request ${shortSafeApprovalId(approvalId)}, risk ${approvalRisk.name.lowercase().replace('_', ' ')}."
                 }
                 .testTag("approval-decision-identity"),
             horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
@@ -1222,14 +1237,25 @@ private fun DecisionPanel(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
             ) {
-                Text(
-                    text = approvalProvider,
-                    color = palette.inkMuted,
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.testTag("approval-decision-identity-provider")
-                )
+                if (veryShortViewport && !exactToolRequest) {
+                    Text(
+                        text = "Review request · ${approvalProviderName(approvalProvider)}",
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("approval-decision-identity-title")
+                    )
+                } else {
+                    Text(
+                        text = approvalProvider,
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("approval-decision-identity-provider")
+                    )
+                }
                 Text(
                     text = "Request ${shortSafeApprovalId(approvalId)}",
                     color = palette.inkMuted,
@@ -1245,48 +1271,50 @@ private fun DecisionPanel(
                 modifier = Modifier.testTag("approval-decision-identity-risk")
             )
         }
-        Text(
-            text = ApprovalDecisionPolicy.expiryCountdownLabel(expiresAt, now),
-            color = if (ApprovalDecisionPolicy.expiryIsUrgent(expiresAt, now)) palette.caution else palette.inkMuted,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clearAndSetSemantics {
-                    liveRegion = LiveRegionMode.Polite
-                    contentDescription = ApprovalDecisionPolicy.expiryAccessibilityAnnouncement(expiresAt, now)
-                }
-                .testTag("approval-decision-expiry-countdown")
-        )
-        Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text(
-            text = when {
-                compactLayout && decisionNeedsReconciliation -> "Check server status."
-                compactLayout && decisionInFlight -> "Recording decision…"
-                compactLayout && hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
-                compactLayout && isBlocked -> "This request is blocked by policy. No decision can be recorded from mobile."
-                compactLayout && decisionBlockReason != null -> decisionBlockReason
-                compactLayout && exactToolRequestNeedsReview -> "Review request first."
-                compactLayout && fullDiffReviewNeedsReview -> "Review full diff first."
-                compactLayout && canApprove -> "Ready for decision."
-                hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
-                decisionNeedsReconciliation -> "The previous decision may have reached the server, but its response was lost. Check server status before trying again."
-                decisionInFlight -> "Sending the decision and waiting for the server."
-                isBlocked -> "This request is blocked by policy. No decision can be recorded from mobile."
-                !canDecide -> "This request is no longer waiting for a decision."
-                fullDiffReviewNeedsReview && !fullDiffOpened -> "Open the full file diff, then acknowledge that you reviewed it before approving."
-                fullDiffReviewNeedsReview -> "Acknowledge that you reviewed the full file diff before approving."
-                exactToolRequestNeedsReview -> "Review the exact tool name and arguments above, then acknowledge before approving."
-                canApprove -> "Approval is available. Confirm only after reviewing diff, tests, and rollback."
-                else -> "Approval is disabled until safety requirements are satisfied."
-            },
-            modifier = Modifier
-                .testTag("approval-decision-status")
-                .semantics { liveRegion = LiveRegionMode.Polite },
-            color = if (canApprove) palette.inkMuted else palette.caution,
-            style = if (compactLayout) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge,
-            maxLines = Int.MAX_VALUE,
-            overflow = TextOverflow.Clip
-        )
+        if (!veryShortViewport) {
+            Text(
+                text = ApprovalDecisionPolicy.expiryCountdownLabel(expiresAt, now),
+                color = if (ApprovalDecisionPolicy.expiryIsUrgent(expiresAt, now)) palette.caution else palette.inkMuted,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clearAndSetSemantics {
+                        liveRegion = LiveRegionMode.Polite
+                        contentDescription = ApprovalDecisionPolicy.expiryAccessibilityAnnouncement(expiresAt, now)
+                    }
+                    .testTag("approval-decision-expiry-countdown")
+            )
+            Spacer(modifier = Modifier.height(TowerSpacing.xs))
+            Text(
+                text = when {
+                    compactLayout && decisionNeedsReconciliation -> "Check server status."
+                    compactLayout && decisionInFlight -> "Recording decision…"
+                    compactLayout && hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
+                    compactLayout && isBlocked -> "This request is blocked by policy. No decision can be recorded from mobile."
+                    compactLayout && decisionBlockReason != null -> decisionBlockReason
+                    compactLayout && exactToolRequestNeedsReview -> "Review request first."
+                    compactLayout && fullDiffReviewNeedsReview -> "Review full diff first."
+                    compactLayout && canApprove -> "Ready for decision."
+                    hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
+                    decisionNeedsReconciliation -> "The previous decision may have reached the server, but its response was lost. Check server status before trying again."
+                    decisionInFlight -> "Sending the decision and waiting for the server."
+                    isBlocked -> "This request is blocked by policy. No decision can be recorded from mobile."
+                    !canDecide -> "This request is no longer waiting for a decision."
+                    fullDiffReviewNeedsReview && !fullDiffOpened -> "Open the full file diff, then acknowledge that you reviewed it before approving."
+                    fullDiffReviewNeedsReview -> "Acknowledge that you reviewed the full file diff before approving."
+                    exactToolRequestNeedsReview -> "Review the exact tool name and arguments above, then acknowledge before approving."
+                    canApprove -> "Approval is available. Confirm only after reviewing diff, tests, and rollback."
+                    else -> "Approval is disabled until safety requirements are satisfied."
+                },
+                modifier = Modifier
+                    .testTag("approval-decision-status")
+                    .semantics { liveRegion = LiveRegionMode.Polite },
+                color = if (canApprove) palette.inkMuted else palette.caution,
+                style = if (compactLayout) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge,
+                maxLines = Int.MAX_VALUE,
+                overflow = TextOverflow.Clip
+            )
+        }
         Spacer(modifier = Modifier.height(if (compactLayout) TowerSpacing.xs else TowerSpacing.lg))
         if (decisionNeedsReconciliation) {
             Spacer(modifier = Modifier.height(TowerSpacing.sm))
