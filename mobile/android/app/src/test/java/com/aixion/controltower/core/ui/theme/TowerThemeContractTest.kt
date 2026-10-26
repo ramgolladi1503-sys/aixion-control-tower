@@ -2,6 +2,7 @@ package com.aixion.controltower.core.ui.theme
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -18,13 +19,19 @@ class TowerThemeContractTest {
     }
 
     @Test
-    fun supportingLabelStylesUseAReadableAscendingScale() {
-        assertEquals(12.sp, TowerTypography.labelSmall.fontSize)
-        assertEquals(13.sp, TowerTypography.labelMedium.fontSize)
+    fun supportingLabelStylesMeetTheReadableFloorAndKeepHierarchy() {
+        assertEquals(14.sp, TowerTypography.labelSmall.fontSize)
+        assertEquals(14.sp, TowerTypography.labelMedium.fontSize)
         assertEquals(14.sp, TowerTypography.labelLarge.fontSize)
-        assertEquals(16.sp, TowerTypography.labelSmall.lineHeight)
-        assertEquals(18.sp, TowerTypography.labelMedium.lineHeight)
+        assertEquals(18.sp, TowerTypography.labelSmall.lineHeight)
+        assertEquals(20.sp, TowerTypography.labelMedium.lineHeight)
         assertEquals(20.sp, TowerTypography.labelLarge.lineHeight)
+        assertEquals(FontWeight.Medium, TowerTypography.labelMedium.fontWeight)
+        assertEquals(FontWeight.SemiBold, TowerTypography.labelLarge.fontWeight)
+        assertTrue(
+            "Small labels must retain a more compact line height",
+            TowerTypography.labelSmall.lineHeight < TowerTypography.labelMedium.lineHeight
+        )
     }
 
     @Test

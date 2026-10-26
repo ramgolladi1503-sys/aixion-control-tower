@@ -30,7 +30,7 @@ class ConnectorsScreenCopyTest {
 
     @Test
     fun antigravityRetainsProjectHostSetupAffordance() {
-        assertTrue(providerSetupDescription("ANTIGRAVITY").contains("computer running this project"))
+        assertTrue(providerSetupDescription("ANTIGRAVITY").contains("agent computer"))
         assertEquals("Supported hook · setup required", providerSetupStatus("ANTIGRAVITY"))
         assertEquals("Open Antigravity setup", providerSetupButtonLabel("ANTIGRAVITY"))
     }
