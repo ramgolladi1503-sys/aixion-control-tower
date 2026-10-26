@@ -466,6 +466,70 @@ def test_execute_route_fails_closed_for_non_sqlite_runtime_before_global_trust_a
     assert step.status == AgentRunStepStatus.READY
 
 
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_step_boundary_fails_closed_without_repository_in_authoritative_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    _run_id, run, _step = _create_run()
+    monkeypatch.setattr(
+        agent_run_routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    class RejectLocalStepRead(dict):
+        def get(self, _key, _default=None):
+            raise AssertionError("authoritative AgentRun boundary read local step state")
+
+    monkeypatch.setattr(
+        store,
+        "agent_run_steps",
+        RejectLocalStepRead(store.agent_run_steps),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        agent_run_routes._require_step_boundary(run, "start another execution")
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+
+
+def test_step_boundary_uses_selected_repository_instead_of_local_step_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _run_id, run, step = _create_run()
+
+    class RunRepository:
+        def list_steps_for_run(self, run_id: str):
+            assert run_id == run.id
+            return [step]
+
+    class RejectLocalStepRead(dict):
+        def get(self, _key, _default=None):
+            raise AssertionError("repository-backed AgentRun boundary read local step state")
+
+    monkeypatch.setattr(
+        store,
+        "agent_run_steps",
+        RejectLocalStepRead(store.agent_run_steps),
+    )
+
+    agent_run_routes._require_step_boundary(
+        run,
+        "start another execution",
+        RunRepository(),
+    )
+
+
 def test_capability_binding_fails_closed_for_non_sqlite_runtime_before_store_access(
     monkeypatch,
 ) -> None:

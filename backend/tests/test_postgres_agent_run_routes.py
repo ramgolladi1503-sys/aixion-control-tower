@@ -533,6 +533,11 @@ def test_postgres_execute_route_injects_bound_audit_repository(
     assert created.status_code == 200, created.text
     run_id = created.json()["run"]["id"]
     captured: dict[str, object] = {}
+    original_step_boundary = agent_run_routes._require_step_boundary
+
+    def capture_step_boundary(run, action, run_repository=None):
+        captured["step_boundary_repository"] = run_repository
+        return original_step_boundary(run, action, run_repository)
 
     def capture(*_args, **kwargs):
         captured.update(kwargs)
@@ -540,6 +545,7 @@ def test_postgres_execute_route_injects_bound_audit_repository(
 
         raise AgentRunConflict("test stopped before execute-next side effects")
 
+    monkeypatch.setattr(agent_run_routes, "_require_step_boundary", capture_step_boundary)
     monkeypatch.setattr(agent_run_routes, "execute_next_step", capture)
     response = client.post(
         f"/agent/runs/{run_id}/execute-next",
@@ -547,6 +553,7 @@ def test_postgres_execute_route_injects_bound_audit_repository(
     )
 
     assert response.status_code == 409
+    assert captured["step_boundary_repository"] is state["repositories"].agent_runs
     assert captured["audit_repository"] is state["repositories"].audit_events
     assert captured["fault_repository"] is state["repositories"].agent_run_faults
 

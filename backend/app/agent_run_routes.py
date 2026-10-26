@@ -225,6 +225,13 @@ def _require_step_boundary(
 ) -> None:
     current_step_id = run.current_step_id or ""
     if run_repository is None:
+        settings = get_settings()
+        if settings.is_production or settings.postgres_auth_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL AgentRun boundary checks require the selected durable repository",
+                headers={"Retry-After": "1"},
+            )
         current = store.agent_run_steps.get(current_step_id)
     else:
         current = next(
@@ -802,7 +809,7 @@ def bind_run_capability_lease(
             run_repository.list_events_for_run(run.id),
         )
         run = store.agent_runs[run.id]
-    _require_step_boundary(run, "bind a capability lease")
+    _require_step_boundary(run, "bind a capability lease", run_repository)
     try:
         attach_capability_lease(
             run,
@@ -877,7 +884,7 @@ def execute_run_next_step(
     )
     execution_lock = _acquire_execution_lock(run.id)
     try:
-        _require_step_boundary(run, "start another execution")
+        _require_step_boundary(run, "start another execution", run_repository)
         lease_seconds = _safe_lease_seconds(payload)
         current_step = (
             next(

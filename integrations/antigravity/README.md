@@ -219,17 +219,23 @@ dedicated test database. Set `API_PORT` below to that exact port; configure the
 Antigravity hook to call `http://127.0.0.1:${API_PORT}` and build the Android
 debug app with that same API URL. Both clients must use the same backend
 instance and database for the phone decision to unblock the pending hook call.
-The prepared local E2E API in the current PR workspace uses port `8004`; use
-`API_PORT=8004` when continuing that run. Do not start a second service for the
-USB mapping.
+Port `8004` was used by a prepared E2E API, but a port number alone does not
+prove that the process uses the current checkout or intended disposable
+database. Before reuse, verify the listener PID, working directory, source
+revision, loopback bind, and sanitized database target. The previously prepared
+listener may be from an older source revision; leave it running if its owner or
+state is uncertain. For current-source certification, use an unused loopback
+port and a separate disposable database when the existing listener is stale.
+Do not stop or replace another process to obtain the desired port.
 
 With USB debugging authorized, run the following in one terminal session. Set
-`API_PORT` to the verified isolated backend port (`8004` for the prepared local
-E2E runtime) and `ANDROID_SERIAL` to the connected device serial:
+`API_PORT` only after verifying the exact current-source isolated backend and
+`ANDROID_SERIAL` to the designated connected device serial. Never assume that
+the previously used port `8004` is current:
 
 ```sh
 adb devices -l
-API_PORT=8004 # prepared isolated E2E API; change only if the backend uses another port
+API_PORT="<verified-current-source-loopback-port>"
 ANDROID_SERIAL="<serial shown above>"
 export API_PORT ANDROID_SERIAL
 adb -s "$ANDROID_SERIAL" reverse "tcp:${API_PORT}" "tcp:${API_PORT}"
@@ -245,7 +251,7 @@ the Antigravity hook. Keep the backend bound to loopback; this setup does not
 expose the selected port to the LAN. Remove the mapping when finished:
 
 ```sh
-API_PORT=8004 # must match the backend port and USB reverse mapping above
+API_PORT="<same-verified-port-used-above>"
 ANDROID_SERIAL="<serial shown above>"
 adb -s "$ANDROID_SERIAL" reverse --remove "tcp:${API_PORT}"
 ```
