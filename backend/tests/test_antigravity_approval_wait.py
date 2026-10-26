@@ -17,6 +17,8 @@ from unittest.mock import patch
 from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
+
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
@@ -24,6 +26,7 @@ from fastapi.testclient import TestClient
 from app.approval_integrity import compute_approval_payload_hash
 from app.approval_decisions import approval_decision_repository
 from app.agent_auth import revoke_external_agent_token
+from app import main as main_module
 from app.models import ApprovalRequest
 from app.main import app
 from app.models import ApprovalStatus, Project, Workspace, now_utc
@@ -103,6 +106,15 @@ def _approval(project_id: str, headers: dict[str, str]) -> str:
     )
     assert created_audit.details["source_invocation_id"] == "antigravity:v1:hook-test"
     return response.json()["id"]
+
+
+def _mobile_decide(approval_id: str, decision: str):
+    reviewed = client.get(f"/approvals/{approval_id}")
+    assert reviewed.status_code == 200, reviewed.text
+    return client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": decision, "review_fingerprint": reviewed.json()["review_fingerprint"]},
+    )
 
 
 def test_invocation_retry_reuses_one_approval_and_changed_payload_conflicts() -> None:
@@ -286,9 +298,7 @@ def test_invocation_heartbeat_cannot_refresh_a_consumed_approval() -> None:
     project, agent_id, token = _setup_agent()
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    assert client.post(
-        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
-    ).status_code == 200
+    assert _mobile_decide(approval_id, "approve").status_code == 200
     assert client.post(f"/agents/approvals/{approval_id}/consume", headers=headers).status_code == 200
 
     heartbeat = client.post(
@@ -334,6 +344,202 @@ def test_connector_approval_without_invocation_identity_is_rejected() -> None:
     assert store.approval_requests == {}
 
 
+def test_mobile_decision_rejects_changed_native_tool_snapshot_without_side_effects() -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+
+    preflight = client.get(f"/approvals/{approval_id}")
+    assert preflight.status_code == 200, preflight.text
+    review_fingerprint = preflight.json()["review_fingerprint"]
+    assert review_fingerprint.startswith("sha256:review-v1:")
+
+    # Simulate another durable writer changing the action after the app's
+    # refresh/preflight and before its decision POST.
+    original = store.approval_requests[approval_id]
+    store.approval_requests[approval_id] = original.model_copy(
+        update={"summary": "Changed after the reviewer saw the request."}
+    )
+    store.persist()
+    audit_count = len(store.audit_events)
+    notification_ids = set(store.notifications)
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "review_fingerprint": review_fingerprint},
+    )
+
+    assert decision.status_code == 409, decision.text
+    assert store.approval_requests[approval_id].status == ApprovalStatus.PENDING_REVIEW
+    assert len(store.audit_events) == audit_count
+    assert set(store.notifications) == notification_ids
+
+
+def test_mobile_decision_rejects_source_verification_revoked_after_review() -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+
+    preflight = client.get(f"/approvals/{approval_id}")
+    assert preflight.status_code == 200, preflight.text
+    assert preflight.json()["verified_source"] is True
+    review_fingerprint = preflight.json()["review_fingerprint"]
+
+    # A trust revocation after display invalidates the exact approval snapshot.
+    original = store.approval_requests[approval_id]
+    store.approval_requests[approval_id] = original.model_copy(
+        update={"verified_source": False}
+    )
+    store.persist()
+    audit_count = len(store.audit_events)
+    notification_ids = set(store.notifications)
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve", "review_fingerprint": review_fingerprint},
+    )
+
+    assert decision.status_code == 409, decision.text
+    assert store.approval_requests[approval_id].status == ApprovalStatus.PENDING_REVIEW
+    assert store.approval_requests[approval_id].verified_source is False
+    assert len(store.audit_events) == audit_count
+    assert set(store.notifications) == notification_ids
+
+    current_review = client.get(f"/approvals/{approval_id}")
+    assert current_review.status_code == 200, current_review.text
+    unverified_decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={
+            "decision": "approve",
+            "review_fingerprint": current_review.json()["review_fingerprint"],
+        },
+    )
+    assert unverified_decision.status_code == 409, unverified_decision.text
+    assert "Unverified connector tool requests cannot be approved" in unverified_decision.json()["detail"]
+    assert store.approval_requests[approval_id].status == ApprovalStatus.PENDING_REVIEW
+    assert len(store.audit_events) == audit_count
+    assert set(store.notifications) == notification_ids
+
+
+def test_tool_classification_is_rechecked_after_second_durable_read(monkeypatch) -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+    original = store.approval_requests[approval_id]
+    non_tool_file = original.files[0].model_copy(
+        update={"path": "src/action.py", "change_type": "update"}
+    )
+    store.approval_requests[approval_id] = original.model_copy(
+        update={"files": [non_tool_file]}
+    )
+    store.persist()
+    original_lookup = main_module._approval_for_user
+    swapped = False
+
+    def change_to_native_tool_before_second_read(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            current = store.approval_requests[approval_id]
+            store.approval_requests[approval_id] = current.model_copy(
+                update={"files": [original.files[0]]}
+            )
+            store.persist()
+            swapped = True
+        return original_lookup(*args, **kwargs)
+
+    monkeypatch.setattr(
+        main_module, "_approval_for_user", change_to_native_tool_before_second_read
+    )
+    audit_count = len(store.audit_events)
+    notification_ids = set(store.notifications)
+
+    response = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve"},
+    )
+
+    assert swapped is True
+    assert response.status_code == 409, response.text
+    assert store.approval_requests[approval_id].status == ApprovalStatus.PENDING_REVIEW
+    assert len(store.audit_events) == audit_count
+    assert set(store.notifications) == notification_ids
+
+
+@pytest.mark.parametrize(
+    ("alias", "decision"),
+    [("approve", "approve"), ("deny", "deny")],
+)
+def test_approval_decision_alias_rejects_changed_review_fingerprint(
+    alias: str, decision: str
+) -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+
+    preflight = client.get(f"/approvals/{approval_id}")
+    assert preflight.status_code == 200, preflight.text
+    review_fingerprint = preflight.json()["review_fingerprint"]
+    original = store.approval_requests[approval_id]
+    store.approval_requests[approval_id] = original.model_copy(
+        update={"summary": "Changed after the reviewer saw the request."}
+    )
+    store.persist()
+    audit_count = len(store.audit_events)
+    notification_ids = set(store.notifications)
+
+    response = client.post(
+        f"/approvals/{approval_id}/{alias}",
+        json={
+            "decision": decision,
+            "reason": "reviewed from alias",
+            "review_fingerprint": review_fingerprint,
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert store.approval_requests[approval_id].status == ApprovalStatus.PENDING_REVIEW
+    assert len(store.audit_events) == audit_count
+    assert set(store.notifications) == notification_ids
+
+
+@pytest.mark.parametrize(
+    ("alias", "decision"),
+    [("approve", "approve"), ("deny", "deny")],
+)
+def test_approval_decision_alias_accepts_current_review_fingerprint(
+    alias: str, decision: str
+) -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+    preflight = client.get(f"/approvals/{approval_id}")
+    assert preflight.status_code == 200, preflight.text
+
+    response = client.post(
+        f"/approvals/{approval_id}/{alias}",
+        json={
+            "decision": decision,
+            "reason": "reviewed from alias",
+            "review_fingerprint": preflight.json()["review_fingerprint"],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    expected_status = (
+        ApprovalStatus.APPROVED if decision == "approve" else ApprovalStatus.DENIED
+    )
+    assert response.json()["status"] == expected_status
+    assert store.approval_requests[approval_id].status == expected_status
+
+
+def test_native_tool_decision_requires_review_fingerprint() -> None:
+    project, agent_id, token = _setup_agent()
+    approval_id = _approval(project.id, _headers(agent_id, token))
+
+    decision = client.post(
+        f"/approvals/{approval_id}/decision",
+        json={"decision": "approve"},
+    )
+
+    assert decision.status_code == 409, decision.text
+    assert store.approval_requests[approval_id].status == ApprovalStatus.PENDING_REVIEW
+
+
 def test_unscoped_connector_approval_is_rejected_before_persistence() -> None:
     project, agent_id, token = _setup_agent()
     unscoped_project = project.model_copy(update={"workspace_id": None})
@@ -372,10 +578,7 @@ def test_approved_invocation_delivery_is_claimed_once_and_audited() -> None:
     project, agent_id, token = _setup_agent()
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    decision = client.post(
-        f"/approvals/{approval_id}/decision",
-        json={"decision": "approve"},
-    )
+    decision = _mobile_decide(approval_id, "approve")
     assert decision.status_code == 200
     assert decision.json()["approved_payload_hash_version"] == 2
     assert decision.json()["approved_payload_hash"].startswith("sha256:v2:")
@@ -398,10 +601,7 @@ def test_credential_revoked_after_authentication_cannot_claim_delivery(monkeypat
     project, agent_id, token = _setup_agent()
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    decision = client.post(
-        f"/approvals/{approval_id}/decision",
-        json={"decision": "approve"},
-    )
+    decision = _mobile_decide(approval_id, "approve")
     assert decision.status_code == 200
 
     auth_repository = app.state.external_agent_auth_repository
@@ -480,7 +680,7 @@ def test_hook_denies_when_consume_commits_but_response_is_lost_and_retry_replays
                 state["approval_id"] = approval["id"]
                 decision = client.post(
                     f"/approvals/{approval['id']}/decision",
-                    json={"decision": "approve"},
+                    json={"decision": "approve", "review_fingerprint": approval["review_fingerprint"]},
                 )
                 assert decision.status_code == 200, decision.text
             else:
@@ -545,9 +745,7 @@ def test_revocation_after_phone_approval_read_blocks_delivery_claim() -> None:
     project, agent_id, token = _setup_agent()
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    assert client.post(
-        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
-    ).status_code == 200
+    assert _mobile_decide(approval_id, "approve").status_code == 200
 
     polled = client.get(
         f"/agents/approvals/{approval_id}/decision", headers=headers
@@ -576,9 +774,7 @@ def test_legacy_v1_approved_invocation_cannot_be_claimed() -> None:
     project, agent_id, token = _setup_agent()
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    assert client.post(
-        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
-    ).status_code == 200
+    assert _mobile_decide(approval_id, "approve").status_code == 200
 
     legacy = store.approval_requests[approval_id].model_copy(
         update={"approved_payload_hash_version": 1, "approved_payload_hash": None}
@@ -601,9 +797,7 @@ def test_ambiguous_delivery_failure_requires_explicit_capability_and_claim() -> 
     project, agent_id, token = _setup_agent()
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    assert client.post(
-        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
-    ).status_code == 200
+    assert _mobile_decide(approval_id, "approve").status_code == 200
     approved = client.get(
         f"/agents/approvals/{approval_id}/decision", headers=headers
     ).json()
@@ -641,9 +835,7 @@ def test_ambiguous_delivery_failure_is_identity_bound_idempotent_and_audited() -
     ])
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    assert client.post(
-        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
-    ).status_code == 200
+    assert _mobile_decide(approval_id, "approve").status_code == 200
     approved = client.get(
         f"/agents/approvals/{approval_id}/decision", headers=headers
     ).json()
@@ -689,9 +881,7 @@ def test_ambiguous_delivery_failure_requires_a_committed_claim() -> None:
     ])
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    assert client.post(
-        f"/approvals/{approval_id}/decision", json={"decision": "approve"}
-    ).status_code == 200
+    assert _mobile_decide(approval_id, "approve").status_code == 200
     approved = client.get(
         f"/agents/approvals/{approval_id}/decision", headers=headers
     ).json()
@@ -733,7 +923,7 @@ def test_delivery_claim_requires_explicit_connector_capability() -> None:
     )
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    client.post(f"/approvals/{approval_id}/decision", json={"decision": "approve"})
+    _mobile_decide(approval_id, "approve")
 
     response = client.post(f"/agents/approvals/{approval_id}/consume", headers=headers)
 
@@ -770,7 +960,7 @@ def test_agent_can_expire_only_its_own_pending_approval_and_late_approval_is_rej
         event.event_type == "approval.expired" and event.entity_id == approval_id
         for event in store.audit_events
     )
-    late_decision = client.post(f"/approvals/{approval_id}/decision", json={"decision": "approve"})
+    late_decision = _mobile_decide(approval_id, "approve")
     assert late_decision.status_code == 409
     assert store.approval_requests[approval_id].status == "EXPIRED"
     assert store.approval_requests[approval_id].approved_payload_hash is None
@@ -782,10 +972,7 @@ def test_timeout_cannot_overwrite_a_durable_phone_approval_with_stale_local_stat
     approval_id = _approval(project.id, headers)
     stale_pending = store.approval_requests[approval_id].model_copy(deep=True)
 
-    decision = client.post(
-        f"/approvals/{approval_id}/decision",
-        json={"decision": "approve"},
-    )
+    decision = _mobile_decide(approval_id, "approve")
     assert decision.status_code == 200
 
     # Model another API process retaining the pre-decision object in memory.
@@ -1231,7 +1418,7 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
             decision = api.post(
                 f"/approvals/{approval['id']}/decision",
                 headers=owner_headers,
-                json={"decision": "approve"},
+                json={"decision": "approve", "review_fingerprint": approval["review_fingerprint"]},
             )
             assert decision.status_code == 200, decision.text
 
@@ -1316,7 +1503,7 @@ def test_in_flight_antigravity_hook_recovers_after_api_process_restart(tmp_path)
                 rejected = api.post(
                     f"/approvals/{second_approval['id']}/decision",
                     headers=owner_headers,
-                    json={"decision": "deny"},
+                    json={"decision": "deny", "review_fingerprint": second_approval["review_fingerprint"]},
                 )
                 assert rejected.status_code == 200, rejected.text
 
@@ -1397,10 +1584,7 @@ def test_approved_decision_returns_the_hash_of_frozen_tool_payload() -> None:
         approval.model_copy(update={"approved_payload_hash_version": 2})
     )
 
-    decision = client.post(
-        f"/approvals/{approval_id}/decision",
-        json={"decision": "approve"},
-    )
+    decision = _mobile_decide(approval_id, "approve")
     assert decision.status_code == 200
     polled = client.get(f"/agents/approvals/{approval_id}/decision", headers=headers)
     assert polled.status_code == 200
@@ -1412,7 +1596,7 @@ def test_unapproved_or_denied_decision_never_has_approval_hash() -> None:
     project, agent_id, token = _setup_agent()
     headers = _headers(agent_id, token)
     approval_id = _approval(project.id, headers)
-    client.post(f"/approvals/{approval_id}/decision", json={"decision": "deny"})
+    _mobile_decide(approval_id, "deny")
 
     response = client.get(f"/agents/approvals/{approval_id}/decision", headers=headers)
     assert response.status_code == 200

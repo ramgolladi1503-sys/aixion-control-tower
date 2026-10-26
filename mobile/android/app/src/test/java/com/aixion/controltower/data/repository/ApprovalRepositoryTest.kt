@@ -193,7 +193,7 @@ class ApprovalRepositoryTest {
         val repository = ApprovalRepository(FailingApprovalApi())
 
         assertIllegalStateFailure {
-            repository.decide("approval_missing", "approve", "test")
+            repository.decide("approval_missing", "approve", "test", "sha256:review-v1:test")
         }
     }
 

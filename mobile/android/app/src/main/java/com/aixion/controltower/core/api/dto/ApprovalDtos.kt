@@ -34,7 +34,8 @@ data class ApprovalRequestDto(
     val source_task_url: String? = null,
     val expires_at: String? = null,
     val created_by_user_id: String? = null,
-    val verified_source: Boolean = false
+    val verified_source: Boolean = false,
+    val review_fingerprint: String? = null
 ) {
     val uiSourceProvider: String get() = source_provider ?: "MANUAL"
     val uiSourceAgentId: String? get() = source_agent_id
@@ -47,5 +48,6 @@ data class ApprovalRequestDto(
 
 data class DecisionRequestDto(
     val decision: String,
-    val reason: String = ""
+    val reason: String = "",
+    val review_fingerprint: String
 )

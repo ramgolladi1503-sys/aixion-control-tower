@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 
 def now_utc() -> datetime:
@@ -363,6 +363,15 @@ class ApprovalRequest(ApprovalRequestCreate):
     def default_manual_source_provider(cls, value: AgentProvider | str | None) -> AgentProvider | str:
         return AgentProvider.MANUAL if value is None else value
 
+    @computed_field(return_type=str)
+    @property
+    def review_fingerprint(self) -> str:
+        # Local import avoids making approval_integrity depend on a partially
+        # initialized models module.
+        from .approval_integrity import compute_approval_review_fingerprint
+
+        return compute_approval_review_fingerprint(self)
+
 
 class ApprovalHistoryRequestSnapshot(BaseModel):
     """Immutable request fields displayed for a hash-verified decision record."""
@@ -457,6 +466,7 @@ class MCPPendingRequest(BaseModel):
 class DecisionCreate(BaseModel):
     decision: str
     reason: str = ""
+    review_fingerprint: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ApprovalGroups(BaseModel):

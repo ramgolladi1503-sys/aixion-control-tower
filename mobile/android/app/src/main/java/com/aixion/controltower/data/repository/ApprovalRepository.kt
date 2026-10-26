@@ -90,11 +90,19 @@ class ApprovalRepository(private val api: ControlTowerApi) {
         approvalId: String,
         decision: String,
         reason: String,
+        reviewFingerprint: String?,
         projectName: String = "Project"
     ): ApprovalSummary {
+        require(!reviewFingerprint.isNullOrBlank()) {
+            "Approval review fingerprint is missing; refresh and review before deciding"
+        }
         return api.decideApproval(
             approvalId,
-            DecisionRequestDto(decision = decision, reason = reason)
+            DecisionRequestDto(
+                decision = decision,
+                reason = reason,
+                review_fingerprint = reviewFingerprint
+            )
         ).toUiSummary(projectName)
     }
 

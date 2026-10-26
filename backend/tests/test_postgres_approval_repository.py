@@ -20,7 +20,10 @@ from app.agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType,
 from app.agent_credential_models import AgentCredentialRecord
 from app.agent_run_repository import AgentRunRepositoryConflict, PostgresAgentRunRepository
 from app import approval_expiry, approval_repository as approval_repository_module
-from app.approval_integrity import compute_approval_payload_hash
+from app.approval_integrity import (
+    compute_approval_payload_hash,
+    compute_approval_review_fingerprint,
+)
 from app.approval_repository import (
     ApprovalDecisionConflict,
     ApprovalDeliveryEvidenceIntegrityError,
@@ -1331,6 +1334,92 @@ def _notification(approval: ApprovalRequest, name: str) -> Notification:
         entity_id=approval.id,
         workspace_id=approval.workspace_id,
     )
+
+
+def test_postgres_decision_row_lock_rejects_stale_review_fingerprint_without_side_effects(
+    postgres_repository,
+) -> None:
+    repository, connect = postgres_repository
+    _, _, approval, _ = _seed(connect)
+    updated = _updated_approval(approval, ApprovalStatus.APPROVED)
+    audit_event = _audit(approval, updated, "stale_review_fingerprint")
+    notification = _notification(approval, "stale_review_fingerprint")
+    stale_fingerprint = compute_approval_review_fingerprint(approval)
+    changed = approval.model_copy(
+        update={"summary": "Durable request changed after the displayed review."}
+    )
+    commit_started = Event()
+
+    def attempt_stale_commit() -> str:
+        commit_started.set()
+        try:
+            repository.commit_decision(
+                approval_id=approval.id,
+                expected_status=ApprovalStatus.REQUESTED,
+                expected_approval=approval,
+                updated_approval=updated,
+                audit_event=audit_event,
+                decision_notification=notification,
+                review_fingerprint=stale_fingerprint,
+            )
+        except ApprovalDecisionConflict:
+            return "conflict"
+        return "committed"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with connect() as lock_connection:
+            lock_connection.execute(
+                "SELECT approval_id FROM approval_requests WHERE approval_id=%s FOR UPDATE",
+                (approval.id,),
+            )
+            future = executor.submit(attempt_stale_commit)
+            assert commit_started.wait(timeout=5)
+            # The repository decision must wait for, then read under, this row lock.
+            assert not future.done()
+            lock_connection.execute(
+                "UPDATE approval_requests SET payload=%s WHERE approval_id=%s",
+                (Jsonb(changed.model_dump(mode="json")), approval.id),
+            )
+        assert future.result(timeout=10) == "conflict"
+
+    assert repository.get(approval.id) == changed
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE approval_id=%s", (approval.id,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE approval_id=%s", (approval.id,)
+        ).fetchone()[0] == 0
+
+
+def test_postgres_decision_accepts_matching_review_fingerprint(postgres_repository) -> None:
+    repository, connect = postgres_repository
+    _, _, approval, _ = _seed(connect)
+    updated = _updated_approval(approval, ApprovalStatus.APPROVED)
+    audit_event = _audit(approval, updated, "matching_review_fingerprint")
+    notification = _notification(approval, "matching_review_fingerprint")
+
+    committed = repository.commit_decision(
+        approval_id=approval.id,
+        expected_status=ApprovalStatus.REQUESTED,
+        expected_approval=approval,
+        updated_approval=updated,
+        audit_event=audit_event,
+        decision_notification=notification,
+        review_fingerprint=compute_approval_review_fingerprint(approval),
+    )
+
+    assert committed.notification == notification
+    assert repository.get(approval.id) == updated
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM audit_events WHERE event_id=%s",
+            (audit_event.id,),
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE notification_id=%s",
+            (notification.id,),
+        ).fetchone()[0] == 1
 
 
 def _creation_records(approval: ApprovalRequest, name: str) -> tuple[AuditEvent, Notification]:

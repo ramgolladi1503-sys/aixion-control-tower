@@ -145,7 +145,8 @@ fun ApprovalRequestDto.toUiSummary(projectName: String = "Project"): ApprovalSum
         createdByUserId = uiCreatedByUserId,
         verifiedSource = uiVerifiedSource,
         projectId = project_id,
-        riskReasons = risk.reasons
+        riskReasons = risk.reasons,
+        reviewFingerprint = review_fingerprint
     )
 }
 

@@ -17,7 +17,10 @@ from .agent_auth import agent_auth_repository
 from .agent_routes import router as agent_router
 from .agent_run_routes import router as agent_run_router
 from .agent_task_routes import propagate_approval_decision_to_agent_task, router as agent_task_router
-from .approval_integrity import compute_approval_payload_hash
+from .approval_integrity import (
+    compute_approval_payload_hash,
+    compute_approval_review_fingerprint,
+)
 from .approval_expiry import (
     approval_repository_publishes_compatibility_state,
     approval_repository_scope,
@@ -1494,15 +1497,31 @@ def get_approval_request(
     return refreshed
 
 
+def _is_connector_tool_approval(approval: ApprovalRequest) -> bool:
+    return (
+        approval.source_provider.value in {"ANTIGRAVITY", "CODEX"}
+        and any(
+            file.change_type.lower() in {"tool_call", "mcp_tool_call"}
+            or file.path.lower().startswith(("antigravity://tool/", "codex://tool/", "mcp://"))
+            for file in approval.files
+        )
+    )
+
+
 @app.post("/approvals/{approval_id}/approve", response_model=ApprovalRequest)
 def approve_approval(
     approval_id: str,
+    payload: DecisionCreate | None = None,
     user: AuthUser = ReviewerDependency,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> ApprovalRequest:
     return decide_approval(
         approval_id,
-        DecisionCreate(decision="approve"),
+        DecisionCreate(
+            decision="approve",
+            reason=payload.reason if payload is not None else "",
+            review_fingerprint=(payload.review_fingerprint if payload is not None else None),
+        ),
         user,
         http_request,
     )
@@ -1517,7 +1536,11 @@ def deny_approval(
 ) -> ApprovalRequest:
     return decide_approval(
         approval_id,
-        DecisionCreate(decision="deny", reason=payload.reason),
+        DecisionCreate(
+            decision="deny",
+            reason=payload.reason,
+            review_fingerprint=payload.review_fingerprint,
+        ),
         user,
         http_request,
     )
@@ -1539,6 +1562,21 @@ def decide_approval(
             if publish_compatibility_state:
                 store.approval_requests.pop(approval_id, None)
             raise HTTPException(status_code=404, detail="Approval request not found")
+        connector_tool_approval = _is_connector_tool_approval(durable_request)
+        expected_review_fingerprint = compute_approval_review_fingerprint(durable_request)
+        if connector_tool_approval and not payload.review_fingerprint:
+            raise HTTPException(
+                status_code=409,
+                detail="Native tool approvals require the reviewed snapshot fingerprint. Reload and review the request.",
+            )
+        if (
+            payload.review_fingerprint is not None
+            and payload.review_fingerprint != expected_review_fingerprint
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Approval changed after it was reviewed. Reload and review the current request before deciding.",
+            )
         # Reconcile this approval from the repository before applying tenant,
         # lifecycle, and transition checks. The process-local map may be stale
         # after another request or process commits a timeout/decision.
@@ -1546,7 +1584,34 @@ def decide_approval(
             store.approval_requests[approval_id] = durable_request
         approval = _approval_for_user(approval_id, user, repository, http_request)
 
+        # `_approval_for_user` performs another durable read. Recheck against
+        # that exact object before expiry can write audit/task/notification
+        # state, closing the gap between the first response snapshot and this
+        # route's lifecycle handling.
+        connector_tool_approval = _is_connector_tool_approval(approval)
+        latest_review_fingerprint = compute_approval_review_fingerprint(approval)
+        if (
+            (connector_tool_approval and not payload.review_fingerprint)
+            or (
+                payload.review_fingerprint is not None
+                and payload.review_fingerprint != latest_review_fingerprint
+            )
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Approval changed after it was reviewed. Reload and review the current request before deciding.",
+            )
+
         decision = payload.decision.lower().strip()
+        if (
+            decision == "approve"
+            and connector_tool_approval
+            and not approval.verified_source
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Unverified connector tool requests cannot be approved. Reload and verify the source before deciding.",
+            )
         expire_due_approval(approval, repository=repository)
         durable_request = repository.get(approval_id)
         if durable_request is None:
@@ -1655,6 +1720,7 @@ def decide_approval(
                     entity_id=candidate.id,
                     workspace_id=decision_workspace_id,
                 ),
+                review_fingerprint=payload.review_fingerprint,
                 run_repository=selected_run_repository,
             )
             if publish_compatibility_state:

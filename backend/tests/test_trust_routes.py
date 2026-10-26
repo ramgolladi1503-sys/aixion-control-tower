@@ -36,6 +36,7 @@ from app.trust_models import (
 from app.trust_routes import (
     create_attestation,
     evaluate_manual_action,
+    get_exact_action_decision,
     list_attestations,
     list_flight_recorder_events,
 )
@@ -346,3 +347,55 @@ def test_postgres_task_only_action_route_fails_closed_when_flag_is_off(monkeypat
         evaluate_manual_action(payload, user, request)
     assert error.value.status_code == 409
     assert "disabled" in str(error.value.detail)
+
+
+@pytest.mark.parametrize(
+    ("binding", "expected_status"),
+    [
+        ("repositories_only", 409),
+        ("auth_selected_missing_runtime", 503),
+        ("auth_selected_mismatched_runtime", 503),
+    ],
+)
+def test_action_decision_read_fails_closed_without_postgres_runtime(
+    monkeypatch,
+    binding: str,
+    expected_status: int,
+) -> None:
+    class RejectStoreMap(dict):
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("PostgreSQL-selected action read touched a Store map")
+
+        def values(self):
+            raise AssertionError("PostgreSQL-selected action read touched a Store map")
+
+    monkeypatch.setattr(store, "proposed_actions", RejectStoreMap())
+    monkeypatch.setattr(store, "action_authorizations", RejectStoreMap())
+    if binding == "repositories_only":
+        state = SimpleNamespace(postgres_repositories=object())
+        settings = SimpleNamespace(is_production=False, postgres_auth_enabled=False)
+    elif binding == "auth_selected_missing_runtime":
+        state = SimpleNamespace()
+        settings = SimpleNamespace(is_production=False, postgres_auth_enabled=True)
+    else:
+        state = SimpleNamespace(
+            postgres_repositories=object(),
+            postgres_runtime=SimpleNamespace(repositories=object()),
+        )
+        settings = SimpleNamespace(is_production=False, postgres_auth_enabled=True)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    user = AuthUser(
+        id="reviewer-incomplete-action-runtime",
+        email="reviewer@example.test",
+        display_name="Reviewer",
+        role=UserRole.REVIEWER,
+        workspace_id="workspace-action-runtime",
+        email_verified=True,
+    )
+    monkeypatch.setattr("app.trust_routes.get_settings", lambda: settings)
+
+    with pytest.raises(HTTPException) as error:
+        get_exact_action_decision("action_missing", user=user, request=request)
+
+    assert error.value.status_code == expected_status
+    assert "PostgreSQL" in error.value.detail

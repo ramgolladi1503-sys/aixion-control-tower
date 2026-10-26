@@ -437,6 +437,7 @@ class ApprovalsViewModel internal constructor(
                     approval.id,
                     decision,
                     reason,
+                    approval.reviewFingerprint,
                     approval.projectName
                 ).also { result ->
                     if (!decisionMatchesStatus(decision, result.status)) {

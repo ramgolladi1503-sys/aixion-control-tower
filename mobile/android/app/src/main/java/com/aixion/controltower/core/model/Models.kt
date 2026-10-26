@@ -104,7 +104,8 @@ data class ApprovalSummary(
     val createdByUserId: String? = null,
     val verifiedSource: Boolean = false,
     val projectId: String = "",
-    val riskReasons: List<String> = emptyList()
+    val riskReasons: List<String> = emptyList(),
+    val reviewFingerprint: String? = null
 ) {
     val sourceLabel: String
         get() = sourceAgentName?.takeIf { it.isNotBlank() } ?: sourceProvider

@@ -22,6 +22,7 @@ from .agent_task_models import (
     AgentTaskStatus,
 )
 from .approval_integrity import compute_approval_payload_hash
+from .approval_integrity import compute_approval_review_fingerprint
 from .approval_lifecycle import can_transition
 from .mcp_pending_repository import (
     MCPPendingRepositoryError,
@@ -874,6 +875,7 @@ class ApprovalDecisionRepository(Protocol):
         updated_approval: ApprovalRequest,
         audit_event: AuditEvent,
         decision_notification: Notification,
+        review_fingerprint: str | None = None,
         run_repository: object | None = None,
     ) -> ApprovalDecisionCommit: ...
 
@@ -1873,6 +1875,7 @@ class SQLiteApprovalDecisionRepository:
         updated_approval: ApprovalRequest,
         audit_event: AuditEvent,
         decision_notification: Notification,
+        review_fingerprint: str | None = None,
         run_repository: object | None = None,
     ) -> ApprovalDecisionCommit:
         if (
@@ -1920,6 +1923,11 @@ class SQLiteApprovalDecisionRepository:
                 raise ApprovalRecordMissing(approval_id)
 
             durable_approval = ApprovalRequest.model_validate_json(row[0])
+            if (
+                review_fingerprint is not None
+                and compute_approval_review_fingerprint(durable_approval) != review_fingerprint
+            ):
+                raise ApprovalDecisionConflict("Approval changed after its review snapshot was read.")
             if durable_approval.status != expected_status:
                 raise ApprovalDecisionConflict(
                     f"Approval is {durable_approval.status}; expected {expected_status}."
@@ -3053,6 +3061,7 @@ class PostgresApprovalDecisionRepository:
         updated_approval: ApprovalRequest,
         audit_event: AuditEvent,
         decision_notification: Notification,
+        review_fingerprint: str | None = None,
         run_repository: object | None = None,
     ) -> ApprovalDecisionCommit:
         self._validate_decision(
@@ -3073,6 +3082,11 @@ class PostgresApprovalDecisionRepository:
                 (approval_id,),
             ).fetchone()
             durable, version = self._approval_from_row(row, approval_id)
+            if (
+                review_fingerprint is not None
+                and compute_approval_review_fingerprint(durable) != review_fingerprint
+            ):
+                raise ApprovalDecisionConflict("Approval changed after its review snapshot was read.")
             if durable.status != expected_status:
                 raise ApprovalDecisionConflict(
                     f"Approval is {durable.status}; expected {expected_status}."
