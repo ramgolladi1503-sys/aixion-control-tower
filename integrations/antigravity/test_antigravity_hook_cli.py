@@ -1065,11 +1065,12 @@ def test_long_wait_refreshes_exact_invocation_lease_before_same_call_is_consumed
     "failure",
     [
         "unauthorized", "conflict", "timeout", "mismatch", "not_live",
-        "malformed", "malformed_timestamp", "timezone_less_timestamp", "late",
+        "malformed", "malformed_timestamp", "timezone_less_timestamp", "expired_lease", "late",
     ],
 )
 def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     failure: str,
 ) -> None:
     clock = _patch_clock(monkeypatch)
@@ -1108,6 +1109,8 @@ def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
                 response["heartbeat_at"] = "not-a-timestamp"
             elif failure == "timezone_less_timestamp":
                 response["heartbeat_at"] = "2026-10-25T12:00:00"
+            elif failure == "expired_lease":
+                response["expires_at"] = "2026-10-25T12:00:00+00:00"
             return response
         if method == "POST" and url.endswith("/expire"):
             return {**created, "status": "EXPIRED"}
@@ -1122,6 +1125,31 @@ def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
     assert result["reason"] == "Connector liveness could not be confirmed"
     assert calls == ["approvals", "decision", "heartbeat"]
     assert "consume" not in calls
+    diagnostic_lines = capsys.readouterr().err.splitlines()
+    diagnostics = [json.loads(line) for line in diagnostic_lines]
+    heartbeat_failure = [
+        record for record in diagnostics if record["event"] == "invocation_heartbeat_failed"
+    ]
+    expected_failure_code = {
+        "unauthorized": "heartbeat_request_failed",
+        "conflict": "heartbeat_request_failed",
+        "timeout": "heartbeat_request_failed",
+        "mismatch": "approval_identity_mismatch",
+        "not_live": "connector_not_live",
+        "malformed": "response_not_object",
+        "malformed_timestamp": "heartbeat_timestamp_invalid",
+        "timezone_less_timestamp": "heartbeat_timestamp_invalid",
+        "expired_lease": "lease_expired_or_invalid",
+        "late": "host_deadline_expired",
+    }[failure]
+    assert len(heartbeat_failure) == 1
+    assert heartbeat_failure[0]["event"] == "invocation_heartbeat_failed"
+    assert heartbeat_failure[0]["failure_code"] == expected_failure_code
+    assert set(heartbeat_failure[0]) == {
+        "component", "provider", "event", "correlation_id", "approval_id",
+        "attempt", "decision", "failure_code",
+    }
+    assert all("heartbeat timed out" not in line for line in diagnostic_lines)
 
 
 def test_run_reconnects_after_ambiguous_decision_read_then_consumes_once(

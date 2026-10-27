@@ -46,6 +46,19 @@ MAX_RESPONSE_BYTES = 256 * 1024
 MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 APPROVAL_PROTOCOL_VERSION = "1"
 DIAGNOSTIC_APPROVAL_ID = re.compile(r"^approval_[a-f0-9]{12}$")
+HEARTBEAT_FAILURE_CODES = frozenset({
+    "host_deadline_expired",
+    "rate_limited",
+    "heartbeat_request_failed",
+    "heartbeat_retry_exhausted",
+    "heartbeat_retry_deadline_exhausted",
+    "response_not_object",
+    "approval_identity_mismatch",
+    "connector_not_live",
+    "heartbeat_timestamp_invalid",
+    "lease_expired_or_invalid",
+    "lease_timing_invalid",
+})
 SENSITIVE_KEY = re.compile(r"(token|secret|password|credential|private.?key|api.?key)", re.I)
 SENSITIVE_VALUE = re.compile(
     r"(?:bearer\s+[A-Za-z0-9._~-]{8,}|(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[\"']?[A-Za-z0-9._~/-]{8,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
@@ -107,6 +120,7 @@ def _emit_diagnostic(
     event: str,
     attempt: int | None = None,
     decision: str | None = None,
+    failure_code: str | None = None,
 ) -> None:
     """Write fixed-field, content-free diagnostics without affecting the gate."""
     record = {
@@ -118,11 +132,30 @@ def _emit_diagnostic(
         "attempt": attempt,
         "decision": decision,
     }
+    if failure_code is not None:
+        # Failure codes are fixed internal labels; never pass server text,
+        # request payloads, or exception messages through this field.
+        if failure_code not in HEARTBEAT_FAILURE_CODES:
+            return
+        record["failure_code"] = failure_code
     try:
         sys.stderr.write(json.dumps(record, separators=(",", ":")) + "\n")
     except OSError:
         # Diagnostic output must never change an authorization result.
         return
+
+
+def _emit_heartbeat_failure(
+    diagnostics: dict[str, str | None] | None,
+    failure_code: str,
+) -> None:
+    if diagnostics is None:
+        return
+    _emit_diagnostic(
+        context=diagnostics,
+        event="invocation_heartbeat_failed",
+        failure_code=failure_code,
+    )
 
 
 def _short_correlation_id(source_invocation_id: str) -> str:
@@ -472,11 +505,13 @@ def _refresh_invocation_lease_if_due(
         return next_heartbeat_at, True
     remaining_seconds = deadline - now
     if remaining_seconds <= 0:
+        _emit_heartbeat_failure(diagnostics, "host_deadline_expired")
         return next_heartbeat_at, False
     heartbeat: Any
     for attempt in range(2):
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
+            _emit_heartbeat_failure(diagnostics, "host_deadline_expired")
             return next_heartbeat_at, False
         try:
             request_started_at = time.monotonic()
@@ -504,6 +539,7 @@ def _refresh_invocation_lease_if_due(
                 or lease_state.get("approval_deadline") is None
                 or lease_state["approval_deadline"] <= time.monotonic() + delay + REQUEST_TIMEOUT_SECONDS + 1
             ):
+                _emit_heartbeat_failure(diagnostics, "rate_limited")
                 return next_heartbeat_at, False
             if diagnostics is not None:
                 _emit_diagnostic(
@@ -520,9 +556,14 @@ def _refresh_invocation_lease_if_due(
                 exc.__cause__, (TimeoutError, OSError)
             )
             if attempt != 0 or not transport_failure:
+                _emit_heartbeat_failure(
+                    diagnostics,
+                    "heartbeat_retry_exhausted" if attempt != 0 else "heartbeat_request_failed",
+                )
                 return next_heartbeat_at, False
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS:
+                _emit_heartbeat_failure(diagnostics, "heartbeat_retry_deadline_exhausted")
                 return next_heartbeat_at, False
             if diagnostics is not None:
                 _emit_diagnostic(
@@ -532,17 +573,26 @@ def _refresh_invocation_lease_if_due(
                 )
             time.sleep(INVOCATION_HEARTBEAT_RETRY_DELAY_SECONDS)
     if time.monotonic() >= deadline:
+        _emit_heartbeat_failure(diagnostics, "host_deadline_expired")
         return next_heartbeat_at, False
     if not isinstance(heartbeat, dict):
+        _emit_heartbeat_failure(diagnostics, "response_not_object")
         return next_heartbeat_at, False
     if (
         heartbeat.get("approval_id") != approval_id
         or heartbeat.get("source_agent_id") != agent_id
         or heartbeat.get("source_invocation_id") != source_invocation_id
-        or heartbeat.get("live") is not True
-        or not _heartbeat_timestamp_is_valid(heartbeat.get("heartbeat_at"))
-        or not _lease_expiry_is_current(heartbeat.get("expires_at"))
     ):
+        _emit_heartbeat_failure(diagnostics, "approval_identity_mismatch")
+        return next_heartbeat_at, False
+    if heartbeat.get("live") is not True:
+        _emit_heartbeat_failure(diagnostics, "connector_not_live")
+        return next_heartbeat_at, False
+    if not _heartbeat_timestamp_is_valid(heartbeat.get("heartbeat_at")):
+        _emit_heartbeat_failure(diagnostics, "heartbeat_timestamp_invalid")
+        return next_heartbeat_at, False
+    if not _lease_expiry_is_current(heartbeat.get("expires_at")):
+        _emit_heartbeat_failure(diagnostics, "lease_expired_or_invalid")
         return next_heartbeat_at, False
     if lease_state is not None:
         measured_deadline = _monotonic_expiry_deadline(
@@ -552,6 +602,7 @@ def _refresh_invocation_lease_if_due(
             response_received_at=time.monotonic(),
         )
         if measured_deadline is None or measured_deadline <= time.monotonic():
+            _emit_heartbeat_failure(diagnostics, "lease_timing_invalid")
             return next_heartbeat_at, False
         lease_state["deadline"] = measured_deadline
         lease_state["approval_deadline"] = (
