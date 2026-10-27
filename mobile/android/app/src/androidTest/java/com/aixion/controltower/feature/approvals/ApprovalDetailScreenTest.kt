@@ -338,10 +338,10 @@ class ApprovalDetailScreenTest {
         }
 
         composeRule.onNodeWithContentDescription(
-            "Deny request ail-test from Antigravity: Run production migration. Risk: high."
+            "Deny request ail-test from Antigravity: Run production migration. Risk: high. Invocation: ail-test."
         ).assertExists()
         composeRule.onNodeWithContentDescription(
-            "Approve request ail-test from Antigravity: Run production migration. Risk: high."
+            "Approve request ail-test from Antigravity: Run production migration. Risk: high. Invocation: ail-test."
         ).assertExists()
         // Keep concise visible button labels unchanged for sighted reviewers.
         composeRule.onNodeWithText("Deny").assertExists()
@@ -394,6 +394,8 @@ class ApprovalDetailScreenTest {
             composeRule.onNodeWithText("Review the tool name and arguments below before deciding.").assertExists()
             composeRule.onNodeWithText("{\"command\":\"echo exact\"}")
                 .assertIsDisplayed()
+            composeRule.onNodeWithTag("approval-detail-list")
+                .performScrollToNode(hasText("I reviewed the exact tool name and arguments above."))
             composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
                 .assertIsDisplayed()
             composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
@@ -402,7 +404,6 @@ class ApprovalDetailScreenTest {
             composeRule.onNodeWithText("Review the exact tool name and arguments above, then acknowledge before approving.")
                 .assertExists()
             composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
-                .performScrollTo()
                 .performClick()
             composeRule.onNodeWithText("Approve request").assertIsEnabled()
         }
@@ -421,8 +422,10 @@ class ApprovalDetailScreenTest {
             )
         )
         composeRule.setContent {
-            Box(modifier = Modifier.width(400.dp).height(1200.dp)) {
-                ApprovalDetailContent(request, null, {}, {}, {})
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f)) {
+                Box(modifier = Modifier.width(400.dp).height(1200.dp)) {
+                    ApprovalDetailContent(request, null, {}, {}, {})
+                }
             }
         }
 
@@ -487,11 +490,14 @@ class ApprovalDetailScreenTest {
         )
         val currentApproval = androidx.compose.runtime.mutableStateOf(original)
         composeRule.setContent {
-            ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+            Box(modifier = Modifier.width(400.dp).height(1_200.dp)) {
+                ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+            }
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("I reviewed the exact tool name and arguments above."))
         composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
-            .performScrollTo()
             .performClick()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
 
@@ -519,11 +525,14 @@ class ApprovalDetailScreenTest {
         )
         val currentApproval = androidx.compose.runtime.mutableStateOf(original)
         composeRule.setContent {
-            ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+            Box(modifier = Modifier.width(400.dp).height(1_200.dp)) {
+                ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
+            }
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("I reviewed the exact tool name and arguments above."))
         composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
-            .performScrollTo()
             .performClick()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
 
@@ -552,8 +561,9 @@ class ApprovalDetailScreenTest {
             ApprovalDetailContent(currentApproval.value, null, {}, {}, {})
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("I reviewed the exact tool name and arguments above."))
         composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
-            .performScrollTo()
             .performClick()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
 
@@ -708,8 +718,9 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("I reviewed the exact tool name and arguments above."))
         composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
-            .performScrollTo()
             .performClick()
         composeRule.onNodeWithText("Approve request").performClick()
 
@@ -1110,8 +1121,12 @@ class ApprovalDetailScreenTest {
             }
         }
 
-        val statusBounds = composeRule.onNodeWithText("Ready for decision").fetchSemanticsNode().boundsInRoot
-        val riskBounds = composeRule.onNodeWithText("High").fetchSemanticsNode().boundsInRoot
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Review required"))
+        val statusBounds = composeRule.onNodeWithText("Review required").fetchSemanticsNode().boundsInRoot
+        val riskBadges = composeRule.onAllNodesWithText("High")
+        riskBadges.assertCountEquals(2)
+        val riskBounds = riskBadges.fetchSemanticsNodes().first().boundsInRoot
         assertTrue(
             "Approval status and risk badges should move to separate rows at narrow widths",
             statusBounds.bottom < riskBounds.top

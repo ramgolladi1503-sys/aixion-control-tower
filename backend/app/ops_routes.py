@@ -137,6 +137,16 @@ _APP_STATE_REPOSITORIES = {
     "trust_events": ("trust_event_repository", "trust_events"),
 }
 
+# These repositories are selected from the lifespan-owned bundle directly,
+# rather than mirrored onto individual app.state aliases. Keep them visible in
+# readiness too: they own account/session, auth-rate-limit, and email-outbox
+# state required by the production request and worker paths.
+_BUNDLE_REPOSITORIES = {
+    "auth": "auth",
+    "auth_rate_limits": "auth_rate_limits",
+    "email_outbox": "email_outbox",
+}
+
 
 def _is_sqlite_repository(repository: object) -> bool:
     """Recognize SQLite adapters and their test/instrumentation subclasses."""
@@ -190,7 +200,10 @@ def _application_repository_bindings(
 ) -> dict[str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]]:
     """Report app-state repository identity without claiming whole-app readiness."""
     if application_state is None:
-        return {name: "unavailable" for name in _APP_STATE_REPOSITORIES}
+        return {
+            name: "unavailable"
+            for name in (*_APP_STATE_REPOSITORIES, *_BUNDLE_REPOSITORIES)
+        }
 
     postgres_repositories = getattr(postgres_runtime, "repositories", None)
     result: dict[str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]] = {}
@@ -206,6 +219,26 @@ def _application_repository_bindings(
             result[name] = "sqlite"
         else:
             result[name] = "other"
+
+    application_repositories = getattr(application_state, "postgres_repositories", None)
+    if application_repositories is None:
+        result.update({name: "unbound" for name in _BUNDLE_REPOSITORIES})
+        return result
+
+    if postgres_repositories is None:
+        result.update({name: "unavailable" for name in _BUNDLE_REPOSITORIES})
+        return result
+
+    if application_repositories is not postgres_repositories:
+        result.update({name: "other" for name in _BUNDLE_REPOSITORIES})
+        return result
+
+    for name, repository_attribute in _BUNDLE_REPOSITORIES.items():
+        result[name] = (
+            "postgresql"
+            if getattr(application_repositories, repository_attribute, None) is not None
+            else "unbound"
+        )
     return result
 
 
@@ -464,6 +497,18 @@ def build_runtime_readiness(
         application_state=application_state,
         postgres_runtime=postgres_runtime,
     )
+    if postgres_is_authoritative:
+        missing_bundle_repositories = [
+            name
+            for name in _BUNDLE_REPOSITORIES
+            if application_repository_bindings.get(name) != "postgresql"
+        ]
+        if missing_bundle_repositories:
+            errors.append(
+                "PostgreSQL critical repository bindings are incomplete or mismatched: "
+                + ", ".join(missing_bundle_repositories)
+                + "."
+            )
     if settings.is_production:
         errors.append(
             "Application persistence is not production-ready: authoritative routes and workers "

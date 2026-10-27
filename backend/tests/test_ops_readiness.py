@@ -479,6 +479,125 @@ def test_readiness_reports_all_high_risk_postgres_lifespan_bindings() -> None:
     assert bindings["trust_events"] == "other"
 
 
+def test_readiness_reports_auth_and_outbox_bundle_bindings_by_identity() -> None:
+    repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=object(),
+        email_outbox=object(),
+    )
+    application_state = SimpleNamespace(postgres_repositories=repositories)
+    runtime = SimpleNamespace(repositories=repositories)
+
+    bindings = ops_routes._application_repository_bindings(
+        application_state=application_state,
+        postgres_runtime=runtime,
+    )
+
+    assert {
+        name: bindings[name]
+        for name in ("auth", "auth_rate_limits", "email_outbox")
+    } == {
+        "auth": "postgresql",
+        "auth_rate_limits": "postgresql",
+        "email_outbox": "postgresql",
+    }
+
+
+@pytest.mark.parametrize("repository_name", ["auth", "auth_rate_limits", "email_outbox"])
+def test_readiness_reports_missing_critical_bundle_repository_as_unbound(
+    repository_name: str,
+) -> None:
+    repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=object(),
+        email_outbox=object(),
+    )
+    setattr(repositories, repository_name, None)
+
+    bindings = ops_routes._application_repository_bindings(
+        application_state=SimpleNamespace(postgres_repositories=repositories),
+        postgres_runtime=SimpleNamespace(repositories=repositories),
+    )
+
+    assert bindings[repository_name] == "unbound"
+
+
+@pytest.mark.parametrize("repository_name", ["auth", "auth_rate_limits", "email_outbox"])
+def test_readiness_reports_mismatched_critical_bundle_as_other(
+    repository_name: str,
+) -> None:
+    application_repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=object(),
+        email_outbox=object(),
+    )
+    runtime_repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=object(),
+        email_outbox=object(),
+    )
+
+    bindings = ops_routes._application_repository_bindings(
+        application_state=SimpleNamespace(
+            postgres_repositories=application_repositories
+        ),
+        postgres_runtime=SimpleNamespace(repositories=runtime_repositories),
+    )
+
+    assert bindings[repository_name] == "other"
+
+
+def test_postgres_readiness_fails_closed_on_incomplete_critical_bundle(monkeypatch) -> None:
+    settings = replace(
+        get_settings(),
+        auth_enabled=True,
+        postgres_auth_enabled=True,
+        postgres_runtime_probe_enabled=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=None,
+        email_outbox=object(),
+    )
+
+    class Runtime:
+        def probe(self):
+            schema = SimpleNamespace(
+                ready=True,
+                applied_migration_ids=tuple(
+                    migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+                ),
+                missing_migration_ids=(),
+                unknown_migration_ids=(),
+                mismatched_migration_ids=(),
+            )
+            return SimpleNamespace(
+                ready=True,
+                schema=schema,
+                pool_size=1,
+                pool_available=1,
+                pool_waiting=0,
+            )
+
+    Runtime.repositories = repositories
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=SimpleNamespace(postgres_repositories=repositories),
+    )
+
+    assert readiness.status == "not_ready"
+    assert readiness.application_store_ready is False
+    assert readiness.app_state_repository_bindings["auth"] == "postgresql"
+    assert readiness.app_state_repository_bindings["auth_rate_limits"] == "unbound"
+    assert readiness.app_state_repository_bindings["email_outbox"] == "postgresql"
+    assert any(
+        "critical repository bindings are incomplete or mismatched: auth_rate_limits"
+        in error
+        for error in readiness.errors
+    )
+
+
 def test_production_readiness_rejects_sqlite_application_store(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_PROFILE", "production")
     monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
