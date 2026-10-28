@@ -5,12 +5,15 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
@@ -24,6 +27,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -195,7 +199,10 @@ class ApprovalDetailScreenTest {
             )
         }
 
-        val countdown = composeRule.onNodeWithTag("approval-decision-expiry-countdown")
+        val countdown = composeRule.onNodeWithContentDescription(
+            "Approval expires in less than one minute.",
+            useUnmergedTree = true
+        )
         assertEquals(
             LiveRegionMode.Polite,
             countdown.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
@@ -320,7 +327,11 @@ class ApprovalDetailScreenTest {
         composeRule.setContent { ApprovalDetailContent(approval(ApprovalStatus.REQUESTED), null, {}, {}, {}) }
 
         composeRule.onNodeWithText("Ready for decision").assertExists()
-        composeRule.onNodeWithText("Low").assertExists()
+        composeRule.onAllNodes(
+            hasTestTag("approval-decision-identity-risk") and
+                hasAnyDescendant(hasText("Low", substring = false)),
+            useUnmergedTree = true
+        ).assertCountEquals(1)
         composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("+test"))
         composeRule.onNodeWithText("+test").assertExists()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
@@ -389,7 +400,9 @@ class ApprovalDetailScreenTest {
             )
             composeRule.waitForIdle()
 
-            composeRule.onNodeWithTag("approval-exact-tool-request").assertExists()
+            composeRule.onNodeWithTag("approval-detail-list")
+                .performScrollToNode(hasText("Exact requested tool action"))
+            composeRule.onNodeWithTag("approval-exact-tool-request", useUnmergedTree = true).assertExists()
             composeRule.onNodeWithText("Exact requested tool action").assertExists()
             composeRule.onNodeWithText("Review the tool name and arguments below before deciding.").assertExists()
             composeRule.onNodeWithText("{\"command\":\"echo exact\"}")
@@ -599,9 +612,11 @@ class ApprovalDetailScreenTest {
 
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
         composeRule.onNodeWithText("Deny").assertIsEnabled()
-        composeRule.onNodeWithText("Review full diff").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Review full diff"))
+        composeRule.onNodeWithText("Review full diff").assertIsDisplayed()
         composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement")
-            .performScrollTo()
+            .assertExists()
             .assertIsNotEnabled()
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled()
 
@@ -609,9 +624,18 @@ class ApprovalDetailScreenTest {
             .performScrollTo()
             .performClick()
         composeRule.runOnIdle { assertEquals(1, fullDiffOpenCount) }
-        composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement")
-            .performScrollTo()
-            .performClick()
+        val acknowledgement = composeRule.onNodeWithTag(
+            "approval-full-diff-review-acknowledgement"
+        )
+        val list = composeRule.onNodeWithTag("approval-detail-list")
+        list.performScrollToNode(hasTestTag("approval-full-diff-review-acknowledgement"))
+        acknowledgement.assertIsDisplayed().assertIsEnabled()
+        acknowledgement.performClick()
+        composeRule.waitForIdle()
+        assertEquals(
+            ToggleableState.On,
+            acknowledgement.fetchSemanticsNode().config[SemanticsProperties.ToggleableState]
+        )
 
         composeRule.onNodeWithText("Approve request").assertIsEnabled()
         composeRule.onNodeWithText("Deny").assertIsEnabled()
@@ -629,11 +653,11 @@ class ApprovalDetailScreenTest {
         }
 
         fun openAndAcknowledge() {
-            composeRule.onNodeWithTag("approval-full-diff-review")
-                .performScrollTo()
-                .performClick()
+            val list = composeRule.onNodeWithTag("approval-detail-list")
+            list.performScrollToNode(hasText("Review full diff"))
+            composeRule.onNodeWithTag("approval-full-diff-review").performClick()
+            list.performScrollToNode(hasText("I reviewed the full file diff above."))
             composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement")
-                .performScrollTo()
                 .performClick()
         }
 
@@ -916,9 +940,9 @@ class ApprovalDetailScreenTest {
             reason.fetchSemanticsNode().boundsInRoot.height >= 48f
         )
         composeRule.onNodeWithTag("approval-decision-identity").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-decision-identity-provider")
+        composeRule.onNodeWithTag("approval-decision-identity-provider", useUnmergedTree = true)
             .assertTextContains("ANTIGRAVITY").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-decision-identity-request-id")
+        composeRule.onNodeWithTag("approval-decision-identity-request-id", useUnmergedTree = true)
             .assertTextContains("Request ail-test").assertIsDisplayed()
         composeRule.onNodeWithText("Deny").assertIsNotEnabled().assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled().assertIsDisplayed()
@@ -947,9 +971,9 @@ class ApprovalDetailScreenTest {
             reason.fetchSemanticsNode().boundsInRoot.height >= 48f
         )
         composeRule.onNodeWithTag("approval-decision-identity").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-decision-identity-provider")
+        composeRule.onNodeWithTag("approval-decision-identity-provider", useUnmergedTree = true)
             .assertTextContains("ANTIGRAVITY").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-decision-identity-request-id")
+        composeRule.onNodeWithTag("approval-decision-identity-request-id", useUnmergedTree = true)
             .assertTextContains("Request ail-test").assertIsDisplayed()
         composeRule.onNodeWithText("Deny").assertIsNotEnabled().assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsNotEnabled().assertIsDisplayed()
@@ -1092,7 +1116,7 @@ class ApprovalDetailScreenTest {
         }
 
         val status = composeRule.onNodeWithTag("approval-decision-status")
-        status.assertTextContains("Approval is available.")
+        status.assertTextContains("Approval is available.", substring = true)
         assertEquals(
             LiveRegionMode.Polite,
             status.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
@@ -1149,9 +1173,11 @@ class ApprovalDetailScreenTest {
             }
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Request at a glance"))
         val projectLabel = composeRule.onNodeWithText("Project", useUnmergedTree = true)
             .fetchSemanticsNode().boundsInRoot
-        val projectValue = composeRule.onNodeWithText("Production workspace", useUnmergedTree = true)
+        val projectValue = composeRule.onNodeWithText("Test project", useUnmergedTree = true)
             .fetchSemanticsNode().boundsInRoot
         assertTrue(
             "At 200% font scale, decision-critical values should follow their labels vertically",
@@ -1265,10 +1291,15 @@ class ApprovalDetailScreenTest {
             ApprovalDetailContent(request, null, {}, {}, {})
         }
 
-        composeRule.onNodeWithText("Risk rationale").assertExists()
-        composeRule.onNodeWithText("ANTIGRAVITY · Verified source").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("main").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Show technical details").performScrollTo().assertIsDisplayed()
+        val list = composeRule.onNodeWithTag("approval-detail-list")
+        list.performScrollToNode(hasText("Risk rationale"))
+        composeRule.onNodeWithText("Risk rationale").assertIsDisplayed()
+        list.performScrollToNode(hasText("ANTIGRAVITY · Verified source"))
+        composeRule.onNodeWithText("ANTIGRAVITY · Verified source").assertIsDisplayed()
+        list.performScrollToNode(hasText("main"))
+        composeRule.onNodeWithText("main").assertIsDisplayed()
+        list.performScrollToNode(hasText("Show technical details"))
+        composeRule.onNodeWithText("Show technical details").assertIsDisplayed()
         composeRule.onAllNodesWithText("Approval ID: approval-detail-test", substring = true).assertCountEquals(0)
         composeRule.onNodeWithText("antigravity:session-codex-42:tool-19").assertDoesNotExist()
         composeRule.onNodeWithText("Show technical details").performClick()
@@ -1320,7 +1351,7 @@ class ApprovalDetailScreenTest {
             sourceSessionId = sessionId,
             sourceInvocationId = longInvocationId,
             verifiedSource = true,
-            expiresAt = "2026-10-22T14:30:00Z",
+            expiresAt = "2099-10-22T14:30:00Z",
             riskReasons = listOf(
                 "Command may modify production configuration.",
                 "Command runs with workspace write access."
@@ -1329,37 +1360,46 @@ class ApprovalDetailScreenTest {
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
         composeRule.onNodeWithText("Request at a glance").assertExists()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Command may modify production configuration.", substring = true))
         composeRule.onAllNodesWithText("Command may modify production configuration.", substring = true)
             .assertCountEquals(1)
         composeRule.onAllNodesWithText("Command runs with workspace write access.", substring = true)
             .assertCountEquals(1)
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
         composeRule.onNodeWithText("Deny").assertIsDisplayed()
-        composeRule.onNodeWithText("Command may modify production configuration.", substring = true)
-            .performScrollTo()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Command may modify production configuration.", substring = true))
         composeRule.onNodeWithText("Command may modify production configuration.", substring = true)
             .assertIsDisplayed()
-        composeRule.onNodeWithText("Payments service").performScrollTo()
+        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("Payments service"))
         composeRule.onNodeWithText("Payments service").assertIsDisplayed()
         composeRule.onNodeWithText("release/production").assertIsDisplayed()
-        composeRule.onNodeWithText("Command runs with workspace write access.", substring = true)
-            .performScrollTo()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Command runs with workspace write access.", substring = true))
         composeRule.onNodeWithText("Command runs with workspace write access.", substring = true)
             .assertIsDisplayed()
-        composeRule.onNodeWithText("ANTIGRAVITY · Verified source").performScrollTo()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("ANTIGRAVITY · Verified source"))
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").assertIsDisplayed()
-        composeRule.onNodeWithText("Session").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText(shortSafeApprovalId(sessionId)).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Invocation").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText(shortSafeApprovalId(longInvocationId)).performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("Session"))
+        composeRule.onNodeWithText("Session", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText(shortSafeApprovalId(sessionId), useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("Invocation"))
+        composeRule.onNodeWithText("Invocation", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText(shortSafeApprovalId(longInvocationId), useUnmergedTree = true).assertIsDisplayed()
         composeRule.onAllNodesWithText(sessionId).assertCountEquals(0)
         composeRule.onAllNodesWithText(longInvocationId).assertCountEquals(0)
-        composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
-        composeRule.onNodeWithText("Session ID: $sessionId", substring = true).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Source invocation ID: $longInvocationId", substring = true)
-            .performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("2026-10-22T14:30:00Z").performScrollTo()
-        composeRule.onNodeWithText("2026-10-22T14:30:00Z").assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("Show technical details"))
+        composeRule.onNodeWithText("Show technical details").performClick()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Session ID: $sessionId", substring = true))
+        composeRule.onNodeWithText("Session ID: $sessionId", substring = true).assertIsDisplayed()
+        val technicalDetails = composeRule.onNodeWithText(
+            "Source invocation ID: $longInvocationId",
+            substring = true
+        ).assertIsDisplayed()
+        technicalDetails.assertTextContains("Expires at: 2099-10-22T14:30:00Z", substring = true)
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
     }
 
@@ -1375,13 +1415,23 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
-        composeRule.onAllNodesWithText("Not provided").assertCountEquals(5)
-        composeRule.onNodeWithText("ANTIGRAVITY · Source not verified").assertExists()
-        composeRule.onNodeWithText("No risk rationale was supplied.").assertExists()
-        composeRule.onNodeWithText("Session").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Invocation").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Expires").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Show technical details").performScrollTo().performClick()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Request at a glance"))
+        composeRule.onAllNodesWithText("Not provided").assertCountEquals(3)
+        val list = composeRule.onNodeWithTag("approval-detail-list")
+        list.performScrollToNode(hasText("ANTIGRAVITY · Source not verified"))
+        composeRule.onNodeWithText("ANTIGRAVITY · Source not verified").assertIsDisplayed()
+        list.performScrollToNode(hasText("No risk rationale was supplied", substring = true))
+        composeRule.onNodeWithText("No risk rationale was supplied", substring = true).assertIsDisplayed()
+        list.performScrollToNode(hasText("Session"))
+        composeRule.onNodeWithText("Session", useUnmergedTree = true).assertIsDisplayed()
+        list.performScrollToNode(hasText("Invocation"))
+        composeRule.onNodeWithText("Invocation", useUnmergedTree = true).assertIsDisplayed()
+        list.performScrollToNode(hasText("Expires"))
+        composeRule.onNodeWithText("Expires", useUnmergedTree = true).assertIsDisplayed()
+        list.performScrollToNode(hasText("Show technical details"))
+        composeRule.onNodeWithText("Show technical details").performClick()
+        list.performScrollToNode(hasText("Source invocation ID: Not provided", substring = true))
         composeRule.onNodeWithText("Source invocation ID: Not provided", substring = true).assertExists()
     }
 
@@ -1406,19 +1456,30 @@ class ApprovalDetailScreenTest {
             }
         }
 
-        val sessionLabel = composeRule.onNodeWithText("Session").performScrollTo()
-        val sessionValue = composeRule.onNodeWithText(shortSafeApprovalId(sessionId)).performScrollTo()
-        val invocationLabel = composeRule.onNodeWithText("Invocation").performScrollTo()
-        val invocationValue = composeRule.onNodeWithText(shortSafeApprovalId(invocationId)).performScrollTo()
-
-        listOf(sessionLabel, sessionValue, invocationLabel, invocationValue).forEach { it.assertIsDisplayed() }
+        val list = composeRule.onNodeWithTag("approval-detail-list")
+        list.performScrollToNode(hasText("Session"))
+        val sessionLabel = composeRule.onNodeWithText("Session", useUnmergedTree = true)
+        val sessionValue = composeRule.onNodeWithText(shortSafeApprovalId(sessionId), useUnmergedTree = true)
+        sessionLabel.performScrollTo().assertIsDisplayed()
+        sessionValue.performScrollTo().assertIsDisplayed()
+        sessionLabel.assertIsDisplayed()
+        val sessionLabelBounds = sessionLabel.fetchSemanticsNode().boundsInRoot
+        val sessionValueBounds = sessionValue.fetchSemanticsNode().boundsInRoot
+        list.performScrollToNode(hasText("Invocation"))
+        val invocationLabel = composeRule.onNodeWithText("Invocation", useUnmergedTree = true)
+        val invocationValue = composeRule.onNodeWithText(shortSafeApprovalId(invocationId), useUnmergedTree = true)
+        invocationLabel.performScrollTo().assertIsDisplayed()
+        invocationValue.performScrollTo().assertIsDisplayed()
+        invocationLabel.assertIsDisplayed()
+        val invocationLabelBounds = invocationLabel.fetchSemanticsNode().boundsInRoot
+        val invocationValueBounds = invocationValue.fetchSemanticsNode().boundsInRoot
         assertTrue(
             "Session value should stack below its label at large font scale",
-            sessionValue.fetchSemanticsNode().boundsInRoot.top > sessionLabel.fetchSemanticsNode().boundsInRoot.bottom
+            sessionValueBounds.top > sessionLabelBounds.bottom
         )
         assertTrue(
             "Invocation value should stack below its label at large font scale",
-            invocationValue.fetchSemanticsNode().boundsInRoot.top > invocationLabel.fetchSemanticsNode().boundsInRoot.bottom
+            invocationValueBounds.top > invocationLabelBounds.bottom
         )
         composeRule.onAllNodesWithText(sessionId).assertCountEquals(0)
         composeRule.onAllNodesWithText(invocationId).assertCountEquals(0)
@@ -1448,11 +1509,11 @@ class ApprovalDetailScreenTest {
         }
 
         val errorCopy = composeRule.onNodeWithTag("approval-detail-open-error").assertExists()
-        errorCopy.assertTextContains("No other request is selected")
+        errorCopy.assertTextContains("No other request is selected", substring = true)
         composeRule.onNodeWithTag("approval-detail-technical-error").assertDoesNotExist()
         composeRule.onNodeWithText("Technical details").performClick()
         composeRule.onNodeWithTag("approval-detail-technical-error")
-            .assertTextContains("not found")
+            .assertTextContains("not found", substring = true)
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
         composeRule.onNodeWithText("Retry approval load").performClick()
         assertEquals(1, retryCount)
@@ -1492,6 +1553,8 @@ private fun approval(status: ApprovalStatus) = ApprovalSummary(
     sourceAgentId = "agent-detail-test",
     sourceSessionId = "session-detail-test",
     sourceInvocationId = "invocation-detail-test",
-    expiresAt = Instant.now().plusSeconds(600).toString(),
+    // Keep generic UI fixtures valid even when the complete instrumentation class takes minutes.
+    // Expiry-specific cases override this with bounded test timestamps.
+    expiresAt = "2099-01-01T00:00:00Z",
     verifiedSource = true
 )
