@@ -769,6 +769,46 @@ def test_phone_rejection_denies_codex_request(monkeypatch) -> None:
     assert "DENIED" in message
 
 
+@pytest.mark.parametrize(
+    ("decision_status", "expected_reason"),
+    [
+        ("DENIED", "Control Tower decision: DENIED"),
+        ("APPROVED", "Connector liveness could not be confirmed"),
+        ("PENDING_REVIEW", "Connector liveness could not be confirmed"),
+    ],
+)
+def test_due_heartbeat_race_preserves_phone_denial_but_never_allows(
+    decision_status: str, expected_reason: str, monkeypatch
+) -> None:
+    calls: list[str] = []
+    created_body: dict = {}
+
+    def request(method, url, _config, _token, body=None, **_kwargs):
+        nonlocal created_body
+        calls.append(method)
+        if method == "POST" and url.endswith("/agents/approvals"):
+            created_body = body or {}
+            return _record(created_body)
+        if method == "GET" and url.endswith("/decision"):
+            decision = _record(created_body, status=decision_status)
+            if decision_status == "APPROVED":
+                decision["approved_payload_hash"] = hook._hash(decision)
+            return decision
+        pytest.fail("a liveness failure must never consume or mutate a decision")
+
+    monkeypatch.setattr(hook, "_request", request)
+    monkeypatch.setattr(
+        hook,
+        "_refresh_invocation_lease_if_due",
+        lambda **kwargs: (kwargs["next_heartbeat_at"], False),
+    )
+
+    behavior, reason = hook.run(_event(), ENV)
+
+    assert (behavior, reason) == ("deny", expected_reason)
+    assert calls == ["POST", "GET"]
+
+
 @pytest.mark.parametrize("args", [
     {"command": "echo access_token=very-secret-value"},
     {"password": "not-displayable"},

@@ -916,6 +916,37 @@ def _run(
             diagnostics=diagnostics,
         )
         if not lease_live:
+            # A phone denial can commit between a due heartbeat and this
+            # iteration. The backend correctly refuses to renew a lease for a
+            # resolved approval; read the decision once so the native hook can
+            # report that exact denial. This read can never authorize a tool:
+            # an approved response still fails closed when liveness is lost.
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                return "deny", "Connector liveness could not be confirmed"
+            try:
+                latest = _request(
+                    "GET",
+                    f"{api_base}/agents/approvals/{approval_id}/decision",
+                    config,
+                    token,
+                    timeout_seconds=min(MAX_REQUEST_TIMEOUT_SECONDS, remaining_seconds),
+                )
+            except GateError:
+                return "deny", "Connector liveness could not be confirmed"
+            if not _identity_matches(latest, approval_id=approval_id, config=config):
+                return "deny", "Control Tower returned a different approval request"
+            try:
+                if _decision_snapshot(latest) != original:
+                    return "deny", "Approval payload changed after the original Codex request"
+            except (KeyError, TypeError):
+                return "deny", "Control Tower approval payload is incomplete"
+            latest_status = latest.get("status")
+            if latest_status in {
+                "DENIED", "REJECTED", "REVISION_REQUESTED", "EXPIRED",
+                "CANCELLED", "BLOCKED", "FAILED",
+            }:
+                return "deny", f"Control Tower decision: {latest_status}"
             return "deny", "Connector liveness could not be confirmed"
         # Heartbeat latency consumes the same host wait budget. Recompute the
         # remaining time before the decision GET instead of using the stale
