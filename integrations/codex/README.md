@@ -27,9 +27,15 @@ The installer writes a project-local Codex hook definition to
 to an existing conversation, or take over a running session. Automated tests
 launch the hook command with synthetic `PermissionRequest` JSON and exercise
 the Control Tower API. They do not launch Codex CLI or the native Codex
-desktop app. Therefore neither runtime is certified to invoke this adapter
-and resume the same task after a phone decision. Treat Codex Desktop phone
-approval as unverified until an installed desktop session produces the real
+desktop app. A separate manual local runtime checkpoint is recorded in
+[`docs/CODEX_CLI_ANDROID_E2E_20261029.md`](../../docs/CODEX_CLI_ANDROID_E2E_20261029.md):
+Codex CLI `0.163.0-alpha.11.2` sent a real `PermissionRequest` through the
+hook to Android emulator `5556`; the approved command executed and a phone
+denial prevented its command marker from being created. The exact final hook
+denial message was not captured. This is narrow CLI runtime evidence, not
+production certification; live timeout, API failure, stale-payload,
+credential-revocation, and restart cases remain open. Codex Desktop phone
+approval is unverified until an installed desktop session produces the real
 event and the same native task is observed continuing after approval (and
 stopping after denial). Reviewing or trusting the hook in Codex only confirms
 that the configuration is accepted; it is not runtime-flow evidence.
@@ -124,12 +130,12 @@ that the configuration is accepted; it is not runtime-flow evidence.
 
 4. In the Codex runtime you intend to use, review and trust the hook through
    Codex's hook review UI or `/hooks` in the CLI, and confirm it lists the
-   `PermissionRequest` hook. This verifies configuration only. The CLI and
-   native desktop runtime flows remain unverified by this repository's
-   automated tests. Before relying on either, run a harmless action that
-   normally produces a permission prompt and prove that the exact request
-   appears on the phone, approval resumes that same task, and denial prevents
-   that same action. Also verify network interruption and timeout fail closed.
+   `PermissionRequest` hook. This verifies configuration only. The dated
+   checkpoint above demonstrates one local Codex CLI approval and denial on
+   an emulator; repeat the exact-action check for your installation and verify
+   network interruption and timeout fail closed before relying on it. Codex
+   Desktop has no verified runtime flow here and must not be treated as
+   supported based on the CLI result.
 
 To remove this integration, run `setup_workspace.py --workspace
 "/absolute/path/to/project" --remove`. It removes only its own managed entry
