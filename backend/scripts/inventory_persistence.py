@@ -598,9 +598,18 @@ def inventory(root: Path) -> dict[str, Any]:
     module_functions: dict[str, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
     module_router_prefixes: dict[str, dict[str, str]] = {}
     imports: dict[str, dict[str, str]] = {}
-    app_paths = sorted(app_root.rglob("*.py"))
+    # macOS writes AppleDouble sidecars (named `._<file>`) when a checkout is
+    # stored on filesystems that cannot represent resource forks. They are
+    # binary metadata, not Python modules, and must not enter the AST scan.
+    app_paths = sorted(
+        path for path in app_root.rglob("*.py") if not path.name.startswith("._")
+    )
     scripts_root = root / "scripts"
-    script_paths = sorted(scripts_root.rglob("*.py")) if scripts_root.is_dir() else []
+    script_paths = (
+        sorted(path for path in scripts_root.rglob("*.py") if not path.name.startswith("._"))
+        if scripts_root.is_dir()
+        else []
+    )
     script_modules: set[str] = set()
     script_events: list[dict[str, Any]] = []
     for path in [*app_paths, *script_paths]:

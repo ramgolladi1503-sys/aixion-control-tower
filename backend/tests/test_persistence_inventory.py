@@ -44,6 +44,26 @@ def test_store_maps_are_discovered_from_store_initialization(tmp_path: Path) -> 
     assert _store_maps(store_file) == {"approvals", "audit_events"}
 
 
+def test_inventory_ignores_binary_appledouble_python_sidecars(tmp_path: Path) -> None:
+    app_dir = tmp_path / "app"
+    scripts_dir = tmp_path / "scripts"
+    app_dir.mkdir()
+    scripts_dir.mkdir()
+    (app_dir / "store.py").write_text(
+        "class Store:\n"
+        "    def __init__(self):\n"
+        "        self.approvals = {}\n",
+        encoding="utf-8",
+    )
+    (app_dir / "._store.py").write_bytes(b"\x00\x05\x16\x07Mac OS X")
+    (scripts_dir / "._worker.py").write_bytes(b"\x00\x05\x16\x07Mac OS X")
+
+    report = inventory(tmp_path)
+
+    assert report["modules_with_persistence_access"] == 0
+    assert report["modules"] == {}
+
+
 def test_inventory_classifies_reads_writes_mutations_and_persist() -> None:
     source = textwrap.dedent(
         """
