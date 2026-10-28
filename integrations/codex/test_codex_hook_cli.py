@@ -1225,7 +1225,7 @@ def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
             return response
         if method == "POST" and url.endswith("/expire"):
             return {**created, "status": "EXPIRED"}
-        raise AssertionError(f"Heartbeat failure must not proceed: {method} {url}")
+        raise AssertionError(f"Heartbeat failure must not consume an approval: {method} {url}")
 
     monkeypatch.setattr(hook, "_request", request)
     environment = _codex_environment()
@@ -1233,7 +1233,10 @@ def test_failed_or_late_invocation_heartbeat_denies_without_consuming(
     result = hook.run(_codex_event(), environment)
 
     assert result == ("deny", "Connector liveness could not be confirmed")
-    assert calls == ["approvals", "decision", "heartbeat"]
+    expected_calls = ["approvals", "decision", "heartbeat"]
+    if failure != "late":
+        expected_calls.append("decision")
+    assert calls == expected_calls
     assert "consume" not in calls
 
 
@@ -1544,13 +1547,13 @@ def test_long_retry_after_with_failed_heartbeat_denies_without_consuming(
             if heartbeat_failure == "rate_limited":
                 raise hook.RateLimitError(90)
             return {**_invocation_heartbeat(created), "live": False}
-        raise AssertionError(f"Failed liveness must stop the approval wait: {method} {url}")
+        raise AssertionError(f"Failed liveness must not consume an approval: {method} {url}")
 
     monkeypatch.setattr(hook, "_request", request)
     result = hook.run(_codex_event(), environment)
 
     assert result == ("deny", "Connector liveness could not be confirmed")
-    assert calls == ["approvals", "decision", "heartbeat"]
+    assert calls == ["approvals", "decision", "heartbeat", "decision"]
     assert clock.sleeps == [hook.INVOCATION_HEARTBEAT_INTERVAL_SECONDS]
     assert "consume" not in calls
 
