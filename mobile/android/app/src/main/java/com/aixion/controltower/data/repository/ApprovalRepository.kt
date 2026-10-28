@@ -10,16 +10,32 @@ import com.aixion.controltower.core.model.ApprovalHistoryPage
 import com.aixion.controltower.core.model.ApprovalHistoryRequestSnapshot
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
+import kotlinx.coroutines.CancellationException
 
 class ApprovalRepository(private val api: ControlTowerApi) {
     suspend fun listApprovals(projectNamesById: Map<String, String> = emptyMap()): List<ApprovalSummary> {
-        return api.listApprovals().map { dto ->
-            dto.toUiSummary(projectNamesById[dto.project_id] ?: "Project")
+        val approvals = api.listApprovals()
+        val names = projectNamesById.ifEmpty { projectNames() }
+        return approvals.map { dto ->
+            dto.toUiSummary(names[dto.project_id]?.takeIf { it.isNotBlank() }
+                ?: "Project name unavailable (${dto.project_id})")
         }
     }
 
-    suspend fun getApproval(approvalId: String, projectName: String = "Project"): ApprovalSummary {
-        return api.getApproval(approvalId).toUiSummary(projectName)
+    suspend fun getApproval(approvalId: String, projectName: String? = null): ApprovalSummary {
+        val approval = api.getApproval(approvalId)
+        val name = projectName?.takeIf { it.isNotBlank() }
+            ?: projectNames()[approval.project_id]?.takeIf { it.isNotBlank() }
+            ?: "Project name unavailable (${approval.project_id})"
+        return approval.toUiSummary(name)
+    }
+
+    private suspend fun projectNames(): Map<String, String> = try {
+        api.listProjects().associate { it.id to it.name }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        emptyMap()
     }
 
     suspend fun listApprovalHistory(

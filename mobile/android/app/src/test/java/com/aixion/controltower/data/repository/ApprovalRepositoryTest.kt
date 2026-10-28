@@ -11,6 +11,8 @@ import com.aixion.controltower.core.api.dto.AuthUserDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
 import com.aixion.controltower.core.api.dto.LoginRequestDto
 import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
+import com.aixion.controltower.core.api.dto.ProjectDto
+import com.aixion.controltower.core.api.dto.RiskAssessmentDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
 import com.aixion.controltower.core.api.dto.RegistrationResponseDto
 import com.aixion.controltower.core.model.ApprovalDeliveryStatus
@@ -20,6 +22,30 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 class ApprovalRepositoryTest {
+    @Test
+    fun listApprovalsResolvesProjectName() = runTest {
+        val approval = ApprovalRepository(ProjectNameApprovalApi()).listApprovals().single()
+        assertEquals("Isolated project", approval.projectName)
+    }
+
+    @Test
+    fun listApprovalsShowsExplicitFallbackWhenProjectLookupFails() = runTest {
+        val approval = ApprovalRepository(ProjectNameApprovalApi(failProjects = true)).listApprovals().single()
+        assertEquals("Project name unavailable (project-1)", approval.projectName)
+    }
+
+    @Test
+    fun getApprovalResolvesProjectNameForDirectOpen() = runTest {
+        val approval = ApprovalRepository(ProjectNameApprovalApi()).getApproval("approval-1")
+        assertEquals("Isolated project", approval.projectName)
+    }
+
+    @Test
+    fun getApprovalShowsFallbackWhenProjectLookupFails() = runTest {
+        val approval = ApprovalRepository(ProjectNameApprovalApi(failProjects = true)).getApproval("approval-1")
+        assertEquals("Project name unavailable (project-1)", approval.projectName)
+    }
+
     @Test
     fun listApprovalHistoryMapsOnlyVerifiedImmutableRequestSnapshot() = runTest {
         val api = HistoryApprovalApi(
@@ -204,6 +230,21 @@ class ApprovalRepositoryTest {
         assertIllegalStateFailure {
             repository.resolveMCPApproval("approval_missing")
         }
+    }
+}
+
+private class ProjectNameApprovalApi(private val failProjects: Boolean = false) : BaseFakeControlTowerApi() {
+    override suspend fun listApprovals() = listOf(
+        ApprovalRequestDto(id = "approval-1", project_id = "project-1", title = "Review",
+            summary = "Review action", target_branch = "main", status = "PENDING_REVIEW",
+            risk = RiskAssessmentDto(level = "LOW"))
+    )
+
+    override suspend fun getApproval(approvalId: String): ApprovalRequestDto = listApprovals().single()
+
+    override suspend fun listProjects(): List<ProjectDto> {
+        if (failProjects) throw IllegalStateException("Project lookup failed")
+        return listOf(ProjectDto(id = "project-1", name = "Isolated project"))
     }
 }
 
