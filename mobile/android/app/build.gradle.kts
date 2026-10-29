@@ -192,6 +192,7 @@ fun releaseApiUrlProblem(rawUrl: String): String? {
     val normalizedHost = parsedUrl.host?.lowercase()?.removeSuffix(".").orEmpty()
     val ipv4Address = Regex("^\\d{1,3}(?:\\.\\d{1,3}){3}$")
     val ipv6Address = normalizedHost.contains(":")
+    val websiteApexHost = normalizedHost == "aixionlab.com"
     val localOrReservedHost = normalizedHost == "localhost" ||
         normalizedHost.endsWith(".localhost") ||
         normalizedHost == "local" ||
@@ -207,6 +208,7 @@ fun releaseApiUrlProblem(rawUrl: String): String? {
     if (!parsedUrl.scheme.equals("https", ignoreCase = true) ||
         normalizedHost.isBlank() ||
         !normalizedHost.contains(".") ||
+        websiteApexHost ||
         ipv4Address.matches(normalizedHost) ||
         ipv6Address ||
         localOrReservedHost ||
@@ -235,7 +237,7 @@ tasks.register("verifyReleaseApiUrlGuard") {
     group = "verification"
     description = "Checks accepted and rejected release API base URL examples."
     doLast {
-        val accepted = listOf("https://aixionlab.com/")
+        val accepted = listOf("https://api.aixionlab.com/")
         val rejected = listOf(
             "http://aixionlab.com/",
             "https://localhost/",
@@ -243,6 +245,7 @@ tasks.register("verifyReleaseApiUrlGuard") {
             "https://[::1]/",
             "https://api.example.invalid/",
             "https://api.example.test/",
+            "https://aixionlab.com/",
             "https://example.com/",
             "https://aixionlab.com",
             "https://user@aixionlab.com/",
