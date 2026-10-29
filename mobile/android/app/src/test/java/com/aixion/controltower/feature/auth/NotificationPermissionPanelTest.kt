@@ -69,7 +69,7 @@ class NotificationPermissionPanelTest {
         assertEquals(
             NotificationPanelMessage(
                 headline = "This device could not be registered for approval alerts.",
-                supportingDetail = "Server registration failed. Reopen Account to retry."
+                supportingDetail = "Registration could not be completed. Reopen Account to retry."
             ),
             NotificationPanelCopy.message(
                 NotificationPermissionState.GRANTED,
