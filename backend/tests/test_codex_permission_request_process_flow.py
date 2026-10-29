@@ -671,3 +671,159 @@ def test_real_codex_permission_hook_denies_without_claim_or_tool_side_effect(
             hook_process.kill()
             hook_process.wait(timeout=5)
         _stop_api(api_process)
+
+
+def test_codex_permission_hook_denies_within_deadline_when_api_drops_pending_wait(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "codex-api-outage.sqlite3"
+    marker_path = tmp_path / "codex-outage-tool-ran"
+    port = _free_loopback_port()
+    base_url = f"http://127.0.0.1:{port}"
+    api_process = _start_api(db_path, port)
+    hook_process: subprocess.Popen | None = None
+
+    try:
+        _wait_for_api(api_process, base_url)
+        with httpx.Client(base_url=base_url, timeout=5) as api:
+            registration = api.post(
+                "/auth/register",
+                json={
+                    "email": "codex-outage-owner@example.com",
+                    "password": "Codex-outage-password-123!",
+                    "display_name": "Codex outage owner",
+                },
+            )
+            assert registration.status_code == 200, registration.text
+            code = registration.json().get("dev_verification_code")
+            assert code
+            verified = api.post(
+                "/auth/verify-email",
+                json={"email": "codex-outage-owner@example.com", "code": code},
+            )
+            assert verified.status_code == 200, verified.text
+            project_response = api.post(
+                "/projects", json={"name": "Codex outage approval project"}
+            )
+            assert project_response.status_code == 200, project_response.text
+            project_id = project_response.json()["id"]
+            registered = api.post(
+                "/agents",
+                json={
+                    "provider": "CODEX",
+                    "display_name": "Codex API outage integration",
+                    "auth_type": "API_KEY",
+                    "allowed_project_ids": [project_id],
+                    "allowed_actions": [
+                        "CREATE_APPROVAL",
+                        "READ_APPROVAL_DECISION",
+                        "CONSUME_APPROVAL_DECISION",
+                        "REPORT_APPROVAL_DELIVERY_FAILURE",
+                        "EXPIRE_OWN_APPROVAL",
+                    ],
+                    "enabled": True,
+                },
+            )
+            assert registered.status_code == 200, registered.text
+            agent_id = registered.json()["agent"]["id"]
+            agent_token = registered.json()["agent_token"]
+
+        hook_environment = os.environ.copy()
+        hook_environment.update(
+            {
+                "AIXION_API_BASE_URL": base_url,
+                "AIXION_AGENT_ID": agent_id,
+                "AIXION_AGENT_TOKEN": agent_token,
+                "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+                "AIXION_PROJECT_ID": project_id,
+                "AIXION_CODEX_WORKSPACE_PATH": str(BACKEND_ROOT.parent),
+                "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "4",
+            }
+        )
+        for key in list(hook_environment):
+            if key.startswith("AIXION_POSTGRES_"):
+                hook_environment.pop(key)
+
+        command = f"touch {shlex.quote(str(marker_path))}"
+        permission_request = {
+            "hook_event_name": "PermissionRequest",
+            "cwd": str(BACKEND_ROOT.parent),
+            "permission_mode": "default",
+            "session_id": "codex-session-api-outage",
+            "turn_id": "codex-turn-api-outage",
+            "tool_use_id": "codex-tool-api-outage",
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        }
+        hook_process = subprocess.Popen(
+            [sys.executable, str(HOOK_PATH)],
+            cwd=BACKEND_ROOT.parent,
+            env=hook_environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert hook_process.stdin is not None
+        hook_process.stdin.write(json.dumps(permission_request) + "\n")
+        hook_process.stdin.close()
+        hook_process.stdin = None
+
+        approval: dict | None = None
+        deadline = time.monotonic() + 15
+        with httpx.Client(base_url=base_url, timeout=5) as api:
+            while time.monotonic() < deadline:
+                response = api.get("/approvals")
+                assert response.status_code == 200, response.text
+                approval = next(
+                    (
+                        item
+                        for item in response.json()
+                        if item.get("source_provider") == "CODEX"
+                        and item.get("source_agent_id") == agent_id
+                        and item.get("title") == "Codex permission: Bash"
+                    ),
+                    None,
+                )
+                if approval is not None:
+                    break
+                assert hook_process.poll() is None, (
+                    "Codex hook exited before a pending approval was created"
+                )
+                time.sleep(0.1)
+
+        assert approval is not None, "Codex hook did not create a pending approval"
+        assert approval["status"] in {"REQUESTED", "PENDING_REVIEW"}
+        assert hook_process.poll() is None, (
+            "Codex hook returned before the API outage"
+        )
+
+        started = time.monotonic()
+        _stop_api(api_process)
+        stdout, stderr = hook_process.communicate(timeout=12)
+        elapsed = time.monotonic() - started
+        assert elapsed < 10, f"Codex permission hook exceeded its bound: {elapsed:.2f}s"
+        assert hook_process.returncode == 0, stderr
+        output = json.loads(stdout.strip().splitlines()[-1])
+        decision = output.get("hookSpecificOutput", {}).get("decision", {})
+        assert output.get("hookSpecificOutput", {}).get("hookEventName") == "PermissionRequest"
+        assert decision.get("behavior") == "deny"
+        assert decision.get("message") == (
+            "Approval timed out; expiration could not be confirmed"
+        )
+
+        if decision.get("behavior") == "allow":
+            subprocess.run(command, shell=True, check=True, timeout=5)
+        assert not marker_path.exists()
+
+        with sqlite3.connect(db_path) as connection:
+            claim_count = connection.execute(
+                "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+                (approval["id"],),
+            ).fetchone()[0]
+        assert claim_count == 0
+    finally:
+        if hook_process is not None and hook_process.poll() is None:
+            hook_process.kill()
+            hook_process.wait(timeout=5)
+        _stop_api(api_process)
