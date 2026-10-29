@@ -109,6 +109,9 @@ def _effective_terraform_string(
     if variable == "project_id" and not re.fullmatch(PROJECT_ID_RE, selected):
         issues.append("Terraform project_id must be a valid concrete GCP project ID")
         return None
+    if variable == "firebase_project_id" and not re.fullmatch(PROJECT_ID_RE, selected):
+        issues.append("Terraform firebase_project_id must be a valid concrete GCP project ID")
+        return None
     if variable in {"cloud_run_region", "scheduler_region"} and not re.fullmatch(
         r"[a-z]+-[a-z]+[0-9]", selected
     ):
@@ -352,12 +355,14 @@ def _validate_scheduler(
     *,
     job_projects: set[str],
     job_regions: set[str],
+    push_runtime_identity: str | None,
     terraform_overrides: dict[str, list[str]],
 ) -> None:
     effective: dict[str, str | None] = {}
     for variable in (
         "project_id", "cloud_run_region", "scheduler_region", "push_schedule",
         "email_schedule", "scheduler_timezone", "scheduler_service_account_id",
+        "firebase_project_id", "push_runtime_service_account_email",
     ):
         effective[variable] = _effective_terraform_string(
             text, variable, terraform_overrides.get(variable, []), issues
@@ -368,6 +373,15 @@ def _validate_scheduler(
         issues.append("Cloud Scheduler project_id must match the Job image and Cloud SQL project")
     if terraform_region is not None and job_regions and job_regions != {terraform_region}:
         issues.append("Cloud Scheduler cloud_run_region must match the Job image and location")
+
+    push_identity = effective["push_runtime_service_account_email"]
+    if push_identity is not None and not re.fullmatch(
+        rf"[a-z][a-z0-9-]{{4,28}}[a-z0-9]@{PROJECT_ID_RE}\.iam\.gserviceaccount\.com",
+        push_identity,
+    ):
+        issues.append("FCM sender must target a concrete push runtime service account")
+    if push_runtime_identity is None or push_identity != push_runtime_identity:
+        issues.append("FCM sender identity must match the push Cloud Run job runtime identity")
 
     scheduler_account_id = effective["scheduler_service_account_id"]
     if scheduler_account_id is not None and not re.fullmatch(
@@ -386,8 +400,37 @@ def _validate_scheduler(
         issues.append("Scheduler must POST each job trigger and use zero scheduler retries")
     if "attempt_deadline = \"300s\"" not in text:
         issues.append("Scheduler HTTP attempt deadline must be 300 seconds")
-    if re.search(r"resource\s+\"google_project_iam_(?:member|binding|policy)\"", text):
-        issues.append("Scheduler must not receive project-wide IAM grants")
+    project_iam_resources = re.findall(
+        r'resource\s+"(google_project_iam_(?:member|binding|policy|custom_role))"\s+"([^"]+)"',
+        text,
+    )
+    if project_iam_resources.count(("google_project_iam_member", "fcm_push_sender")) != 1 \
+            or project_iam_resources.count(("google_project_iam_custom_role", "fcm_sender")) != 1 \
+            or len(project_iam_resources) != 2:
+        issues.append("FCM sender template must not add unrelated project-wide IAM grants")
+    custom_role_resources = re.findall(
+        r'resource\s+"google_project_iam_custom_role"\s+"([^"]+)"', text
+    )
+    if custom_role_resources != ["fcm_sender"]:
+        issues.append("FCM sender must use exactly one dedicated project custom role")
+    role_block = _terraform_resource(text, "google_project_iam_custom_role", "fcm_sender")
+    if role_block is None:
+        issues.append("FCM sender custom role is required")
+    else:
+        if 'project     = var.firebase_project_id' not in role_block:
+            issues.append("FCM sender custom role must be scoped to the Firebase project")
+        if 'permissions = ["cloudmessaging.messages.create"]' not in role_block:
+            issues.append("FCM sender custom role must grant only cloudmessaging.messages.create")
+    fcm_member = _terraform_resource(text, "google_project_iam_member", "fcm_push_sender")
+    if fcm_member is None:
+        issues.append("FCM sender must bind its custom role to the push runtime identity")
+    else:
+        if 'project = var.firebase_project_id' not in fcm_member:
+            issues.append("FCM sender binding must be scoped to the Firebase project")
+        if 'role    = google_project_iam_custom_role.fcm_sender.name' not in fcm_member:
+            issues.append("FCM sender binding must use the dedicated FCM custom role")
+        if 'member  = "serviceAccount:${var.push_runtime_service_account_email}"' not in fcm_member:
+            issues.append("FCM sender binding must target only the push job runtime identity")
 
     expected_iam = {
         "push_invoker": "aixion-push-dispatch",
@@ -434,9 +477,9 @@ def validate_manifest_text(
     jobs = _parse_jobs(jobs_text, issues)
     regions: set[str] = set()
     cloudsql_projects: set[str] = set()
+    service_accounts: list[str] = []
     if len(jobs) == 2:
         found: dict[str, dict[str, Any]] = {}
-        service_accounts: list[str] = []
         for document in jobs:
             metadata = _mapping(document.get("metadata"))
             name = metadata.get("name")
@@ -468,6 +511,7 @@ def validate_manifest_text(
         issues,
         job_projects=cloudsql_projects,
         job_regions=regions,
+        push_runtime_identity=(service_accounts[0] if service_accounts else None),
         terraform_overrides=terraform_overrides or {},
     )
     return issues

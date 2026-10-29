@@ -43,6 +43,8 @@ KNOWN_TERRAFORM_RESOURCES = {
     # line item; their underlying Cloud Run/Scheduler service is costed above.
     "google_service_account",
     "google_cloud_run_v2_job_iam_member",
+    "google_project_iam_custom_role",
+    "google_project_iam_member",
     "google_cloud_scheduler_job",
 }
 

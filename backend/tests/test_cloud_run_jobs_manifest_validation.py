@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
+import pytest
 
 from scripts.validate_cloud_run_jobs_manifest import validate_manifest_text
 
@@ -55,6 +56,40 @@ def _issues(jobs: str, scheduler: str) -> list[str]:
 def test_reviewed_candidate_shape_passes_local_checks() -> None:
     jobs, scheduler = _valid_inputs()
     assert _issues(jobs, scheduler) == []
+
+
+def test_fcm_sender_role_is_required_and_limited_to_push_runtime_identity() -> None:
+    jobs, scheduler = _valid_inputs()
+    assert _issues(jobs, scheduler) == []
+
+
+@pytest.mark.parametrize(
+    ("role_block", "member_block"),
+    [
+        ('permissions = ["cloudmessaging.messages.create", "cloudmessaging.topicSubscriptions.create"]', None),
+        (None, None),
+        (None, 'member  = "serviceAccount:aixion-email@aixion-staging-123.iam.gserviceaccount.com"'),
+    ],
+)
+def test_fcm_iam_contract_rejects_missing_broad_or_wrong_principal_grants(
+    role_block: str | None,
+    member_block: str | None,
+) -> None:
+    jobs, scheduler = _valid_inputs()
+    if role_block is None:
+        start = scheduler.index('resource "google_project_iam_custom_role" "fcm_sender"')
+        end = scheduler.index('\n}', start) + 2
+        scheduler = scheduler[:start] + scheduler[end:]
+    else:
+        scheduler = scheduler.replace(
+            'permissions = ["cloudmessaging.messages.create"]', role_block
+        )
+    if member_block is not None:
+        scheduler = scheduler.replace(
+            'member  = "serviceAccount:aixion-push@aixion-staging-123.iam.gserviceaccount.com"',
+            member_block,
+        )
+    assert any("FCM sender" in issue for issue in _issues(jobs, scheduler))
 
 
 def test_checked_in_templates_fail_closed_on_unresolved_inputs() -> None:

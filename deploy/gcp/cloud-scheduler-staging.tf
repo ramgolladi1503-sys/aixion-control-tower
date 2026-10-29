@@ -53,6 +53,18 @@ variable "scheduler_service_account_id" {
   default     = "REPLACE_WITH_SCHEDULER_SERVICE_ACCOUNT_ID"
 }
 
+variable "firebase_project_id" {
+  description = "Owner-approved Firebase project ID used by the Android app and push dispatcher."
+  type        = string
+  default     = "REPLACE_WITH_FIREBASE_PROJECT_ID"
+}
+
+variable "push_runtime_service_account_email" {
+  description = "The dedicated Cloud Run push job runtime service account; never the scheduler identity."
+  type        = string
+  default     = "REPLACE_WITH_PUSH_RUNTIME_SERVICE_ACCOUNT"
+}
+
 provider "google" {
   project = var.project_id
   region  = var.cloud_run_region
@@ -79,6 +91,24 @@ resource "google_cloud_run_v2_job_iam_member" "email_invoker" {
   name     = "aixion-email-dispatch"
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.scheduler_invoker.email}"
+}
+
+# The push worker needs only the FCM send operation. Keep this project-level
+# custom role separate from the scheduler's job-invoker identity and from the
+# email runtime identity. Template only: owner approval and Slice 1 precede apply.
+resource "google_project_iam_custom_role" "fcm_sender" {
+  project     = var.firebase_project_id
+  role_id     = "aixionControlTowerPushSender"
+  title       = "Aixion Control Tower push sender"
+  description = "Sends approval push notifications through Firebase Cloud Messaging."
+  permissions = ["cloudmessaging.messages.create"]
+  stage       = "GA"
+}
+
+resource "google_project_iam_member" "fcm_push_sender" {
+  project = var.firebase_project_id
+  role    = google_project_iam_custom_role.fcm_sender.name
+  member  = "serviceAccount:${var.push_runtime_service_account_email}"
 }
 
 resource "google_cloud_scheduler_job" "push_dispatch" {
