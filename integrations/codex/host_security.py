@@ -82,7 +82,7 @@ def open_private_file(path: Path, *, require_private: bool,
                 raise HostSecurityError(f"File must be a regular file owned by this user: {path}")
             mode = stat.S_IMODE(metadata.st_mode)
             if require_private and mode & 0o077:
-                raise HostSecurityError(f"File must exclude group and other users: {path}")
+                raise HostSecurityError(f"File permissions must exclude group and other users: {path}")
             if reject_shared_write and mode & 0o022:
                 raise HostSecurityError(f"File must not be group- or other-writable: {path}")
             return os.fdopen(descriptor, "rb")
