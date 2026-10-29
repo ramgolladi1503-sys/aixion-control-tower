@@ -84,7 +84,7 @@ internal class PushDeviceRegistrationRepository internal constructor(
         } catch (_: RegistrationAuthenticationRequiredException) {
             // Keep the pending cleanup record and stop background retries until
             // the authenticated session is repaired.
-            PushRegistrationResult.AUTHENTICATION_REQUIRED
+            return PushRegistrationResult.AUTHENTICATION_REQUIRED
         } catch (error: HttpException) {
             return classifyBackendFailure(error)
         } catch (_: Exception) {
