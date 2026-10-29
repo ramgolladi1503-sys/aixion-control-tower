@@ -62,8 +62,11 @@ Control Tower prompts may differ by tool and Antigravity configuration.
 
 The token is sent only to the configured Control Tower API over HTTPS (or
 loopback HTTP for development). The hook rejects secret-like argument keys,
-common inline secret patterns, and argument payloads larger than 48 KiB. No
-tool arguments are written to logs.
+common inline secret patterns, credential options such as MySQL `-p` and
+`sshpass -p`, and argument payloads larger than 48 KiB. This is a finite
+heuristic, not general secret detection; credentials embedded in unrecognized
+free-form command text may not be detected. Do not put credentials in
+approval-gated arguments. No tool arguments are written to logs.
 
 ## Physical Android device over USB (local development only)
 
