@@ -73,6 +73,8 @@ SENSITIVE_OPTION = re.compile(
 )
 MYSQL_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?(?:mysql|mariadb)(?=\s|$)", re.I)
 MYSQL_PASSWORD_OPTION = re.compile(r"(?:^|\s)-p\S*(?=\s|=|:|$)")
+SSHPASS_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?sshpass(?=\s|$)", re.I)
+SSHPASS_PASSWORD_OPTION = re.compile(r"(?:^|\s)-p(?=\s|=|:|$|\S)")
 READ_ONLY_TOOLS = frozenset({
     "view_file", "list_dir", "find_by_name", "grep_search",
     "search_web", "read_url_content", "list_permissions",
@@ -296,6 +298,10 @@ def _has_sensitive_value(value: Any) -> bool:
         or (
             MYSQL_COMMAND.search(value) is not None
             and MYSQL_PASSWORD_OPTION.search(value) is not None
+        )
+        or (
+            SSHPASS_COMMAND.search(value) is not None
+            and SSHPASS_PASSWORD_OPTION.search(value) is not None
         )
     )
 

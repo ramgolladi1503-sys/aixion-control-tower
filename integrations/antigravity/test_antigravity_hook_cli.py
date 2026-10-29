@@ -205,6 +205,8 @@ def test_protected_config_cannot_be_overridden_by_inherited_environment(
         "deploy --password=arbitrary-value",
         "mysql -phunter2 database",
         "mysql -p hunter2 database",
+        "sshpass -p Hunter2 ssh user@example.test",
+        "sshpass -pHunter2 ssh user@example.test",
         "mariadb --password hunter2 database",
     ],
 )
@@ -229,6 +231,17 @@ def test_secret_bearing_cli_options_are_denied_before_network_request(
         "reason": "Tool arguments contain a secret-like field; redact it before requesting approval",
     }
     assert requests == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sshpass -P prompt ssh user@example.test",
+        "tool -p arbitrary-value",
+    ],
+)
+def test_sshpass_password_filter_does_not_match_unrelated_options(command: str) -> None:
+    assert not hook._has_sensitive_value({"command": command})
 
 
 def test_diagnostic_approval_id_requires_backend_id_format() -> None:
