@@ -54,7 +54,7 @@ DIAGNOSTIC_APPROVAL_ID = re.compile(r"^approval_[a-f0-9]{12}$")
 DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/aixion/codex.json")
 SENSITIVE_KEY = re.compile(r"(token|secret|password|credential|private.?key|api.?key)", re.I)
 SENSITIVE_VALUE = re.compile(
-    r"(?:bearer\s+[A-Za-z0-9._~-]{8,}|(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[\"']?[A-Za-z0-9._~/-]{8,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
+    r"(?:bearer\s+[A-Za-z0-9._~-]{8,}|authorization\s*:\s*basic\s+[A-Za-z0-9+/]{4,}={0,2}|https?://[^/\s:@]+:[^/\s@]+@|(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[\"']?[A-Za-z0-9._~/-]{8,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
     re.I,
 )
 # Command arguments are sent verbatim to the approval API and phone. Reject
@@ -67,6 +67,8 @@ SENSITIVE_OPTION = re.compile(
 )
 MYSQL_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?(?:mysql|mariadb)(?=\s|$)", re.I)
 MYSQL_PASSWORD_OPTION = re.compile(r"(?:^|\s)-p\S*(?=\s|=|:|$)")
+CURL_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?curl(?=\s|$)", re.I)
+CURL_USER_OPTION = re.compile(r"(?:^|\s)(?:--user(?:=|\s+)|-u(?:=|\s+|(?=\S)))[\"']?[^\s\"']+", re.I)
 
 
 class GateError(Exception):
@@ -247,6 +249,10 @@ def _contains_sensitive(value: Any) -> bool:
         or (
             MYSQL_COMMAND.search(value) is not None
             and MYSQL_PASSWORD_OPTION.search(value) is not None
+        )
+        or (
+            CURL_COMMAND.search(value) is not None
+            and CURL_USER_OPTION.search(value) is not None
         )
     )
 

@@ -40,19 +40,19 @@ import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 internal fun providerSetupDescription(provider: String): String = when (provider) {
     "ANTIGRAVITY" -> "Use Antigravity's local pre-tool hook. Install it on the agent computer and keep the session and API reachable while requests wait."
-    "CODEX" -> "Native Codex phone delivery and same-task return are unverified. This setup does not establish a live approval connection."
+    "CODEX" -> "Use the project-local Codex CLI PermissionRequest hook to route permission prompts to Control Tower. Setup is required for each project. Codex Desktop is not verified, and this screen cannot confirm that your hook is installed."
     else -> "Choose a supported provider and complete setup on the computer where the agent runs."
 }
 
 internal fun providerSetupStatus(provider: String): String = when (provider) {
-    "CODEX" -> "Unverified · not a live connection"
+    "CODEX" -> "Codex CLI hook · setup required"
     "ANTIGRAVITY" -> "Supported hook · setup required"
     else -> "Not verified"
 }
 
 internal fun providerSetupButtonLabel(provider: String): String = when (provider) {
     "ANTIGRAVITY" -> "Open Antigravity setup"
-    "CODEX" -> "View setup only (unverified)"
+    "CODEX" -> "Open Codex CLI setup"
     else -> "View setup"
 }
 

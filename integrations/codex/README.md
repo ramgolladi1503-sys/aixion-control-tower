@@ -76,8 +76,10 @@ that the configuration is accepted; it is not runtime-flow evidence.
   `CODEX` external agent limited to one project. Server-side limits and expiry
   remain authoritative.
 - Before transmitting tool arguments, the hook rejects known credential-bearing
-  field names, recognizable secret values, and common CLI options such as
-  `--password`, `--with-token`, and `-p`. This is a conservative heuristic, not
+  field names, recognizable secret values, common CLI options such as
+  `--password`, `--with-token`, and MySQL `-p`, and curl Basic Auth forms such as
+  `-u user:password`, `--user user:password`, URL user-info, and an
+  `Authorization: Basic` header. This is a finite, conservative heuristic, not
   general secret detection: arbitrary credentials embedded in free-form command
   text may not be recognized. Do not put credentials in approval-gated command
   arguments; use the tool's supported secret store or interactive prompt.

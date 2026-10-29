@@ -63,11 +63,11 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText(
             "Use Antigravity's local pre-tool hook. Install it on the agent computer and keep the session and API reachable while requests wait."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("View setup only (unverified)").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Open Codex CLI setup").performScrollTo().assertExists()
         composeRule.onNodeWithText(
-            "Native Codex phone delivery and same-task return are unverified. This setup does not establish a live approval connection."
+            "Use the project-local Codex CLI PermissionRequest hook to route permission prompts to Control Tower. Setup is required for each project. Codex Desktop is not verified, and this screen cannot confirm that your hook is installed."
         ).performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Unverified · not a live connection").assertExists()
+        composeRule.onNodeWithText("Codex CLI hook · setup required").assertExists()
         composeRule.onAllNodesWithText("Setup available").assertCountEquals(0)
         composeRule.onNodeWithText("When an approval arrives").performScrollTo().assertExists()
 
@@ -127,7 +127,7 @@ class ConnectorsScreenTest {
         }
 
         composeRule.onNodeWithText("Open Antigravity setup").performScrollTo().performClick()
-        composeRule.onNodeWithText("View setup only (unverified)").performScrollTo().performClick()
+        composeRule.onNodeWithText("Open Codex CLI setup").performScrollTo().performClick()
 
         composeRule.runOnIdle {
             assertEquals(listOf("ANTIGRAVITY", "CODEX"), navigationRequests)
@@ -145,8 +145,8 @@ class ConnectorsScreenTest {
             "Use Antigravity's local pre-tool hook. Install it on the agent computer and keep the session and API reachable while requests wait."
         ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Phone test passed locally").assertDoesNotExist()
-        composeRule.onNodeWithText("Unverified · not a live connection").assertExists()
-        composeRule.onNodeWithText("View setup only (unverified)").assertExists()
+        composeRule.onNodeWithText("Codex CLI hook · setup required").assertExists()
+        composeRule.onNodeWithText("Open Codex CLI setup").assertExists()
         composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
         composeRule.onAllNodesWithText("Connected").assertCountEquals(0)

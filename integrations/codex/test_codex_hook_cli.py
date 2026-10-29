@@ -549,6 +549,12 @@ def test_protected_workspace_config_cannot_be_overridden_by_environment(
         "mysql -phunter2",
         "mysql -p hunter2",
         "tool --client-secret:arbitrary-value",
+        "curl -u alice:supersecret https://api.example.test/data",
+        "curl --user alice:supersecret https://api.example.test/data",
+        "curl --user=alice:supersecret https://api.example.test/data",
+        "curl -ualice:supersecret https://api.example.test/data",
+        "curl -H 'Authorization: Basic YWxpY2U6c2VjcmV0' https://api.example.test/data",
+        "curl https://alice:supersecret@api.example.test/data",
     ],
 )
 def test_run_denies_credential_bearing_command_options_before_api_request(
@@ -605,6 +611,8 @@ def test_run_denies_tool_names_that_can_spoof_approval_display_before_api_reques
         "mysql -P3306",
         "find . -print",
         "tool --tokenize input.txt",
+        "curl --user-agent 'aixion-test' https://api.example.test/health",
+        "curl --upload-file ./report.txt https://api.example.test/upload",
         "echo safe",
     ],
 )

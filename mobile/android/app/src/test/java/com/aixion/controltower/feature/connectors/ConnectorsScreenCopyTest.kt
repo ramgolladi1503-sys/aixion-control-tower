@@ -18,14 +18,15 @@ class ConnectorsScreenCopyTest {
     }
 
     @Test
-    fun codexGuidanceStatesUnverifiedAvailabilityWithoutClaimingSupport() {
+    fun codexGuidanceOffersTheTestedCliHookAndKeepsDesktopUnverified() {
         val copy = providerSetupDescription("CODEX")
 
-        assertTrue(copy.contains("Native Codex phone delivery and same-task return are unverified"))
-        assertTrue(copy.contains("does not establish a live approval connection"))
-        assertFalse(copy.contains("supported approval path"))
-        assertEquals("Unverified · not a live connection", providerSetupStatus("CODEX"))
-        assertEquals("View setup only (unverified)", providerSetupButtonLabel("CODEX"))
+        assertTrue(copy.contains("Codex CLI PermissionRequest hook"))
+        assertTrue(copy.contains("Setup is required for each project"))
+        assertTrue(copy.contains("Codex Desktop is not verified"))
+        assertTrue(copy.contains("cannot confirm that your hook is installed"))
+        assertEquals("Codex CLI hook · setup required", providerSetupStatus("CODEX"))
+        assertEquals("Open Codex CLI setup", providerSetupButtonLabel("CODEX"))
     }
 
     @Test
