@@ -68,11 +68,15 @@ jobs:
       - name: Build signed release AAB
         working-directory: mobile/android
         env:
+          AIXION_API_BASE_URL: ${{ inputs.api_base_url }}
           ANDROID_KEYSTORE_FILE: release.keystore
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew bundleRelease -PAIXION_API_BASE_URL=${{ inputs.api_base_url }}
+        run: |
+          set -euo pipefail
+          python3 ../../scripts/validate_android_release_url.py
+          ./gradlew bundleRelease "-PAIXION_API_BASE_URL=${AIXION_API_BASE_URL}"
 
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4
