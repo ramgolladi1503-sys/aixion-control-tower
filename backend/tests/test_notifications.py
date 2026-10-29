@@ -109,6 +109,8 @@ def test_push_uses_oauth_v1_and_generic_lock_screen_content(monkeypatch: Any) ->
             "notification_id": "notification_opaque",
             "entity_type": "agent_task",
             "entity_id": "task_opaque",
+            "title": "Confidential project and task name",
+            "body": "Sensitive approval summary",
         },
     )
 
@@ -120,14 +122,15 @@ def test_push_uses_oauth_v1_and_generic_lock_screen_content(monkeypatch: Any) ->
     payload = captured["json"]["message"]
     assert payload["token"] == "device-token"
     assert payload["android"]["priority"] == "HIGH"
-    assert payload["notification"] == {
-        "title": "Aixion Control Tower",
-        "body": "A request is waiting for your review. Open the app to view details.",
-    }
+    assert "notification" not in payload
     assert "Confidential project and task name" not in str(payload)
     assert "Sensitive approval summary" not in str(payload)
     assert payload["data"]["notification_id"] == "notification_opaque"
     assert payload["data"]["entity_id"] == "task_opaque"
+    assert payload["data"]["title"] == "Aixion Control Tower"
+    assert payload["data"]["body"] == (
+        "A request is waiting for your review. Open the app to view details."
+    )
 
 
 def test_fcm_error_body_is_not_returned_for_persistence(monkeypatch: Any) -> None:

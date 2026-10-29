@@ -328,10 +328,12 @@ def _send_fcm_to_token(token: str, title: str, body: str, data: dict[str, str]) 
         "message": {
             "token": token,
             "android": {"priority": "HIGH"},
-            # Notification model text can contain project, task, or approval details.
-            # Keep the lock-screen payload generic; authenticated app fetches expose details.
-            "notification": {"title": PUSH_TITLE, "body": PUSH_BODY},
-            "data": data,
+            # Use a data-only message so delivered foreground/background pushes are
+            # handled by the app service, which attaches the exact approval deep link.
+            # FCM notification messages can be displayed directly by Android without
+            # invoking onMessageReceived. Keep lock-screen copy generic; authenticated
+            # app fetches expose approval details after the user opens the app.
+            "data": {**data, "title": PUSH_TITLE, "body": PUSH_BODY},
         },
     }
     try:
