@@ -1,7 +1,10 @@
 package com.aixion.controltower.feature.agentaccess
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
@@ -10,7 +13,9 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.Density
@@ -69,19 +74,21 @@ class OneTimeTokenPanelTest {
     @Test
     fun setupInstructionsUseRealRepositoryRelativeCommandAndNoPlaceholders() {
         composeRule.setContent {
-            ControlTowerTheme {
-                OneTimeTokenPanel(
-                    token = "one-time-token-example",
-                    provider = "ANTIGRAVITY",
-                    agentName = "Antigravity connector",
-                    agentId = "agent-example",
-                    projectId = "project-example",
-                    apiBaseUrl = "http://10.0.2.2:8000/",
-                    onCopy = {},
-                    onCopyKeychainCommand = { true },
-                    onCopyHookInstallCommand = { true },
-                    onHide = {}
-                )
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                ControlTowerTheme {
+                    OneTimeTokenPanel(
+                        token = "one-time-token-example",
+                        provider = "ANTIGRAVITY",
+                        agentName = "Antigravity connector",
+                        agentId = "agent-example",
+                        projectId = "project-example",
+                        apiBaseUrl = "http://10.0.2.2:8000/",
+                        onCopy = {},
+                        onCopyKeychainCommand = { true },
+                        onCopyHookInstallCommand = { true },
+                        onHide = {}
+                    )
+                }
             }
         }
 
@@ -97,7 +104,7 @@ class OneTimeTokenPanelTest {
         ).assertExists()
         composeRule.onNodeWithText("Copy Keychain command").assertExists()
         composeRule.onNodeWithText(
-            "Run the command from the Control Tower repository root, with this local hook repository available.",
+            "Run the command from the Control Tower repository root",
             substring = true
         ).assertExists()
         composeRule.onNodeWithText("Absolute local project directory").assertExists()
@@ -106,6 +113,7 @@ class OneTimeTokenPanelTest {
             substring = true
         ).assertExists()
         composeRule.onNodeWithText("Absolute local project directory")
+            .performScrollTo()
             .performTextInput("/Users/test/Projects/example")
         composeRule.onNodeWithText("Copy hook install command").assertIsNotEnabled()
         composeRule.onNodeWithText("/ABSOLUTE/PATH", substring = true).assertDoesNotExist()
@@ -117,23 +125,26 @@ class OneTimeTokenPanelTest {
     @Test
     fun invalidWorkspacePathKeepsHookCommandUnavailableAndCopyDisabled() {
         composeRule.setContent {
-            ControlTowerTheme {
-                OneTimeTokenPanel(
-                    token = "secret-example",
-                    provider = "ANTIGRAVITY",
-                    agentName = "Antigravity connector",
-                    agentId = "agent-example",
-                    projectId = "project-example",
-                    apiBaseUrl = "https://api.example.test/",
-                    onCopy = {},
-                    onCopyKeychainCommand = { true },
-                    onCopyHookInstallCommand = { error("Invalid path must never be copied") },
-                    onHide = {}
-                )
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                ControlTowerTheme {
+                    OneTimeTokenPanel(
+                        token = "secret-example",
+                        provider = "ANTIGRAVITY",
+                        agentName = "Antigravity connector",
+                        agentId = "agent-example",
+                        projectId = "project-example",
+                        apiBaseUrl = "https://api.example.test/",
+                        onCopy = {},
+                        onCopyKeychainCommand = { true },
+                        onCopyHookInstallCommand = { error("Invalid path must never be copied") },
+                        onHide = {}
+                    )
+                }
             }
         }
 
         composeRule.onNodeWithText("Absolute local project directory")
+            .performScrollTo()
             .performTextInput("relative/project")
         composeRule.onNodeWithText(
             "Enter a valid absolute project path, such as /Users/you/Projects/example."
@@ -148,26 +159,30 @@ class OneTimeTokenPanelTest {
         var hookCommandCopied: String? = null
         val path = "/Users/test/Projects/it's a project"
         composeRule.setContent {
-            ControlTowerTheme {
-                OneTimeTokenPanel(
-                    token = "secret-example",
-                    provider = "ANTIGRAVITY",
-                    agentName = "Antigravity connector",
-                    agentId = "agent-example",
-                    projectId = "project-example",
-                    apiBaseUrl = "https://api.example.test/",
-                    onCopy = {},
-                    onCopyKeychainCommand = { true },
-                    onCopyHookInstallCommand = { command ->
-                        hookCommandCopied = command
-                        true
-                    },
-                    onHide = {}
-                )
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                ControlTowerTheme {
+                    OneTimeTokenPanel(
+                        token = "secret-example",
+                        provider = "ANTIGRAVITY",
+                        agentName = "Antigravity connector",
+                        agentId = "agent-example",
+                        projectId = "project-example",
+                        apiBaseUrl = "https://api.example.test/",
+                        onCopy = {},
+                        onCopyKeychainCommand = { true },
+                        onCopyHookInstallCommand = { command ->
+                            hookCommandCopied = command
+                            true
+                        },
+                        onHide = {}
+                    )
+                }
             }
         }
 
-        composeRule.onNodeWithText("Absolute local project directory").performTextInput(path)
+        composeRule.onNodeWithText("Absolute local project directory")
+            .performScrollTo()
+            .performTextInput(path)
         val expected = "python3 'integrations/antigravity/setup_workspace.py' \\\n" +
             "  --workspace '/Users/test/Projects/it'\\''s a project' \\\n" +
             "  --api-base-url 'https://api.example.test' \\\n" +
@@ -175,7 +190,7 @@ class OneTimeTokenPanelTest {
             "  --project-id 'project-example'"
 
         composeRule.onNodeWithText(expected).assertExists()
-        composeRule.onNodeWithText("Copy hook install command").performClick()
+        composeRule.onNodeWithText("Copy hook install command").performScrollTo().performClick()
         composeRule.onNodeWithText(
             "Hook install command copied. Run it from the Control Tower repository root."
         ).assertExists()
@@ -229,54 +244,57 @@ class OneTimeTokenPanelTest {
     @Test
     fun tokenActionsAndHookInstallRemainUsableInNarrowLargeTextLayout() {
         composeRule.setContent {
-            Box(modifier = Modifier.width(240.dp)) {
-                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
-                    ControlTowerTheme {
-                        OneTimeTokenPanel(
-                            token = "one-time-token-example",
-                            provider = "ANTIGRAVITY",
-                            agentName = "Antigravity connector",
-                            agentId = "agent-example",
-                            projectId = "project-example",
-                            apiBaseUrl = "https://api.example.test/",
-                            onCopy = {},
-                            onCopyKeychainCommand = { true },
-                            onCopyHookInstallCommand = { true },
-                            onHide = {}
-                        )
+            Box(modifier = Modifier.width(240.dp).testTag("one-time-token-viewport")) {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
+                        ControlTowerTheme {
+                            OneTimeTokenPanel(
+                                token = "one-time-token-example",
+                                provider = "ANTIGRAVITY",
+                                agentName = "Antigravity connector",
+                                agentId = "agent-example",
+                                projectId = "project-example",
+                                apiBaseUrl = "https://api.example.test/",
+                                onCopy = {},
+                                onCopyKeychainCommand = { true },
+                                onCopyHookInstallCommand = { true },
+                                onHide = {}
+                            )
+                        }
                     }
                 }
             }
         }
         composeRule.onNodeWithText("Absolute local project directory")
+            .performScrollTo()
             .performTextInput("/Users/test/Projects/example")
 
         val copyAction = composeRule.onNodeWithText("Copy sensitive token")
         val keychainAction = composeRule.onNodeWithText("Copy Keychain command")
         val hookAction = composeRule.onNodeWithText("Copy hook install command")
         val hideAction = composeRule.onNodeWithText("Hide now")
+        val viewportBounds = composeRule.onNodeWithTag("one-time-token-viewport")
+            .fetchSemanticsNode().boundsInRoot
         copyAction.assertExists()
         keychainAction.assertExists()
         hookAction.assertExists()
         hideAction.assertExists()
-        composeRule.runOnIdle {
-            assertTrue(
-                "Copy action should remain within the narrow viewport",
-                copyAction.fetchSemanticsNode().boundsInRoot.right <= 240f
-            )
-            assertTrue(
-                "Keychain copy action should remain within the narrow viewport",
-                keychainAction.fetchSemanticsNode().boundsInRoot.right <= 240f
-            )
-            assertTrue(
-                "Hook install copy action should remain within the narrow viewport",
-                hookAction.fetchSemanticsNode().boundsInRoot.right <= 240f
-            )
-            assertTrue(
-                "Hide action should remain within the narrow viewport",
-                hideAction.fetchSemanticsNode().boundsInRoot.right <= 240f
-            )
-        }
+        assertTrue(
+            "Copy action should remain within the narrow viewport",
+            copyAction.fetchSemanticsNode().boundsInRoot.right <= viewportBounds.right
+        )
+        assertTrue(
+            "Keychain copy action should remain within the narrow viewport",
+            keychainAction.fetchSemanticsNode().boundsInRoot.right <= viewportBounds.right
+        )
+        assertTrue(
+            "Hook install copy action should remain within the narrow viewport",
+            hookAction.fetchSemanticsNode().boundsInRoot.right <= viewportBounds.right
+        )
+        assertTrue(
+            "Hide action should remain within the narrow viewport",
+            hideAction.fetchSemanticsNode().boundsInRoot.right <= viewportBounds.right
+        )
     }
 
     @Test
@@ -285,29 +303,31 @@ class OneTimeTokenPanelTest {
         var keychainCommandCopied: String? = null
         var hookCommandCopied: String? = null
         composeRule.setContent {
-            ControlTowerTheme {
-                OneTimeTokenPanel(
-                    token = "secret-example",
-                    provider = "ANTIGRAVITY",
-                    agentName = "Antigravity connector",
-                    agentId = "agent-example",
-                    projectId = "project-example",
-                    apiBaseUrl = "https://api.example.test/",
-                    onCopy = { sensitiveTokenCopied = true },
-                    onCopyKeychainCommand = { command ->
-                        keychainCommandCopied = command
-                        true
-                    },
-                    onCopyHookInstallCommand = { command ->
-                        hookCommandCopied = command
-                        true
-                    },
-                    onHide = {}
-                )
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                ControlTowerTheme {
+                    OneTimeTokenPanel(
+                        token = "secret-example",
+                        provider = "ANTIGRAVITY",
+                        agentName = "Antigravity connector",
+                        agentId = "agent-example",
+                        projectId = "project-example",
+                        apiBaseUrl = "https://api.example.test/",
+                        onCopy = { sensitiveTokenCopied = true },
+                        onCopyKeychainCommand = { command ->
+                            keychainCommandCopied = command
+                            true
+                        },
+                        onCopyHookInstallCommand = { command ->
+                            hookCommandCopied = command
+                            true
+                        },
+                        onHide = {}
+                    )
+                }
             }
         }
 
-        composeRule.onNodeWithText("Copy Keychain command").performClick()
+        composeRule.onNodeWithText("Copy Keychain command").performScrollTo().performClick()
         composeRule.onNodeWithText(
             "Keychain command copied. Enter the token only at the secure prompt."
         ).assertExists()
@@ -319,8 +339,9 @@ class OneTimeTokenPanelTest {
         assertFalse(sensitiveTokenCopied)
 
         composeRule.onNodeWithText("Absolute local project directory")
+            .performScrollTo()
             .performTextInput("/Users/test/Projects/example")
-        composeRule.onNodeWithText("Copy hook install command").performClick()
+        composeRule.onNodeWithText("Copy hook install command").performScrollTo().performClick()
         composeRule.onNodeWithText(
             "Hook install command copied. Run it from the Control Tower repository root."
         ).assertExists()
@@ -329,7 +350,7 @@ class OneTimeTokenPanelTest {
         assertFalse(keychainCommandCopied?.contains("secret-example") ?: false)
         assertFalse(hookCommandCopied?.contains("secret-example") ?: false)
 
-        composeRule.onNodeWithText("Copy sensitive token").performClick()
+        composeRule.onNodeWithText("Copy sensitive token").performScrollTo().performClick()
         assertTrue(sensitiveTokenCopied)
     }
 }
