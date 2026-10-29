@@ -48,3 +48,11 @@ This is evidence for the Codex **CLI** `PermissionRequest` hook on one local mac
 The complete Codex slice remains **UNVERIFIED**. Before acceptance, capture the post-fix Codex result directly and run controlled end-to-end timeout, API/backend failure, stale or changed payload, credential revocation, and connector/backend restart cases. Each must show fail-closed behavior for the same pending invocation. Mark Codex Desktop unsupported unless its native surface exposes a documented permission hook with equivalent evidence.
 
 No new configuration key, database migration, cloud resource, billing setting, deployment, or merge was introduced by this checkpoint. Do not use this local result to claim away-from-computer delivery.
+
+## Current PR-head follow-up (2026-10-29)
+
+The current PR head is `60298357232a95701cf64985cbd605eec29fe0a0`. It includes the Codex hook credential-filter fix for curl credentials and the Android Connect copy clarifying that the project-scoped Codex CLI hook requires setup and does not certify Codex Desktop.
+
+Current-source focused validation passed **204 tests** across the Codex hook, HTTP integration, subprocess process-flow, CLI, and workspace-setup suites. This includes real hook subprocess/API approval, denial, and API-process-restart integration tests; these use an isolated local test API and do not exercise the native Codex application or require a human phone decision. The full exact-head GitHub checks passed, including the PostgreSQL-enabled Backend validation job (**18m 18s**), Android validation and debug APK build, Mission Control container validation, the expected-blocked production startup guard, and staging Terraform validation without cloud access.
+
+This follow-up does not extend the older phone E2E result from source revision `3b6cc103` to the current source head. The post-fix native Codex denial output still needs to be captured in a fresh owner-decided phone run. Codex Desktop and Windows remain unsupported/unverified; the adapter's secure host setup is currently macOS-only. Slice 4 and the overall production objective remain open. PR #204 remains draft and unmerged.
