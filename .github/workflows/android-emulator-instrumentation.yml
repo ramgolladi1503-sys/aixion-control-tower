@@ -1,0 +1,119 @@
+name: Android emulator instrumentation
+
+on:
+  pull_request:
+    paths:
+      - "mobile/android/**"
+      - ".github/workflows/android-emulator-instrumentation.yml"
+  push:
+    paths:
+      - "mobile/android/**"
+      - ".github/workflows/android-emulator-instrumentation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-emulator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  instrumentation:
+    name: Android emulator instrumentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    env:
+      ANDROID_API_LEVEL: "35"
+      AVD_NAME: aixion-api35
+      GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install API 35 emulator image
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "system-images;android-${ANDROID_API_LEVEL};google_apis;x86_64" \
+            "emulator"
+
+      - name: Create API 35 virtual device
+        run: |
+          printf 'no\n' | avdmanager create avd \
+            --force \
+            --name "${AVD_NAME}" \
+            --package "system-images;android-${ANDROID_API_LEVEL};google_apis;x86_64" \
+            --device "pixel_2"
+
+      - name: Boot emulator with a bounded wait
+        shell: bash
+        run: |
+          set -euo pipefail
+          emulator -avd "${AVD_NAME}" \
+            -no-window \
+            -no-audio \
+            -no-boot-anim \
+            -no-snapshot \
+            -gpu swiftshader \
+            -no-metrics \
+            > "${RUNNER_TEMP}/aixion-emulator.log" 2>&1 &
+          emulator_pid=$!
+
+          if ! timeout 120 adb wait-for-device; then
+            cat "${RUNNER_TEMP}/aixion-emulator.log"
+            exit 1
+          fi
+
+          for attempt in $(seq 1 60); do
+            if [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == "1" ]]; then
+              adb shell settings put global window_animation_scale 0
+              adb shell settings put global transition_animation_scale 0
+              adb shell settings put global animator_duration_scale 0
+              exit 0
+            fi
+            if ! kill -0 "${emulator_pid}" 2>/dev/null; then
+              cat "${RUNNER_TEMP}/aixion-emulator.log"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          cat "${RUNNER_TEMP}/aixion-emulator.log"
+          echo "Android emulator did not finish booting within 5 minutes." >&2
+          exit 1
+
+      - name: Run Android instrumentation tests
+        working-directory: mobile/android
+        run: ./gradlew :app:connectedDebugAndroidTest --no-daemon
+
+      - name: Upload instrumentation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-emulator-instrumentation-${{ github.sha }}
+          path: |
+            mobile/android/app/build/outputs/androidTest-results/connected/
+            mobile/android/app/build/reports/androidTests/connected/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop emulator
+        if: always()
+        run: adb emu kill || true
