@@ -1,10 +1,13 @@
 package com.aixion.controltower.feature.home
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
@@ -19,6 +22,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
@@ -166,11 +170,13 @@ class HomeScreenTest {
         var openedApprovals = false
 
         composeRule.setContent {
-            HomeApprovalPreview(
-                approvals = approvals,
-                onApprovalSelected = { selectedApprovalId = it.id },
-                onOpenApprovals = { openedApprovals = true }
-            )
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                HomeApprovalPreview(
+                    approvals = approvals,
+                    onApprovalSelected = { selectedApprovalId = it.id },
+                    onOpenApprovals = { openedApprovals = true }
+                )
+            }
         }
 
         composeRule.onNodeWithText("Approval 1").assertExists()
@@ -179,7 +185,7 @@ class HomeScreenTest {
         composeRule.onAllNodesWithText("Approval 4").assertCountEquals(0)
         composeRule.onNodeWithText("Approval 3").performClick()
         composeRule.runOnIdle { assertEquals("approval-3", selectedApprovalId) }
-        composeRule.onNodeWithText("See all approvals").performClick()
+        composeRule.onNodeWithText("See all approvals").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(true, openedApprovals) }
     }
 
@@ -268,10 +274,10 @@ class HomeScreenTest {
             )
         }
 
-        composeRule.onNodeWithText("2 requests require review").assertExists()
+        composeRule.onNodeWithText("2 requests need your decision").assertExists()
         assertEquals(
             androidx.compose.ui.semantics.LiveRegionMode.Polite,
-            composeRule.onNodeWithText("2 requests require review")
+            composeRule.onNodeWithText("2 requests need your decision")
                 .fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
         )
     }
