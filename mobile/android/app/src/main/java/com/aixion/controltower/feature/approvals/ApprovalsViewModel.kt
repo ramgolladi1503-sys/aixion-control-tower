@@ -160,10 +160,6 @@ class ApprovalsViewModel internal constructor(
     private var refreshInFlight = false
     private var historyRequestInFlight = false
 
-    init {
-        refresh()
-    }
-
     fun refresh() {
         viewModelScope.launch { refresh(showLoading = true) }
     }

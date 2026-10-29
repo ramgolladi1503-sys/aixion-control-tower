@@ -34,6 +34,22 @@ private const val REVIEW_FINGERPRINT = "sha256:review-v1:test"
 @OptIn(ExperimentalCoroutinesApi::class)
 class ApprovalDecisionViewModelTest {
     @Test
+    fun viewModelConstructionDoesNotFetchApprovalsBeforeAuthentication() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val api = RecordingApprovalApi()
+            val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
+
+            ApprovalsViewModel(application, ApprovalRepository(api))
+            runCurrent()
+
+            assertEquals("Creating the ViewModel on the sign-in route must not call protected APIs.", 0, api.listCalls)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
     fun inboxSelectionIsRejectedUntilInitialRefreshFinishes() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
@@ -527,10 +543,11 @@ class ApprovalDecisionViewModelTest {
 
     private fun newViewModel(api: ControlTowerApi): ApprovalsViewModel {
         val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
-        return ApprovalsViewModel(application, ApprovalRepository(api))
+        return ApprovalsViewModel(application, ApprovalRepository(api)).also { it.refresh() }
     }
 
     private class RecordingApprovalApi : BaseFakeControlTowerApi() {
+        var listCalls = 0
         var decisionCalls = 0
         val decisionApprovalIds = mutableListOf<String>()
         val decisionReviewFingerprints = mutableListOf<String>()
@@ -548,7 +565,10 @@ class ApprovalDecisionViewModelTest {
         var historyCalls = 0
         var historyResult: suspend () -> ApprovalHistoryResponseDto = { ApprovalHistoryResponseDto() }
 
-        override suspend fun listApprovals(): List<ApprovalRequestDto> = listResult()
+        override suspend fun listApprovals(): List<ApprovalRequestDto> {
+            listCalls += 1
+            return listResult()
+        }
 
         override suspend fun listApprovalHistory(limit: Int, cursor: String?): ApprovalHistoryResponseDto {
             historyCalls += 1

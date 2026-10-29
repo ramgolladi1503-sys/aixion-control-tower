@@ -45,6 +45,7 @@ class ApprovalStaleDecisionViewModelTest {
                 ApprovalRepository(api),
                 Clock.fixed(syncedAt, ZoneOffset.UTC)
             )
+            viewModel.refresh()
             runCurrent()
 
             assertEquals(syncedAt, viewModel.state.value.lastSuccessfulSyncAt)
@@ -85,6 +86,7 @@ class ApprovalStaleDecisionViewModelTest {
             val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
             val clock = Clock.fixed(now, ZoneOffset.UTC)
             val viewModel = ApprovalsViewModel(application, ApprovalRepository(api), clock)
+            viewModel.refresh()
             runCurrent()
             viewModel.selectApproval(staleApprovalSummary(expiresAt))
 
@@ -112,6 +114,7 @@ class ApprovalStaleDecisionViewModelTest {
             val api = StaleApprovalApi()
             val application = allocateWithoutConstructor(TestApplication::class.java) as TestApplication
             val viewModel = ApprovalsViewModel(application, ApprovalRepository(api))
+            viewModel.refresh()
             runCurrent()
             viewModel.selectApproval(staleApprovalSummary())
 

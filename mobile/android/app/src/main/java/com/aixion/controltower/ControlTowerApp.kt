@@ -147,6 +147,16 @@ fun ControlTowerApp(
             }
         }
 
+        LaunchedEffect(authState.authenticated, authState.sessionChecked) {
+            if (AuthSessionGate.canOpenProtectedRoute(
+                    authenticated = authState.authenticated,
+                    sessionChecked = authState.sessionChecked
+                )
+            ) {
+                approvalsViewModel.refreshInForeground()
+            }
+        }
+
         LaunchedEffect(
             notificationDeepLink,
             notificationEventId,
