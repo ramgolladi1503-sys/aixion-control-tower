@@ -110,7 +110,7 @@ class ControlTowerApplicationTest {
     }
 
     @Test(expected = kotlinx.coroutines.CancellationException::class)
-    fun startupReconciliationPropagatesCoroutineCancellation() = runBlocking {
+    fun startupReconciliationPropagatesCoroutineCancellation() = runBlocking<Unit> {
         reconcileStartupPushRegistration(
             hasAuthenticatedSession = { throw kotlinx.coroutines.CancellationException() },
             hasActiveRegistrationWork = { false },
