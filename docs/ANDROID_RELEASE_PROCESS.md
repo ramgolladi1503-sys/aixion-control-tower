@@ -112,7 +112,9 @@ With the real Firebase file in place, compile an unsigned release variant with:
 cd mobile/android
 ./gradlew assembleRelease \
   -PAIXION_FIREBASE_CONFIG_ENABLED=true \
-  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}"
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ```
 
 This command still does not prove the API is reachable, sign the artifact, or
@@ -162,10 +164,14 @@ Then build:
 ```bash
 ./gradlew assembleRelease \
   -PAIXION_FIREBASE_CONFIG_ENABLED=true \
-  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}"
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ./gradlew bundleRelease \
   -PAIXION_FIREBASE_CONFIG_ENABLED=true \
-  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}"
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ```
 
 The real `google-services.json` must be present in `app/` for both commands.
@@ -256,7 +262,9 @@ For Play Store, prefer Android App Bundle output:
 cd mobile/android
 ./gradlew bundleRelease \
   -PAIXION_FIREBASE_CONFIG_ENABLED=true \
-  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}"
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ```
 
 This command requires the real `app/google-services.json`, the actual HTTPS
@@ -277,9 +285,9 @@ AIXION_FCM_PROJECT_ID (GitHub Environment variable)
 ```
 
 The workflow validates the release app package in the Firebase JSON and invokes
-Gradle with `-PAIXION_FIREBASE_CONFIG_ENABLED=true`; it does not expose secret
-values in the job log. No exact signed build or physical release smoke test has
-been recorded yet.
+Gradle with `-PAIXION_FIREBASE_CONFIG_ENABLED=true` and explicit version inputs;
+it does not expose secret values in the job log. No exact signed build or
+physical release smoke test has been recorded yet.
 
 Expected artifact:
 
@@ -303,7 +311,7 @@ The manual workflow currently performs:
 
 1. Validate required secrets are present without printing their values.
 2. Decode the keystore and Firebase JSON into owner-only temporary files.
-3. Run `./gradlew bundleRelease -PAIXION_FIREBASE_CONFIG_ENABLED=true -PAIXION_API_BASE_URL="$AIXION_RELEASE_API_URL"` with the actual HTTPS API URL.
+3. Run `./gradlew bundleRelease -PAIXION_FIREBASE_CONFIG_ENABLED=true -PAIXION_API_BASE_URL="$AIXION_RELEASE_API_URL" -PAIXION_VERSION_CODE="$AIXION_RELEASE_VERSION_CODE" -PAIXION_VERSION_NAME="$AIXION_RELEASE_VERSION_NAME"` with the actual HTTPS API URL and explicit version values.
 4. Upload the AAB as a short-retention workflow artifact.
 5. Remove the temporary keystore and Firebase JSON on success or failure.
 6. Never echo secrets or commit the keystore/config file.
@@ -495,12 +503,20 @@ Current Android version fields live in:
 mobile/android/app/build.gradle.kts
 ```
 
-Current values:
+Debug builds retain these development defaults:
 
 ```text
 versionCode = 1
 versionName = "0.1.0"
 ```
+
+Every release build now requires both `AIXION_VERSION_CODE` and
+`AIXION_VERSION_NAME`. The code must be an integer from 1 through 2,100,000,000;
+the name must follow `MAJOR.MINOR.PATCH`, with an optional prerelease or build
+suffix. The manual signed-AAB workflow takes both as required dispatch inputs.
+Choose a code higher than every version code already uploaded to any Play track;
+the build validates format and bounds, while the release operator must compare
+against Play Console because the workflow has no Play publishing credentials.
 
 Before a real release:
 
@@ -554,7 +570,7 @@ Production mobile deployment is solved.
 | `testDebugUnitTest` fails | Android logic/test compile issue | Fix before merge. |
 | `assembleDebug` fails | Debug build broken | Fix before demo. |
 | `assembleRelease` fails | Release variant broken | Fix before claiming release readiness. |
-| `bundleRelease` fails | App Bundle release path or signing path is not ready | Fix before Play Store upload. |
+| `bundleRelease` fails | App Bundle release path, signing inputs, or explicit version inputs are not ready | Fix before Play Store upload. |
 | Release build rejects API URL | URL is missing or is not valid HTTPS | Configure the intended HTTPS staging/production URL; never switch release traffic to HTTP. |
 | APK cannot reach backend | Wrong API URL or LAN/network issue | Prove `/health` from phone first. |
 | APK not installable | Likely unsigned/release signing issue | Use debug for demo or provide real signing values. |

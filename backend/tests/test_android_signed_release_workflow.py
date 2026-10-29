@@ -171,9 +171,15 @@ def test_signed_release_workflow_does_not_interpolate_dispatch_inputs_into_shell
     assert "ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}" in workflow
     assert "AIXION_FCM_PROJECT_ID: ${{ vars.AIXION_FCM_PROJECT_ID }}" in workflow
     assert "environment: android-release" in workflow
+    assert "      version_code:" in workflow
+    assert "      version_name:" in workflow
+    assert "AIXION_VERSION_CODE: ${{ inputs.version_code }}" in workflow
+    assert "AIXION_VERSION_NAME: ${{ inputs.version_name }}" in workflow
     assert "python3 scripts/install_android_firebase_config.py" in workflow
     assert "-PAIXION_FIREBASE_CONFIG_ENABLED=true" in workflow
     assert '"-PAIXION_API_BASE_URL=${AIXION_API_BASE_URL}"' in workflow
+    assert '"-PAIXION_VERSION_CODE=${AIXION_VERSION_CODE}"' in workflow
+    assert '"-PAIXION_VERSION_NAME=${AIXION_VERSION_NAME}"' in workflow
     assert 'RELEASE_PACKAGE_NAME = "com.aixion.controltower"' in installer
     assert 'if: always() && steps.firebase_config.outputs.created == \'true\'' in workflow
     assert 'echo "created=true" >> "$GITHUB_OUTPUT"' in workflow

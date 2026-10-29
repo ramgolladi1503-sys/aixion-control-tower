@@ -11,6 +11,14 @@ on:
         description: "Uploaded artifact name"
         required: true
         default: "aixion-control-tower-release-aab"
+      version_code:
+        description: "Integer greater than the highest version code already uploaded to any Play track"
+        required: true
+        type: string
+      version_name:
+        description: "Release version in MAJOR.MINOR.PATCH form, with an optional prerelease/build suffix"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -83,6 +91,8 @@ jobs:
         working-directory: mobile/android
         env:
           AIXION_API_BASE_URL: ${{ inputs.api_base_url }}
+          AIXION_VERSION_CODE: ${{ inputs.version_code }}
+          AIXION_VERSION_NAME: ${{ inputs.version_name }}
           ANDROID_KEYSTORE_FILE: release.keystore
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -91,7 +101,9 @@ jobs:
           set -euo pipefail
           ./gradlew bundleRelease \
             -PAIXION_FIREBASE_CONFIG_ENABLED=true \
-            "-PAIXION_API_BASE_URL=${AIXION_API_BASE_URL}"
+            "-PAIXION_API_BASE_URL=${AIXION_API_BASE_URL}" \
+            "-PAIXION_VERSION_CODE=${AIXION_VERSION_CODE}" \
+            "-PAIXION_VERSION_NAME=${AIXION_VERSION_NAME}"
 
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4

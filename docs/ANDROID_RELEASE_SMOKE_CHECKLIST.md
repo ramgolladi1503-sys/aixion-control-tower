@@ -57,8 +57,9 @@ From repository root:
 cd mobile/android
 ./gradlew testDebugUnitTest
 ./gradlew assembleDebug
-./gradlew assembleRelease -PAIXION_API_BASE_URL=https://aixionlab.com/
 ./gradlew :app:verifyReleaseApiUrlGuard
+./gradlew :app:verifyReleaseFirebaseConfigGuard
+./gradlew :app:verifyReleaseVersionGuard
 ```
 
 Focused Android guards:
@@ -74,14 +75,13 @@ Expected result:
 ```text
 Android JVM tests pass.
 Debug build passes.
-Release variant compiles.
-Release API URL guard accepts the compile-only URL and rejects unsafe URL cases.
+Release API URL, Firebase-config, and explicit-version guard cases pass.
 ```
 
-The `aixionlab.com` URL is used only for release URL-shape compilation. It is
-the Aixion Lab website, not a Control Tower API endpoint. This build does not
-prove a usable backend connection or signed APK readiness. Use the actual
-HTTPS staging or production URL for a device-installable release artifact.
+The release guard tasks do not build a release artifact. A real release build
+requires Firebase configuration, the actual HTTPS Control Tower API URL,
+explicit release version inputs, and signing values. Use the actual HTTPS
+staging or production URL for a device-installable release artifact.
 
 ## 3. Start auth-enabled demo backend
 

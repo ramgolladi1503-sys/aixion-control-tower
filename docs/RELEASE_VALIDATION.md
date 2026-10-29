@@ -61,7 +61,7 @@ Do not call this production-grade until deployment, secrets, monitoring, project
 | Android owner session controls | Account screen lists sessions and can expire another user's access | Manual Account check |
 | Android work-order provenance | Work Orders show Manual User Source or Verified Agent Source | `docs/ANDROID_RELEASE_SMOKE_CHECKLIST.md` + `WorkOrderRepositoryTest` |
 | Android debug build | Debug APK builds | `cd mobile/android && ./gradlew assembleDebug` |
-| Android release variant | Release variant compiles | `cd mobile/android && ./gradlew assembleRelease` |
+| Android release guards | Release URL, Firebase-config, and version policy checks pass | `cd mobile/android && ./gradlew :app:verifyReleaseApiUrlGuard :app:verifyReleaseFirebaseConfigGuard :app:verifyReleaseVersionGuard` |
 | Android release process | Release limits and signing gap are documented | `docs/ANDROID_RELEASE_PROCESS.md` |
 | Auth-disabled demo | Fast local demo works without login | `AIXION_PROFILE=demo` / `AIXION_AUTH_ENABLED=false` path below |
 | Auth-enabled demo | Android `Acct` login/register/session verification works and protected screens load | `AIXION_PROFILE=demo AIXION_AUTH_ENABLED=true` path below |
@@ -118,7 +118,7 @@ cd mobile/android
 ./gradlew testDebugUnitTest
 ./gradlew testDebugUnitTest --tests '*SessionAdminRepositoryTest'
 ./gradlew assembleDebug
-./gradlew assembleRelease
+./gradlew :app:verifyReleaseApiUrlGuard :app:verifyReleaseFirebaseConfigGuard :app:verifyReleaseVersionGuard
 ```
 
 Expected result:
@@ -126,10 +126,13 @@ Expected result:
 ```text
 JVM tests pass
 debug build passes
-release variant compiles
+release guard cases pass
 ```
 
 If Android tests fail because of fake API drift or model drift, fix that before demo. Do not wave it away as “just tests”.
+These release guard tasks do not compile or sign a release artifact. A real
+release build needs the real Firebase config, reachable HTTPS API URL, explicit
+release version values, and (for a distributable AAB) signing configuration.
 
 For the focused Android smoke path, use:
 
@@ -259,22 +262,25 @@ BUILD SUCCESSFUL
 
 This proves a debug build. It does not prove signed release APK readiness.
 
-## 7. Android release variant build
+## 7. Android release guard validation
 
 Run:
 
 ```bash
 cd mobile/android
-./gradlew assembleRelease
+./gradlew :app:verifyReleaseApiUrlGuard :app:verifyReleaseFirebaseConfigGuard :app:verifyReleaseVersionGuard
 ```
 
 Expected result:
 
 ```text
-BUILD SUCCESSFUL
+Release API URL, Firebase configuration, and version policy guard cases pass.
 ```
 
-This proves the release variant compiles. It does **not** prove production signing, Play Store readiness, or installability of a signed APK.
+The release guard command above does not compile the release variant. It does
+**not** prove signing, Play Store readiness, or installability. Use the actual
+release build procedure in `docs/ANDROID_RELEASE_PROCESS.md` after all required
+inputs exist.
 
 See:
 

@@ -6,6 +6,50 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+private const val MAX_ANDROID_VERSION_CODE = 2_100_000_000
+private const val DEFAULT_ANDROID_VERSION_CODE = 1
+private const val DEFAULT_ANDROID_VERSION_NAME = "0.1.0"
+private val ANDROID_VERSION_NAME_PATTERN = Regex("""\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?""")
+
+fun releaseVersionProblem(rawVersionCode: String?, rawVersionName: String?): String? {
+    val versionCodeText = rawVersionCode?.trim()?.takeIf(String::isNotEmpty)
+        ?: return "Release builds require -PAIXION_VERSION_CODE=<increasing-integer>."
+    val versionCode = versionCodeText.toIntOrNull()
+        ?: return "AIXION_VERSION_CODE must be an integer from 1 to $MAX_ANDROID_VERSION_CODE."
+    if (versionCode !in 1..MAX_ANDROID_VERSION_CODE) {
+        return "AIXION_VERSION_CODE must be an integer from 1 to $MAX_ANDROID_VERSION_CODE."
+    }
+
+    val versionName = rawVersionName?.trim()?.takeIf(String::isNotEmpty)
+        ?: return "Release builds require -PAIXION_VERSION_NAME=<semver>."
+    if (!ANDROID_VERSION_NAME_PATTERN.matches(versionName)) {
+        return "AIXION_VERSION_NAME must use MAJOR.MINOR.PATCH with an optional prerelease or build suffix."
+    }
+    return null
+}
+
+val configuredVersionCode = providers.gradleProperty("AIXION_VERSION_CODE").orNull
+val configuredVersionName = providers.gradleProperty("AIXION_VERSION_NAME").orNull
+val androidVersionCode = configuredVersionCode?.trim()?.let { raw ->
+    val parsed = raw.toIntOrNull()
+        ?: throw GradleException(
+            "AIXION_VERSION_CODE must be an integer from 1 to $MAX_ANDROID_VERSION_CODE."
+        )
+    if (parsed !in 1..MAX_ANDROID_VERSION_CODE) {
+        throw GradleException(
+            "AIXION_VERSION_CODE must be an integer from 1 to $MAX_ANDROID_VERSION_CODE."
+        )
+    }
+    parsed
+} ?: DEFAULT_ANDROID_VERSION_CODE
+val androidVersionName = configuredVersionName?.trim()?.also { raw ->
+    if (!ANDROID_VERSION_NAME_PATTERN.matches(raw)) {
+        throw GradleException(
+            "AIXION_VERSION_NAME must use MAJOR.MINOR.PATCH with an optional prerelease or build suffix."
+        )
+    }
+} ?: DEFAULT_ANDROID_VERSION_NAME
+
 val firebaseConfigEnabled = providers.gradleProperty("AIXION_FIREBASE_CONFIG_ENABLED")
     .orElse("false")
     .map { raw ->
@@ -82,8 +126,8 @@ android {
         applicationId = "com.aixion.controltower"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = androidVersionCode
+        versionName = androidVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "AIXION_API_BASE_URL", "\"$aixionApiBaseUrl\"")
         buildConfigField("int", "AIXION_API_TIMEOUT_SECONDS", apiTimeoutSeconds.toString())
@@ -244,8 +288,46 @@ tasks.register("verifyReleaseFirebaseConfigGuard") {
     }
 }
 
+tasks.register("verifyReleaseVersionGuard") {
+    group = "verification"
+    description = "Checks explicit Android release version inputs and Play version-code bounds."
+    doLast {
+        val accepted = listOf(
+            "1" to "0.1.0",
+            "42" to "1.2.3-rc.1",
+            "2100000000" to "2.0.0+release.7",
+        )
+        val rejected = listOf(
+            null to "1.0.0",
+            "1" to null,
+            "0" to "1.0.0",
+            "2100000001" to "1.0.0",
+            "1.5" to "1.0.0",
+            "1" to "latest",
+            "1" to "1.0",
+        )
+        accepted.forEach { (versionCode, versionName) ->
+            val problem = releaseVersionProblem(versionCode, versionName)
+            check(problem == null) {
+                "Release version guard unexpectedly rejected $versionCode/$versionName: $problem"
+            }
+        }
+        rejected.forEach { (versionCode, versionName) ->
+            check(releaseVersionProblem(versionCode, versionName) != null) {
+                "Release version guard unexpectedly accepted $versionCode/$versionName."
+            }
+        }
+        logger.lifecycle(
+            "Release version guard passed: ${accepted.size} accepted and ${rejected.size} rejected cases."
+        )
+    }
+}
+
 tasks.matching { it.name == "preReleaseBuild" }.configureEach {
     doFirst {
+        val versionProblem = releaseVersionProblem(configuredVersionCode, configuredVersionName)
+        if (versionProblem != null) throw GradleException(versionProblem)
+
         val rawUrl = configuredApiBaseUrl
             ?: throw GradleException(
                 "Release builds require -PAIXION_API_BASE_URL=https://<production-api-host>/"

@@ -48,7 +48,9 @@ signing configuration separately:
 ```bash
 ./gradlew assembleRelease \
   -PAIXION_FIREBASE_CONFIG_ENABLED=true \
-  -PAIXION_API_BASE_URL=https://<staging-or-production-api>/
+  -PAIXION_API_BASE_URL=https://<staging-or-production-api>/ \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ```
 
 Setting `AIXION_FIREBASE_CONFIG_ENABLED=true` without the configuration file

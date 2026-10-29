@@ -41,7 +41,9 @@ A production build requires an externally hosted API URL with HTTPS:
 
 ```bash
 ./gradlew bundleRelease \
-  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the HTTPS API URL}"
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the HTTPS API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ```
 
 The release build rejects missing, non-HTTPS, or malformed API URLs. The URL
