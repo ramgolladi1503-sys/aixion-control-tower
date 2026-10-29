@@ -26,16 +26,24 @@ def _without_posix_uid() -> SimpleNamespace:
     )
 
 
+def _write_protected_file(path: Path, contents: bytes) -> None:
+    if os.name == "nt":
+        _secure_dir(path.parent)
+        host_security.atomic_write(path, contents, 0o600)
+        return
+    path.write_bytes(contents)
+    path.chmod(0o600)
+
+
 def test_protected_config_uses_host_security_without_posix_uid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = tmp_path / "antigravity.json"
-    config_path.write_text(json.dumps({
+    _write_protected_file(config_path, json.dumps({
         "api_base_url": "https://control.example.test",
         "agent_id": "agent-protected",
         "project_id": "project-protected",
-    }), encoding="utf-8")
-    config_path.chmod(0o600)
+    }).encode("utf-8"))
     monkeypatch.setattr(hook, "os", _without_posix_uid())
     monkeypatch.setattr(hook, "host_security", host_security, raising=False)
 
@@ -51,8 +59,7 @@ def test_protected_token_file_uses_host_security_without_posix_uid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     token_path = tmp_path / "agent-token"
-    token_path.write_text("protected-test-token\n", encoding="utf-8")
-    token_path.chmod(0o600)
+    _write_protected_file(token_path, b"protected-test-token\n")
     monkeypatch.setattr(hook, "os", _without_posix_uid())
     monkeypatch.setattr(hook, "host_security", host_security, raising=False)
 
