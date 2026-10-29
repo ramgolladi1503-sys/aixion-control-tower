@@ -6,9 +6,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-private const val MAX_ANDROID_VERSION_CODE = 2_100_000_000
-private const val DEFAULT_ANDROID_VERSION_CODE = 1
-private const val DEFAULT_ANDROID_VERSION_NAME = "0.1.0"
+private val MAX_ANDROID_VERSION_CODE = 2_100_000_000
+private val DEFAULT_ANDROID_VERSION_CODE = 1
+private val DEFAULT_ANDROID_VERSION_NAME = "0.1.0"
 private val ANDROID_VERSION_NAME_PATTERN = Regex("""\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?""")
 
 fun releaseVersionProblem(rawVersionCode: String?, rawVersionName: String?): String? {
