@@ -69,6 +69,8 @@ MYSQL_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?(?:mysql|mariadb)
 MYSQL_PASSWORD_OPTION = re.compile(r"(?:^|\s)-p\S*(?=\s|=|:|$)")
 CURL_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?curl(?=\s|$)", re.I)
 CURL_USER_OPTION = re.compile(r"(?:^|\s)(?:--user(?:=|\s+)|-u(?:=|\s+|(?=\S)))[\"']?[^\s\"']+", re.I)
+SSHPASS_COMMAND = re.compile(r"(?:^|[\s;&|])(?:sudo\s+)?(?:\S*/)?sshpass(?=\s|$)", re.I)
+SSHPASS_PASSWORD_OPTION = re.compile(r"(?:^|\s)-p(?=\s|=|:|$|\S)")
 
 
 class GateError(Exception):
@@ -253,6 +255,10 @@ def _contains_sensitive(value: Any) -> bool:
         or (
             CURL_COMMAND.search(value) is not None
             and CURL_USER_OPTION.search(value) is not None
+        )
+        or (
+            SSHPASS_COMMAND.search(value) is not None
+            and SSHPASS_PASSWORD_OPTION.search(value) is not None
         )
     )
 

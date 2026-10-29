@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.auth
 
 import android.Manifest
+import android.util.Log
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import android.content.pm.PackageManager
 import android.os.Build
@@ -31,7 +32,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.aixion.controltower.BuildConfig
 import com.aixion.controltower.core.ui.components.TowerPanel
+import com.aixion.controltower.data.repository.registerPushDeviceAndScheduleRetries
 import com.aixion.controltower.notifications.PushDeviceRegistrationRepository
+import com.aixion.controltower.notifications.PushDeviceRegistrationWorker
 import com.aixion.controltower.notifications.PushRegistrationResult
 
 internal enum class PushRegistrationUiState {
@@ -169,7 +172,23 @@ internal fun NotificationPermissionPanel() {
 
     LaunchedEffect(permissionState, registrationRefresh) {
         registrationState = PushRegistrationUiState.CHECKING
-        val result = PushDeviceRegistrationRepository(context).registerCurrentDevice().toUiState()
+        val registrationResult = registerPushDeviceAndScheduleRetries(
+            register = { PushDeviceRegistrationRepository(context).registerCurrentDevice() },
+            scheduleRetry = { PushDeviceRegistrationWorker.enqueue(context) },
+            onRegistrationFailure = { error ->
+                Log.w(
+                    "NotificationPermissionPanel",
+                    "Push registration failed unexpectedly (${error.javaClass.simpleName})."
+                )
+            },
+            onScheduleFailure = { error ->
+                Log.w(
+                    "NotificationPermissionPanel",
+                    "Push registration retry could not be queued (${error.javaClass.simpleName})."
+                )
+            }
+        )
+        val result = registrationResult.toUiState()
         registrationState = if (
             !BuildConfig.AIXION_FIREBASE_CONFIG_ENABLED &&
             result == PushRegistrationUiState.PERMISSION_REQUIRED
