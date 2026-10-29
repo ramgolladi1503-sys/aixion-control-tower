@@ -7,8 +7,11 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import com.aixion.controltower.MainActivity
 import com.google.firebase.messaging.RemoteMessage
 import org.junit.Assert.assertEquals
@@ -75,6 +78,22 @@ class ControlTowerMessagingServiceNotificationTest {
                     NotificationDeepLink.ApprovalRequest(approvalId, notificationId),
                     resolvedLink
                 )
+
+                val expectedLink = NotificationDeepLink.ApprovalRequest(approvalId, notificationId)
+                assertEquals(expectedLink, mainActivityNotificationState(startedActivity).current.link)
+
+                // Exercise MainActivity's real save/restore path after the notification tap.
+                // This does not simulate Android process death or prove network/auth behavior.
+                startedActivity.recreate()
+                val recreatedActivity = awaitResumedMainActivityDifferentFrom(
+                    instrumentation = instrumentation,
+                    previousActivity = startedActivity
+                )
+                launchedActivity = recreatedActivity
+                assertEquals(expectedLink, NotificationDeepLink.fromIntent(recreatedActivity.intent))
+                val restoredState = mainActivityNotificationState(recreatedActivity)
+                assertEquals(expectedLink, restoredState.current.link)
+                assertEquals(expectedLink, restoredState.pendingEvents().single().link)
             } finally {
                 instrumentation.runOnMainSync { launchedActivity?.finish() }
                 instrumentation.removeMonitor(activityMonitor)
@@ -224,6 +243,31 @@ class ControlTowerMessagingServiceNotificationTest {
             .apply { isAccessible = true }
             .invoke(service, context)
         return service
+    }
+
+    private fun mainActivityNotificationState(activity: MainActivity): NotificationDeepLinkEventState =
+        MainActivity::class.java
+            .getDeclaredField("notificationEventState")
+            .apply { isAccessible = true }
+            .get(activity) as NotificationDeepLinkEventState
+
+    private fun awaitResumedMainActivityDifferentFrom(
+        instrumentation: Instrumentation,
+        previousActivity: MainActivity
+    ): MainActivity {
+        val deadline = SystemClock.uptimeMillis() + ACTIVITY_START_TIMEOUT_MS
+        while (SystemClock.uptimeMillis() < deadline) {
+            var resumedActivity: MainActivity? = null
+            instrumentation.runOnMainSync {
+                resumedActivity = ActivityLifecycleMonitorRegistry.getInstance()
+                    .getActivitiesInStage(Stage.RESUMED)
+                    .filterIsInstance<MainActivity>()
+                    .firstOrNull { it !== previousActivity }
+            }
+            resumedActivity?.let { return it }
+            Thread.sleep(50)
+        }
+        throw AssertionError("MainActivity was not recreated and resumed after the notification tap")
     }
 
     private companion object {
