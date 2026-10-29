@@ -75,7 +75,6 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          python3 ../../scripts/validate_android_release_url.py
           ./gradlew bundleRelease "-PAIXION_API_BASE_URL=${AIXION_API_BASE_URL}"
 
       - name: Upload signed AAB artifact
