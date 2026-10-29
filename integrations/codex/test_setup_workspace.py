@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -26,6 +27,20 @@ def _install(workspace: Path, home: Path) -> tuple[Path, Path]:
         project_id="project_test_codex",
         home=home,
     )
+
+
+def test_windows_command_uses_argument_quoting_for_paths_with_spaces(tmp_path: Path) -> None:
+    config = tmp_path / "A User" / "AppData" / "codex config.json"
+    script = tmp_path / "Aixion Control Tower" / "approval hook.py"
+    python = r"C:\Program Files\Python\python.exe"
+    command = setup._windows_hook_command(config, script, python)
+
+    expected = subprocess.list2cmdline((python, str(script.resolve()), "--config", str(config)))
+    assert command == expected
+    assert '"C:\\Program Files\\Python\\python.exe"' in command
+    assert "Aixion Control Tower" in command
+    assert "approval hook.py" in command
+    assert "A User" in command
 
 
 def test_install_is_workspace_scoped_idempotent_and_preserves_unrelated_hooks(

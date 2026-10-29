@@ -42,7 +42,19 @@ that the configuration is accepted; it is not runtime-flow evidence.
 
 ## Supported scope and limits
 
-- Initial host support is macOS with local Codex and a token in macOS Keychain.
+- The adapter implementation targets macOS and Windows Codex CLI. macOS uses
+  Keychain; Windows uses the current user's Windows Credential Manager and
+  protected NTFS ACLs. Windows implementation support is conditional on the
+  `Codex Windows validation` CI job passing for the exact revision; this is
+  not native Codex runtime certification.
+- A real Windows Codex same-invocation phone approval and denial remains an
+  explicit certification gate. Do not infer Windows runtime behavior from the
+  Windows CI tests or the macOS Codex CLI round trip.
+- The Windows installer rejects UNC paths, reparse points, null or unknown
+  DACLs, and access granted to broad or unrecognized principals. It accepts
+  only the current user, LocalSystem, and privileged Builtin Administrators
+  on protected files/directories. Shared project `.codex` directories may need
+  an owner-controlled directory; unsafe ACLs are never silently rewritten.
 - The API URL must be HTTPS except for loopback HTTP during local development.
 - The Codex project must be trusted. Codex requires review and trust of this
   non-managed hook before it runs; setup does not bypass that prompt.
@@ -87,13 +99,24 @@ that the configuration is accepted; it is not runtime-flow evidence.
 ## Install
 
 1. In the Control Tower app, register a `CODEX` external agent scoped to the
-   intended project with only the five actions listed above. Save its token
-   in macOS Keychain as a generic password using service
-   `com.aixion.controltower.agent` and account equal to the agent ID. Do not
-   enable Keychain access for all applications.
+   intended project with only the five actions listed above. Save its token in
+   the host credential store under service `com.aixion.controltower.agent` and
+   account equal to the agent ID. On macOS, use a generic password in Keychain
+   and do not enable access for all applications. On Windows, use the hidden
+   prompt below to store the token in Windows Credential Manager; the token is
+   not placed in command-line arguments, Codex config, or a plaintext file:
+
+   ```powershell
+   py -3 integrations/codex/setup_workspace.py --store-token --agent-id "agent_..."
+   ```
+
+   To remove the Windows credential, run
+   `py -3 integrations/codex/setup_workspace.py --remove-token --agent-id "agent_..."`.
 2. From the repository root, install the workspace hook. The command writes a
-   protected non-secret config under `~/.config/aixion/workspaces/` and merges
-   only the `PermissionRequest` entry in `<project>/.codex/hooks.json`:
+   protected non-secret config under the host's Aixion config directory and
+   merges only the `PermissionRequest` entry in `<project>/.codex/hooks.json`.
+   macOS uses `~/.config/aixion/workspaces/`; Windows uses
+   `%LOCALAPPDATA%\Aixion\ControlTower\Codex\workspaces\`:
 
    ```sh
    python3 integrations/codex/setup_workspace.py \
@@ -103,10 +126,28 @@ that the configuration is accepted; it is not runtime-flow evidence.
      --project-id "project_..."
    ```
 
+   On Windows, run the equivalent command from PowerShell:
+
+   ```powershell
+   py -3 integrations/codex/setup_workspace.py `
+     --workspace "C:\Users\you\source\Aixion Project" `
+     --api-base-url "https://control.example.com" `
+     --agent-id "agent_..." `
+     --project-id "project_..."
+   ```
+
+   Windows stores non-secret workspace config under
+   `%LOCALAPPDATA%\Aixion\ControlTower\Codex\workspaces\`. The generated
+   hook entry includes Codex's Windows-only `commandWindows` override with
+   Windows argument quoting for interpreter, script, and config paths that
+   contain spaces. New app-owned directories/files get explicit protected
+   DACLs; installation fails closed when existing paths cannot be validated.
+
    Existing installations must rerun the same command after upgrading. The
    installer adds the canonical workspace path to the protected config and
-   preserves the existing hook and Keychain credential. No credential reset
-   is needed. Until this metadata is present, the hook fails closed.
+   preserves the existing hook and host credential (macOS Keychain or Windows
+   Credential Manager). No credential reset is needed. Until this metadata is
+   present, the hook fails closed.
 
    If the project already has `.codex/hooks.json`, the installer requires the
    file to be owned by the current user and not writable by group or other
@@ -118,7 +159,7 @@ that the configuration is accepted; it is not runtime-flow evidence.
    chmod go-w "/absolute/path/to/project/.codex/hooks.json"
    ```
 
-3. Check connectivity and Keychain access. Preflight calls unauthenticated
+3. Check connectivity and host credential-store access. Preflight calls unauthenticated
    `/health` without the token, then authenticates `GET /agents/identity` to
    verify the registered CODEX installation, project scope, and required
    approval capabilities. The endpoint returns no credential. Production also
@@ -140,9 +181,11 @@ that the configuration is accepted; it is not runtime-flow evidence.
    supported based on the CLI result.
 
 To remove this integration, run `setup_workspace.py --workspace
-"/absolute/path/to/project" --remove`. It removes only its own managed entry
-and config, preserving other Codex hooks. Revoke the external-agent token in
-Control Tower if it is no longer needed.
+"/absolute/path/to/project" --remove` (or the equivalent quoted Windows
+PowerShell command). It removes only its own managed entry and config,
+preserving other Codex hooks. Remove the Windows Credential Manager token with
+`--remove-token`, and revoke the external-agent token in Control Tower if it is
+no longer needed.
 
 ## Configuration and validation
 
@@ -182,7 +225,8 @@ callback identity and body once after 250 ms; each create request has a
 diagnostic to stderr. Invocation idempotency prevents a duplicate approval when
 the first request committed. It never retries consume `POST`s after ambiguous
 outcomes. The hook's Codex command timeout is 960 seconds so the API wait can
-expire and return an explicit denial. Tokens are read from macOS Keychain or a protected owner-only file
+expire and return an explicit denial. Tokens are read from macOS Keychain,
+Windows Credential Manager, or an explicitly configured protected owner-only file
 (`AIXION_AGENT_TOKEN_FILE`). Process-environment tokens are disabled by
 default; local tests must set both `AIXION_AGENT_TOKEN` and
 `AIXION_ALLOW_AGENT_TOKEN_ENV=true`. Do not enable process-environment tokens

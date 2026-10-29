@@ -1848,3 +1848,26 @@ def test_http_request_rejects_duplicate_response_fields(
             {"agent_id": "agent-123"},
             "test-token",
         )
+
+
+def test_windows_credential_missing_or_revoked_denies_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = {
+        "agent_id": "agent_windows_test",
+        "keychain_service": "com.aixion.controltower.agent",
+    }
+
+    def unavailable(_service: str, _account: str) -> str:
+        raise hook.host_security.HostSecurityError("credential unavailable")
+
+    monkeypatch.setattr(hook.host_security, "read_credential", unavailable)
+    with pytest.raises(hook.GateError, match="Windows Credential Manager"):
+        hook._windows_agent_token(config)
+
+    monkeypatch.setattr(hook.host_security, "read_credential", lambda _s, _a: "token")
+    assert hook._windows_agent_token(config) == "token"
+
+    monkeypatch.setattr(hook.host_security, "read_credential", unavailable)
+    with pytest.raises(hook.GateError, match="Windows Credential Manager"):
+        hook._windows_agent_token(config)

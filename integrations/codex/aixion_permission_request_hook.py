@@ -12,7 +12,6 @@ import math
 import os
 from pathlib import Path
 import re
-import stat
 import subprocess
 import sys
 import time
@@ -28,6 +27,7 @@ if _REPOSITORY_ROOT not in sys.path:
     sys.path.insert(0, _REPOSITORY_ROOT)
 
 from integrations.aixion_deadline_http import request as deadline_request  # noqa: E402
+from integrations.codex import host_security  # noqa: E402
 
 MAX_INPUT_BYTES = 128 * 1024
 MAX_ARGUMENTS_BYTES = 48 * 1024
@@ -51,7 +51,7 @@ MAX_CREATE_ATTEMPTS = 2
 CREATE_RETRY_DELAY_SECONDS = 0.25
 APPROVAL_PROTOCOL_VERSION = "1"
 DIAGNOSTIC_APPROVAL_ID = re.compile(r"^approval_[a-f0-9]{12}$")
-DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/aixion/codex.json")
+DEFAULT_CONFIG_PATH = os.fspath(host_security.default_config_path(Path.home()))
 SENSITIVE_KEY = re.compile(r"(token|secret|password|credential|private.?key|api.?key)", re.I)
 SENSITIVE_VALUE = re.compile(
     r"(?:bearer\s+[A-Za-z0-9._~-]{8,}|authorization\s*:\s*basic\s+[A-Za-z0-9+/]{4,}={0,2}|https?://[^/\s:@]+:[^/\s@]+@|(?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*[\"']?[A-Za-z0-9._~/-]{8,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
@@ -302,13 +302,9 @@ def _configuration(env: dict[str, str]) -> dict[str, str]:
     config: Any = {}
     if has_config_file:
         try:
-            descriptor = os.open(config_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(descriptor, "rb") as stream:
-                metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-                    raise GateError("Codex config must be a regular file owned by this user")
-                if stat.S_IMODE(metadata.st_mode) & 0o077:
-                    raise GateError("Codex config permissions must exclude group and other users")
+            with host_security.open_private_file(
+                Path(config_path), require_private=True, reject_shared_write=True
+            ) as stream:
                 raw = stream.read(MAX_CONFIG_BYTES + 1)
             if len(raw) > MAX_CONFIG_BYTES:
                 raise GateError("Codex config exceeds its size limit")
@@ -322,7 +318,7 @@ def _configuration(env: dict[str, str]) -> dict[str, str]:
                 parse_constant=_reject_nonstandard_json_constant,
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
-        except (OSError, ValueError, UnicodeDecodeError) as exc:
+        except (OSError, ValueError, UnicodeDecodeError, host_security.HostSecurityError) as exc:
             raise GateError("Codex config is unreadable or invalid") from exc
     elif not all(env.get(name) for name in (
         "AIXION_API_BASE_URL", "AIXION_AGENT_ID", "AIXION_PROJECT_ID"
@@ -376,8 +372,10 @@ def _configuration(env: dict[str, str]) -> dict[str, str]:
     if not workspace_path.is_absolute():
         raise GateError("Codex config workspace path must be absolute")
     try:
+        if os.name == "nt":
+            host_security.ensure_no_reparse_path(workspace_path)
         canonical_workspace = workspace_path.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, host_security.HostSecurityError) as exc:
         raise GateError("Codex config workspace path is unavailable") from exc
     if not canonical_workspace.is_dir() or str(canonical_workspace) != values["workspace_path"]:
         raise GateError("Codex config workspace path must be a canonical directory")
@@ -394,8 +392,10 @@ def _validate_event_workspace(event: dict[str, Any], config: dict[str, str]) -> 
     if not session_path.is_absolute():
         raise GateError("Codex permission request working directory must be absolute")
     try:
+        if os.name == "nt":
+            host_security.ensure_no_reparse_path(session_path)
         canonical_session = session_path.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, host_security.HostSecurityError) as exc:
         raise GateError("Codex permission request working directory is unavailable") from exc
     if not canonical_session.is_dir():
         raise GateError("Codex permission request working directory is not a directory")
@@ -409,25 +409,23 @@ def _agent_token(env: dict[str, str], config: dict[str, str]) -> str:
     if token:
         if env.get("AIXION_ALLOW_AGENT_TOKEN_ENV") != "true":
             raise GateError(
-                "Environment agent tokens are disabled; use macOS Keychain or a protected token file"
+                "Environment agent tokens are disabled; use the host credential store or a protected token file"
             )
         return token
     token_path = env.get("AIXION_AGENT_TOKEN_FILE", "").strip()
     if token_path:
         try:
-            descriptor = os.open(token_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(descriptor, "rb") as stream:
-                metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-                    raise GateError("Agent token file must be a regular file owned by this user")
-                if stat.S_IMODE(metadata.st_mode) & 0o077:
-                    raise GateError("Agent token file permissions must exclude group and other users")
+            with host_security.open_private_file(
+                Path(token_path), require_private=True, reject_shared_write=True
+            ) as stream:
                 raw = stream.read(8193)
-        except OSError as exc:
+        except (OSError, host_security.HostSecurityError) as exc:
             raise GateError("Agent token file is unavailable") from exc
         if len(raw) > 8192 or not raw.strip():
             raise GateError("Agent token file is empty or too large")
         return raw.decode("utf-8").strip()
+    if os.name == "nt":
+        return _windows_agent_token(config)
     if sys.platform != "darwin":
         raise GateError("Agent token is missing; configure a protected secret source")
     try:
@@ -442,6 +440,13 @@ def _agent_token(env: dict[str, str], config: dict[str, str]) -> str:
     if not token:
         raise GateError("Agent token is empty in macOS Keychain")
     return token
+
+
+def _windows_agent_token(config: dict[str, str]) -> str:
+    try:
+        return host_security.read_credential(config["keychain_service"], config["agent_id"])
+    except host_security.HostSecurityError as exc:
+        raise GateError("Agent token was not available from Windows Credential Manager") from exc
 
 
 def _request(method: str, url: str, config: dict[str, str], token: str,
