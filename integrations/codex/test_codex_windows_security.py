@@ -132,6 +132,24 @@ def test_windows_install_rejects_broad_profile_ancestor_acl(tmp_path: Path) -> N
         )
 
 
+def test_windows_atomic_write_closes_temp_handle_when_acl_setup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "Protected Files"
+    _secure_dir(parent)
+    destination = parent / "managed config.json"
+
+    def reject_acl(*_args, **_kwargs) -> None:
+        raise host_security.HostSecurityError("injected ACL setup failure")
+
+    monkeypatch.setattr(host_security, "_windows_set_private_acl_path", reject_acl)
+    with pytest.raises(host_security.HostSecurityError, match="injected ACL setup failure"):
+        host_security.atomic_write(destination, b"{}\n", 0o600)
+
+    assert not list(parent.glob(".managed config.json.*"))
+    assert not destination.exists()
+
+
 def test_windows_credential_manager_missing_present_and_revoked_fail_closed() -> None:
     service = "com.aixion.controltower.agent"
     account = f"agent_windows_test_{uuid.uuid4().hex}"

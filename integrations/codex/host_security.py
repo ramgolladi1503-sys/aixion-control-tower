@@ -168,9 +168,12 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
             pass
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp_path = Path(temporary)
+    descriptor_open = True
     try:
         _windows_set_private_acl_path(temp_path)
-        with os.fdopen(fd, "wb") as output:
+        output = os.fdopen(fd, "wb")
+        descriptor_open = False
+        with output:
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
@@ -178,6 +181,8 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
         with open_private_file(path, require_private=True, reject_shared_write=True):
             pass
     finally:
+        if descriptor_open:
+            os.close(fd)
         temp_path.unlink(missing_ok=True)
 
 
@@ -292,6 +297,8 @@ if os.name == "nt":
         ctypes.POINTER(wintypes.DWORD),
     ]
     _advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    _advapi32.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    _advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
     _advapi32.GetSecurityDescriptorDacl.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
                                                      ctypes.POINTER(ctypes.c_void_p),
                                                      ctypes.POINTER(wintypes.BOOL)]
@@ -339,13 +346,15 @@ if os.name == "nt":
             _kernel32.CloseHandle(token)
 
     def _open_handle(path: Path, *, directory: bool = False, read_data: bool = False,
-                     write_dac: bool = False):
+                     write_dac: bool = False, write_owner: bool = False):
         flags = _FILE_FLAG_OPEN_REPARSE_POINT
         if directory:
             flags |= _FILE_FLAG_BACKUP_SEMANTICS
         access = (_GENERIC_READ if read_data else _FILE_READ_ATTRIBUTES | _READ_CONTROL)
         if write_dac:
             access |= 0x00040000  # WRITE_DAC
+        if write_owner:
+            access |= 0x00080000  # WRITE_OWNER
         handle = _kernel32.CreateFileW(
             str(path), access, _FILE_SHARE_ALL, None, _OPEN_EXISTING, flags, None
         )
@@ -471,12 +480,28 @@ if os.name == "nt":
             _kernel32.LocalFree(descriptor)
 
     def _windows_set_private_acl_path(path: Path, *, directory: bool = False) -> None:
-        handle = _open_handle(path, directory=directory, write_dac=True)
+        handle = _open_handle(path, directory=directory, write_dac=True, write_owner=True)
         try:
+            _windows_set_current_user_owner(handle)
             _windows_set_private_acl(handle, directory=directory)
             _validate_handle_acl(handle, path)
         finally:
             _kernel32.CloseHandle(handle)
+
+    def _windows_set_current_user_owner(handle) -> None:
+        """Make newly created managed objects owned by the interactive user."""
+        sid = ctypes.c_void_p()
+        if not _advapi32.ConvertStringSidToSidW(_current_user_sid(), ctypes.byref(sid)):
+            raise _win_error("format current-user owner SID")
+        try:
+            status = _advapi32.SetSecurityInfo(
+                handle, _SE_FILE_OBJECT, _OWNER_SECURITY_INFORMATION,
+                sid, None, None, None,
+            )
+            if status != 0:
+                raise _win_error("set current-user owner", status)
+        finally:
+            _kernel32.LocalFree(sid)
 
     def _credential_target(service: str, account: str) -> str:
         if not service or not account or any(char in "\x00\r\n" for char in service + account):
