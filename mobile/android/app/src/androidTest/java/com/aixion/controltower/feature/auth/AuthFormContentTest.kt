@@ -99,7 +99,8 @@ class AuthFormContentTest {
             SemanticsMatcher.expectValue(SemanticsProperties.ContentType, ContentType.Password)
         )
 
-        composeRule.onNodeWithText("Create account").performClick()
+        composeRule.onNodeWithText("Register").performClick()
+        composeRule.onNodeWithText("Create account").assertExists()
         composeRule.onNodeWithText("Email address").assert(
             SemanticsMatcher.expectValue(SemanticsProperties.ContentType, ContentType.EmailAddress)
         )
@@ -141,7 +142,8 @@ class AuthFormContentTest {
             .assertExists()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Password is hidden"))
 
-        composeRule.onNodeWithText("Create account").performClick()
+        composeRule.onNodeWithText("Register").performClick()
+        composeRule.onNodeWithText("Create account").assertExists()
         composeRule.onNodeWithContentDescription("Show password").assertExists().performClick()
         composeRule.onNodeWithContentDescription("Hide password").assertExists()
 
@@ -192,8 +194,10 @@ class AuthFormContentTest {
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Error"))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
         val bounds = feedback.fetchSemanticsNode().boundsInRoot
-        assertTrue("Feedback should stay within the narrow screen width", bounds.width <= 240f)
-        assertTrue("Feedback should wrap into a readable multi-line block", bounds.height >= 36f)
+        val maxWidthPx = with(composeRule.density) { 240.dp.toPx() }
+        val minWrappedHeightPx = with(composeRule.density) { 36.dp.toPx() }
+        assertTrue("Feedback should stay within the narrow screen width", bounds.width <= maxWidthPx)
+        assertTrue("Feedback should wrap into a readable multi-line block", bounds.height >= minWrappedHeightPx)
     }
 
     @Test
@@ -211,13 +215,13 @@ class AuthFormContentTest {
             )
         }
 
-        composeRule.onNodeWithText("Logging in…")
+        composeRule.onNodeWithText("Signing in…")
             .assertExists()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Information"))
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
         composeRule.onNodeWithText("Email address").assertIsNotEnabled()
         composeRule.onNodeWithText("Password").assertIsNotEnabled()
-        composeRule.onNodeWithText("Log in").assertIsNotEnabled()
+        composeRule.onNodeWithText("Logging in…").assertIsNotEnabled()
         composeRule.onNodeWithText("Register").assertIsNotEnabled()
     }
 
