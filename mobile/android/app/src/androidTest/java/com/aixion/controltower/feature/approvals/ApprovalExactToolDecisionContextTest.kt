@@ -137,12 +137,11 @@ class ApprovalExactToolDecisionContextTest {
             formatApprovalExpiry(expiresAt),
             "12345678"
         ).forEach { value -> assertTextRenderedInside(composeRule, context, value) }
-        val acknowledgementAbsoluteBounds = absoluteVerticalBounds(
-            requestList,
-            composeRule,
-            hasTestTag("approval-exact-tool-review-acknowledgement")
-        )
+        requestList.performScrollToNode(hasTestTag("approval-exact-tool-decision-context"))
+        context.assertIsDisplayed()
         acknowledgement.assertIsDisplayed()
+        val contextBounds = context.fetchSemanticsNode().boundsInRoot
+        val acknowledgementBounds = acknowledgement.fetchSemanticsNode().boundsInRoot
         assertTrue(
             "Displayed diff must precede executable content in rendered content",
             payloadAbsoluteBounds.second <= executableAbsoluteBounds.first
@@ -153,7 +152,7 @@ class ApprovalExactToolDecisionContextTest {
         )
         assertTrue(
             "Reviewer context must precede acknowledgement in rendered content",
-            contextAbsoluteBounds.second <= acknowledgementAbsoluteBounds.first
+            contextBounds.bottom <= acknowledgementBounds.top
         )
 
         requestList.performScrollToNode(hasTestTag("approval-exact-tool-review-acknowledgement"))
