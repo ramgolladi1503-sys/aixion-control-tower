@@ -397,10 +397,34 @@ def test_invalid_external_agent_token_records_failed_auth_audit() -> None:
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid external agent token"
     assert store.external_agent_credentials[agent_id].failed_auth_count == 1
-    assert any(
-        event.event_type == "agent.auth_failed" and event.details["reason"] == "invalid_token"
+    auth_failure = next(
+        event
         for event in store.audit_events
+        if event.event_type == "agent.auth_failed"
+        and event.details["reason"] == "invalid_token"
     )
+    assert auth_failure.entity_id == agent_id
+    assert auth_failure.workspace_id == project.workspace_id
+
+
+def test_unknown_external_agent_auth_failure_remains_unscoped() -> None:
+    project = _project()
+
+    response = client.post(
+        "/agents/tasks",
+        json=_task_payload(project.id),
+        headers=_headers("missing-agent", "untrusted-token"),
+    )
+
+    assert response.status_code == 401
+    auth_failure = next(
+        event
+        for event in store.audit_events
+        if event.event_type == "agent.auth_failed"
+        and event.details["reason"] == "unknown_agent"
+    )
+    assert auth_failure.entity_id == "missing-agent"
+    assert auth_failure.workspace_id is None
 
 
 def test_external_agent_token_rotation_invalidates_old_token() -> None:
@@ -547,7 +571,11 @@ def test_external_agent_rate_limit_blocks_excess_requests() -> None:
     assert response.status_code == 429
     assert response.json()["detail"] == "External agent rate limit exceeded"
     assert 1 <= int(response.headers["Retry-After"]) <= 60
-    assert any(event.event_type == "agent.rate_limited" for event in store.audit_events)
+    rate_limit_event = next(
+        event for event in store.audit_events if event.event_type == "agent.rate_limited"
+    )
+    assert rate_limit_event.entity_id == agent_id
+    assert rate_limit_event.workspace_id == project.workspace_id
 
 
 def test_external_agent_rate_limit_survives_store_reload() -> None:

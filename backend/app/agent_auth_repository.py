@@ -139,6 +139,7 @@ class SQLiteExternalAgentAuthRepository:
             if reason is not None:
                 updated_credential, auth_event = self._record_auth_failure(
                     agent_id=agent_id,
+                    agent=agent,
                     credential=credential,
                     reason=reason,
                     occurred_at=occurred_at,
@@ -180,6 +181,7 @@ class SQLiteExternalAgentAuthRepository:
                     event_type="agent.rate_limited",
                     entity_id=agent.id,
                     actor=f"agent:{agent.id}",
+                    workspace_id=agent.workspace_id,
                     details={
                         "agent_id": agent.id,
                         "limit": credential.rate_limit_per_minute,
@@ -269,6 +271,7 @@ class SQLiteExternalAgentAuthRepository:
         self,
         *,
         agent_id: str | None,
+        agent: ExternalAgent | None,
         credential: AgentCredentialRecord | None,
         reason: str,
         occurred_at: datetime,
@@ -291,9 +294,21 @@ class SQLiteExternalAgentAuthRepository:
                     agent_id,
                 ),
             )
+        workspace_id = None
+        if agent is not None and agent.id == agent_id and agent.workspace_id:
+            workspace_row = conn.execute(
+                "SELECT payload FROM kv_store WHERE entity_type=? AND entity_id=?",
+                ("workspace", agent.workspace_id),
+            ).fetchone()
+            if workspace_row is not None:
+                workspace = Workspace.model_validate_json(workspace_row[0])
+                if workspace.id == agent.workspace_id:
+                    workspace_id = workspace.id
+
         event = AuditEvent(
             event_type="agent.auth_failed",
             entity_id=agent_id or "unknown_agent",
+            workspace_id=workspace_id,
             actor="external-agent-auth",
             details={"agent_id": agent_id, "reason": reason},
         )
