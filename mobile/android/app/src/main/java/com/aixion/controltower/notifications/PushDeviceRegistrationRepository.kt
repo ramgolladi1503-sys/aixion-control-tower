@@ -16,12 +16,14 @@ import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeout
+import retrofit2.HttpException
 
 internal enum class PushRegistrationResult {
     REGISTERED,
     REGISTERED_CLEANUP_PENDING,
     PERMISSION_REQUIRED,
     PERMISSION_REQUIRED_CLEANUP_PENDING,
+    AUTHENTICATION_REQUIRED,
     FIREBASE_NOT_CONFIGURED,
     BACKEND_UNAVAILABLE
 }
@@ -68,11 +70,7 @@ internal class PushDeviceRegistrationRepository internal constructor(
 
     suspend fun registerCurrentDevice(): PushRegistrationResult {
         if (!hasNotificationPermission()) {
-            return if (unregisterCurrentDevice()) {
-                PushRegistrationResult.PERMISSION_REQUIRED
-            } else {
-                PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING
-            }
+            return unregisterCurrentDeviceResult()
         }
 
         // Migrate old plaintext tokens before network access. The FCM token is
@@ -83,10 +81,18 @@ internal class PushDeviceRegistrationRepository internal constructor(
             api.currentUserId()
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (_: RegistrationAuthenticationRequiredException) {
+            // Keep the pending cleanup record and stop background retries until
+            // the authenticated session is repaired.
+            PushRegistrationResult.AUTHENTICATION_REQUIRED
+        } catch (error: HttpException) {
+            return classifyBackendFailure(error)
         } catch (_: Exception) {
             return PushRegistrationResult.BACKEND_UNAVAILABLE
         }
-        retryPendingUnregistrations(userId)
+        if (retryPendingUnregistrationsForUser(userId)) {
+            return PushRegistrationResult.AUTHENTICATION_REQUIRED
+        }
 
         val token = try {
             currentFcmToken()?.takeIf(String::isNotBlank)
@@ -139,12 +145,20 @@ internal class PushDeviceRegistrationRepository internal constructor(
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (_: RegistrationAuthenticationRequiredException) {
+            PushRegistrationResult.AUTHENTICATION_REQUIRED
+        } catch (error: HttpException) {
+            classifyBackendFailure(error)
         } catch (_: Exception) {
             PushRegistrationResult.BACKEND_UNAVAILABLE
         }
     }
 
     suspend fun unregisterCurrentDevice(): Boolean {
+        return unregisterCurrentDeviceResult() == PushRegistrationResult.PERMISSION_REQUIRED
+    }
+
+    private suspend fun unregisterCurrentDeviceResult(): PushRegistrationResult {
         val pending = state.readPendingUnregistrations()
         val deviceId = state.activeDeviceId()
         val deviceOwnerId = state.activeUserId()
@@ -153,7 +167,7 @@ internal class PushDeviceRegistrationRepository internal constructor(
         }
         if (pending.isEmpty()) {
             state.clearActiveRegistration()
-            return true
+            return PushRegistrationResult.PERMISSION_REQUIRED
         }
 
         // Persist cleanup intent before network I/O so process death cannot
@@ -163,11 +177,27 @@ internal class PushDeviceRegistrationRepository internal constructor(
             val userId = api.currentUserId()
             val remaining = cleanupUnregistrations(pending, userId)
             state.writePendingUnregistrations(remaining)
-            remaining.isEmpty()
+            if (remaining.isEmpty()) {
+                PushRegistrationResult.PERMISSION_REQUIRED
+            } else {
+                PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (_: RegistrationAuthenticationRequiredException) {
+            // The cleanup intent is already durable; let session recovery retry it.
+            PushRegistrationResult.AUTHENTICATION_REQUIRED
+        } catch (error: HttpException) {
+            val failure = classifyBackendFailure(error)
+            if (failure == PushRegistrationResult.AUTHENTICATION_REQUIRED) {
+                // The cleanup intent was saved before network I/O; leave it
+                // durable and let login/session recovery retry it later.
+                failure
+            } else {
+                PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING
+            }
         } catch (_: Exception) {
-            false
+            PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING
         } finally {
             state.clearActiveRegistration()
         }
@@ -181,9 +211,20 @@ internal class PushDeviceRegistrationRepository internal constructor(
         } catch (_: Exception) {
             return
         }
-        state.writePendingUnregistrations(
-            cleanupUnregistrations(state.readPendingUnregistrations(), currentUserId)
-        )
+        retryPendingUnregistrationsForUser(currentUserId)
+    }
+
+    /** Returns true only for auth rejection; transient per-device failures remain pending. */
+    private suspend fun retryPendingUnregistrationsForUser(userId: String): Boolean {
+        return try {
+            state.writePendingUnregistrations(
+                cleanupUnregistrations(state.readPendingUnregistrations(), userId)
+            )
+            false
+        } catch (_: RegistrationAuthenticationRequiredException) {
+            // Keep the persisted cleanup set unchanged; login/session recovery retries it.
+            true
+        }
     }
 
     private suspend fun cleanupUnregistrations(
@@ -201,6 +242,11 @@ internal class PushDeviceRegistrationRepository internal constructor(
             } catch (cancelled: CancellationException) {
                 if (cancelled !is kotlinx.coroutines.TimeoutCancellationException) throw cancelled
                 false
+            } catch (error: HttpException) {
+                if (error.code() == 401 || error.code() == 403) {
+                    throw RegistrationAuthenticationRequiredException()
+                }
+                false
             } catch (_: Exception) {
                 false
             }
@@ -208,6 +254,15 @@ internal class PushDeviceRegistrationRepository internal constructor(
         }
         return remaining
     }
+
+    private fun classifyBackendFailure(error: HttpException): PushRegistrationResult =
+        if (error.code() == 401 || error.code() == 403) {
+            PushRegistrationResult.AUTHENTICATION_REQUIRED
+        } else {
+            PushRegistrationResult.BACKEND_UNAVAILABLE
+        }
+
+    private class RegistrationAuthenticationRequiredException : Exception()
 
     private class ApiPushRegistrationAdapter(
         private val api: ControlTowerApi

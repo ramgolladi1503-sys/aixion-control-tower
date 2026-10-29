@@ -42,16 +42,14 @@ internal class PushDeviceRegistrationWorker(
             // contain request or account details from a lower-level client.
             return retryOrStop()
         }
-        return if (shouldRetry(registrationResult)) retryOrStop() else Result.success()
+        return resultForRegistrationResult(registrationResult, runAttemptCount)
     }
 
-    private fun retryOrStop(): Result =
-        if (shouldRetryWithinLimit(runAttemptCount)) Result.retry() else Result.failure()
+    private fun retryOrStop(): Result = retryResultForAttempt(runAttemptCount)
 
     companion object {
         private const val UNIQUE_WORK_NAME = "aixion_push_device_registration"
         private const val BACKOFF_MILLIS = 30_000L
-        private const val MAX_ATTEMPTS = 8
         private const val CANCEL_TIMEOUT_SECONDS = 10L
 
         fun enqueue(context: Context) {
@@ -89,12 +87,32 @@ internal class PushDeviceRegistrationWorker(
             }
         }
 
-        internal fun shouldRetryWithinLimit(runAttemptCount: Int): Boolean =
-            runAttemptCount < MAX_ATTEMPTS
+        /**
+         * Keep transient registration failures scheduled until success or the
+         * authenticated session is cancelled. A finite retry budget can leave
+         * an otherwise-valid installation permanently unregistered after a
+         * prolonged API outage, with no new token event to trigger recovery.
+         * WorkManager applies capped exponential backoff and the worker also
+         * requires network connectivity, so this does not create a tight loop.
+         */
+        internal fun retryResultForAttempt(runAttemptCount: Int): Result {
+            require(runAttemptCount >= 0) { "WorkManager attempt count cannot be negative" }
+            return Result.retry()
+        }
+
+        internal fun resultForRegistrationResult(
+            registrationResult: PushRegistrationResult,
+            runAttemptCount: Int
+        ): Result = when {
+            shouldRetry(registrationResult) -> retryResultForAttempt(runAttemptCount)
+            registrationResult == PushRegistrationResult.AUTHENTICATION_REQUIRED -> Result.failure()
+            else -> Result.success()
+        }
 
         internal fun shouldRetry(result: PushRegistrationResult): Boolean = when (result) {
             PushRegistrationResult.REGISTERED,
-            PushRegistrationResult.PERMISSION_REQUIRED -> false
+            PushRegistrationResult.PERMISSION_REQUIRED,
+            PushRegistrationResult.AUTHENTICATION_REQUIRED -> false
 
             PushRegistrationResult.REGISTERED_CLEANUP_PENDING,
             PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING,

@@ -38,12 +38,38 @@ class PushDeviceRegistrationWorkerTest {
                 PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING
             )
         )
+        assertFalse(
+            PushDeviceRegistrationWorker.shouldRetry(
+                PushRegistrationResult.AUTHENTICATION_REQUIRED
+            )
+        )
     }
 
     @Test
-    fun retriesStopAfterBoundedAttempts() {
-        assertTrue(PushDeviceRegistrationWorker.shouldRetryWithinLimit(0))
-        assertTrue(PushDeviceRegistrationWorker.shouldRetryWithinLimit(7))
-        assertFalse(PushDeviceRegistrationWorker.shouldRetryWithinLimit(8))
+    fun transientRegistrationRetriesContinueAfterLongOutages() {
+        for (attempt in listOf(0, 8, 100)) {
+            assertTrue(
+                "Transient failures must retry at attempt $attempt",
+                PushDeviceRegistrationWorker.resultForRegistrationResult(
+                    PushRegistrationResult.BACKEND_UNAVAILABLE,
+                    attempt
+                ) is androidx.work.ListenableWorker.Result.Retry
+            )
+        }
+    }
+
+    @Test
+    fun authenticationFailureStopsBackgroundRetryUntilSessionRecovery() {
+        assertTrue(
+            PushDeviceRegistrationWorker.resultForRegistrationResult(
+                PushRegistrationResult.AUTHENTICATION_REQUIRED,
+                8
+            ) is androidx.work.ListenableWorker.Result.Failure
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun negativeWorkManagerAttemptCountIsRejected() {
+        PushDeviceRegistrationWorker.retryResultForAttempt(-1)
     }
 }

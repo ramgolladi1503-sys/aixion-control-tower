@@ -263,5 +263,6 @@ private fun PushRegistrationResult.toUiState(): PushRegistrationUiState = when (
     PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING ->
         PushRegistrationUiState.PERMISSION_REQUIRED_CLEANUP_PENDING
     PushRegistrationResult.FIREBASE_NOT_CONFIGURED -> PushRegistrationUiState.FIREBASE_NOT_CONFIGURED
+    PushRegistrationResult.AUTHENTICATION_REQUIRED -> PushRegistrationUiState.BACKEND_UNAVAILABLE
     PushRegistrationResult.BACKEND_UNAVAILABLE -> PushRegistrationUiState.BACKEND_UNAVAILABLE
 }

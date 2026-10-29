@@ -4,6 +4,9 @@ import com.aixion.controltower.core.api.dto.DeviceRegistrationDto
 import com.aixion.controltower.core.api.dto.DeviceRegistrationRequestDto
 import java.io.IOException
 import kotlinx.coroutines.test.runTest
+import okhttp3.ResponseBody
+import retrofit2.HttpException
+import retrofit2.Response
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -80,6 +83,133 @@ class PushDeviceRegistrationRepositoryTest {
     }
 
     @Test
+    fun unauthorizedUserLookupIsTerminalAndDoesNotFetchOrSendFcmToken() = runTest {
+        for (status in listOf(401, 403)) {
+            val state = FakeRegistrationState()
+            val api = FakeRegistrationApi(userId = "unused").apply {
+                currentUserFailure = httpFailure(status)
+            }
+            var tokenFetchCount = 0
+            val repository = repository(
+                api = api,
+                state = state,
+                token = {
+                    tokenFetchCount += 1
+                    "must-not-be-fetched"
+                }
+            )
+
+            assertEquals(
+                "HTTP $status must stop registration until the user session is repaired",
+                PushRegistrationResult.AUTHENTICATION_REQUIRED,
+                repository.registerCurrentDevice()
+            )
+            assertEquals(0, tokenFetchCount)
+            assertTrue(api.registrationRequests.isEmpty())
+            assertFalse(state.clearPendingTokenCalled)
+        }
+    }
+
+    @Test
+    fun registrationAuthFailuresAreTerminalAndPreservePendingToken() = runTest {
+        for (status in listOf(401, 403)) {
+            val state = FakeRegistrationState()
+            val api = FakeRegistrationApi(userId = "user-current").apply {
+                registrationFailure = httpFailure(status)
+            }
+            val repository = repository(api = api, state = state, token = { "fcm-token" })
+
+            assertEquals(
+                PushRegistrationResult.AUTHENTICATION_REQUIRED,
+                repository.registerCurrentDevice()
+            )
+            assertEquals(listOf("fcm-token"), api.registrationRequests.map { it.token })
+            assertFalse(state.clearPendingTokenCalled)
+            assertEquals(null, state.activeRegistration)
+        }
+    }
+
+    @Test
+    fun serverAndTransportFailuresRemainRetryable() = runTest {
+        for (failure in listOf(httpFailure(500), IOException("offline"))) {
+            val state = FakeRegistrationState()
+            val api = FakeRegistrationApi(userId = "user-current").apply {
+                currentUserFailure = failure
+            }
+            val repository = repository(
+                api = api,
+                state = state,
+                token = { error("token must not be fetched before user lookup succeeds") }
+            )
+
+            assertEquals(
+                PushRegistrationResult.BACKEND_UNAVAILABLE,
+                repository.registerCurrentDevice()
+            )
+            assertTrue(api.registrationRequests.isEmpty())
+            assertFalse(state.clearPendingTokenCalled)
+        }
+    }
+
+    @Test
+    fun pendingCleanupAuthFailureStopsRegistrationBeforeFetchingFcmToken() = runTest {
+        for (status in listOf(401, 403)) {
+            val state = FakeRegistrationState(
+                pending = setOf("device-pending" to "user-current")
+            )
+            val api = FakeRegistrationApi(userId = "user-current").apply {
+                unregisterFailure = httpFailure(status)
+            }
+            val repository = repository(
+                api = api,
+                state = state,
+                token = { error("FCM token must not be fetched after cleanup auth rejection") }
+            )
+
+            assertEquals(
+                PushRegistrationResult.AUTHENTICATION_REQUIRED,
+                repository.registerCurrentDevice()
+            )
+            assertEquals(
+                setOf("device-pending" to "user-current"),
+                state.pendingUnregistrations
+            )
+            assertEquals(listOf("device-pending"), api.unregisteredDeviceIds)
+            assertTrue(api.registrationRequests.isEmpty())
+        }
+    }
+
+    @Test
+    fun permissionDeniedDeviceUnregisterAuthFailureRetainsCleanupIntent() = runTest {
+        for (status in listOf(401, 403)) {
+            val state = FakeRegistrationState(
+                deviceId = "device-current",
+                userId = "user-current"
+            )
+            val api = FakeRegistrationApi(userId = "user-current").apply {
+                unregisterFailure = httpFailure(status)
+            }
+            val repository = repository(
+                api = api,
+                state = state,
+                hasPermission = false,
+                token = { error("token must not be fetched when permission is denied") }
+            )
+
+            assertEquals(
+                PushRegistrationResult.AUTHENTICATION_REQUIRED,
+                repository.registerCurrentDevice()
+            )
+            assertEquals(
+                setOf("device-current" to "user-current"),
+                state.pendingUnregistrations
+            )
+            assertEquals(listOf("device-current"), api.unregisteredDeviceIds)
+            assertTrue(api.registrationRequests.isEmpty())
+        }
+    }
+
+    @Test
     fun deniedPermissionUnregistersOwnedDeviceWithoutFetchingOrSendingToken() = runTest {
         val state = FakeRegistrationState(
             deviceId = "device-current",
@@ -130,6 +260,36 @@ class PushDeviceRegistrationRepositoryTest {
         assertEquals(setOf("device-current" to "user-current"), state.pendingUnregistrations)
         assertEquals(null, state.activeRegistration)
         assertTrue(api.registrationRequests.isEmpty())
+    }
+
+    @Test
+    fun deniedPermissionAuthFailureKeepsCleanupIntentAndStopsRetry() = runTest {
+        for (status in listOf(401, 403)) {
+            val state = FakeRegistrationState(
+                deviceId = "device-current",
+                userId = "user-current"
+            )
+            val api = FakeRegistrationApi(userId = "unused").apply {
+                currentUserFailure = httpFailure(status)
+            }
+            val repository = repository(
+                api = api,
+                state = state,
+                hasPermission = false,
+                token = { error("token must not be fetched when permission is denied") }
+            )
+
+            val result = repository.registerCurrentDevice()
+
+            assertEquals(PushRegistrationResult.AUTHENTICATION_REQUIRED, result)
+            assertEquals(
+                setOf("device-current" to "user-current"),
+                state.pendingUnregistrations
+            )
+            assertEquals(null, state.activeRegistration)
+            assertTrue(api.unregisteredDeviceIds.isEmpty())
+            assertTrue(api.registrationRequests.isEmpty())
+        }
     }
 
     @Test
@@ -192,6 +352,10 @@ class PushDeviceRegistrationRepositoryTest {
         appVersion = "test-version"
     )
 
+    private fun httpFailure(statusCode: Int): HttpException = HttpException(
+        Response.error<Any>(statusCode, ResponseBody.create(null, ByteArray(0)))
+    )
+
     private class FakeRegistrationApi(
         private val userId: String,
         private val registration: DeviceRegistrationDto = DeviceRegistrationDto(
@@ -202,6 +366,7 @@ class PushDeviceRegistrationRepositoryTest {
         val registrationRequests = mutableListOf<DeviceRegistrationRequestDto>()
         val unregisteredDeviceIds = mutableListOf<String>()
         var currentUserFailure: Exception? = null
+        var registrationFailure: Exception? = null
         var unregisterFailure: Exception? = null
 
         override suspend fun currentUserId(): String {
@@ -213,6 +378,7 @@ class PushDeviceRegistrationRepositoryTest {
             payload: DeviceRegistrationRequestDto
         ): DeviceRegistrationDto {
             registrationRequests += payload
+            registrationFailure?.let { throw it }
             return registration
         }
 
