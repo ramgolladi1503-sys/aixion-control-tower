@@ -1,8 +1,9 @@
 # Android Firebase Messaging Setup
 
 This project includes Firebase Cloud Messaging (FCM) client code, but does not
-include a Firebase project configuration. Without the configuration, the app
-must report push as unavailable and must not register a device token.
+include a Firebase project configuration in source control. Without a supplied
+configuration, the app must report push as unavailable and must not register a
+device token.
 
 ## Firebase Android app registration
 
@@ -56,6 +57,40 @@ app without Firebase initialization; the Account screen reports that push is
 unavailable. A successful build does not prove token registration, FCM send
 permission, notification delivery, or deep-link routing. Use
 `docs/FCM_REAL_DEVICE_VALIDATION.md` for the physical-device validation gate.
+
+## Signed release workflow
+
+The GitHub Actions workflow `Build signed Android AAB` uses the protected
+GitHub Environment named `android-release` and reads its secret
+`ANDROID_GOOGLE_SERVICES_JSON_BASE64`.
+Set it to the single-line base64 encoding of the real `google-services.json`
+that contains the `com.aixion.controltower` Android client. For example, on
+macOS:
+
+```bash
+base64 -i mobile/android/app/google-services.json | tr -d '\n'
+```
+
+Copy that output directly into the GitHub secret value; do not commit the JSON
+or paste its contents into an issue or chat. The workflow validates the base64,
+JSON structure, project ID, and exactly one release package client without
+printing the config, writes it with owner-only file permissions, enables the
+existing Gradle Firebase release gate, and removes the temporary file even if
+the job fails. The Google Services Gradle plugin remains responsible for its
+full variant-specific validation.
+
+The workflow also requires the four Android signing secrets documented in
+`docs/ANDROID_RELEASE_PROCESS.md`. Configuring secrets only makes a signed AAB
+attempt possible; it does not certify FCM delivery, API reachability, Play
+Store acceptance, or production readiness.
+
+Set the `AIXION_FCM_PROJECT_ID` variable in the same GitHub Environment to the
+Firebase project ID configured for the backend. Configure required reviewers
+and branch restrictions for that environment before using the workflow. The
+installer rejects a Firebase Android config whose project ID does not match
+this value. The backend still needs its own Google credentials and
+`AIXION_FCM_PROJECT_ID` runtime setting; the Android config does not grant send
+permission.
 
 ## Backend credentials
 

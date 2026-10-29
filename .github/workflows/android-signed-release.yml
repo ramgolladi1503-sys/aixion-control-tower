@@ -22,21 +22,24 @@ jobs:
   build-signed-aab:
     name: Build signed release AAB
     runs-on: ubuntu-latest
+    environment: android-release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate required signing secrets
+      - name: Validate required release secrets
         shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+          AIXION_FCM_PROJECT_ID: ${{ vars.AIXION_FCM_PROJECT_ID }}
         run: |
           set -euo pipefail
           missing=0
-          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_GOOGLE_SERVICES_JSON_BASE64 AIXION_FCM_PROJECT_ID; do
             if [ -z "${!name:-}" ]; then
               echo "Missing required GitHub secret: $name"
               missing=1
@@ -65,6 +68,17 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > mobile/android/release.keystore
           chmod 600 mobile/android/release.keystore
 
+      - name: Install Firebase Android configuration
+        id: firebase_config
+        shell: bash
+        env:
+          ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+          AIXION_FCM_PROJECT_ID: ${{ vars.AIXION_FCM_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          python3 scripts/install_android_firebase_config.py
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
       - name: Build signed release AAB
         working-directory: mobile/android
         env:
@@ -75,7 +89,9 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          ./gradlew bundleRelease "-PAIXION_API_BASE_URL=${AIXION_API_BASE_URL}"
+          ./gradlew bundleRelease \
+            -PAIXION_FIREBASE_CONFIG_ENABLED=true \
+            "-PAIXION_API_BASE_URL=${AIXION_API_BASE_URL}"
 
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4
@@ -89,3 +105,8 @@ jobs:
         if: always()
         shell: bash
         run: rm -f mobile/android/release.keystore
+
+      - name: Remove installed Firebase Android configuration
+        if: always() && steps.firebase_config.outputs.created == 'true'
+        shell: bash
+        run: rm -f mobile/android/app/google-services.json

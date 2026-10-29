@@ -9,8 +9,8 @@ It is intentionally honest: the project can validate the release build variant a
 ```text
 Debug APK:                 supported
 Release variant build:     blocked until real Firebase config and HTTPS API URL are available
-Signing config scaffold:   supported through local properties or environment variables
-Signed production APK/AAB: possible only after Firebase config, API URL, and real keystore values are provided
+Signing config scaffold:   supported through local properties, environment variables, or the manual GitHub workflow
+Signed production APK/AAB: workflow is configured; no real signed artifact has been verified
 Play Store / internal app: not configured yet
 ```
 
@@ -55,8 +55,10 @@ real HTTPS Control Tower API URL. A successful `verifyReleaseFirebaseConfigGuard
 task checks only the guard's boolean cases; it does not prove that a Firebase
 project is valid or reachable.
 
-When those prerequisites are available, a release build can optionally sign
-the variant if valid local signing values are also present.
+The manual `Build signed Android AAB` workflow can compile and sign the release
+after its required GitHub secrets are configured. That workflow has not yet
+produced a verified release artifact. See the Firebase setup guide for its
+temporary config secret and cleanup behavior.
 
 Release validation currently does **not** prove:
 
@@ -66,7 +68,7 @@ Release validation currently does **not** prove:
 4. App integrity / Play App Signing enrollment.
 5. Runtime smoke test on a real physical device.
 6. Production backend URL correctness.
-7. Production secrets or Firebase release setup.
+7. Production secrets and Firebase release setup.
 8. Privacy policy readiness.
 9. Store listing readiness.
 10. Review-compliant screenshots and feature graphics.
@@ -259,7 +261,25 @@ cd mobile/android
 
 This command requires the real `app/google-services.json`, the actual HTTPS
 Control Tower API URL, and signing values configured outside source control.
-CI signing remains unconfigured and is not exercised by the current workflow.
+The manual GitHub workflow targets the `android-release` GitHub Environment,
+accepts Firebase config and signing material through its protected secrets,
+creates temporary files in the runner, and removes them at job completion.
+Configure required reviewers and branch restrictions on that environment, then
+set these environment secrets and variable before dispatching:
+
+```text
+ANDROID_KEYSTORE_BASE64
+ANDROID_KEYSTORE_PASSWORD
+ANDROID_KEY_ALIAS
+ANDROID_KEY_PASSWORD
+ANDROID_GOOGLE_SERVICES_JSON_BASE64
+AIXION_FCM_PROJECT_ID (GitHub Environment variable)
+```
+
+The workflow validates the release app package in the Firebase JSON and invokes
+Gradle with `-PAIXION_FIREBASE_CONFIG_ENABLED=true`; it does not expose secret
+values in the job log. No exact signed build or physical release smoke test has
+been recorded yet.
 
 Expected artifact:
 
@@ -267,27 +287,26 @@ Expected artifact:
 mobile/android/app/build/outputs/bundle/release/*.aab
 ```
 
-## Future CI signing implementation
+## GitHub Actions signing workflow
 
-The current scaffold supports signing from local properties or environment variables. A later PR can add CI artifact publishing after repository secrets exist.
-
-CI signing should use GitHub Actions secrets such as:
+The workflow uses GitHub Actions secrets:
 
 ```text
 ANDROID_KEYSTORE_BASE64
 ANDROID_KEYSTORE_PASSWORD
 ANDROID_KEY_ALIAS
 ANDROID_KEY_PASSWORD
+ANDROID_GOOGLE_SERVICES_JSON_BASE64
 ```
 
-The CI signing flow should support:
+The manual workflow currently performs:
 
-1. Decode keystore from secret into a temporary file.
-2. Pass signing values through environment variables.
-3. Run `./gradlew bundleRelease -PAIXION_FIREBASE_CONFIG_ENABLED=true -PAIXION_API_BASE_URL="$AIXION_RELEASE_API_URL"` with the real Firebase config and HTTPS API URL.
-4. Upload the AAB as a workflow artifact.
-5. Never echo secrets.
-6. Never commit the keystore.
+1. Validate required secrets are present without printing their values.
+2. Decode the keystore and Firebase JSON into owner-only temporary files.
+3. Run `./gradlew bundleRelease -PAIXION_FIREBASE_CONFIG_ENABLED=true -PAIXION_API_BASE_URL="$AIXION_RELEASE_API_URL"` with the actual HTTPS API URL.
+4. Upload the AAB as a short-retention workflow artifact.
+5. Remove the temporary keystore and Firebase JSON on success or failure.
+6. Never echo secrets or commit the keystore/config file.
 
 ## Play Store preflight checklist
 
