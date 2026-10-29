@@ -914,6 +914,16 @@ def test_postgres_approval_history_reads_verified_decision_from_runtime_bundle(
         raising=False,
     )
 
+    def reject_sqlite_fallback(*_args, **_kwargs):
+        raise AssertionError("PostgreSQL approval decision/history accessed SQLite")
+
+    for sqlite_repository in (
+        main.approval_decision_repository,
+        main.project_repository,
+        main.app.state.audit_event_repository,
+    ):
+        monkeypatch.setattr(sqlite_repository, "_connect", reject_sqlite_fallback)
+
     client = TestClient(main.app)
     created = client.post(
         "/agents/approvals",
