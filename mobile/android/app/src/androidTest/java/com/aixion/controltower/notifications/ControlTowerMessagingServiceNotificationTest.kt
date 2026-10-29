@@ -1,10 +1,13 @@
 package com.aixion.controltower.notifications
 
 import android.app.Activity
+import android.app.ActivityOptions
 import android.app.Instrumentation
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
@@ -28,8 +31,7 @@ class ControlTowerMessagingServiceNotificationTest {
     fun approvalPushPostsPrivatePreviewAndTapOpensExactApprovalReference() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        grantNotificationPermissionIfNeeded(instrumentation, context)
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = prepareNotificationDelivery(instrumentation, context)
         val approvalId = "approval_device_test_42"
         val notificationId = "notification_device_test_42"
         val notificationTag = notificationTag(notificationId)
@@ -46,8 +48,10 @@ class ControlTowerMessagingServiceNotificationTest {
 
             createMessagingService(context).onMessageReceived(message)
 
-            val posted = manager.activeNotifications.singleOrNull {
-                it.tag == notificationTag && it.id == NOTIFICATION_ID
+            val posted = awaitActiveNotifications(manager) {
+                it.singleOrNull { notification ->
+                    notification.tag == notificationTag && notification.id == NOTIFICATION_ID
+                }
             }
             assertNotNull("Approval push should create a notification", posted)
             val notification = requireNotNull(posted).notification
@@ -59,6 +63,10 @@ class ControlTowerMessagingServiceNotificationTest {
             assertFalse(notification.extras.toString().contains("confidential"))
             assertFalse(notification.extras.toString().contains("Private client"))
 
+            val foregroundActivity = instrumentation.startActivitySync(
+                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+
             val activityMonitor = Instrumentation.ActivityMonitor(
                 MainActivity::class.java.name,
                 null,
@@ -68,7 +76,7 @@ class ControlTowerMessagingServiceNotificationTest {
             var launchedActivity: Activity? = null
             try {
                 assertNotNull("Approval notification must have a tap intent", notification.contentIntent)
-                notification.contentIntent.send()
+                requireNotNull(notification.contentIntent).sendFromInstrumentation(context)
                 val activity = activityMonitor.waitForActivityWithTimeout(ACTIVITY_START_TIMEOUT_MS)
                 assertNotNull("Notification tap should launch MainActivity", activity)
                 val startedActivity = activity as MainActivity
@@ -84,7 +92,7 @@ class ControlTowerMessagingServiceNotificationTest {
 
                 // Exercise MainActivity's real save/restore path after the notification tap.
                 // This does not simulate Android process death or prove network/auth behavior.
-                startedActivity.recreate()
+                instrumentation.runOnMainSync { startedActivity.recreate() }
                 val recreatedActivity = awaitResumedMainActivityDifferentFrom(
                     instrumentation = instrumentation,
                     previousActivity = startedActivity
@@ -95,7 +103,10 @@ class ControlTowerMessagingServiceNotificationTest {
                 assertEquals(expectedLink, restoredState.current.link)
                 assertEquals(expectedLink, restoredState.pendingEvents().single().link)
             } finally {
-                instrumentation.runOnMainSync { launchedActivity?.finish() }
+                instrumentation.runOnMainSync {
+                    launchedActivity?.finish()
+                    foregroundActivity.finish()
+                }
                 instrumentation.removeMonitor(activityMonitor)
             }
         } finally {
@@ -107,8 +118,7 @@ class ControlTowerMessagingServiceNotificationTest {
     fun collidingStringHashesKeepDistinctApprovalNotificationsAndPendingIntents() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
-        grantNotificationPermissionIfNeeded(instrumentation, context)
-        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager = prepareNotificationDelivery(instrumentation, context)
         val notificationIds = listOf("notification_Aa", "notification_BB")
         val approvalIds = listOf("approval_Aa", "approval_BB")
         assertEquals(
@@ -133,9 +143,12 @@ class ControlTowerMessagingServiceNotificationTest {
             deliver(0)
             deliver(1)
 
-            var active = manager.activeNotifications
-                .filter { it.tag in notificationIds.map(::notificationTag) }
-                .associateBy { it.tag }
+            val active = awaitActiveNotifications(manager) { notifications ->
+                notifications
+                    .filter { it.tag in notificationIds.map(::notificationTag) }
+                    .associateBy { it.tag }
+                    .takeIf { it.size == 2 }
+            }
             assertEquals("Distinct approvals must remain independently visible", 2, active.size)
             val first = requireNotNull(active[notificationTag(notificationIds[0])]).notification.contentIntent
             val second = requireNotNull(active[notificationTag(notificationIds[1])]).notification.contentIntent
@@ -143,42 +156,55 @@ class ControlTowerMessagingServiceNotificationTest {
             assertNotNull(second)
             assertNotEquals("Hash-colliding approvals must not share a tap target", first, second)
 
+            val foregroundActivity = instrumentation.startActivitySync(
+                Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+
             val activityMonitor = Instrumentation.ActivityMonitor(
                 MainActivity::class.java.name,
                 null,
                 false
             )
             instrumentation.addMonitor(activityMonitor)
-            var launchedActivity: Activity? = null
+            val launchedActivities = mutableListOf<Activity>()
             try {
-                first.send()
-                val activity = activityMonitor.waitForActivityWithTimeout(ACTIVITY_START_TIMEOUT_MS)
-                assertNotNull("First colliding notification should launch MainActivity", activity)
-                val mainActivity = requireNotNull(activity)
-                launchedActivity = mainActivity
+                requireNotNull(first).sendFromInstrumentation(context)
+                val firstActivity = activityMonitor.waitForActivityWithTimeout(ACTIVITY_START_TIMEOUT_MS)
+                assertNotNull("First colliding notification should launch MainActivity", firstActivity)
+                val mainActivity = requireNotNull(firstActivity) as MainActivity
+                launchedActivities += mainActivity
                 assertEquals(
                     NotificationDeepLink.ApprovalRequest(approvalIds[0], notificationIds[0]),
                     NotificationDeepLink.fromIntent(mainActivity.intent)
                 )
 
-                second.send()
-                instrumentation.waitForIdleSync()
+                requireNotNull(second).sendFromInstrumentation(context)
+                val secondActivity = activityMonitor.waitForActivityWithTimeout(ACTIVITY_START_TIMEOUT_MS)
+                assertNotNull("Second colliding notification should launch MainActivity", secondActivity)
+                val secondMainActivity = requireNotNull(secondActivity) as MainActivity
+                launchedActivities += secondMainActivity
                 assertEquals(
                     "Second colliding notification should deliver its own approval reference",
                     NotificationDeepLink.ApprovalRequest(approvalIds[1], notificationIds[1]),
-                    NotificationDeepLink.fromIntent(mainActivity.intent)
+                    NotificationDeepLink.fromIntent(secondMainActivity.intent)
                 )
             } finally {
-                instrumentation.runOnMainSync { launchedActivity?.finish() }
+                instrumentation.runOnMainSync {
+                    launchedActivities.forEach(Activity::finish)
+                    foregroundActivity.finish()
+                }
                 instrumentation.removeMonitor(activityMonitor)
             }
 
             // Redelivery is idempotent for the same notification: replace its card,
             // while keeping the other colliding notification and its target intact.
             deliver(1)
-            val afterRedelivery = manager.activeNotifications
-                .filter { it.tag in notificationIds.map(::notificationTag) }
-                .associateBy { it.tag }
+            val afterRedelivery = awaitActiveNotifications(manager) { notifications ->
+                notifications
+                    .filter { it.tag in notificationIds.map(::notificationTag) }
+                    .associateBy { it.tag }
+                    .takeIf { it.size == 2 }
+            }
             assertEquals("Same-ID redelivery should replace only its card", 2, afterRedelivery.size)
             assertNotEquals(
                 "Each active card must retain a distinct tap target",
@@ -235,6 +261,65 @@ class ControlTowerMessagingServiceNotificationTest {
         instrumentation.uiAutomation.grantRuntimePermission(context.packageName, permission)
     }
 
+    /** Establishes and asserts the Android prerequisites before exercising delivery. */
+    private fun prepareNotificationDelivery(
+        instrumentation: Instrumentation,
+        context: Context
+    ): NotificationManager {
+        grantNotificationPermissionIfNeeded(instrumentation, context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            assertEquals(
+                "POST_NOTIFICATIONS must be granted for delivery assertions",
+                PackageManager.PERMISSION_GRANTED,
+                context.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+            )
+        }
+
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        assertTrue("App-level notifications must be enabled for delivery assertions", manager.areNotificationsEnabled())
+        ApprovalNotificationChannel.ensureCreated(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = manager.getNotificationChannel(ApprovalNotificationChannel.ID)
+            assertNotNull("Approval notification channel must exist", channel)
+            assertTrue(
+                "Approval notification channel must not be blocked",
+                requireNotNull(channel).importance != NotificationManager.IMPORTANCE_NONE
+            )
+        }
+        return manager
+    }
+
+    /**
+     * NotificationManager exposes notifications after system-server processes the
+     * notify binder call. Poll briefly for that observable state, retaining the
+     * full assertion when no notification appears within the bound.
+     */
+    private fun <T : Any> awaitActiveNotifications(
+        manager: NotificationManager,
+        selector: (Array<android.service.notification.StatusBarNotification>) -> T?
+    ): T {
+        val deadline = SystemClock.uptimeMillis() + NOTIFICATION_VISIBLE_TIMEOUT_MS
+        do {
+            selector(manager.activeNotifications)?.let { return it }
+            SystemClock.sleep(NOTIFICATION_POLL_INTERVAL_MS)
+        } while (SystemClock.uptimeMillis() < deadline)
+        throw AssertionError("Expected notification state was not visible within ${NOTIFICATION_VISIBLE_TIMEOUT_MS}ms")
+    }
+
+    /** The test process must explicitly opt in to API 34+ background launches. */
+    private fun PendingIntent.sendFromInstrumentation(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val options = ActivityOptions.makeBasic()
+                .setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                )
+                .toBundle()
+            send(context, 0, null, null, null, null, options)
+        } else {
+            send()
+        }
+    }
+
     /** Attaches the app context to the real final Android service instance for an isolated callback test. */
     private fun createMessagingService(context: Context): ControlTowerMessagingService {
         val service = ControlTowerMessagingService()
@@ -272,6 +357,8 @@ class ControlTowerMessagingServiceNotificationTest {
 
     private companion object {
         const val ACTIVITY_START_TIMEOUT_MS = 5_000L
+        const val NOTIFICATION_VISIBLE_TIMEOUT_MS = 2_000L
+        const val NOTIFICATION_POLL_INTERVAL_MS = 50L
         const val NOTIFICATION_ID = 1
 
         fun notificationTag(notificationId: String): String = "aixion-approval:$notificationId"
