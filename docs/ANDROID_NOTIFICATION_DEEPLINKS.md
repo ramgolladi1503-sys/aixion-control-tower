@@ -28,6 +28,22 @@ When Firebase delivers a message with `entity_type=approval_request` and a valid
 5. ControlTowerApp opens the existing Approval Detail route for the matching approval.
 ```
 
+The backend sends an Android high-priority **data-only** FCM message. Do not add
+an FCM `notification` payload: Android may render that payload itself while the
+app is backgrounded and skip `ControlTowerMessagingService`, preventing the
+client from attaching its typed approval deep link. The service posts the
+visible local notification from the data payload. Its title and body are fixed,
+generic copy; never include project, task, command, or approval details in the
+lock-screen payload. The user sees authenticated approval details only after
+opening the app.
+
+High priority is a delivery request to Android/FCM, not a guarantee that a
+device will wake: network availability, Android notification permission and
+channel settings, app force-stop state, battery policy, and provider delivery
+all affect the result. A service-level instrumentation test exercises local
+notification construction and deep-link routing; only a configured real-device
+test proves FCM delivery to a backgrounded or locked phone.
+
 The notification preview does not expose project or task text from the untrusted push payload. The detail screen loads approval information from the backend after the user opens the app.
 
 ## Required FCM data payload
