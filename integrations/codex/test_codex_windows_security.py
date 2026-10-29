@@ -19,6 +19,15 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="requires native Windows
 
 def _secure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+    # Some Windows runner images create temporary paths with the Administrators
+    # group as owner. Production correctly requires the current user's SID, so
+    # make the fixture explicit instead of relaxing that validation.
+    owner_sid = host_security._current_user_sid()
+    owner = subprocess.run(
+        ["icacls.exe", str(path), "/setowner", f"*{owner_sid}"],
+        capture_output=True, text=True, check=False,
+    )
+    assert owner.returncode == 0, owner.stderr or owner.stdout
     host_security.ensure_private_directory(path)
 
 
