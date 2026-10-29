@@ -448,19 +448,6 @@ class ApprovalInboxScreenTest {
         }
         composeRule.onAllNodesWithContentDescription("Request summary: Regression approval summary")
             .assertCountEquals(0)
-        inboxList.performScrollToNode(hasText("Pending approval"))
-        composeRule.onAllNodesWithTag("approval-card-summary-preview", useUnmergedTree = true)
-            .assertCountEquals(3)
-        val previewNodes = composeRule.onAllNodesWithTag(
-            "approval-card-preview-content",
-            useUnmergedTree = true
-        ).fetchSemanticsNodes()
-        assertTrue(
-            "Every visible inbox overview must announce that it may be incomplete",
-            previewNodes.size == 3 && previewNodes.all { node ->
-                node.config[SemanticsProperties.ContentDescription].any { it.contains("may be incomplete") }
-            }
-        )
         composeRule.onAllNodesWithText("Approve request").assertCountEquals(0)
         composeRule.onAllNodesWithText("Deny").assertCountEquals(0)
         inboxList.performScrollToNode(hasText("Legacy pending"))

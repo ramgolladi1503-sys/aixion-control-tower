@@ -784,7 +784,7 @@ class ApprovalDetailScreenTest {
             "The requested file change should appear before secondary request metadata",
             actionSectionOffset <= requestContextOffset
         )
-        composeRule.onNodeWithText("File changes").assertIsDisplayed()
+        composeRule.onNodeWithText("File changes").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("A detail screen state test.").assertExists()
         composeRule.onNodeWithText("+test").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("Approve request").assertIsEnabled()

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
@@ -105,10 +106,16 @@ class ApprovalExactToolDecisionContextTest {
             payloadNode.fetchSemanticsNode().boundsInRoot.height > 42f
         )
         wrapToggle.performClick()
+        composeRule.waitUntil(timeoutMillis = 1_000) {
+            wrapToggle.fetchSemanticsNode().config[SemanticsProperties.ToggleableState] == ToggleableState.Off
+        }
         wrapToggle.assertIsOff()
         composeRule.onNodeWithTag("approval-unbroken-payload-scroll-0").assertExists()
         composeRule.onNodeWithTag("approval-payload-horizontal-scroll-hint").assertExists()
         wrapToggle.performClick()
+        composeRule.waitUntil(timeoutMillis = 1_000) {
+            wrapToggle.fetchSemanticsNode().config[SemanticsProperties.ToggleableState] == ToggleableState.On
+        }
         wrapToggle.assertIsOn()
         composeRule.onNodeWithTag("approval-unbroken-payload-wrapped-0").assertExists()
         composeRule.onNodeWithTag("approval-unbroken-payload-scroll-0").assertDoesNotExist()

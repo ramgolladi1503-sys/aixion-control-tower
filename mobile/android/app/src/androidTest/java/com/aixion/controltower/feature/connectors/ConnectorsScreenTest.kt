@@ -101,6 +101,7 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText(explanation, useUnmergedTree = true)
             .assertExists()
             .assertTextEquals(explanation)
+            .performScrollTo()
             .assertIsDisplayed()
     }
 
