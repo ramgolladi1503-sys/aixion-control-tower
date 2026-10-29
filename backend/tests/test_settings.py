@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -680,6 +683,42 @@ def test_sqlite_store_rejects_production_even_if_environment_validation_changes(
     with pytest.raises(RuntimeError, match="SQLite-backed store cannot initialize"):
         store_module.SQLiteBackedStore()
 
+    assert not db_path.exists()
+
+
+def test_production_api_entrypoint_fails_before_creating_sqlite_database(
+    tmp_path: Path,
+) -> None:
+    backend_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "production.sqlite3"
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("AIXION_")
+    }
+    environment.update(
+        {
+            "AIXION_PROFILE": "production",
+            "AIXION_DB_PATH": str(db_path),
+        }
+    )
+    existing_pythonpath = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        path for path in (str(backend_root), existing_pythonpath) if path
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        cwd=backend_root,
+        env=environment,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=15,
+    )
+
+    assert result.returncode != 0
+    assert "Production profile is disabled" in result.stderr
     assert not db_path.exists()
 
 
