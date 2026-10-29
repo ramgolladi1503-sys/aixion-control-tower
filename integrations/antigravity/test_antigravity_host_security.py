@@ -107,7 +107,7 @@ def test_windows_antigravity_accepts_explicit_user_acl_config_and_token(
         capture_output=True, text=True, check=False,
     )
     assert grant.returncode == 0, grant.stderr or grant.stdout
-    with pytest.raises(hook.GateError, match="Agent token file is unavailable"):
+    with pytest.raises(hook.GateError, match="Agent token file is unavailable.*permissions"):
         hook._agent_token(
             {"AIXION_AGENT_TOKEN_FILE": str(token_path)},
             {"agent_id": "agent-win", "keychain_service": "service"},

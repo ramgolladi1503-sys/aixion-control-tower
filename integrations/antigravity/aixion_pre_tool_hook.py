@@ -746,8 +746,11 @@ def _configuration(env: dict[str, str], payload: dict[str, Any]) -> dict[str, st
                 parse_constant=_reject_nonstandard_json_constant,
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
-        except (OSError, host_security.HostSecurityError, json.JSONDecodeError,
-                UnicodeDecodeError, ValueError) as exc:
+        except host_security.HostSecurityError as exc:
+            raise GateError(
+                "Agent config is unreadable or invalid due to protected-file permissions or path policy"
+            ) from exc
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
             raise GateError("Agent config is unreadable or invalid") from exc
         if not isinstance(config, dict):
             raise GateError("Agent config must be a JSON object")
@@ -873,7 +876,11 @@ def _agent_token(env: dict[str, str], config: dict[str, str]) -> str:
                 Path(token_path), require_private=True, reject_shared_write=True
             ) as stream:
                 token_bytes = stream.read(8193)
-        except (OSError, host_security.HostSecurityError) as exc:
+        except host_security.HostSecurityError as exc:
+            raise GateError(
+                "Agent token file is unavailable because protected-file permissions or path policy failed"
+            ) from exc
+        except OSError as exc:
             raise GateError("Agent token file is unavailable") from exc
         if len(token_bytes) > 8192:
             raise GateError("Agent token file exceeds its size limit")
