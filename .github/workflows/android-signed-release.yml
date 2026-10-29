@@ -41,7 +41,7 @@ jobs:
           missing=0
           for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_GOOGLE_SERVICES_JSON_BASE64 AIXION_FCM_PROJECT_ID; do
             if [ -z "${!name:-}" ]; then
-              echo "Missing required GitHub secret: $name"
+              echo "Missing required GitHub Actions setting: $name"
               missing=1
             fi
           done
