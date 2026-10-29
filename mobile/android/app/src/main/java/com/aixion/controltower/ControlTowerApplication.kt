@@ -20,6 +20,12 @@ internal enum class StartupPushReconciliation {
     FAILED
 }
 
+internal enum class StartupPushFailureStage {
+    SESSION_LOOKUP,
+    ACTIVE_WORK_QUERY,
+    ENQUEUE
+}
+
 /**
  * Reconciles startup scheduling without putting account or token data into
  * WorkManager input. Failures are reported to the caller and do not escape into
@@ -29,21 +35,37 @@ internal suspend fun reconcileStartupPushRegistration(
     hasAuthenticatedSession: suspend () -> Boolean,
     hasActiveRegistrationWork: suspend () -> Boolean,
     enqueue: () -> Unit,
-    onFailure: (Exception) -> Unit
+    onFailure: (StartupPushFailureStage, Exception) -> Unit
 ): StartupPushReconciliation {
-    return try {
-        if (!hasAuthenticatedSession()) {
-            StartupPushReconciliation.SKIPPED_NO_SESSION
-        } else if (hasActiveRegistrationWork()) {
-            StartupPushReconciliation.SKIPPED_ACTIVE_WORK
-        } else {
-            enqueue()
-            StartupPushReconciliation.ENQUEUED
-        }
+    val hasSession = try {
+        hasAuthenticatedSession()
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (error: Exception) {
-        onFailure(error)
+        onFailure(StartupPushFailureStage.SESSION_LOOKUP, error)
+        return StartupPushReconciliation.FAILED
+    }
+    if (!hasSession) return StartupPushReconciliation.SKIPPED_NO_SESSION
+
+    val hasActiveWork = try {
+        hasActiveRegistrationWork()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        // A failed state query is not evidence that work is already present.
+        // Report it, then use WorkManager's unique enqueue path to recover.
+        onFailure(StartupPushFailureStage.ACTIVE_WORK_QUERY, error)
+        false
+    }
+    if (hasActiveWork) return StartupPushReconciliation.SKIPPED_ACTIVE_WORK
+
+    return try {
+        enqueue()
+        StartupPushReconciliation.ENQUEUED
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        onFailure(StartupPushFailureStage.ENQUEUE, error)
         StartupPushReconciliation.FAILED
     }
 }
@@ -73,10 +95,10 @@ class ControlTowerApplication : Application() {
                         }
                 },
                 enqueue = { PushDeviceRegistrationWorker.enqueue(appContext) },
-                onFailure = {
+                onFailure = { stage, _ ->
                     // Deliberately omit exception details: lower-level failures
                     // can contain account, request, or infrastructure data.
-                    Log.w(TAG, "Startup push registration reconciliation failed.")
+                    Log.w(TAG, "Startup push registration $stage failed.")
                 }
             )
         }

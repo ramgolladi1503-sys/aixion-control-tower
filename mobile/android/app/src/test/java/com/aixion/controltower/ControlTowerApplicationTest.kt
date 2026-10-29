@@ -18,7 +18,7 @@ class ControlTowerApplicationTest {
                 false
             },
             enqueue = { enqueueCount += 1 },
-            onFailure = { throw AssertionError("Unexpected startup error", it) }
+            onFailure = { _, error -> throw AssertionError("Unexpected startup error", error) }
         )
 
         assertEquals(StartupPushReconciliation.SKIPPED_NO_SESSION, result)
@@ -34,7 +34,7 @@ class ControlTowerApplicationTest {
             hasAuthenticatedSession = { true },
             hasActiveRegistrationWork = { false },
             enqueue = { enqueueCount += 1 },
-            onFailure = { throw AssertionError("Unexpected startup error", it) }
+            onFailure = { _, error -> throw AssertionError("Unexpected startup error", error) }
         )
 
         assertEquals(StartupPushReconciliation.ENQUEUED, result)
@@ -49,7 +49,7 @@ class ControlTowerApplicationTest {
             hasAuthenticatedSession = { true },
             hasActiveRegistrationWork = { true },
             enqueue = { enqueueCount += 1 },
-            onFailure = { throw AssertionError("Unexpected startup error", it) }
+            onFailure = { _, error -> throw AssertionError("Unexpected startup error", error) }
         )
 
         assertEquals(StartupPushReconciliation.SKIPPED_ACTIVE_WORK, result)
@@ -57,34 +57,56 @@ class ControlTowerApplicationTest {
     }
 
     @Test
-    fun startupReconciliationContainsSessionAndWorkManagerFailures() = runBlocking {
+    fun activeWorkQueryFailureIsReportedAndRecoversThroughUniqueEnqueue() = runBlocking {
+        val queryError = IllegalStateException("work manager unavailable")
+        val failures = mutableListOf<Pair<StartupPushFailureStage, Exception>>()
         var enqueueCount = 0
-        val errors = mutableListOf<Exception>()
+
+        val result = reconcileStartupPushRegistration(
+            hasAuthenticatedSession = { true },
+            hasActiveRegistrationWork = { throw queryError },
+            enqueue = { enqueueCount += 1 },
+            onFailure = { stage, error -> failures += (stage to error) }
+        )
+
+        assertEquals(StartupPushReconciliation.ENQUEUED, result)
+        assertEquals(1, enqueueCount)
+        assertEquals(
+            listOf(StartupPushFailureStage.ACTIVE_WORK_QUERY to queryError),
+            failures
+        )
+    }
+
+    @Test
+    fun sessionLookupAndEnqueueFailuresAreReportedAndContained() = runBlocking {
+        val sessionError = IllegalStateException("session unavailable")
+        val enqueueError = IllegalStateException("enqueue unavailable")
+        val failures = mutableListOf<Pair<StartupPushFailureStage, Exception>>()
+        var enqueueCount = 0
 
         val sessionFailure = reconcileStartupPushRegistration(
-            hasAuthenticatedSession = { throw IllegalStateException("session unavailable") },
+            hasAuthenticatedSession = { throw sessionError },
             hasActiveRegistrationWork = { false },
             enqueue = { enqueueCount += 1 },
-            onFailure = { errors.add(it) }
-        )
-        val workManagerFailure = reconcileStartupPushRegistration(
-            hasAuthenticatedSession = { true },
-            hasActiveRegistrationWork = { throw IllegalStateException("work manager unavailable") },
-            enqueue = { enqueueCount += 1 },
-            onFailure = { errors.add(it) }
+            onFailure = { stage, error -> failures += (stage to error) }
         )
         val enqueueFailure = reconcileStartupPushRegistration(
             hasAuthenticatedSession = { true },
             hasActiveRegistrationWork = { false },
-            enqueue = { throw IllegalStateException("enqueue unavailable") },
-            onFailure = { errors.add(it) }
+            enqueue = { throw enqueueError },
+            onFailure = { stage, error -> failures += (stage to error) }
         )
 
         assertEquals(StartupPushReconciliation.FAILED, sessionFailure)
-        assertEquals(StartupPushReconciliation.FAILED, workManagerFailure)
         assertEquals(StartupPushReconciliation.FAILED, enqueueFailure)
         assertEquals(0, enqueueCount)
-        assertEquals(3, errors.size)
+        assertEquals(
+            listOf(
+                StartupPushFailureStage.SESSION_LOOKUP to sessionError,
+                StartupPushFailureStage.ENQUEUE to enqueueError
+            ),
+            failures
+        )
     }
 
     @Test(expected = kotlinx.coroutines.CancellationException::class)
@@ -93,7 +115,9 @@ class ControlTowerApplicationTest {
             hasAuthenticatedSession = { throw kotlinx.coroutines.CancellationException() },
             hasActiveRegistrationWork = { false },
             enqueue = {},
-            onFailure = { throw AssertionError("Cancellation must not be swallowed", it) }
+            onFailure = { _, error ->
+                throw AssertionError("Cancellation must not be swallowed", error)
+            }
         )
     }
 }
