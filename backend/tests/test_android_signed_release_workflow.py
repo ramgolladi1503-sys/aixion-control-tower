@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "android-signed-release.yml"
 FIREBASE_CONFIG_INSTALLER = REPOSITORY_ROOT / "scripts" / "install_android_firebase_config.py"
+CI_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def _firebase_config_secret(config: object) -> str:
@@ -185,3 +186,22 @@ def test_signed_release_workflow_does_not_interpolate_dispatch_inputs_into_shell
     assert 'echo "created=true" >> "$GITHUB_OUTPUT"' in workflow
     assert "run: rm -f mobile/android/release.keystore" in workflow
     assert "run: rm -f mobile/android/app/google-services.json" in workflow
+
+
+def test_android_ci_compiles_release_variant_without_signing_or_publishing() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    marker = "      - name: Compile Android release variant without signing or publishing"
+    assert marker in workflow
+    step = workflow.split(marker, maxsplit=1)[1].split("      - name:", maxsplit=1)[0]
+
+    assert "if [[ -e app/google-services.json ]]" in step
+    assert "trap 'rm -f app/google-services.json' EXIT" in step
+    assert '"package_name": "com.aixion.controltower"' in step
+    assert "./gradlew :app:compileReleaseKotlin" in step
+    assert "-PAIXION_FIREBASE_CONFIG_ENABLED=true" in step
+    assert "-PAIXION_API_BASE_URL=https://api.aixionlab.com/" in step
+    assert "-PAIXION_VERSION_CODE=1" in step
+    assert "-PAIXION_VERSION_NAME=0.1.0" in step
+    assert "bundleRelease" not in step
+    assert "assembleRelease" not in step
+    assert "upload-artifact" not in step

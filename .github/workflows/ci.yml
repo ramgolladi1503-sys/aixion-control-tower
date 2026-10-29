@@ -119,6 +119,44 @@ jobs:
       - name: Build Android debug APK
         run: ./gradlew assembleDebug
 
+      - name: Compile Android release variant without signing or publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e app/google-services.json ]]; then
+            echo "Refusing to overwrite an existing Firebase config during compile-only validation." >&2
+            exit 1
+          fi
+          trap 'rm -f app/google-services.json' EXIT
+          cat > app/google-services.json <<'JSON'
+          {
+            "project_info": {
+              "project_number": "123456789012",
+              "project_id": "aixion-ci-compile-only"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:123456789012:android:0123456789abcdef",
+                  "android_client_info": {
+                    "package_name": "com.aixion.controltower"
+                  }
+                },
+                "api_key": [
+                  {
+                    "current_key": "compile-only-fake-key-never-used-for-delivery"
+                  }
+                ]
+              }
+            ]
+          }
+          JSON
+          ./gradlew :app:compileReleaseKotlin \
+            -PAIXION_API_BASE_URL=https://api.aixionlab.com/ \
+            -PAIXION_VERSION_CODE=1 \
+            -PAIXION_VERSION_NAME=0.1.0 \
+            -PAIXION_FIREBASE_CONFIG_ENABLED=true
+
       - name: Upload Android debug APK for this exact CI revision
         uses: actions/upload-artifact@v4
         with:
