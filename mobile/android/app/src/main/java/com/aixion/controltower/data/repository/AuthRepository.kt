@@ -75,6 +75,32 @@ internal suspend fun logoutWithCleanup(
     return cleanupSucceeded
 }
 
+internal suspend fun registerPushDeviceAndScheduleRetries(
+    register: suspend () -> PushRegistrationResult,
+    scheduleRetry: () -> Unit,
+    onRegistrationFailure: (Exception) -> Unit = {},
+    onScheduleFailure: (Exception) -> Unit = {}
+): PushRegistrationResult {
+    val result = try {
+        register()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        onRegistrationFailure(error)
+        PushRegistrationResult.BACKEND_UNAVAILABLE
+    }
+    if (!PushDeviceRegistrationWorker.shouldRetry(result)) return result
+
+    try {
+        scheduleRetry()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        onScheduleFailure(error)
+    }
+    return result
+}
+
 class AuthRepository(
     private val api: ControlTowerApi,
     private val context: Context
@@ -131,7 +157,16 @@ class AuthRepository(
     }
 
     internal suspend fun registerPushDeviceIfAllowed(): PushRegistrationResult =
-        pushRegistrationRepository.registerCurrentDevice()
+        registerPushDeviceAndScheduleRetries(
+            register = { pushRegistrationRepository.registerCurrentDevice() },
+            scheduleRetry = { PushDeviceRegistrationWorker.enqueue(context) },
+            onRegistrationFailure = { error ->
+                Log.w("AuthRepository", "Push registration failed unexpectedly.", error)
+            },
+            onScheduleFailure = { error ->
+                Log.w("AuthRepository", "Push registration retry could not be queued.", error)
+            }
+        )
 
     suspend fun requestPrivacyAccountRemoval(reason: String): AccountDeletionResponseDto {
         val response = api.requestAccountDeletion(AccountDeletionRequestDto(reason = reason.trim()))
