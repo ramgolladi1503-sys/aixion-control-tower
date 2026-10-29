@@ -2206,6 +2206,14 @@ def test_postgres_standard_approval_creation_does_not_project_to_sqlite(
     initial_audit_ids = {event.id for event in store.audit_events}
     initial_notification_ids = set(store.notifications)
 
+    def reject_sqlite_fallback(*_args, **_kwargs):
+        raise AssertionError("PostgreSQL approval creation accessed a SQLite repository")
+
+    # Poison the legacy adapters so this regression proves the request used the
+    # same PostgreSQL runtime for project lookup and durable approval creation.
+    monkeypatch.setattr(main.approval_decision_repository, "_connect", reject_sqlite_fallback)
+    monkeypatch.setattr(main.project_repository, "_connect", reject_sqlite_fallback)
+
     response = client.post(
         "/approvals",
         json={
