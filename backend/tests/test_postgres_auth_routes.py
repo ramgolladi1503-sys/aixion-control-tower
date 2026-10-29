@@ -96,6 +96,44 @@ def _register_and_login(client: TestClient, email: str, password: str) -> tuple[
     return registration.json()["user"], login.json()["access_token"]
 
 
+def test_postgres_auth_http_flow_does_not_fall_back_to_sqlite(
+    postgres_auth_runtime: tuple[PostgresAuthRepository, Callable[[], Connection], str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _repository, connect, _dsn, _schema = postgres_auth_runtime
+    email = f"sqlite-trap-{uuid.uuid4().hex}@example.com"
+    password = "SQLite-Trap-Local-Postgres-Password-842!"
+
+    def reject_sqlite_access() -> None:
+        raise AssertionError("PostgreSQL-authoritative auth route accessed SQLite")
+
+    # Registration, email verification, login, and session lookup must all
+    # remain within the lifespan-bound PostgreSQL authority.
+    monkeypatch.setattr(store, "_connect", reject_sqlite_access)
+    client = TestClient(app)
+    user, token = _register_and_login(client, email, password)
+
+    current_user = client.get(
+        "/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert current_user.status_code == 200, current_user.text
+    assert current_user.json()["id"] == user["id"]
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with connect() as connection:
+        stored_user = connection.execute(
+            "SELECT user_id,workspace_id FROM users WHERE normalized_email=%s",
+            (email.lower(),),
+        ).fetchone()
+        stored_session = connection.execute(
+            "SELECT session_id,user_id FROM sessions WHERE token_hash=%s",
+            (token_hash,),
+        ).fetchone()
+    assert stored_user == (user["id"], user["workspace_id"])
+    assert stored_session is not None and stored_session[1] == user["id"]
+
+
 def test_postgres_auth_route_session_is_accepted_by_fresh_api_process(
     postgres_auth_runtime: tuple[PostgresAuthRepository, Callable[[], Connection], str, str],
 ) -> None:
