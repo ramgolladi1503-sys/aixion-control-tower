@@ -1,18 +1,25 @@
 package com.aixion.controltower.feature.approvals
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.unit.dp
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
@@ -39,6 +46,8 @@ class ApprovalExactToolDecisionContextTest {
             summary = "A pending tool approval.",
             agentName = "Antigravity",
             sourceProvider = "ANTIGRAVITY",
+            sourceAgentId = "agent-context-test",
+            sourceSessionId = "session-context-test",
             targetBranch = "release/1.0",
             status = ApprovalStatus.REQUESTED,
             risk = RiskLevel.LOW,
@@ -55,32 +64,38 @@ class ApprovalExactToolDecisionContextTest {
             testPlan = emptyList(),
             rollbackPlan = "",
             sourceInvocationId = "invocation-12345678",
+            verifiedSource = true,
             expiresAt = expiresAt,
             riskReasons = listOf("Deletes generated build output")
         )
 
         composeRule.setContent {
-            Box(Modifier.size(width = 420.dp, height = 2400.dp)) {
+            Box(Modifier.fillMaxSize()) {
                 ApprovalDetailContent(approval, null, {}, {}, {})
             }
         }
 
+        val requestList = composeRule.onNodeWithTag("approval-detail-list")
         val payloadNode = composeRule.onNodeWithText(payload)
         val executableContentNode = composeRule.onNodeWithText(executableContent)
         val actionHeading = composeRule.onNodeWithText("Exact requested tool action")
         val wrapToggle = composeRule.onNodeWithTag("approval-payload-wrap-toggle")
         val context = composeRule.onNodeWithTag("approval-exact-tool-decision-context")
         val acknowledgement = composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
-        val approve = composeRule.onNodeWithText("Approve request")
+        val approve = composeRule.onNodeWithContentDescription(
+            "Approve request ${shortSafeApprovalId(approval.id)} from Antigravity: Clean generated files. " +
+                "Risk: low. Invocation: 12345678."
+        )
 
-        context.assertExists()
+        requestList.performScrollToNode(hasText("Exact requested tool action"))
+        actionHeading.assertIsDisplayed()
         assertTrue(
             "The exact action section should be available through screen-reader heading navigation",
             actionHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
         )
-        payloadNode.assertExists()
+        val payloadAbsoluteBounds = absoluteVerticalBounds(requestList, composeRule, hasText(payload))
+        payloadNode.assertIsDisplayed()
         composeRule.onNodeWithText("Exact executable arguments").assertExists()
-        executableContentNode.assertExists()
         wrapToggle.assertIsOn()
         composeRule.onNodeWithTag("approval-unbroken-payload-wrapped-0").assertExists()
         composeRule.onNodeWithTag("approval-unbroken-payload-scroll-0").assertDoesNotExist()
@@ -97,27 +112,43 @@ class ApprovalExactToolDecisionContextTest {
         wrapToggle.assertIsOn()
         composeRule.onNodeWithTag("approval-unbroken-payload-wrapped-0").assertExists()
         composeRule.onNodeWithTag("approval-unbroken-payload-scroll-0").assertDoesNotExist()
-        composeRule.onNodeWithText("Before you decide").assertExists()
-        composeRule.onNodeWithText("release/1.0").assertExists()
-        composeRule.onNodeWithText("Low").assertExists()
-        composeRule.onNodeWithText("Deletes generated build output").assertExists()
-        composeRule.onNodeWithText(formatApprovalExpiry(expiresAt)).assertExists()
-        composeRule.onNodeWithText("12345678").assertExists()
-        acknowledgement.assertExists()
         approve.assertIsNotEnabled()
 
-        val payloadBottom = payloadNode.fetchSemanticsNode().boundsInRoot.bottom
-        val executableContentBottom = executableContentNode.fetchSemanticsNode().boundsInRoot.bottom
-        val contextTop = context.fetchSemanticsNode().boundsInRoot.top
-        val contextBottom = context.fetchSemanticsNode().boundsInRoot.bottom
-        val acknowledgementTop = acknowledgement.fetchSemanticsNode().boundsInRoot.top
-        assertTrue(
-            "Displayed diff must precede executable content",
-            payloadBottom <= executableContentNode.fetchSemanticsNode().boundsInRoot.top
+        val executableAbsoluteBounds = absoluteVerticalBounds(requestList, composeRule, hasText(executableContent))
+        executableContentNode.assertIsDisplayed()
+        val contextAbsoluteBounds = absoluteVerticalBounds(
+            requestList,
+            composeRule,
+            hasTestTag("approval-exact-tool-decision-context")
         )
-        assertTrue("Executable content must precede reviewer context", executableContentBottom <= contextTop)
-        assertTrue("Reviewer context must precede acknowledgement", contextBottom <= acknowledgementTop)
+        context.assertIsDisplayed()
+        listOf(
+            "release/1.0",
+            "Risk evidence",
+            "Deletes generated build output",
+            formatApprovalExpiry(expiresAt),
+            "12345678"
+        ).forEach { value -> assertTextRenderedInside(composeRule, context, value) }
+        val acknowledgementAbsoluteBounds = absoluteVerticalBounds(
+            requestList,
+            composeRule,
+            hasTestTag("approval-exact-tool-review-acknowledgement")
+        )
+        acknowledgement.assertIsDisplayed()
+        assertTrue(
+            "Displayed diff must precede executable content in rendered content",
+            payloadAbsoluteBounds.second <= executableAbsoluteBounds.first
+        )
+        assertTrue(
+            "Executable content must precede reviewer context in rendered content",
+            executableAbsoluteBounds.second <= contextAbsoluteBounds.first
+        )
+        assertTrue(
+            "Reviewer context must precede acknowledgement in rendered content",
+            contextAbsoluteBounds.second <= acknowledgementAbsoluteBounds.first
+        )
 
+        requestList.performScrollToNode(hasTestTag("approval-exact-tool-review-acknowledgement"))
         acknowledgement.performClick()
         approve.assertIsEnabled()
     }
@@ -141,17 +172,52 @@ class ApprovalExactToolDecisionContextTest {
         )
 
         composeRule.setContent {
-            Box(Modifier.size(width = 420.dp, height = 2400.dp)) {
+            Box(Modifier.fillMaxSize()) {
                 ApprovalDetailContent(approval, null, {}, {}, {})
             }
         }
 
+        val requestList = composeRule.onNodeWithTag("approval-detail-list")
+        requestList.performScrollToNode(hasTestTag("approval-exact-tool-decision-context"))
         val context = composeRule.onNodeWithTag("approval-exact-tool-decision-context")
-        context.assertExists()
-        composeRule.onNodeWithText("Not provided").assertExists()
+        context.assertIsDisplayed()
+        composeRule.onAllNodesWithText("Not provided").assertCountEquals(3)
         composeRule.onNodeWithText("No risk rationale was supplied by the backend.").assertExists()
         composeRule.onNodeWithText("Expiry unavailable").assertExists()
         composeRule.onNodeWithText("Approve request").assertDoesNotExist()
         composeRule.onNodeWithText("Deny").assertDoesNotExist()
     }
+}
+
+private fun absoluteVerticalBounds(
+    list: androidx.compose.ui.test.SemanticsNodeInteraction,
+    composeRule: androidx.compose.ui.test.junit4.ComposeContentTestRule,
+    target: androidx.compose.ui.test.SemanticsMatcher
+): Pair<Float, Float> {
+    list.performScrollToNode(target)
+    val scrollOffset = list.fetchSemanticsNode()
+        .config[SemanticsProperties.VerticalScrollAxisRange]
+        .value()
+    val bounds = composeRule.onNode(target).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    return (scrollOffset + bounds.top) to (scrollOffset + bounds.bottom)
+}
+
+private fun assertTextRenderedInside(
+    composeRule: androidx.compose.ui.test.junit4.ComposeContentTestRule,
+    container: androidx.compose.ui.test.SemanticsNodeInteraction,
+    expectedText: String
+) {
+    val containerBounds = container.fetchSemanticsNode().boundsInRoot
+    val matchingNodes = composeRule.onAllNodesWithText(expectedText, useUnmergedTree = true)
+        .fetchSemanticsNodes()
+    assertTrue(
+        "Expected '$expectedText' to be rendered inside the approval decision context panel",
+        matchingNodes.any { node ->
+            val nodeBounds = node.boundsInRoot
+            nodeBounds.left >= containerBounds.left &&
+                nodeBounds.right <= containerBounds.right &&
+                nodeBounds.top >= containerBounds.top &&
+                nodeBounds.bottom <= containerBounds.bottom
+        }
+    )
 }

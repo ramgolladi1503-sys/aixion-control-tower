@@ -4,10 +4,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.unit.dp
@@ -42,6 +48,7 @@ class ApprovalExactToolContextTest {
                 FileChangeSummary("codex://tool/shell", "tool_call", payload, RiskLevel.LOW)
             ),
             sourceInvocationId = "codex-run-87654321",
+            expiresAt = "2099-01-02T03:04:05Z",
             requiredActions = emptyList(),
             testPlan = emptyList(),
             rollbackPlan = ""
@@ -61,33 +68,47 @@ class ApprovalExactToolContextTest {
 
         val context = composeRule.onNodeWithTag("approval-exact-tool-context")
         val header = composeRule.onNodeWithTag("approval-exact-tool-request")
+        val headerTitle = composeRule.onNodeWithText("Exact requested tool action")
         val path = composeRule.onNodeWithText("codex://tool/shell")
         val exactPayload = composeRule.onNodeWithText(payload)
         val acknowledgement = composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement")
 
+        val requestList = composeRule.onNodeWithTag("approval-detail-list")
+        requestList.performScrollToNode(hasTestTag("approval-exact-tool-request"))
         context.assertExists()
         header.assertExists()
-        composeRule.onNodeWithContentDescription(
-            "Deny request xt-test from Codex: Check repository state. Risk: low. Invocation: 87654321."
-        ).assertExists()
-        composeRule.onNodeWithContentDescription(
-            "Approve request xt-test from Codex: Check repository state. Risk: low. Invocation: 87654321."
-        ).assertExists()
-        path.assertExists()
-        exactPayload.assertExists()
-        composeRule.onNodeWithTag("approval-payload-horizontal-scroll-hint").assertDoesNotExist()
-        acknowledgement.assertExists()
         context.assertTextContains("Provider: Codex · Project: Mobile app workspace")
+        composeRule.onNodeWithContentDescription(
+            "Deny request ${shortSafeApprovalId(approval.id)} from Codex: Check repository state. Risk: low. Invocation: 87654321."
+        ).assertExists()
+        composeRule.onNodeWithContentDescription(
+            "Approve request ${shortSafeApprovalId(approval.id)} from Codex: Check repository state. Risk: low. Invocation: 87654321."
+        ).assertExists()
+        assertTrue(
+            "Provider and project context follows the exact action header",
+            headerTitle.fetchSemanticsNode().boundsInRoot.bottom <= context.fetchSemanticsNode().boundsInRoot.top
+        )
 
-        val contextTop = context.fetchSemanticsNode().boundsInRoot.top
-        val headerTop = header.fetchSemanticsNode().boundsInRoot.top
-        val pathTop = path.fetchSemanticsNode().boundsInRoot.top
-        val payloadTop = exactPayload.fetchSemanticsNode().boundsInRoot.top
-        val acknowledgementTop = acknowledgement.fetchSemanticsNode().boundsInRoot.top
-        assertTrue("The exact action header must precede provider and project context", headerTop < contextTop)
-        assertTrue("Provider and project context must precede the invocation payload", contextTop < pathTop)
-        assertTrue("The request path must precede its payload", pathTop <= payloadTop)
-        assertTrue("The review acknowledgement must follow the payload", payloadTop < acknowledgementTop)
+        val pathAbsoluteBounds = absoluteVerticalBounds(requestList, composeRule, hasText("codex://tool/shell"))
+        path.assertIsDisplayed()
+        val payloadAbsoluteBounds = absoluteVerticalBounds(requestList, composeRule, hasText(payload))
+        exactPayload.assertIsDisplayed()
+        composeRule.onNodeWithTag("approval-payload-horizontal-scroll-hint").assertDoesNotExist()
+        assertTrue(
+            "The request path precedes the exact payload in rendered content",
+            pathAbsoluteBounds.second <= payloadAbsoluteBounds.first
+        )
+
+        val acknowledgementAbsoluteBounds = absoluteVerticalBounds(
+            requestList,
+            composeRule,
+            hasTestTag("approval-exact-tool-review-acknowledgement")
+        )
+        acknowledgement.assertIsDisplayed()
+        assertTrue(
+            "The review acknowledgement follows the exact payload in rendered content",
+            payloadAbsoluteBounds.second <= acknowledgementAbsoluteBounds.first
+        )
     }
 
     @Test
@@ -119,6 +140,12 @@ class ApprovalExactToolContextTest {
             }
         }
 
+        val requestList = composeRule.onNodeWithTag("approval-detail-list")
+        requestList.performScrollToNode(hasTestTag("approval-payload-wrap-toggle"))
+        val wrapToggle = composeRule.onNodeWithTag("approval-payload-wrap-toggle")
+        wrapToggle.performClick()
+        composeRule.waitForIdle()
+        wrapToggle.assertIsOff()
         val payloadNode = composeRule.onNodeWithText(payload)
         payloadNode.assertExists()
         payloadNode.assertTextContains(payload)
@@ -140,4 +167,17 @@ class ApprovalExactToolContextTest {
         )
         composeRule.onNodeWithText("Swipe horizontally to inspect the full line.").assertExists()
     }
+}
+
+private fun absoluteVerticalBounds(
+    list: androidx.compose.ui.test.SemanticsNodeInteraction,
+    composeRule: androidx.compose.ui.test.junit4.ComposeContentTestRule,
+    target: androidx.compose.ui.test.SemanticsMatcher
+): Pair<Float, Float> {
+    list.performScrollToNode(target)
+    val scrollOffset = list.fetchSemanticsNode()
+        .config[SemanticsProperties.VerticalScrollAxisRange]
+        .value()
+    val bounds = composeRule.onNode(target).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    return (scrollOffset + bounds.top) to (scrollOffset + bounds.bottom)
 }

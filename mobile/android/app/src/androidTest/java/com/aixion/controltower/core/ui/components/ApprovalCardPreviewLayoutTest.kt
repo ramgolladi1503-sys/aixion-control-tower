@@ -48,9 +48,10 @@ class ApprovalCardPreviewLayoutTest {
 
         val preview = composeRule.onNodeWithTag("approval-card-preview-content")
         val longHeight = preview.fetchSemanticsNode().boundsInRoot.height
-        composeRule.runOnIdle { summary.value = "Review the requested workspace changes." }
+        composeRule.runOnIdle { summary.value = "Review changes." }
         composeRule.waitForIdle()
         val shortHeight = preview.fetchSemanticsNode().boundsInRoot.height
+        val maximumTwoLineHeightDelta = with(composeRule.density) { 48.dp.toPx() }
 
         assertTrue(
             "A useful overview should occupy more than one text line at phone width",
@@ -58,7 +59,7 @@ class ApprovalCardPreviewLayoutTest {
         )
         assertTrue(
             "The preview should remain capped at two lines instead of growing with arbitrary input",
-            longHeight < shortHeight + 48f
+            longHeight < shortHeight + maximumTwoLineHeightDelta
         )
     }
 }
