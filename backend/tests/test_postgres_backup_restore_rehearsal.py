@@ -4,6 +4,7 @@ import ipaddress
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import uuid
 
@@ -14,6 +15,67 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.postgres_database import POSTGRES_MIGRATIONS, run_postgres_migrations
 from app.postgres_runtime import PostgresRuntime
+
+
+def _explicit_local_postgres_target(info: dict[str, str]) -> bool:
+    """Accept only Unix sockets or TCP destinations pinned to loopback."""
+    host = info.get("host", "").strip()
+    hostaddr = info.get("hostaddr", "").strip()
+    if not host or "," in host or "," in hostaddr:
+        return False
+
+    local_socket_roots = ("/tmp", "/private/tmp", "/var/run/postgresql", "/run/postgresql")
+    if host.startswith("/"):
+        return not hostaddr and any(
+            host == root or host.startswith(root.rstrip("/") + "/")
+            for root in local_socket_roots
+        )
+
+    # Require libpq's actual TCP destination plus the host identity to resolve
+    # to the same local address. A hostname alone is not safe: DNS may be remote.
+    try:
+        pinned_address = ipaddress.ip_address(hostaddr)
+    except ValueError:
+        return False
+    if not pinned_address.is_loopback:
+        return False
+
+    try:
+        host_address = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            resolved_addresses = {
+                ipaddress.ip_address(result[4][0])
+                for result in socket.getaddrinfo(
+                    host,
+                    info.get("port") or None,
+                    type=socket.SOCK_STREAM,
+                )
+            }
+        except (OSError, ValueError):
+            return False
+        return bool(resolved_addresses) and all(
+            address.is_loopback for address in resolved_addresses
+        ) and pinned_address in resolved_addresses
+
+    return host_address.is_loopback and host_address == pinned_address
+
+
+def _create_owned_scratch_database(
+    admin: psycopg.Connection, *, label: str, created_databases: list[str]
+) -> str:
+    """Record cleanup ownership only after an unambiguous successful CREATE."""
+    for _attempt in range(5):
+        database = f"aixion_restore_{label}_{uuid.uuid4().hex}_test"
+        try:
+            admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+        except psycopg.errors.DuplicateDatabase:
+            continue
+        except psycopg.errors.InsufficientPrivilege:
+            pytest.skip("configured local test role cannot create isolated scratch databases")
+        created_databases.append(database)
+        return database
+    pytest.fail("could not allocate a unique scratch database name after five attempts")
 
 
 def _configured_local_test_dsn() -> tuple[str, dict[str, str]]:
@@ -31,29 +93,11 @@ def _configured_local_test_dsn() -> tuple[str, dict[str, str]]:
     if not database.endswith("_test"):
         pytest.skip("backup/restore rehearsal requires a configured database ending in _test")
 
-    # Refuse service aliases and implicit defaults: the target must be explicit
-    # enough to establish that this drill is local and disposable.
+    # Refuse service aliases, implicit defaults, and unresolved TCP destinations.
     if info.get("service"):
         pytest.skip("service-file DSNs are ambiguous for the isolated local restore rehearsal")
-    host = info.get("host", "").strip()
-    hostaddr = info.get("hostaddr", "").strip()
-    local_socket_roots = ("/tmp", "/private/tmp", "/var/run/postgresql", "/run/postgresql")
-    if host.startswith("/"):
-        is_local = any(host == root or host.startswith(root.rstrip("/") + "/") for root in local_socket_roots)
-    elif host:
-        try:
-            is_local = host.lower() == "localhost" or ipaddress.ip_address(host).is_loopback
-        except ValueError:
-            is_local = False
-    else:
-        is_local = False
-    if hostaddr:
-        try:
-            is_local = is_local and ipaddress.ip_address(hostaddr).is_loopback
-        except ValueError:
-            is_local = False
-    if not is_local:
-        pytest.skip("backup/restore rehearsal accepts only an explicit loopback PostgreSQL target")
+    if not _explicit_local_postgres_target(info):
+        pytest.skip("backup/restore rehearsal accepts only a pinned local PostgreSQL target")
 
     return dsn, info
 
@@ -117,6 +161,56 @@ def _run_pg_tool(command: list[str], *, env: dict[str, str]) -> subprocess.Compl
     )
 
 
+def test_backup_rehearsal_tcp_target_requires_pinned_local_peer(monkeypatch) -> None:
+    assert not _explicit_local_postgres_target({"host": "localhost"})
+    assert _explicit_local_postgres_target(
+        {"host": "127.0.0.1", "hostaddr": "127.0.0.1"}
+    )
+    assert not _explicit_local_postgres_target(
+        {"host": "192.0.2.7", "hostaddr": "127.0.0.1"}
+    )
+    assert not _explicit_local_postgres_target(
+        {"host": "127.0.0.1,localhost", "hostaddr": "127.0.0.1"}
+    )
+
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.7", 5432))
+        ],
+    )
+    assert not _explicit_local_postgres_target(
+        {"host": "localhost", "hostaddr": "127.0.0.1", "port": "5432"}
+    )
+
+
+def test_backup_rehearsal_local_socket_target_is_explicit() -> None:
+    assert _explicit_local_postgres_target({"host": "/private/tmp/aixion/socket"})
+    assert not _explicit_local_postgres_target(
+        {"host": "/private/tmp/aixion/socket", "hostaddr": "127.0.0.1"}
+    )
+
+
+def test_backup_rehearsal_database_collision_retries_before_recording_ownership() -> None:
+    class Admin:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def execute(self, _statement):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise psycopg.errors.DuplicateDatabase("name collision")
+
+    admin = Admin()
+    owned: list[str] = []
+    created = _create_owned_scratch_database(
+        admin, label="src", created_databases=owned  # type: ignore[arg-type]
+    )
+    assert admin.attempts == 2
+    assert owned == [created]
+
+
 def test_local_postgres_logical_backup_restores_data_constraints_and_readiness(
     tmp_path: Path,
 ) -> None:
@@ -130,28 +224,23 @@ def test_local_postgres_logical_backup_restores_data_constraints_and_readiness(
     tmp_path.chmod(0o700)
     archive = tmp_path / "synthetic-postgres-rehearsal.dump"
     suffix = uuid.uuid4().hex
-    source_name = f"aixion_restore_src_{suffix}_test"
-    recovery_name = f"aixion_restore_dst_{suffix}_test"
     created_databases: list[str] = []
 
     with psycopg.connect(base_dsn, autocommit=True, connect_timeout=5) as admin:
         configured_database = info.get("dbname", "")
         actual_database = admin.execute("SELECT current_database()").fetchone()[0]
         assert actual_database == configured_database, "connected DB differs from explicit test DSN"
+        peer_address = admin.info.hostaddr
+        if peer_address and not ipaddress.ip_address(peer_address).is_loopback:
+            pytest.skip("PostgreSQL connection peer is not loopback")
 
         try:
-            # Each CREATE is recorded only after PostgreSQL confirms success;
-            # cleanup can therefore touch only databases created by this test.
-            for database in (source_name, recovery_name):
-                existing = admin.execute(
-                    "SELECT 1 FROM pg_database WHERE datname = %s", (database,)
-                ).fetchone()
-                assert existing is None, "UUID scratch database unexpectedly already exists"
-                try:
-                    admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
-                except psycopg.errors.InsufficientPrivilege:
-                    pytest.skip("configured local test role cannot create isolated scratch databases")
-                created_databases.append(database)
+            source_name = _create_owned_scratch_database(
+                admin, label="src", created_databases=created_databases
+            )
+            recovery_name = _create_owned_scratch_database(
+                admin, label="dst", created_databases=created_databases
+            )
 
             source_dsn = _scratch_dsn(base_dsn, source_name)
             recovery_dsn = _scratch_dsn(base_dsn, recovery_name)
