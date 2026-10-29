@@ -64,6 +64,13 @@ jobs:
             --package "system-images;android-${ANDROID_API_LEVEL};google_apis;x86_64" \
             --device "pixel_2"
 
+      - name: Grant the runner least-privilege KVM access
+        run: |
+          runner_user="$(id -un)"
+          sudo chown "${runner_user}:kvm" /dev/kvm
+          sudo chmod 660 /dev/kvm
+          "${ANDROID_HOME}/emulator/emulator" -accel-check
+
       - name: Boot emulator with a bounded wait
         shell: bash
         run: |
