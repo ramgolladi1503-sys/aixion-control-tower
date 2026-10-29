@@ -71,7 +71,7 @@ class ControlTowerMessagingServiceNotificationTest {
                 notification.contentIntent.send()
                 val activity = activityMonitor.waitForActivityWithTimeout(ACTIVITY_START_TIMEOUT_MS)
                 assertNotNull("Notification tap should launch MainActivity", activity)
-                val startedActivity = activity as Activity
+                val startedActivity = activity as MainActivity
                 launchedActivity = startedActivity
                 val resolvedLink = NotificationDeepLink.fromIntent(startedActivity.intent)
                 assertEquals(
