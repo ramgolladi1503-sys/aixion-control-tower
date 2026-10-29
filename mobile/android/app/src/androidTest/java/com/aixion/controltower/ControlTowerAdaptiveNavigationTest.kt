@@ -128,7 +128,8 @@ class ControlTowerAdaptiveNavigationTest {
             listOf(false, true).forEach { expanded ->
                 renderNavigation(width = 390, expanded = expanded, approvalsState = state)
                 composeRule.waitForIdle()
-                composeRule.onAllNodesWithTag("approval-navigation-badge").assertCountEquals(0)
+                composeRule.onAllNodesWithTag("approval-navigation-badge", useUnmergedTree = true)
+                    .assertCountEquals(0)
                 composeRule.onAllNodesWithContentDescription("Approvals, 1 pending").assertCountEquals(0)
             }
         }
@@ -193,7 +194,12 @@ class ControlTowerAdaptiveNavigationTest {
         listOf(false, true).forEach { expanded ->
             renderNavigation(width = 390, expanded = expanded, approvalsState = state)
             composeRule.waitForIdle()
-            composeRule.onNodeWithTag("approval-navigation-badge").assertIsDisplayed()
+            // Material3 places the badge partly outside the icon's layout bounds.
+            // The badge node itself can therefore fail Compose's full-bounds
+            // displayed check even though its count text is visible. Assert that
+            // the badge is composed, then require the actual count to be displayed
+            // and announced below.
+            composeRule.onNodeWithTag("approval-navigation-badge", useUnmergedTree = true).assertExists()
             val badgeNode = composeRule.onNodeWithText(expectedText, useUnmergedTree = true)
             badgeNode.assertIsDisplayed()
             val badgeAnnouncement = expectedDescription.substringAfter(", ")
