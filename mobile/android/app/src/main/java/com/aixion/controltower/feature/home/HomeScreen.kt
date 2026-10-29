@@ -263,7 +263,46 @@ internal fun HomeApprovalPreview(
 
 @Composable
 private fun HomeHeader(lastSuccessfulSyncAt: Instant?) {
-    lastSuccessfulSyncAt?.let { syncedAt -> HomeSyncTimestamp(syncedAt) }
+    val palette = LocalTowerPalette.current
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val showLogo = maxWidth >= 340.dp && LocalDensity.current.fontScale < 1.45f
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.md),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (showLogo) {
+                    ForgedLogoMark(
+                        modifier = Modifier.testTag("home-header-logo"),
+                        size = 40.dp,
+                        color = palette.brand
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "AIXION",
+                        color = palette.brand,
+                        style = MaterialTheme.typography.labelSmall,
+                        letterSpacing = 1.2.sp
+                    )
+                    Text(
+                        text = "Control Tower",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("home-header-title")
+                            .semantics { heading() },
+                        color = palette.ink,
+                        style = MaterialTheme.typography.titleLarge
+                    )
+                }
+            }
+            lastSuccessfulSyncAt?.let { syncedAt ->
+                Spacer(modifier = Modifier.height(TowerSpacing.xs))
+                HomeSyncTimestamp(syncedAt)
+            }
+        }
+    }
 }
 
 @Composable

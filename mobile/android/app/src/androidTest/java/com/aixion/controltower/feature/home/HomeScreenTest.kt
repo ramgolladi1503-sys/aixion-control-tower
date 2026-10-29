@@ -61,8 +61,14 @@ class HomeScreenTest {
         val title = composeRule.onNodeWithTag("home-status-title")
         title.assertIsDisplayed()
         composeRule.onNodeWithTag("home-hero-logo").assertDoesNotExist()
+        val mastheadTitle = composeRule.onNodeWithTag("home-header-title").assertIsDisplayed()
+        composeRule.onNodeWithTag("home-header-logo").assertDoesNotExist()
         val viewport = composeRule.onNodeWithTag("home-hero-viewport").fetchSemanticsNode().boundsInRoot
         val titleBounds = title.fetchSemanticsNode().boundsInRoot
+        val mastheadBounds = mastheadTitle.fetchSemanticsNode().boundsInRoot
+        assertTrue("The masthead title should remain within compact screen padding", mastheadBounds.left >= viewport.left + 20f)
+        assertTrue("The masthead title should use the available compact width", mastheadBounds.right <= viewport.right - 20f)
+        assertTrue("The masthead title remains a screen-reader heading", mastheadTitle.fetchSemanticsNode().config.contains(SemanticsProperties.Heading))
         assertTrue("Large Home status text should remain inside compact screen padding", titleBounds.left >= viewport.left + 20f)
         assertTrue("Large Home status text should use the available compact width", titleBounds.right <= viewport.right - 20f)
         assertTrue("Large Home status heading should receive the full hero copy column", titleBounds.width >= 220f)
