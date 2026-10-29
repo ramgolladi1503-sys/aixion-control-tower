@@ -50,7 +50,8 @@ internal class PushDeviceRegistrationRepository internal constructor(
     private val hasNotificationPermission: () -> Boolean,
     private val currentFcmToken: suspend () -> String?,
     private val state: PushRegistrationStateStore,
-    private val appVersion: String
+    private val appVersion: String,
+    private val firebaseConfigured: () -> Boolean = { BuildConfig.AIXION_FIREBASE_CONFIG_ENABLED }
 ) {
     constructor(context: Context) : this(
         api = ApiPushRegistrationAdapter(ApiClient.create(context.applicationContext)),
@@ -93,14 +94,17 @@ internal class PushDeviceRegistrationRepository internal constructor(
         if (retryPendingUnregistrationsForUser(userId)) {
             return PushRegistrationResult.AUTHENTICATION_REQUIRED
         }
+        if (!firebaseConfigured()) {
+            return PushRegistrationResult.FIREBASE_NOT_CONFIGURED
+        }
 
         val token = try {
             currentFcmToken()?.takeIf(String::isNotBlank)
-                ?: return PushRegistrationResult.FIREBASE_NOT_CONFIGURED
+                ?: return PushRegistrationResult.BACKEND_UNAVAILABLE
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            return PushRegistrationResult.FIREBASE_NOT_CONFIGURED
+            return PushRegistrationResult.BACKEND_UNAVAILABLE
         }
 
         return try {

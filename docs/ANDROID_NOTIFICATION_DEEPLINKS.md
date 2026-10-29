@@ -69,7 +69,8 @@ docs/templates/FCM_REAL_DEVICE_EVIDENCE_TEMPLATE.md
 AgentTask push notifications and AgentTask notification deep links are deferred
 No notification inbox deep-link fallback yet
 No notification preference model yet
-No retry queue for failed backend push sends yet
+Eligible transient backend push-send failures use a durable, bounded retry queue
+Permanent send failures and exhausted attempts remain terminal; no operator redrive path is documented
 No instrumentation test for real FCM delivery yet
 ```
 

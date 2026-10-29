@@ -234,7 +234,7 @@ backend is only reachable from emulator but not real device
 
 ```text
 No automated FCM instrumentation test yet
-No retry queue for FAILED pushes yet
+Eligible transient push-send failures are retried through the durable outbox, up to `AIXION_PUSH_MAX_ATTEMPTS` (default 5). Permanent failures and exhausted attempts remain `FAILED`; no operator redrive path is documented.
 No notification preference model yet
 No full production observability dashboard yet
 ```

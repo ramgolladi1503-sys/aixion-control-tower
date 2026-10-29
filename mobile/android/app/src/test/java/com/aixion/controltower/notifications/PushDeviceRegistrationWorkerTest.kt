@@ -21,12 +21,16 @@ class PushDeviceRegistrationWorkerTest {
     }
 
     @Test
-    fun transientBackendFirebaseAndCleanupFailuresRetry() {
+    fun missingFirebaseBuildConfigurationDoesNotRetry() {
+        assertFalse(
+            PushDeviceRegistrationWorker.shouldRetry(PushRegistrationResult.FIREBASE_NOT_CONFIGURED)
+        )
+    }
+
+    @Test
+    fun transientBackendAndCleanupFailuresRetry() {
         assertTrue(
             PushDeviceRegistrationWorker.shouldRetry(PushRegistrationResult.BACKEND_UNAVAILABLE)
-        )
-        assertTrue(
-            PushDeviceRegistrationWorker.shouldRetry(PushRegistrationResult.FIREBASE_NOT_CONFIGURED)
         )
         assertTrue(
             PushDeviceRegistrationWorker.shouldRetry(

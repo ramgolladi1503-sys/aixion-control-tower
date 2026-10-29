@@ -112,11 +112,11 @@ internal class PushDeviceRegistrationWorker(
         internal fun shouldRetry(result: PushRegistrationResult): Boolean = when (result) {
             PushRegistrationResult.REGISTERED,
             PushRegistrationResult.PERMISSION_REQUIRED,
-            PushRegistrationResult.AUTHENTICATION_REQUIRED -> false
+            PushRegistrationResult.AUTHENTICATION_REQUIRED,
+            PushRegistrationResult.FIREBASE_NOT_CONFIGURED -> false
 
             PushRegistrationResult.REGISTERED_CLEANUP_PENDING,
             PushRegistrationResult.PERMISSION_REQUIRED_CLEANUP_PENDING,
-            PushRegistrationResult.FIREBASE_NOT_CONFIGURED,
             PushRegistrationResult.BACKEND_UNAVAILABLE -> true
         }
     }

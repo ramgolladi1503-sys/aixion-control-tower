@@ -152,6 +152,47 @@ class PushDeviceRegistrationRepositoryTest {
     }
 
     @Test
+    fun temporaryFirebaseTokenProviderFailureRemainsRetryable() = runTest {
+        val state = FakeRegistrationState()
+        val api = FakeRegistrationApi(userId = "user-current")
+        val repository = repository(
+            api = api,
+            state = state,
+            token = { throw IOException("temporary Firebase token service failure") }
+        )
+
+        assertEquals(
+            PushRegistrationResult.BACKEND_UNAVAILABLE,
+            repository.registerCurrentDevice()
+        )
+        assertTrue(api.registrationRequests.isEmpty())
+        assertFalse(state.clearPendingTokenCalled)
+    }
+
+    @Test
+    fun missingFirebaseConfigurationDoesNotFetchOrRegisterToken() = runTest {
+        val state = FakeRegistrationState()
+        val api = FakeRegistrationApi(userId = "user-current")
+        var tokenFetches = 0
+        val repository = repository(
+            api = api,
+            state = state,
+            firebaseConfigured = false,
+            token = {
+                tokenFetches += 1
+                "must-not-be-requested"
+            }
+        )
+
+        assertEquals(
+            PushRegistrationResult.FIREBASE_NOT_CONFIGURED,
+            repository.registerCurrentDevice()
+        )
+        assertEquals(0, tokenFetches)
+        assertTrue(api.registrationRequests.isEmpty())
+    }
+
+    @Test
     fun pendingCleanupAuthFailureStopsRegistrationBeforeFetchingFcmToken() = runTest {
         for (status in listOf(401, 403)) {
             val state = FakeRegistrationState(
@@ -343,13 +384,15 @@ class PushDeviceRegistrationRepositoryTest {
         api: FakeRegistrationApi,
         state: FakeRegistrationState,
         hasPermission: Boolean = true,
+        firebaseConfigured: Boolean = true,
         token: suspend () -> String?
     ) = PushDeviceRegistrationRepository(
         api = api,
         hasNotificationPermission = { hasPermission },
         currentFcmToken = token,
         state = state,
-        appVersion = "test-version"
+        appVersion = "test-version",
+        firebaseConfigured = { firebaseConfigured }
     )
 
     private fun httpFailure(statusCode: Int): HttpException = HttpException(

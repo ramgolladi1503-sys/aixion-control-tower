@@ -111,7 +111,7 @@ internal object NotificationPanelCopy {
             PushRegistrationUiState.BACKEND_UNAVAILABLE -> NotificationPanelMessage(
                 headline = "This device could not be registered for approval alerts.",
                 supportingDetail = buildString {
-                    append("Server registration failed. Reopen Account to retry.")
+                    append("Registration could not be completed. Reopen Account to retry.")
                     if (permissionState == NotificationPermissionState.DENIED) {
                         append(" Android notifications are also off.")
                     }
