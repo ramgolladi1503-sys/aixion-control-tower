@@ -68,7 +68,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          emulator -avd "${AVD_NAME}" \
+          "${ANDROID_HOME}/emulator/emulator" -avd "${AVD_NAME}" \
             -no-window \
             -no-audio \
             -no-boot-anim \
