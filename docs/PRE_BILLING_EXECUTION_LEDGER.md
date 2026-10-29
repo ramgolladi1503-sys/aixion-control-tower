@@ -1,30 +1,35 @@
 # Pre-Billing Execution Ledger
 
-Updated: 2026-10-26
-PR #204 head: `26f05b7a73b340e39b208db9687c2d0484e2506f` (open, draft, unmerged; all eight checks green)
-Working tree: `/Volumes/TradeBotFast/AixionControlTower/goal-workstreams/android-design`
+Updated: 2026-10-29
+PR #204: https://github.com/ramgolladi1503-sys/aixion-control-tower/pull/204
+PR state: OPEN, draft, unmerged
+PR head: `410863cf8507a9b31327febffa28a6b1e71bea3b`
+Worktree: `/Volumes/TradeBot/worktrees/aixion-codex-approval-roundtrip-20261029`
+Working tree: clean before this ledger update
 
-| Slice / criterion | Owner | Status | Evidence / artifact | Blocker | Next action |
-|---|---|---|---|---|---|
-| 0 — Approval contract | Integration lead | PASS | Accepted contract and state-transition rules in `docs/PRE_BILLING_WORK_LOCK.md` | None for this gate | Preserve contract; do not infer provider capability from it. |
-| 1 — Complete PostgreSQL persistence locally | Integration lead; `pg_authority_exit_gap` (read-only review complete) | FAIL | PR checks green; isolated PostgreSQL migration, route, concurrency, rollback, and restart subgates recorded. Current-source review: SQLite-backed defaults remain central; complete app-bound PostgreSQL repository bundle is selected only in opt-in PostgreSQL-auth mode. Authenticated readiness previously reported `database_backend=mixed`, `application_store_ready=false`. | Complete authority binding, safe import/cutover, and full-runtime exit evidence absent. | Build one app-wide repository-authority contract. For every durable route/worker/script bind to the lifespan-owned PostgreSQL bundle or return unavailable; keep production startup refused until inventory and cross-process verification pass. |
-| 2 — Connector protocol reliability | Integration lead | UNVERIFIED | Current-source focused rerun is active in pytest session `91321`; failures were emitted before completion. The historic accepted contract-test subgate is revision-specific. | Current failures lack final traceback and disposition; no current-source gate acceptance. | Collect final output, diagnose each failure without weakening assertions, rerun exact failing cases and the full formal gate. |
-| 3 — Antigravity adapter | Integration lead; `antigravity_e2e_preflight` agent (read-only) | UNVERIFIED | Historical same-invocation evidence is revision-specific; current adapter tests are not a real provider round trip. | Current connector/profile and authenticated Android session must be ready; fresh human decision required for a live request. | Obtain preflight; prepare the exact isolated run without using normal provider profile or stale approval; run only with an active human decision path. |
-| 4 — Codex local permission adapter | Unassigned | UNVERIFIED | No current real Codex phone round-trip evidence | Native Codex permission request integration and same-invocation outcome are unproven | After Slice 1/Android path is stable, test the documented local `PermissionRequest` path against the real Codex app; record supported surfaces and failures. |
-| 5 — Android approval/account UX | Android UI implementation; integration lead (acceptance) | UNVERIFIED | Current uncommitted diff is four approval-screen/test files (82 insertions, 4 deletions); `git diff --check` passes. Gradle session `44529` builds and runs unit/compile tasks; emulator 5556 is online. | Current diff has no completed build/test result or rendered approval-screen review. | Wait for session `44529`; then run connected instrumentation on emulator 5556, install the resulting debug APK, capture inbox/detail, and verify critical states/accessibility. |
-| 6 — Local E2E and failure certification | Integration lead | UNVERIFIED | Exact-head CI green; focused PostgreSQL and Android results recorded | Current-source provider round trips and complete failure matrix are absent | Produce one reproducible Antigravity evidence bundle first; then Codex and remaining failure cases, each tied to exact source/device/provider versions. |
-| 7 — Cost-controlled staging handoff | Integration lead; account owner supplies decisions | BLOCKED | Offline deployment/cost/retention/operations artifacts exist; matrix details exact pending inputs | Owner choices and separate authorization for any live cloud rehearsal | Collect approved project, region, workload, retention, pricing, exposure, and operator values; do not activate billing or provision resources in this goal. |
+## Locked production gates
 
-## Active bounded work
+| Gate | Status | Current evidence | Remaining acceptance evidence |
+|---|---|---|---|
+| 1 — PostgreSQL authority and data cutover | OPEN — owner snapshot required | Production startup remains fail-closed until the complete runtime uses the PostgreSQL repository bundle. Current-source PostgreSQL CI is green, but a passing suite is not a cutover. `docs/PRE_BILLING_WORK_LOCK.md` requires an owner-provided coordinated, quiesced SQLite snapshot and an audit-event inventory/reconciliation; no eligible snapshot was found in the current worktree. | Owner supplies the quiesced source snapshot and event inventory. Complete and validate import/reconciliation, bind all runtime routes/workers to PostgreSQL or fail closed, then prove restart, backup/restore, and independent-process behavior before permitting production startup. Do not derive tenant ownership for nullable legacy audit rows. |
+| 2 — Hosted HTTPS and remote push/deep links | OPEN — no API target | The Pixel is physically ADB-connected. Its installed debug app (`com.aixion.controltower.debug`, `0.1.0`) is on the sign-in screen. `POST_NOTIFICATIONS` is denied. The debug source default is emulator-only `http://10.0.2.2:8000/`. Public DNS does not resolve `api.aixionlab.com`. The user-provided Spaceship Advanced DNS screenshot shows existing website records and an empty custom-record group; existing apex/www records were not changed. Checked-in Cloud Run and scheduler files remain explicitly pre-billing templates with placeholders. | Complete Gate 1; select/provide the owner-approved GCP project, region, image, secrets, Firebase project and cost/SLO inputs; deploy and verify the API over HTTPS; configure only the API hostname after its verified service target exists; then register the device, obtain user notification consent, and prove a real FCM notification/deep link and decision while the physical phone is locked and the desktop connector is reachable. |
+| 3 — Current native adapter certification | OPEN — current round trip not evidenced | The isolated Codex `PermissionRequest` configuration references the hook in the current PR worktree. Historical Antigravity/Codex approvals and current unit/CI checks do not prove a current native request resumed the same invocation. No current request/decision pair was generated and verified in this inspection. The emulator has Control Tower open with an Antigravity connector visible; that is local connector state, not a current native or remote proof. | Run current-source Codex and Antigravity requests in isolated provider workspaces; record exact request, human decision, and same-invocation resume/deny result. Complete timeout, API outage, revocation, restart, workspace mismatch, duplicate/replay, and expired-request cases. Preserve user ownership of each approval decision. |
+| 4 — Android release and operational readiness | OPEN — debug-only device state | Exact-head PR checks pass, including Android validation and debug APK build. This is not a signed release or Play acceptance. The physical Pixel is using the debug app, remains signed out, and has notifications denied; therefore no authenticated device push registration or locked-phone acceptance exists. | Configure and verify release signing/Firebase through the protected release environment; build and inspect a signed AAB; complete release-device, accessibility, notification, deep-link, and Play track acceptance. Finish security/operations, monitoring, backup/restore, incident/revocation procedures, and user-facing connector setup instructions. |
 
-- Android local validation: Gradle session `44529` (current dirty UI changes; build, instrumentation compile, JVM tests); no result yet.
-- Current-source connector validation: pytest session `91321` (10 focused modules, disposable PostgreSQL/SQLite paths); still active and has emitted failures; do not report a pass.
-- Isolated current-source API: PID `35582`, loopback port 8006, external disposable PostgreSQL DB; `/health` returned HTTP 200 in 7.37s on the latest probe. No authenticated Android/provider E2E is currently established.
-- Two read-only reviews completed: app-wide PostgreSQL authority gap and current Android UI validation gap. Their findings are reflected above.
+## Current verification record
 
-## Integration rules
+- `gh pr view 204` reports PR #204 OPEN and draft at head `410863cf8507a9b31327febffa28a6b1e71bea3b`.
+- Exact-head checks reported successful: backend validation, Android validation, Android debug APK/build, Codex Windows validation, Mission Control container validation, Terraform validation without cloud access, and the expected-blocked production-startup guard.
+- `adb devices -l` showed physical Pixel `61191FDCG000KZ` and emulator `emulator-5556` connected. The Pixel app was opened for inspection and remains at sign-in; no credentials were entered and no notification permission was granted by ADB.
+- `adb shell cmd appops get com.aixion.controltower.debug POST_NOTIFICATION` reported `ignore`; package state reports `POST_NOTIFICATIONS` not granted.
+- DNS lookup for `api.aixionlab.com` returned no address. The existing website records were left untouched. No GCP resource, billing setting, Firebase secret, DNS record, production database, or deployment was changed.
+- A progress note with this device/domain evidence was added to PR #204: https://github.com/ramgolladi1503-sys/aixion-control-tower/pull/204#issuecomment-6499841726.
 
-- The integration lead owns final acceptance and reconciles every agent result against the work-lock exit gate.
-- Review file ownership before combining changes; agents share this worktree.
-- Do not push until diffs and focused checks are reviewed. Do not merge.
-- No cloud billing/resources, production data, deployment, or unverified provider/device claims.
+## Safety and rollout constraints
+
+- Keep production startup blocked until Gate 1's complete runtime and owner-supplied import evidence pass.
+- Do not create an SQLite snapshot from a live, active writer or infer workspace ownership for legacy events.
+- Keep the apex website records unchanged. Add an API DNS record only after a real service endpoint and TLS plan have been verified.
+- No cloud resource, billing, deploy, or DNS mutation is included in pre-billing work.
+- Do not describe CI, emulator behavior, or historical provider decisions as hosted, locked-phone, or current-native certification.
+- PR #204 remains draft and must not be merged until all four gates have authoritative evidence and owner acceptance.
