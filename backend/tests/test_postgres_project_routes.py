@@ -113,6 +113,40 @@ def test_project_http_create_and_list_use_postgres_without_sqlite_projection(
     assert main._project_for_user(project["id"], user, request).id == project["id"]
 
 
+def test_project_http_create_and_list_do_not_fall_back_to_sqlite(
+    postgres_project_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, _user = postgres_project_route_runtime
+
+    def reject_sqlite_project_access() -> None:
+        raise AssertionError("PostgreSQL-authoritative project route accessed SQLite")
+
+    # The global SQLite adapter remains available for local mode. Poison its
+    # connection provider so an accidental fallback fails at the access point.
+    monkeypatch.setattr(main.project_repository, "_connect", reject_sqlite_project_access)
+
+    client = TestClient(main.app)
+    created = client.post(
+        "/projects",
+        json={"name": "SQLite trap regression", "description": "synthetic test row"},
+    )
+    assert created.status_code == 200, created.text
+    project = created.json()
+    assert project["workspace_id"] == workspace.id
+
+    listed = client.get("/projects")
+    assert listed.status_code == 200, listed.text
+    assert project in listed.json()
+
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT workspace_id,payload->>'name' FROM projects WHERE project_id=%s",
+            (project["id"],),
+        ).fetchone()
+    assert row == (workspace.id, "SQLite trap regression")
+
+
 def test_project_http_fails_closed_when_postgres_runtime_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
