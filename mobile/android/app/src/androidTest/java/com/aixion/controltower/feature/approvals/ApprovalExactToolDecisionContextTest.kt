@@ -106,9 +106,7 @@ class ApprovalExactToolDecisionContextTest {
             payloadNode.fetchSemanticsNode().boundsInRoot.height > 42f
         )
         wrapToggle.performClick()
-        composeRule.waitUntil(timeoutMillis = 1_000) {
-            wrapToggle.fetchSemanticsNode().config[SemanticsProperties.ToggleableState] == ToggleableState.Off
-        }
+        composeRule.waitForIdle()
         wrapToggle.assertIsOff()
         composeRule.onNodeWithTag("approval-unbroken-payload-scroll-0").assertExists()
         composeRule.onNodeWithTag("approval-payload-horizontal-scroll-hint").assertExists()
