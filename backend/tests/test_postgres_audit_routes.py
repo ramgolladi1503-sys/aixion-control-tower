@@ -199,6 +199,34 @@ def test_legacy_audit_http_reads_bound_postgres_workspace_and_redacts_secrets(
     assert all(row["id"] != sqlite_fallback.id for row in payload)
 
 
+def test_legacy_audit_http_does_not_fall_back_to_sqlite(
+    postgres_audit_route_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect, workspace, user, _runtime = postgres_audit_route_runtime
+    event = AuditEvent(
+        workspace_id=workspace.id,
+        event_type="approval.decision",
+        entity_id=f"approval_{uuid.uuid4().hex}",
+        actor=user.email,
+        details={"decision": "deny"},
+    )
+    _insert_audit_events(connect, event)
+
+    def reject_sqlite_access() -> None:
+        raise AssertionError("PostgreSQL-authoritative audit read accessed SQLite")
+
+    # The legacy repository uses this connection provider. PostgreSQL-backed
+    # workspace resolution and audit reads must not consult it.
+    monkeypatch.setattr(store, "_connect", reject_sqlite_access)
+
+    response = TestClient(main.app).get("/audit")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert [row["id"] for row in payload] == [event.id]
+
+
 @pytest.mark.parametrize("runtime_state", ["missing", "mismatched"])
 def test_legacy_audit_fails_closed_without_matching_postgres_runtime(
     postgres_audit_route_runtime,
