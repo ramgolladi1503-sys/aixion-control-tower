@@ -324,6 +324,61 @@ def test_postgres_dispatch_loop_drains_inflight_thread_on_cancellation(monkeypat
     asyncio.run(exercise())
 
 
+def test_postgres_dispatcher_renews_claim_during_slow_target_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notification = Notification(
+        id="notification_dispatch_lookup_lease",
+        title="Approval needed",
+        body="Open the app to review.",
+        entity_type="approval_request",
+        entity_id="approval_dispatch_lookup_lease",
+        workspace_id="workspace_dispatch_lookup_lease",
+        push_status="SENDING",
+        push_attempts=1,
+    )
+    renewed = Event()
+    target_lookup_saw_renewal = Event()
+    recorded: list[dict[str, object]] = []
+
+    class Repository:
+        def claim_next_due(self, **_: object) -> Notification:
+            return notification
+
+        def renew_claim(self, **_: object) -> Notification:
+            renewed.set()
+            return notification
+
+        def list_device_targets(self, _notification: Notification) -> list[DeviceRegistration]:
+            if renewed.wait(timeout=2):
+                target_lookup_saw_renewal.set()
+            return []
+
+        def record_outcome(self, **kwargs: object) -> Notification:
+            recorded.append(kwargs)
+            return notification
+
+    monkeypatch.setattr(
+        postgres_dispatcher,
+        "get_settings",
+        lambda: SimpleNamespace(
+            push_dispatch_enabled=True,
+            push_max_attempts=5,
+            push_lease_seconds=1,
+            push_retry_base_seconds=15,
+            push_retry_max_seconds=900,
+        ),
+    )
+
+    postgres_dispatcher.dispatch_one_postgres_push(
+        Repository(), now=now_utc(), sender=lambda **_: None
+    )
+
+    assert target_lookup_saw_renewal.is_set()
+    assert len(recorded) == 1
+    assert recorded[0]["push_status"] == "NO_DEVICE"
+
+
 @pytest.mark.parametrize("failed_target_index", [0, 1])
 def test_postgres_dispatcher_isolates_sender_exception_per_target(
     monkeypatch: pytest.MonkeyPatch,

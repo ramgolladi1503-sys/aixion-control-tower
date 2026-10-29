@@ -124,26 +124,29 @@ def dispatch_one_postgres_push(
     errors: list[str] = []
     invalid_devices: list[tuple[str, str, str, str, str]] = []
     skipped = False
-    try:
-        devices = repository.list_device_targets(notification)
-    except Exception:
-        # A target lookup failure means no recipient set was established. Keep
-        # the claim retryable and avoid dispatching against a partial snapshot.
-        logger.warning(
-            "PostgreSQL push target lookup failed for notification id=%s",
-            notification.id,
-        )
-        errors.append("FCM_DISPATCH_FAILED")
-        devices = []
-
     heartbeat = _ClaimLeaseHeartbeat(
         repository,
         notification_id=notification.id,
         attempts=notification.push_attempts,
         lease_seconds=settings.push_lease_seconds,
     )
+    # Start renewing immediately after claim acquisition. Recipient lookup is
+    # database I/O too and can outlive the initial lease; without the heartbeat
+    # here, another worker could reclaim the row before provider fan-out begins.
     heartbeat.start()
     try:
+        try:
+            devices = repository.list_device_targets(notification)
+        except Exception:
+            # A target lookup failure means no recipient set was established.
+            # Keep the claim retryable and avoid partial recipient snapshots.
+            logger.warning(
+                "PostgreSQL push target lookup failed for notification id=%s",
+                notification.id,
+            )
+            errors.append("FCM_DISPATCH_FAILED")
+            devices = []
+
         for device in devices:
             if heartbeat.lost:
                 break
