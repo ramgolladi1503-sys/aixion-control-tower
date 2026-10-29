@@ -70,9 +70,13 @@ def test_windows_install_remove_round_trip_preserves_unrelated_hooks_and_quotes_
     )
     hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
     handler = hooks["hooks"]["PermissionRequest"][0]["hooks"][0]
-    assert handler["commandWindows"].startswith('"C:\\Program Files\\Python\\python.exe"')
-    assert '"Aixion Integration\\approval hook.py"' in handler["commandWindows"]
-    assert '"Aixion Test User\\AppData\\Local' in handler["commandWindows"]
+    expected_command = subprocess.list2cmdline((
+        r"C:\Program Files\Python\python.exe",
+        str(script_path.resolve()),
+        "--config",
+        str(config_path),
+    ))
+    assert handler["commandWindows"] == expected_command
     assert hooks_path.parent == codex_dir
     assert config_path.parent == host_security.workspace_config_dir(home)
     with host_security.open_private_file(config_path, require_private=True, reject_shared_write=True):
@@ -103,9 +107,20 @@ def test_windows_rejects_broad_dacl_and_reparse_workspace(tmp_path: Path) -> Non
             pass
 
     junction = tmp_path / "Project Junction"
-    command = subprocess.list2cmdline(["mklink", "/J", str(junction), str(workspace)])
+    powershell_script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "New-Item -ItemType Junction -Path $env:AIXION_TEST_JUNCTION "
+        "-Target $env:AIXION_TEST_TARGET | Out-Null; "
+        "if (-not (Test-Path -LiteralPath $env:AIXION_TEST_JUNCTION)) { exit 1 }"
+    )
     created = subprocess.run(
-        ["cmd.exe", "/d", "/c", command], capture_output=True, text=True, check=False,
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", powershell_script],
+        env={
+            **os.environ,
+            "AIXION_TEST_JUNCTION": str(junction),
+            "AIXION_TEST_TARGET": str(workspace),
+        },
+        capture_output=True, text=True, check=False,
     )
     assert created.returncode == 0, created.stderr or created.stdout
     with pytest.raises(host_security.HostSecurityError, match="reparse point"):
