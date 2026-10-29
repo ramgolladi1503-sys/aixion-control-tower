@@ -409,9 +409,12 @@ class ApprovalInboxScreenTest {
                 state = ApprovalsUiState(
                     loading = false,
                     approvals = listOf(
-                        approval(id = "approval_requested", title = "Pending approval", status = ApprovalStatus.REQUESTED),
-                        approval(id = "approval_legacy", title = "Legacy pending", status = ApprovalStatus.PENDING_REVIEW),
-                        approval(id = "approval_blocked", title = "Blocked approval", status = ApprovalStatus.BLOCKED),
+                        approval(id = "approval_requested", title = "Pending approval", status = ApprovalStatus.REQUESTED)
+                            .copy(summary = "Pending approval summary"),
+                        approval(id = "approval_legacy", title = "Legacy pending", status = ApprovalStatus.PENDING_REVIEW)
+                            .copy(summary = "Legacy pending summary"),
+                        approval(id = "approval_blocked", title = "Blocked approval", status = ApprovalStatus.BLOCKED)
+                            .copy(summary = "Blocked approval summary"),
                         approval(id = "approval_approved", title = "Approved approval", status = ApprovalStatus.APPROVED),
                     )
                 )
@@ -429,22 +432,26 @@ class ApprovalInboxScreenTest {
         composeRule.onNodeWithText("Blocked approval").assertExists()
         composeRule.onAllNodesWithText("Approved approval").assertCountEquals(0)
         val visibleCards = listOf(
-            "Pending approval" to "Pending approval",
-            "Legacy pending" to "Pending review",
-            "Blocked approval" to "Blocked"
+            Triple("Pending approval", "Pending approval", "Pending approval summary"),
+            Triple("Legacy pending", "Pending review", "Legacy pending summary"),
+            Triple("Blocked approval", "Blocked", "Blocked approval summary")
         )
-        visibleCards.forEach { (title, expectedStatus) ->
+        visibleCards.forEach { (title, expectedStatus, expectedSummary) ->
             inboxList.performScrollToNode(hasText(title))
             val card = composeRule.onNode(
                 hasTestTag("approval-card") and hasText(title, substring = true)
             )
             card.assertExists()
             card.assertTextContains("Aixion Control Tower")
-            card.assertTextContains("Regression approval summary")
+            card.assertTextContains(expectedSummary)
             card.assertTextContains("Request overview · preview only")
             card.assertTextContains("Open full request before deciding")
             card.assertTextContains("Low")
             card.assertTextContains(expectedStatus)
+            composeRule.onNodeWithContentDescription(
+                "Request overview preview: $expectedSummary. This may be incomplete.",
+                useUnmergedTree = true
+            ).assertExists()
         }
         composeRule.onAllNodesWithContentDescription("Request summary: Regression approval summary")
             .assertCountEquals(0)
