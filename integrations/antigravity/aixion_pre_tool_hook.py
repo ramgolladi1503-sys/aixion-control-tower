@@ -12,7 +12,6 @@ import math
 import os
 from pathlib import Path
 import re
-import stat
 import subprocess
 import sys
 import time
@@ -26,6 +25,7 @@ if _REPOSITORY_ROOT not in sys.path:
     sys.path.insert(0, _REPOSITORY_ROOT)
 
 from integrations.aixion_deadline_http import request as deadline_request  # noqa: E402
+from integrations.codex import host_security  # noqa: E402
 
 MAX_INPUT_BYTES = 128 * 1024
 MAX_ARGUMENTS_BYTES = 48 * 1024
@@ -734,13 +734,9 @@ def _configuration(env: dict[str, str], payload: dict[str, Any]) -> dict[str, st
     has_config_file = os.path.lexists(config_path)
     if has_config_file:
         try:
-            descriptor = os.open(config_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(descriptor, "rb") as stream:
-                metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-                    raise GateError("Agent config must be a regular file owned by this user")
-                if stat.S_IMODE(metadata.st_mode) & 0o077:
-                    raise GateError("Agent config permissions must exclude group and other users")
+            with host_security.open_private_file(
+                Path(config_path), require_private=True, reject_shared_write=True
+            ) as stream:
                 raw_config = stream.read(MAX_CONFIG_BYTES + 1)
             if len(raw_config) > MAX_CONFIG_BYTES:
                 raise GateError("Agent config exceeds its size limit")
@@ -750,7 +746,8 @@ def _configuration(env: dict[str, str], payload: dict[str, Any]) -> dict[str, st
                 parse_constant=_reject_nonstandard_json_constant,
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        except (OSError, host_security.HostSecurityError, json.JSONDecodeError,
+                UnicodeDecodeError, ValueError) as exc:
             raise GateError("Agent config is unreadable or invalid") from exc
         if not isinstance(config, dict):
             raise GateError("Agent config must be a JSON object")
@@ -872,15 +869,11 @@ def _agent_token(env: dict[str, str], config: dict[str, str]) -> str:
     token_path = env.get("AIXION_AGENT_TOKEN_FILE", "").strip()
     if token_path:
         try:
-            descriptor = os.open(token_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(descriptor, "rb") as stream:
-                metadata = os.fstat(stream.fileno())
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-                    raise GateError("Agent token file must be a regular file owned by this user")
-                if stat.S_IMODE(metadata.st_mode) & 0o077:
-                    raise GateError("Agent token file permissions must exclude group and other users")
+            with host_security.open_private_file(
+                Path(token_path), require_private=True, reject_shared_write=True
+            ) as stream:
                 token_bytes = stream.read(8193)
-        except OSError as exc:
+        except (OSError, host_security.HostSecurityError) as exc:
             raise GateError("Agent token file is unavailable") from exc
         if len(token_bytes) > 8192:
             raise GateError("Agent token file exceeds its size limit")

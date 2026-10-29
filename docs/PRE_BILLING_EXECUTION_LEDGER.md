@@ -1,5 +1,7 @@
 # Pre-Billing Execution Ledger
 
+**Antigravity protected-file checks use shared host security (2026-10-29; local validation):** Replaced Antigravity's POSIX-only `os.getuid()` and mode-bit checks for connector config and token files with the shared fail-closed host-security opener already used by Codex. On Windows, this enforces the existing explicit-user DACL and rejects reparse paths; POSIX keeps owner/mode checks. Added portable regression coverage for both protected-file paths and native Windows tests for valid config/token access, broad ACL rejection, and a reparse-point config path. The Windows workflow now compiles the Antigravity hook and runs these tests. Local full Antigravity suite passed **158 tests, 2 Windows-only tests skipped**; Python compilation and `git diff --check` passed. Native ACL assertions await the exact-head Windows CI run. This advances Antigravity Windows connector reliability only; it is not current native approval/phone proof and does not close the adapter-certification gate. No configuration, schema, cloud, billing, DNS, device, or production state changed.
+
 Updated: 2026-10-29
 PR #204: https://github.com/ramgolladi1503-sys/aixion-control-tower/pull/204
 PR state at inspection: OPEN, draft, unmerged

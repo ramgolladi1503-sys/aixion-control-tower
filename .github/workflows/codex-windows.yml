@@ -4,10 +4,14 @@ on:
   pull_request:
     paths:
       - "integrations/codex/**"
+      - "integrations/antigravity/aixion_pre_tool_hook.py"
+      - "integrations/antigravity/test_antigravity_host_security.py"
       - ".github/workflows/codex-windows.yml"
   push:
     paths:
       - "integrations/codex/**"
+      - "integrations/antigravity/aixion_pre_tool_hook.py"
+      - "integrations/antigravity/test_antigravity_host_security.py"
       - ".github/workflows/codex-windows.yml"
 
 permissions:
@@ -36,9 +40,13 @@ jobs:
           integrations/codex/host_security.py
           integrations/codex/setup_workspace.py
           integrations/codex/aixion_permission_request_hook.py
+          integrations/antigravity/aixion_pre_tool_hook.py
 
       - name: Run Windows ACL, reparse-point, credential, and install tests
         run: python -m pytest -q integrations/codex/test_codex_windows_security.py
+
+      - name: Run Antigravity protected-file and Windows ACL tests
+        run: python -m pytest -q integrations/antigravity/test_antigravity_host_security.py
 
       - name: Run portable Windows quoting and fail-closed credential tests
         run: >-
