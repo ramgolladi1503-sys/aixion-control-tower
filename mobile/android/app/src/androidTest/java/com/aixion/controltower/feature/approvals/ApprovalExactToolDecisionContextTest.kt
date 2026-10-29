@@ -105,6 +105,7 @@ class ApprovalExactToolDecisionContextTest {
             "Wrapped exact payload should occupy multiple lines for reading without horizontal scrolling",
             payloadNode.fetchSemanticsNode().boundsInRoot.height > 42f
         )
+        requestList.performScrollToNode(hasTestTag("approval-payload-wrap-toggle"))
         wrapToggle.performClick()
         composeRule.waitUntil(timeoutMillis = 1_000) {
             wrapToggle.fetchSemanticsNode().config[SemanticsProperties.ToggleableState] == ToggleableState.Off
