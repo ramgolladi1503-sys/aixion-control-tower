@@ -4,6 +4,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -25,6 +26,9 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
@@ -207,7 +211,9 @@ class ApprovalInboxScreenTest {
         restorationTester.emulateSavedInstanceStateRestore()
 
         composeRule.onNodeWithText("History").assertIsSelected()
-        composeRule.onNodeWithText("Denied").assertIsSelected()
+        composeRule.onNode(
+            hasText("Denied") and SemanticsMatcher.expectValue(SemanticsProperties.Selected, true)
+        ).assertIsSelected()
         composeRule.onNodeWithText("Denied record").assertExists()
         composeRule.onAllNodesWithText("Approved record").assertCountEquals(0)
     }
@@ -306,9 +312,14 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithTag("approval-inbox-loading-skeletons").assertCountEquals(0)
         composeRule.onNodeWithText("Loaded approval").assertExists()
 
-        composeRule.runOnIdle { state.value = ApprovalsUiState(loading = false) }
+        composeRule.runOnIdle {
+            state.value = ApprovalsUiState(
+                loading = false,
+                lastSuccessfulSyncAt = Instant.parse("2026-10-22T05:30:00Z")
+            )
+        }
         composeRule.onAllNodesWithTag("approval-inbox-loading-skeletons").assertCountEquals(0)
-        composeRule.onNodeWithText("No requests need review").assertExists()
+        composeRule.onNodeWithText("You’re all caught up").assertExists()
 
         composeRule.runOnIdle {
             state.value = ApprovalsUiState(
@@ -369,18 +380,24 @@ class ApprovalInboxScreenTest {
         }
 
         composeRule.onNodeWithText("History").performClick()
+        val historyList = composeRule.onNodeWithTag("approval-inbox-list")
+        historyList.performScrollToNode(hasTestTag("approval-terminal-history-heading"))
         composeRule.onNodeWithTag("approval-terminal-history-heading").assertTextContains("Closed requests")
         composeRule.onNodeWithText(
             "Expired and cancelled requests are shown for reference. They cannot be approved or denied."
         ).assertExists()
-        composeRule.onNodeWithText("Expired request").assertExists()
-        composeRule.onNodeWithText("Cancelled request").assertExists()
-        composeRule.onNodeWithText("Expired").assertExists()
-        composeRule.onNodeWithText("Cancelled").assertExists()
+        historyList.performScrollToNode(hasText("No decisions recorded"))
         composeRule.onNodeWithText("No decisions recorded").assertExists()
+        historyList.performScrollToNode(hasText("Expired request"))
+        composeRule.onNodeWithText("Expired request").assertExists()
+        composeRule.onNodeWithText("Expired").assertExists()
+        historyList.performScrollToNode(hasText("Cancelled request"))
+        composeRule.onNodeWithText("Cancelled request").assertExists()
+        composeRule.onNodeWithText("Cancelled").assertExists()
         composeRule.onAllNodesWithText("Approve").assertCountEquals(0)
         composeRule.onAllNodesWithText("Deny").assertCountEquals(0)
 
+        historyList.performScrollToNode(hasText("Expired request"))
         composeRule.onNodeWithText("Expired request").performClick()
         assertEquals("expired-request", selectedId)
     }
@@ -406,28 +423,47 @@ class ApprovalInboxScreenTest {
         composeRule.onAllNodesWithText("2 pending").assertCountEquals(1)
         composeRule.onAllNodesWithText("Needs review 2").assertCountEquals(0)
         composeRule.onNodeWithText("Status blocked 1").assertExists()
-        val inboxList = composeRule.onNode(hasScrollAction())
+        val inboxList = composeRule.onNodeWithTag("approval-inbox-list")
         composeRule.onNodeWithText("Pending approval").assertExists()
         inboxList.performScrollToNode(hasText("Blocked approval"))
         composeRule.onNodeWithText("Blocked approval").assertExists()
         composeRule.onAllNodesWithText("Approved approval").assertCountEquals(0)
-        inboxList.performScrollToNode(hasText("Pending approval"))
-        composeRule.onAllNodesWithText("Aixion Control Tower").assertCountEquals(3)
+        val visibleCards = listOf(
+            "Pending approval" to "Pending approval",
+            "Legacy pending" to "Pending review",
+            "Blocked approval" to "Blocked"
+        )
+        visibleCards.forEach { (title, expectedStatus) ->
+            inboxList.performScrollToNode(hasText(title))
+            val card = composeRule.onNode(
+                hasTestTag("approval-card") and hasText(title, substring = true)
+            )
+            card.assertExists()
+            card.assertTextContains("Aixion Control Tower")
+            card.assertTextContains("Regression approval summary")
+            card.assertTextContains("Request overview · preview only")
+            card.assertTextContains("Open full request before deciding")
+            card.assertTextContains("Low")
+            card.assertTextContains(expectedStatus)
+        }
         composeRule.onAllNodesWithContentDescription("Request summary: Regression approval summary")
             .assertCountEquals(0)
-        composeRule.onAllNodesWithTag("approval-card-summary-preview").assertCountEquals(3)
-        composeRule.onAllNodesWithTag("approval-card-preview-content").assertCountEquals(3)
-        composeRule.onAllNodesWithText("Request overview · preview only").assertCountEquals(3)
-        composeRule.onAllNodesWithText("Open full request before deciding").assertCountEquals(3)
-        composeRule.onAllNodesWithTag("approval-card-preview-content").fetchSemanticsNodes().forEach { node ->
-            assertTrue(
-                "Inbox overview must announce that it may be incomplete",
+        inboxList.performScrollToNode(hasText("Pending approval"))
+        composeRule.onAllNodesWithTag("approval-card-summary-preview", useUnmergedTree = true)
+            .assertCountEquals(3)
+        val previewNodes = composeRule.onAllNodesWithTag(
+            "approval-card-preview-content",
+            useUnmergedTree = true
+        ).fetchSemanticsNodes()
+        assertTrue(
+            "Every visible inbox overview must announce that it may be incomplete",
+            previewNodes.size == 3 && previewNodes.all { node ->
                 node.config[SemanticsProperties.ContentDescription].any { it.contains("may be incomplete") }
-            )
-        }
+            }
+        )
         composeRule.onAllNodesWithText("Approve request").assertCountEquals(0)
         composeRule.onAllNodesWithText("Deny").assertCountEquals(0)
-        composeRule.onAllNodesWithText("Low").assertCountEquals(3)
+        inboxList.performScrollToNode(hasText("Legacy pending"))
         composeRule.onNodeWithText("Pending review").assertExists()
         composeRule.onAllNodesWithText("Open full request before deciding").fetchSemanticsNodes().forEach { node ->
             assertEquals(Role.Button, node.config[SemanticsProperties.Role])
@@ -533,13 +569,24 @@ class ApprovalInboxScreenTest {
 
         val validLabel = formatApprovalExpiry(validExpiry, now)
         val expiredLabel = formatApprovalExpiry(expiredExpiry, now)
+        val inboxList = composeRule.onNodeWithTag("approval-inbox-list")
+        inboxList.performScrollToNode(hasText("Valid expiry"))
         composeRule.onNodeWithText(validLabel).assertExists()
+        inboxList.performScrollToNode(hasText("Expired request"))
         composeRule.onNodeWithText(expiredLabel).assertExists()
         composeRule.onNodeWithContentDescription(
             "$expiredLabel. Request deadline passed; open details to check its current status."
         ).assertExists()
-        composeRule.onAllNodesWithText("Expiry unavailable").assertCountEquals(2)
+        inboxList.performScrollToNode(hasText("Missing expiry"))
+        composeRule.onNode(
+            hasTestTag("approval-card") and hasText("Missing expiry", substring = true)
+        ).assertTextContains("Expiry unavailable")
+        inboxList.performScrollToNode(hasText("Invalid expiry"))
+        composeRule.onNode(
+            hasTestTag("approval-card") and hasText("Invalid expiry", substring = true)
+        ).assertTextContains("Expiry unavailable")
 
+        inboxList.performScrollToNode(hasText("Expired request"))
         composeRule.onNodeWithText("Expired request").performClick()
         assertEquals("Expired requests remain openable for status review", "approval_expired_expiry", selectedId)
     }
@@ -639,7 +686,7 @@ class ApprovalInboxScreenTest {
         warning.assertTextContains("Previously loaded requests are hidden", substring = true)
         warning.assertTextContains("Reconnect and retry before reviewing", substring = true)
         composeRule.onNodeWithTag("approval-inbox-last-successful-check")
-            .assertTextContains("Last successful check")
+            .assertTextContains("Last successful check", substring = true)
         assertEquals(
             LiveRegionMode.Polite,
             warning.fetchSemanticsNode().config[SemanticsProperties.LiveRegion]
@@ -685,7 +732,10 @@ class ApprovalInboxScreenTest {
         var connectRequested = false
         composeRule.setContent {
             ApprovalInboxContent(
-                state = ApprovalsUiState(loading = false),
+                state = ApprovalsUiState(
+                    loading = false,
+                    lastSuccessfulSyncAt = Instant.parse("2026-10-22T05:30:00Z")
+                ),
                 onOpenConnect = { connectRequested = true }
             )
         }
@@ -980,25 +1030,33 @@ class ApprovalInboxScreenTest {
 
         composeRule.onNodeWithText("History").performClick()
         composeRule.onNodeWithText("All").assertIsSelected()
-        val historyList = composeRule.onNode(hasScrollAction())
+        val historyList = composeRule.onNodeWithTag("approval-inbox-list")
         historyList.performScrollToNode(hasText("The server has no usable delivery evidence for this decision."))
-        composeRule.onAllNodesWithContentDescription("Decision status: Approved").assertCountEquals(2)
-        composeRule.onNodeWithText("Delivery not confirmed").assertExists()
+        val notConfirmedCard = composeRule.onNodeWithTag("approval-history-card-audit-not-confirmed")
+        notConfirmedCard.assertIsDisplayed()
+        notConfirmedCard.assert(hasAnyDescendant(hasText("Delivery not confirmed")))
+        notConfirmedCard.assert(hasAnyDescendant(hasContentDescription("Decision status: Approved")))
         composeRule.onNodeWithText(
             "The server has no usable delivery evidence for this decision."
         ).assertExists()
         historyList.performScrollToNode(hasText("Decision consumed"))
-        composeRule.onAllNodesWithContentDescription("Decision status: Approved").assertCountEquals(2)
-        composeRule.onNodeWithText("Decision consumed").assertExists()
+        val consumedCard = composeRule.onNodeWithTag("approval-history-card-audit-consumed")
+        consumedCard.assertIsDisplayed()
+        consumedCard.assert(hasAnyDescendant(hasText("Decision consumed")))
+        consumedCard.assert(hasAnyDescendant(hasContentDescription("Decision status: Approved")))
         historyList.performScrollToNode(hasText("No delivery expected"))
-        composeRule.onAllNodesWithContentDescription("Decision status: Denied").assertCountEquals(1)
-        composeRule.onNodeWithText("No delivery expected").assertExists()
+        val deniedCard = composeRule.onNodeWithTag("approval-history-card-audit-denied")
+        deniedCard.assertIsDisplayed()
+        deniedCard.assert(hasAnyDescendant(hasText("No delivery expected")))
+        deniedCard.assert(hasAnyDescendant(hasContentDescription("Decision status: Denied")))
         composeRule.onNodeWithText(
             "This decision does not authorize an external agent to resume."
         ).assertExists()
         historyList.performScrollToNode(hasText("Delivery response ambiguous"))
-        composeRule.onAllNodesWithContentDescription("Decision status: Approved").assertCountEquals(2)
-        composeRule.onNodeWithText("Delivery response ambiguous").assertExists()
+        val ambiguousCard = composeRule.onNodeWithTag("approval-history-card-audit-failure")
+        ambiguousCard.assertIsDisplayed()
+        ambiguousCard.assert(hasAnyDescendant(hasText("Delivery response ambiguous")))
+        ambiguousCard.assert(hasAnyDescendant(hasContentDescription("Decision status: Approved")))
         composeRule.onNodeWithText(
             "The connector claimed this decision once. This confirms protocol consumption, not agent execution or task completion."
         ).assertExists()

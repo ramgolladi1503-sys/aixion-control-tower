@@ -16,8 +16,11 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
@@ -35,7 +38,8 @@ class ConnectorsScreenTest {
 
         composeRule.onNodeWithText("Set up a project").assertExists()
         composeRule.onNodeWithText("Connect an agent").assertExists()
-        composeRule.onNodeWithText("How connection works").performClick()
+        scrollUntilTextIsComposed("How connection works")
+        composeRule.onNodeWithText("How connection works").performScrollTo().performClick()
         composeRule.onNodeWithText("Before you connect").assertExists()
         composeRule.onNodeWithText("Open the project").assertExists()
         composeRule.onNodeWithText(
@@ -84,6 +88,7 @@ class ConnectorsScreenTest {
             "The decision returns to the same waiting task only while its computer, session, and API remain reachable."
         composeRule.setContent { ConnectorsContent() }
 
+        scrollUntilTextIsComposed("How connection works")
         composeRule.onNodeWithText("How connection works").performScrollTo().performClick()
         composeRule.onNodeWithText("When an approval arrives")
             .performScrollTo()
@@ -104,18 +109,20 @@ class ConnectorsScreenTest {
         composeRule.setContent { ConnectorsContent() }
 
         composeRule.onNodeWithText("Open Antigravity setup").assertExists()
+        scrollUntilTextIsComposed("How connection works")
         composeRule.onNodeWithText("How connection works")
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Collapsed"))
         composeRule.onNodeWithText("Before you connect").assertDoesNotExist()
 
-        composeRule.onNodeWithText("How connection works").performClick()
+        composeRule.onNodeWithText("How connection works").performScrollTo().performClick()
         composeRule.onNodeWithText("Hide connection details")
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Expanded"))
         composeRule.onNodeWithText("Before you connect").assertExists()
         composeRule.onNodeWithText("Keep the computer available").assertExists()
-        composeRule.onNodeWithText("When an approval arrives").assertExists()
-        composeRule.onNodeWithText("Hide connection details").performClick()
+        composeRule.onNodeWithText("When an approval arrives").performScrollTo().assertExists()
+        composeRule.onNodeWithText("Hide connection details").performScrollTo().performClick()
         composeRule.onNodeWithText("Before you connect").assertDoesNotExist()
+        scrollUntilTextIsComposed("Open Antigravity setup")
         composeRule.onNodeWithText("Open Antigravity setup").assertExists()
     }
 
@@ -207,12 +214,15 @@ class ConnectorsScreenTest {
     @Test
     fun providerChoiceComesBeforePrerequisitesAndBothSectionsAreHeadings() {
         composeRule.setContent {
-            Box(modifier = Modifier.width(390.dp).height(1800.dp)) {
-                ConnectorsContent()
+            CompositionLocalProvider(LocalDensity provides Density(density = 1f)) {
+                Box(modifier = Modifier.width(390.dp).height(1800.dp)) {
+                    ConnectorsContent()
+                }
             }
         }
 
         val providerHeading = composeRule.onNodeWithText("Choose a provider")
+        providerHeading.assertIsDisplayed()
         composeRule.onNodeWithText("How connection works").performClick()
         val prerequisiteHeading = composeRule.onNodeWithText("Before you connect")
         providerHeading.assertIsDisplayed()
@@ -230,5 +240,15 @@ class ConnectorsScreenTest {
             "Prerequisites should be announced as a heading",
             prerequisiteHeading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
         )
+    }
+
+    private fun scrollUntilTextIsComposed(text: String) {
+        repeat(10) {
+            if (composeRule.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()) {
+                return
+            }
+            composeRule.onRoot().performTouchInput { swipeUp() }
+        }
+        composeRule.onNodeWithText(text).assertExists()
     }
 }

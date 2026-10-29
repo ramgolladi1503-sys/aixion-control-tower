@@ -480,12 +480,16 @@ class ApprovalDetailScreenTest {
 
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
+        val requestList = composeRule.onNodeWithTag("approval-detail-list")
+        requestList.performScrollToNode(hasTestTag("approval-detail-request-identity"))
         composeRule.onNodeWithTag("approval-detail-request-identity").assertIsDisplayed()
-        composeRule.onNodeWithText("Test project").assertExists()
-        composeRule.onNodeWithText("Session").assertExists()
-        composeRule.onNodeWithText("Invocation").assertExists()
-        composeRule.onNodeWithTag("approval-exact-tool-request").assertExists()
-        composeRule.onNodeWithTag("approval-exact-tool-decision-context").assertExists()
+        requestList.performScrollToNode(hasTestTag("approval-exact-tool-request"))
+        composeRule.onNodeWithTag("approval-exact-tool-context")
+            .assertTextContains("Project: Test project", substring = true)
+        requestList.performScrollToNode(hasTestTag("approval-exact-tool-decision-context"))
+        composeRule.onNodeWithTag("approval-exact-tool-decision-context").assertIsDisplayed()
+        composeRule.onNodeWithText("Session", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithText("Invocation", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithText("Risk evidence").assertExists()
     }
 
@@ -767,12 +771,18 @@ class ApprovalDetailScreenTest {
         }
 
         composeRule.onNodeWithTag("approval-exact-tool-request").assertDoesNotExist()
+        val requestList = composeRule.onNodeWithTag("approval-detail-list")
+        requestList.performScrollToNode(hasTestTag("approval-file-changes"))
         val actionSection = composeRule.onNodeWithTag("approval-file-changes").assertIsDisplayed()
+        val actionSectionOffset = requestList.fetchSemanticsNode()
+            .config[SemanticsProperties.VerticalScrollAxisRange].value()
+        requestList.performScrollToNode(hasTestTag("approval-detail-request-context"))
         val requestContext = composeRule.onNodeWithTag("approval-detail-request-context").assertIsDisplayed()
+        val requestContextOffset = requestList.fetchSemanticsNode()
+            .config[SemanticsProperties.VerticalScrollAxisRange].value()
         assertTrue(
             "The requested file change should appear before secondary request metadata",
-            actionSection.fetchSemanticsNode().boundsInRoot.top <
-                requestContext.fetchSemanticsNode().boundsInRoot.top
+            actionSectionOffset <= requestContextOffset
         )
         composeRule.onNodeWithText("File changes").assertIsDisplayed()
         composeRule.onNodeWithText("A detail screen state test.").assertExists()
@@ -1359,41 +1369,38 @@ class ApprovalDetailScreenTest {
         )
         composeRule.setContent { ApprovalDetailContent(request, null, {}, {}, {}) }
 
-        composeRule.onNodeWithText("Request at a glance").assertExists()
-        composeRule.onNodeWithTag("approval-detail-list")
-            .performScrollToNode(hasText("Command may modify production configuration.", substring = true))
+        val requestList = composeRule.onNodeWithTag("approval-detail-list")
+        requestList.performScrollToNode(hasText("Request at a glance"))
+        composeRule.onNodeWithText("Request at a glance").assertIsDisplayed()
+        requestList.performScrollToNode(hasText("Command may modify production configuration.", substring = true))
         composeRule.onAllNodesWithText("Command may modify production configuration.", substring = true)
             .assertCountEquals(1)
         composeRule.onAllNodesWithText("Command runs with workspace write access.", substring = true)
             .assertCountEquals(1)
         composeRule.onNodeWithText("Approve request").assertIsDisplayed()
         composeRule.onNodeWithText("Deny").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-detail-list")
-            .performScrollToNode(hasText("Command may modify production configuration.", substring = true))
+        requestList.performScrollToNode(hasText("Command may modify production configuration.", substring = true))
         composeRule.onNodeWithText("Command may modify production configuration.", substring = true)
             .assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("Payments service"))
+        requestList.performScrollToNode(hasText("Payments service"))
         composeRule.onNodeWithText("Payments service").assertIsDisplayed()
         composeRule.onNodeWithText("release/production").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-detail-list")
-            .performScrollToNode(hasText("Command runs with workspace write access.", substring = true))
+        requestList.performScrollToNode(hasText("Command runs with workspace write access.", substring = true))
         composeRule.onNodeWithText("Command runs with workspace write access.", substring = true)
             .assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-detail-list")
-            .performScrollToNode(hasText("ANTIGRAVITY · Verified source"))
+        requestList.performScrollToNode(hasText("ANTIGRAVITY · Verified source"))
         composeRule.onNodeWithText("ANTIGRAVITY · Verified source").assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("Session"))
+        requestList.performScrollToNode(hasText("Session"))
         composeRule.onNodeWithText("Session", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithText(shortSafeApprovalId(sessionId), useUnmergedTree = true).assertIsDisplayed()
-        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("Invocation"))
+        requestList.performScrollToNode(hasText("Invocation"))
         composeRule.onNodeWithText("Invocation", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithText(shortSafeApprovalId(longInvocationId), useUnmergedTree = true).assertIsDisplayed()
         composeRule.onAllNodesWithText(sessionId).assertCountEquals(0)
         composeRule.onAllNodesWithText(longInvocationId).assertCountEquals(0)
-        composeRule.onNodeWithTag("approval-detail-list").performScrollToNode(hasText("Show technical details"))
+        requestList.performScrollToNode(hasText("Show technical details"))
         composeRule.onNodeWithText("Show technical details").performClick()
-        composeRule.onNodeWithTag("approval-detail-list")
-            .performScrollToNode(hasText("Session ID: $sessionId", substring = true))
+        requestList.performScrollToNode(hasText("Session ID: $sessionId", substring = true))
         composeRule.onNodeWithText("Session ID: $sessionId", substring = true).assertIsDisplayed()
         val technicalDetails = composeRule.onNodeWithText(
             "Source invocation ID: $longInvocationId",

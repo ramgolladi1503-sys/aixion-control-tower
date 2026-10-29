@@ -104,7 +104,10 @@ class NotificationPermissionAnnouncementsTest {
         }
 
         composeRule.onNodeWithText("This device could not be registered for approval alerts.").assertExists()
-        composeRule.onNodeWithText("Server registration failed. Reopen Account to retry.", substring = true).assertExists()
+        composeRule.onNodeWithText(
+            "Registration could not be completed. Reopen Account to retry.",
+            substring = true
+        ).assertExists()
         composeRule.onAllNodes(SemanticsMatcher.keyIsDefined(SemanticsProperties.LiveRegion), useUnmergedTree = true)
             .assertCountEquals(1)
     }

@@ -756,7 +756,10 @@ internal fun ApprovalDeliveryStatusContent(
 private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
     val palette = LocalTowerPalette.current
     val decisionLabel = event.decision.let(::decisionHistoryLabel)
-    TowerPanel(elevated = true) {
+    TowerPanel(
+        modifier = Modifier.testTag("approval-history-card-${event.eventId}"),
+        elevated = true
+    ) {
         StatusBadge(
             decisionLabel,
             modifier = Modifier.semantics(mergeDescendants = true) {
