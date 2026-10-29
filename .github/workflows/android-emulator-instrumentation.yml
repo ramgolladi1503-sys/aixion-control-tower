@@ -6,6 +6,8 @@ on:
       - "mobile/android/**"
       - ".github/workflows/android-emulator-instrumentation.yml"
   push:
+    branches:
+      - main
     paths:
       - "mobile/android/**"
       - ".github/workflows/android-emulator-instrumentation.yml"
