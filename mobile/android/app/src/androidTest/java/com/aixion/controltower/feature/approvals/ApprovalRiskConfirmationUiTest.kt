@@ -9,6 +9,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performScrollToNode
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
@@ -36,6 +39,12 @@ class ApprovalRiskConfirmationUiTest {
             )
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review"))
+        composeRule.onNodeWithTag("approval-full-diff-review").performClick()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review-acknowledgement"))
+        composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement").performClick()
         composeRule.onNodeWithText("Approve request").assertIsEnabled().performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
         composeRule.onNodeWithText("High impact operation", substring = true).assertExists()
@@ -70,6 +79,12 @@ class ApprovalRiskConfirmationUiTest {
             )
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review"))
+        composeRule.onNodeWithTag("approval-full-diff-review").performClick()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review-acknowledgement"))
+        composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement").performClick()
         composeRule.onNodeWithText("Approve request").performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
         composeRule.onNodeWithText("Provider: Antigravity", substring = true).assertExists()
@@ -88,6 +103,8 @@ class ApprovalRiskConfirmationUiTest {
         val approval = approval(RiskLevel.HIGH).copy(
             sourceProvider = "CODEX",
             verifiedSource = true,
+            sourceAgentId = "codex-installation-test",
+            sourceSessionId = "session-42",
             sourceInvocationId = "codex:session-42:tool-991",
             files = listOf(
                 FileChangeSummary(
@@ -109,12 +126,15 @@ class ApprovalRiskConfirmationUiTest {
             )
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-exact-tool-review-acknowledgement"))
         composeRule.onNodeWithTag("approval-exact-tool-review-acknowledgement").performClick()
         composeRule.onNodeWithText("Approve request").assertIsEnabled().performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
-        composeRule.onAllNodesWithText(displayedDiff).assertCountEquals(2)
-        composeRule.onAllNodesWithText(executableContent).assertCountEquals(2)
+        composeRule.onNodeWithTag("approval-confirmation-tool-arguments").assertExists()
         composeRule.onNodeWithTag("approval-confirmation-executable-content").assertExists()
+        composeRule.onAllNodesWithText(displayedDiff).assertCountEquals(1)
+        composeRule.onAllNodesWithText(executableContent).assertCountEquals(1)
     }
 
     @Test
@@ -142,13 +162,18 @@ class ApprovalRiskConfirmationUiTest {
             )
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review"))
         composeRule.onNodeWithTag("approval-full-diff-review").performClick()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review-acknowledgement"))
         composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement").performClick()
         composeRule.onNodeWithText("Approve request").assertIsEnabled().performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
-        composeRule.onAllNodesWithText(displayedDiff).assertCountEquals(2)
-        composeRule.onAllNodesWithText(resultingContent).assertCountEquals(2)
+        composeRule.onNodeWithTag("approval-confirmation-tool-arguments").assertExists()
         composeRule.onNodeWithTag("approval-confirmation-executable-content").assertExists()
+        composeRule.onAllNodesWithText(displayedDiff).assertCountEquals(1)
+        composeRule.onAllNodesWithText(resultingContent).assertCountEquals(1)
     }
 
     @Test
@@ -165,6 +190,12 @@ class ApprovalRiskConfirmationUiTest {
             )
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review"))
+        composeRule.onNodeWithTag("approval-full-diff-review").performClick()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review-acknowledgement"))
+        composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement").performClick()
         composeRule.onNodeWithText("Approve request").assertIsEnabled().performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
         composeRule.runOnIdle {
@@ -190,6 +221,12 @@ class ApprovalRiskConfirmationUiTest {
             )
         }
 
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review"))
+        composeRule.onNodeWithTag("approval-full-diff-review").performClick()
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasTestTag("approval-full-diff-review-acknowledgement"))
+        composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement").performClick()
         composeRule.onNodeWithText("Approve request").performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
         composeRule.onNodeWithText("High impact operation", substring = true).assertExists()
@@ -201,6 +238,8 @@ class ApprovalRiskConfirmationUiTest {
         composeRule.waitForIdle()
 
         composeRule.onAllNodesWithText("Confirm high-risk approval").assertCountEquals(0)
+        composeRule.onNodeWithTag("approval-detail-list")
+            .performScrollToNode(hasText("Different production action"))
         composeRule.onNodeWithText("Different production action").assertExists()
         composeRule.runOnIdle {
             assertEquals("A changed snapshot must not inherit the prior confirmation", 0, decisionCount)
