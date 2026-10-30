@@ -84,7 +84,8 @@ region, but the region-specific calculator export remains pending.
 | Cloud Monitoring | Google Cloud metrics only; no custom metrics, Prometheus, uptime checks, or synthetic monitors | Assumed non-chargeable system metrics; confirm actual metric inventory | **$0.00 assumed** |
 | **Known reference-rate subtotal** | Includes one global HTTPS forwarding rule; excludes unresolved items listed below | Sum of the rows above | **$51.08** |
 
-The subtotal is **not all-in**. It includes the known Cloud SQL compute line at a
+The subtotal is **not all-in** and must not be represented as the all-in monthly
+cost. It includes the known Cloud SQL compute line at a
 non-regional reference rate and one global forwarding-rule fee, while Cloud SQL
 storage, backup/PITR, load-balancer data processing, internet egress, taxes,
 billing-account free-tier consumption, and the selected Mumbai rates are not

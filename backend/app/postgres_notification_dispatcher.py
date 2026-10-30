@@ -99,9 +99,11 @@ def dispatch_one_postgres_push(
 ) -> str | None:
     """Claim and deliver one PostgreSQL outbox row using injected persistence.
 
-    The service is intentionally not started by the current SQLite-backed API.
-    A future PostgreSQL application binding can inject the repository without
-    changing the provider transport or duplicating retry policy.
+    The FastAPI lifespan starts this worker only when the complete PostgreSQL
+    application repository bundle is selected and inline push dispatch is
+    enabled. The worker uses the injected outbox for claims, target lookup,
+    outcome persistence, and invalid-token cleanup; it does not read the local
+    SQLite notification or device maps.
     """
     settings = get_settings()
     if not settings.push_dispatch_enabled:
