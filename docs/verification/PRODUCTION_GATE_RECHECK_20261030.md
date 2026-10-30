@@ -13,7 +13,7 @@ This checkpoint records evidence for the four locked production gates. It is not
 ## 2. Hosted HTTPS and remote notification delivery
 
 - Read-only DNS lookups returned no A, AAAA, or CNAME record for `api.aixionlab.com`. The Spaceship screen does not identify an approved hosting target or address; no DNS record was changed.
-- Read-only Google Cloud CLI inspection could not list projects because the active token refresh failed with `invalid_grant`. No project or billing state was changed, and no hosting target was selected.
+- Google Cloud authentication was refreshed for `madhuri.kalidindi03@gmail.com`. One active project was visible: `project-bbf1eaa4-b9d8-4b2d-b86` (`My First Project`). It is selected as the local `gcloud` default per the owner instruction to use an existing project; billing is disabled. No service, resource, or billing setting was changed, and no production hosting target is selected.
 - The isolated API at `127.0.0.1:8004` returned HTTP 200 from `/health`. Read-only PostgreSQL activity showed API connections to the isolated `aixion_phone_e2e` database. This is local test evidence only.
 - A temporary emulator-only NAT rule, scoped to Control Tower debug UID `10207` and destination `10.0.2.2:8000`, routes to local API port `8004`. It does not create a public endpoint.
 - No hosted HTTPS, FCM delivery, deep-link routing, or locked-phone approve/deny has been verified. No cloud project/resource or paid setting was changed under the pre-billing lock.
