@@ -105,11 +105,38 @@ jobs:
             "-PAIXION_VERSION_CODE=${AIXION_VERSION_CODE}" \
             "-PAIXION_VERSION_NAME=${AIXION_VERSION_NAME}"
 
+      - name: Verify signed release AAB
+        id: verify_aab
+        working-directory: mobile/android
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          release_aabs=(app/build/outputs/bundle/release/*.aab)
+          if [[ "${#release_aabs[@]}" -ne 1 ]]; then
+            echo "Expected exactly one release AAB; found ${#release_aabs[@]}." >&2
+            exit 1
+          fi
+
+          aab="${release_aabs[0]}"
+          if ! verification_output="$(LC_ALL=C jarsigner -verify "$aab" 2>&1)"; then
+            printf '%s\n' "$verification_output" >&2
+            echo "JDK signature verification failed for release AAB." >&2
+            exit 1
+          fi
+          printf '%s\n' "$verification_output"
+          if ! grep -Fq 'jar verified.' <<< "$verification_output"; then
+            echo "Release AAB has no verified JAR signature." >&2
+            exit 1
+          fi
+
+          echo "path=mobile/android/$aab" >> "$GITHUB_OUTPUT"
+
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
-          path: mobile/android/app/build/outputs/bundle/release/*.aab
+          path: ${{ steps.verify_aab.outputs.path }}
           if-no-files-found: error
           retention-days: 14
 

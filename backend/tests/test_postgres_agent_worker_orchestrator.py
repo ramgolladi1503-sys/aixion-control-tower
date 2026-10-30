@@ -452,3 +452,123 @@ def test_cli_postgres_flag_opens_probes_and_closes_runtime(monkeypatch, capsys) 
     assert exit_code == 0
     assert state == {"opened": True, "probed": True, "closed": True, "called": True}
     assert '"success": true' in capsys.readouterr().out
+
+
+def test_cli_postgres_auth_mode_selects_runtime_without_flag(monkeypatch, capsys) -> None:
+    state = {"opened": False, "probed": False, "closed": False, "called": False}
+    task_repository = object()
+    approval_repository = object()
+    audit_repository = object()
+
+    class RuntimeStub:
+        repositories = SimpleNamespace(
+            agent_tasks=task_repository,
+            approval_decisions=approval_repository,
+            audit_events=audit_repository,
+        )
+
+        @classmethod
+        def from_environment(cls):
+            return cls()
+
+        def open(self, *, wait: bool = False) -> None:
+            assert wait is True
+            state["opened"] = True
+
+        def probe(self):
+            state["probed"] = True
+            schema = SimpleNamespace(ready=True, missing_migration_ids=())
+            return SimpleNamespace(ready=True, schema=schema)
+
+        def close(self) -> None:
+            state["closed"] = True
+
+    def run_flow(**kwargs):
+        state["called"] = True
+        assert kwargs["task_repository"] is task_repository
+        assert kwargs["approval_repository"] is approval_repository
+        assert kwargs["audit_repository"] is audit_repository
+        return orchestrator_module.AgentWorkerOrchestrationResult(
+            success=True, task_id=kwargs["task_id"]
+        )
+
+    store.reset()
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            profile="local", is_production=False, postgres_auth_enabled=True
+        ),
+    )
+    monkeypatch.setattr(orchestrator_module, "PostgresRuntime", RuntimeStub)
+    monkeypatch.setattr(orchestrator_module, "run_approved_agent_task_worker_flow", run_flow)
+
+    exit_code = orchestrator_module.main(["--task-id", "task", "--json"])
+
+    assert exit_code == 0
+    assert state == {"opened": True, "probed": True, "closed": True, "called": True}
+    assert '"success": true' in capsys.readouterr().out
+    assert store.agent_tasks == {}
+    assert store.agent_task_events == {}
+    assert store.audit_events == []
+
+
+def test_cli_postgres_auth_mode_unready_runtime_fails_closed_without_worker_call(
+    monkeypatch, capsys,
+) -> None:
+    state = {"opened": False, "probed": False, "closed": False}
+
+    class UnreadyRuntimeStub:
+        repositories = SimpleNamespace(
+            agent_tasks=object(),
+            approval_decisions=object(),
+            audit_events=object(),
+        )
+
+        @classmethod
+        def from_environment(cls):
+            return cls()
+
+        def open(self, *, wait: bool = False) -> None:
+            assert wait is True
+            state["opened"] = True
+
+        def probe(self):
+            state["probed"] = True
+            schema = SimpleNamespace(
+                ready=False, missing_migration_ids=("20261030_worker_schema",)
+            )
+            return SimpleNamespace(ready=False, schema=schema)
+
+        def close(self) -> None:
+            state["closed"] = True
+
+    def unexpected_worker_call(**_kwargs):
+        pytest.fail("an unready PostgreSQL runtime must not start worker flow")
+
+    store.reset()
+    monkeypatch.setattr(
+        orchestrator_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            profile="local", is_production=False, postgres_auth_enabled=True
+        ),
+    )
+    monkeypatch.setattr(orchestrator_module, "PostgresRuntime", UnreadyRuntimeStub)
+    monkeypatch.setattr(
+        orchestrator_module,
+        "run_approved_agent_task_worker_flow",
+        unexpected_worker_call,
+    )
+
+    exit_code = orchestrator_module.main(["--task-id", "task", "--json"])
+
+    assert exit_code == 1
+    assert state == {"opened": True, "probed": True, "closed": True}
+    output = capsys.readouterr().out
+    assert '"success": false' in output
+    assert "PostgreSQL schema is not ready" in output
+    assert "20261030_worker_schema" in output
+    assert store.agent_tasks == {}
+    assert store.agent_task_events == {}
+    assert store.audit_events == []

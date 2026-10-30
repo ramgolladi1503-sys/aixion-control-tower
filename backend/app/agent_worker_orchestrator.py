@@ -407,7 +407,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--no-isolated-workspace", action="store_true")
     parser.add_argument("--no-container-validation", action="store_true")
-    parser.add_argument("--postgres", action="store_true", help="Use the configured PostgreSQL runtime; production profile selects PostgreSQL automatically.")
+    parser.add_argument(
+        "--postgres",
+        action="store_true",
+        help=(
+            "Use the configured PostgreSQL runtime; production profile and "
+            "PostgreSQL-auth mode select PostgreSQL automatically."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -416,7 +423,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         settings = get_settings()
-        postgres_mode = args.postgres or settings.profile == "production"
+        postgres_mode = (
+            args.postgres
+            or settings.profile == "production"
+            or settings.postgres_auth_enabled
+        )
         if postgres_mode:
             if settings.profile == "production":
                 settings = validate_startup_environment()

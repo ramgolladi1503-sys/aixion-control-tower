@@ -188,6 +188,28 @@ def test_signed_release_workflow_does_not_interpolate_dispatch_inputs_into_shell
     assert "run: rm -f mobile/android/app/google-services.json" in workflow
 
 
+def test_signed_aab_is_uniquely_resolved_and_verified_before_upload() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    build_position = workflow.index("      - name: Build signed release AAB")
+    verify_position = workflow.index("      - name: Verify signed release AAB")
+    upload_position = workflow.index("      - name: Upload signed AAB artifact")
+    assert build_position < verify_position < upload_position
+
+    verify_step = workflow[verify_position:upload_position]
+    assert "id: verify_aab" in verify_step
+    assert "working-directory: mobile/android" in verify_step
+    assert "release_aabs=(app/build/outputs/bundle/release/*.aab)" in verify_step
+    assert '[[ "${#release_aabs[@]}" -ne 1 ]]' in verify_step
+    assert 'LC_ALL=C jarsigner -verify "$aab"' in verify_step
+    assert "grep -Fq 'jar verified.'" in verify_step
+    assert 'echo "path=mobile/android/$aab" >> "$GITHUB_OUTPUT"' in verify_step
+
+    upload_step = workflow[upload_position:]
+    assert "path: ${{ steps.verify_aab.outputs.path }}" in upload_step
+    assert "app/build/outputs/bundle/release/*.aab" not in upload_step
+
+
 def test_android_ci_compiles_release_variant_without_signing_or_publishing() -> None:
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     marker = "      - name: Compile Android release variant without signing or publishing"
