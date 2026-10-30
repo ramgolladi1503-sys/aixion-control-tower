@@ -11,6 +11,7 @@ The existing `aixion-approval-api35-local` AVD now reaches Android boot-complete
 - ADB reached `device`, and `sys.boot_completed` reached `1`. Android package, activity, and window services became available.
 - The Control Tower debug package was already installed and was opened. Android produced an ANR during startup; the app process was observed in `D` state waiting in a file read of its installed `base.apk`. System services and other applications also reported startup delays/ANRs. This is evidence of a slow or stalled guest storage/startup path; it does not establish the underlying host cause.
 - `adb root` was used briefly to inspect guest process state and was reverted with `adb unroot`; ADB returned to the normal `shell` user.
+- On a later recovery attempt, the Android “Wait” action did not dismiss the ANR. The app was on its sign-in screen with no credentials entered or active session, so only its unresponsive process was stopped (equivalent to Android’s “Close app”); the same installed activity was relaunched without clearing app data. It remained on the launch splash, Android logged another ANR, then returned to the launcher and removed the app process. The package remains installed. This is not a recovered app session and no approval was made on this AVD.
 
 ## Backend endpoint mismatch
 
@@ -18,7 +19,7 @@ The sign-in screen displayed `Failed to connect to /10.0.2.2:8004`. A read-only 
 
 ## Remaining verification
 
-- Wait for the AVD and app to become responsive before using the emulator.
+- The AVD itself is booted, but the app still hangs on cold launch; keep its user data intact while investigating the guest storage/startup path.
 - Identify and start the intended isolated API endpoint for this app build; do not redirect it to the SQLite-only port 8003.
 - The missed request `approval_2ce511ce6cb7` remains **missed/expired**, not denied. No decision or same-invocation result is claimed.
 - After the correct backend and app are responsive, create a fresh request only under the existing authorization and record the exact phone decision and resumed invocation.
