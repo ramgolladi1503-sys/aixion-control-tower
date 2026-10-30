@@ -128,6 +128,9 @@ resource "google_sql_database_instance" "staging" {
 
   lifecycle {
     prevent_destroy = true
+    # Cloud SQL can grow disk_size up to the configured limit. Do not let a
+    # later plan attempt to shrink or replace the database to match the seed.
+    ignore_changes = [settings[0].disk_size]
   }
 }
 
