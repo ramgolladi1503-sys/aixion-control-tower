@@ -37,5 +37,5 @@ This checkpoint records evidence for the four locked production gates. It is not
 - Repository: `ramgolladi1503-sys/aixion-control-tower`
 - PR: [#204](https://github.com/ramgolladi1503-sys/aixion-control-tower/pull/204), open and draft; do not merge.
 - Preserve prior Antigravity/Codex approval and denial evidence with its original commit and invocation identities; do not replace it with the expired request.
-- Next: coordinate the SQLite source freeze and snapshot; restore valid Google Cloud authentication and select an approved host target before any cloud/DNS mutation; authenticate the emulator to the matching test workspace before creating a fresh native request; complete signed-release and remote push acceptance.
+- Next: coordinate the SQLite source freeze and snapshot; obtain billing authorization and owner approval of the hosting plan before any cloud/DNS mutation; authenticate the emulator to the matching test workspace before creating a fresh native request; complete signed-release and remote push acceptance.
 - No new configuration keys or migrations were introduced by this checkpoint.
