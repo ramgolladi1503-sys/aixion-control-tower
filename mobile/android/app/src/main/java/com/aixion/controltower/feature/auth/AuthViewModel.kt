@@ -101,7 +101,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                     authenticated = false,
                     sessionChecked = true,
                     userLabel = null,
-                    message = "Login failed: ${AuthFailure.operatorMessage(error)}",
+                    message = AuthFailure.loginMessage(error),
                     messageSeverity = AuthMessageSeverity.ERROR
                 )
             }
