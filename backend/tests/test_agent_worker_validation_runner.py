@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -22,6 +24,7 @@ from app.approval_repository import (
 )
 from app.postgres_database import run_postgres_migrations
 from app.agent_worker_validation_runner import (
+    AgentWorkerValidationRunResult,
     CommandExecutionResult,
     run_agent_worker_validation_commands,
 )
@@ -789,3 +792,136 @@ def test_validation_runner_accepts_same_runtime_postgres_pair_before_claim(
     assert result.reason == "claim reached with shared PostgreSQL runtime"
     assert claims == [task_repository]
     assert executions == []
+
+
+def test_validation_runner_cli_opens_and_binds_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_repository = object()
+    approval_repository = object()
+    runtime = SimpleNamespace(
+        repositories=SimpleNamespace(
+            agent_tasks=task_repository,
+            approval_decisions=approval_repository,
+        ),
+        opened=False,
+        closed=False,
+        open=lambda *, wait: setattr(runtime, "opened", wait),
+        probe=lambda: SimpleNamespace(ready=True),
+        close=lambda: setattr(runtime, "closed", True),
+    )
+    monkeypatch.setattr(
+        validation_runner,
+        "get_settings",
+        lambda: SimpleNamespace(
+            profile="local",
+            postgres_auth_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(validation_runner, "PostgresRuntime", SimpleNamespace(
+        from_environment=lambda: runtime,
+    ))
+    captured: dict[str, object] = {}
+
+    def run_validation(**kwargs):
+        captured.update(kwargs)
+        return AgentWorkerValidationRunResult(
+            success=True,
+            task_id=kwargs["task_id"],
+            reason="Validation commands passed.",
+        )
+
+    monkeypatch.setattr(validation_runner, "run_agent_worker_validation_commands", run_validation)
+
+    exit_code = validation_runner.main(["--postgres", "--task-id", "task_cli_pg"])
+
+    assert exit_code == 0
+    assert runtime.opened is True
+    assert runtime.closed is True
+    assert captured["task_repository"] is task_repository
+    assert captured["approval_repository"] is approval_repository
+
+
+def test_validation_runner_cli_selects_postgres_for_auth_enabled_local_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_repository = object()
+    approval_repository = object()
+    lifecycle: list[str] = []
+    runtime = SimpleNamespace(
+        repositories=SimpleNamespace(
+            agent_tasks=task_repository,
+            approval_decisions=approval_repository,
+        ),
+        open=lambda *, wait: lifecycle.append(f"open:{wait}"),
+        probe=lambda: SimpleNamespace(ready=True),
+        close=lambda: lifecycle.append("close"),
+    )
+    monkeypatch.setattr(
+        validation_runner,
+        "get_settings",
+        lambda: SimpleNamespace(profile="local", postgres_auth_enabled=True),
+    )
+    monkeypatch.setattr(
+        validation_runner,
+        "PostgresRuntime",
+        SimpleNamespace(from_environment=lambda: runtime),
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        validation_runner,
+        "run_agent_worker_validation_commands",
+        lambda **kwargs: captured.update(kwargs)
+        or AgentWorkerValidationRunResult(success=True, reason="ok"),
+    )
+
+    exit_code = validation_runner.main(["--task-id", "task_auth_pg"])
+
+    assert exit_code == 0
+    assert lifecycle == ["open:True", "close"]
+    assert captured["task_repository"] is task_repository
+    assert captured["approval_repository"] is approval_repository
+
+
+def test_validation_runner_cli_fails_closed_before_claim_when_postgres_schema_is_unready(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    lifecycle: list[str] = []
+    runtime = SimpleNamespace(
+        repositories=SimpleNamespace(),
+        open=lambda *, wait: lifecycle.append(f"open:{wait}"),
+        probe=lambda: SimpleNamespace(
+            ready=False,
+            schema=SimpleNamespace(missing_migration_ids=("pg_0001_core",)),
+        ),
+        close=lambda: lifecycle.append("close"),
+    )
+    monkeypatch.setattr(
+        validation_runner,
+        "get_settings",
+        lambda: SimpleNamespace(profile="local", postgres_auth_enabled=False),
+    )
+    monkeypatch.setattr(
+        validation_runner,
+        "PostgresRuntime",
+        SimpleNamespace(from_environment=lambda: runtime),
+    )
+    monkeypatch.setattr(
+        validation_runner,
+        "run_agent_worker_validation_commands",
+        lambda **_kwargs: pytest.fail("unready PostgreSQL must fail before task claim"),
+    )
+
+    exit_code = validation_runner.main(
+        ["--postgres", "--task-id", "task_unready", "--json"]
+    )
+
+    assert exit_code == 1
+    assert lifecycle == ["open:True", "close"]
+    result = json.loads(capsys.readouterr().out)
+    assert result["success"] is False
+    assert result["reason"] == (
+        "PostgreSQL runtime unavailable; no validation command was started: "
+        "PostgreSQL schema is not ready; missing migrations: pg_0001_core"
+    )

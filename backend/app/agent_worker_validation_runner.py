@@ -28,6 +28,8 @@ from .agent_worker_validation_plan import (
 )
 from .models import ApprovalRequest, AuditEvent
 from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
+from .postgres_runtime import PostgresRuntime
+from .settings import get_settings, validate_startup_environment
 from .store import store
 
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -738,20 +740,73 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS, help="Timeout per command."
     )
+    parser.add_argument(
+        "--postgres",
+        action="store_true",
+        help="Use the PostgreSQL runtime even when the local profile is selected.",
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON result.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    result = run_agent_worker_validation_commands(
-        task_id=args.task_id,
-        first_approved=args.first_approved,
-        worker_id=args.worker_id,
-        lease_seconds=args.lease_seconds,
-        cwd=Path(args.cwd),
-        timeout_seconds=args.timeout_seconds,
+    settings = get_settings()
+    postgres_mode = (
+        args.postgres
+        or settings.profile == "production"
+        or settings.postgres_auth_enabled
     )
+
+    if postgres_mode:
+        runtime: PostgresRuntime | None = None
+        try:
+            if settings.profile == "production":
+                validate_startup_environment()
+            runtime = PostgresRuntime.from_environment()
+            runtime.open(wait=True)
+            probe = runtime.probe()
+            if not probe.ready:
+                raise RuntimeError(
+                    "PostgreSQL schema is not ready; missing migrations: "
+                    + ", ".join(probe.schema.missing_migration_ids)
+                )
+        except Exception as error:  # noqa: BLE001 - CLI must fail closed before task claim.
+            if runtime is not None:
+                runtime.close()
+            result = AgentWorkerValidationRunResult(
+                success=False,
+                task_id=args.task_id,
+                worker_id=args.worker_id,
+                reason=(
+                    "PostgreSQL runtime unavailable; no validation command was started: "
+                    f"{error}"
+                ),
+            )
+        else:
+            try:
+                repositories = runtime.repositories
+                result = run_agent_worker_validation_commands(
+                    task_id=args.task_id,
+                    first_approved=args.first_approved,
+                    worker_id=args.worker_id,
+                    lease_seconds=args.lease_seconds,
+                    cwd=Path(args.cwd),
+                    timeout_seconds=args.timeout_seconds,
+                    task_repository=repositories.agent_tasks,
+                    approval_repository=repositories.approval_decisions,
+                )
+            finally:
+                runtime.close()
+    else:
+        result = run_agent_worker_validation_commands(
+            task_id=args.task_id,
+            first_approved=args.first_approved,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+            cwd=Path(args.cwd),
+            timeout_seconds=args.timeout_seconds,
+        )
     if args.json:
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     else:
