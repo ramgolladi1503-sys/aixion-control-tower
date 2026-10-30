@@ -18,6 +18,7 @@ This checkpoint records evidence for the four locked production gates. It is not
 
 ## 3. Current native adapter certification
 
+- At exact PR head `326e46880c33345cc85116bc159a1a8ff18ed223`, local deterministic Codex hook/setup validation passed: `python3 -m pytest -q integrations/codex/test_codex_hook_cli.py integrations/codex/test_setup_workspace.py` (**147 passed**). This validates the current hook and installer regression suite, not native Codex UI interception, phone delivery, or same-invocation resume.
 - Earlier Antigravity and Codex phone approval/deny runs remain historical evidence for their recorded code and invocation; they are not discarded or relabeled.
 - Current-head Codex native same-invocation proof is still open. The most recent phone action did not complete the exact deny request: it was reported missed, then the emulator became unresponsive. An approval or denial is recorded only when the same request's backend state and provider invocation establish that result.
 - On 2026-10-30, ADB still listed `emulator-5560` as connected and the Control Tower activity foregrounded, but the screenshot showed Android's system dialog “Process system isn't responding” over account registration. Selecting **Wait** did not dismiss it. No app data was cleared, no emulator was wiped, and no pending request was converted into a decision.
