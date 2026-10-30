@@ -76,6 +76,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
     val latestVisibleToken by rememberUpdatedState(tokenCurrentlyVisible)
     var projectMenuOpen by remember { mutableStateOf(false) }
     var providerMenuOpen by remember { mutableStateOf(false) }
+    var selectedHost by remember(state.selectedProvider) { mutableStateOf(HostPlatform.MACOS) }
     var pendingAction by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     DisposableEffect(lifecycleOwner) {
@@ -119,7 +120,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
             text = {
                 Text(
                     if (action == "rotate") {
-                        "Rotation immediately invalidates the token currently installed on the Mac. The replacement is shown once."
+                        "Rotation immediately invalidates the token currently installed on the host computer. The replacement is shown once."
                     } else {
                         "Revocation immediately blocks this agent from creating approvals or reading decisions."
                     }
@@ -143,10 +144,10 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            AgentAccessHero(provider = state.selectedProvider, isLoading = state.loading)
+            AgentAccessHero(provider = state.selectedProvider, host = selectedHost, isLoading = state.loading)
         }
 
-        item { AgentAccessSetupGuide(state) }
+        item { AgentAccessSetupGuide(state, selectedHost) }
 
         if (state.notice.isNotBlank()) item { Text(state.notice, color = palette.positive) }
         if (state.error.isNotBlank()) item { Text(state.error, color = palette.danger) }
@@ -216,6 +217,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                 OneTimeTokenPanel(
                     token = token,
                     provider = state.oneTimeProvider ?: state.selectedProvider,
+                    host = selectedHost,
                     agentName = state.oneTimeAgentName.orEmpty(),
                     agentId = state.oneTimeAgentId.orEmpty(),
                     projectId = state.oneTimeProjectId.orEmpty(),
@@ -229,7 +231,11 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                         context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
                     },
                     onCopyKeychainCommand = { command ->
-                        copyNonSecretCommand(context, "macOS Keychain command", command)
+                        copyNonSecretCommand(
+                            context,
+                            if (selectedHost == HostPlatform.MACOS) "macOS Keychain command" else "Windows Credential Manager command",
+                            command
+                        )
                     },
                     onCopyHookInstallCommand = { command ->
                         copyNonSecretCommand(context, "Agent hook install command", command)
@@ -278,11 +284,25 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                     }
                 }
                 Spacer(Modifier.height(TowerSpacing.sm))
+                Text("Host computer", color = palette.ink, fontWeight = FontWeight.SemiBold)
+                HostPlatformSelector(
+                    selected = selectedHost,
+                    enabled = !state.working && !state.loading && state.oneTimeToken == null
+                ) {
+                    selectedHost = it
+                }
+                if (!isSupportedProviderHost(state.selectedProvider, selectedHost)) {
+                    Text(
+                        "Antigravity on Windows is unsupported. Choose macOS to continue, or choose Codex CLI for Windows.",
+                        color = palette.danger,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
                 ConnectorPermissionsDisclosure()
                 Spacer(Modifier.height(TowerSpacing.md))
                 Button(
                     onClick = viewModel::createAgent,
-                    enabled = canCreateApprovalAgent(state),
+                    enabled = canCreateApprovalAgent(state) && isSupportedProviderHost(state.selectedProvider, selectedHost),
                     modifier = Modifier.fillMaxWidth()
                 ) { Text(if (state.working) "Working…" else "Create connector and issue token") }
             }
@@ -291,7 +311,7 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
         item {
             TowerSectionHeader(
                 title = "Existing ${agentProviderName(state.selectedProvider)} connectors",
-                subtitle = "Rotate or revoke credentials when a Mac is replaced, lost, or no longer trusted."
+                subtitle = "Rotate or revoke credentials when a computer is replaced, lost, or no longer trusted."
             )
         }
         if (!state.loading && state.agents.isEmpty()) {
@@ -320,7 +340,29 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
 }
 
 @Composable
-internal fun AgentAccessHero(provider: String, isLoading: Boolean) {
+private fun HostPlatformSelector(
+    selected: HostPlatform,
+    enabled: Boolean,
+    onSelected: (HostPlatform) -> Unit
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
+        HostPlatform.values().forEach { host ->
+            if (selected == host) {
+                Button(onClick = { onSelected(host) }, enabled = enabled) { Text(host.label) }
+            } else {
+                OutlinedButton(onClick = { onSelected(host) }, enabled = enabled) { Text(host.label) }
+            }
+        }
+    }
+}
+
+internal enum class HostPlatform(val label: String) { MACOS("macOS"), WINDOWS("Windows") }
+
+internal fun isSupportedProviderHost(provider: String, host: HostPlatform): Boolean =
+    provider == "CODEX" || (provider == "ANTIGRAVITY" && host == HostPlatform.MACOS)
+
+@Composable
+internal fun AgentAccessHero(provider: String, host: HostPlatform = HostPlatform.MACOS, isLoading: Boolean) {
     val palette = LocalTowerPalette.current
     TowerHeroPanel {
         AgentAccessStatusBadge(isLoading = isLoading)
@@ -333,7 +375,7 @@ internal fun AgentAccessHero(provider: String, isLoading: Boolean) {
         )
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
-            "Create a project-limited connector credential here, then install its local hook in that project on your Mac. Approval decisions stay in this phone app.",
+            "Create a project-limited connector credential here, then install its local hook in that project on your ${host.label}. Approval decisions stay in this phone app.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
@@ -341,7 +383,7 @@ internal fun AgentAccessHero(provider: String, isLoading: Boolean) {
 }
 
 @Composable
-internal fun AgentAccessSetupGuide(state: AgentAccessUiState) {
+internal fun AgentAccessSetupGuide(state: AgentAccessUiState, host: HostPlatform = HostPlatform.MACOS) {
     val palette = LocalTowerPalette.current
     val selectedProject = state.projects.firstOrNull { it.id == state.selectedProjectId }
     val projectReady = state.projectsLoaded && selectedProject != null
@@ -390,12 +432,12 @@ internal fun AgentAccessSetupGuide(state: AgentAccessUiState) {
             detail = if (connectorReady) {
                 "An active project-scoped credential is available."
             } else {
-                "Create it below. The token is shown once for secure installation on your Mac."
+                "Create it below. The token is shown once for secure installation on your ${host.label}."
             },
             complete = connectorReady
         )
         Spacer(Modifier.height(TowerSpacing.md))
-        StatusBadge(label = "Mac setup not confirmed", color = palette.caution, uppercase = false)
+        StatusBadge(label = "${host.label} setup not confirmed", color = palette.caution, uppercase = false)
         Spacer(Modifier.height(TowerSpacing.xs))
         Text(
             "After creating the connector, run its local hook setup command on the computer. This app cannot confirm hook installation or same-session resume.",
@@ -492,10 +534,11 @@ private fun copyNonSecretCommand(context: android.content.Context, label: String
 internal fun keychainSetupCommand(agentId: String): String =
     "security add-generic-password -s com.aixion.controltower.agent -a ${shellQuote(agentId)} -w"
 
-internal fun normalizeWorkspacePath(rawPath: String): String? {
+internal fun normalizeWorkspacePath(rawPath: String, host: HostPlatform = HostPlatform.MACOS): String? {
     if (rawPath.isBlank() || rawPath != rawPath.trim() ||
         rawPath.any { it == '\u0000' || it == '\n' || it == '\r' }
     ) return null
+    if (host == HostPlatform.WINDOWS) return normalizeWindowsWorkspacePath(rawPath)
     return runCatching {
         val path = java.nio.file.Paths.get(rawPath)
         if (!path.isAbsolute) return null
@@ -505,27 +548,54 @@ internal fun normalizeWorkspacePath(rawPath: String): String? {
     }.getOrNull()
 }
 
+private fun normalizeWindowsWorkspacePath(rawPath: String): String? {
+    if (!rawPath.matches(Regex("^[A-Za-z]:\\\\.*"))) return null
+    val drive = rawPath.substring(0, 2)
+    val segments = mutableListOf<String>()
+    rawPath.substring(3).split('\\').forEach { segment ->
+        when (segment) {
+            "", "." -> Unit
+            ".." -> if (segments.isNotEmpty()) segments.removeAt(segments.lastIndex) else return null
+            else -> {
+                if (segment.any { it in "<>:\"|?*" } || segment.endsWith(' ') || segment.endsWith('.')) return null
+                segments += segment
+            }
+        }
+    }
+    return if (segments.isEmpty()) null else "$drive\\${segments.joinToString("\\")}"
+}
+
 internal fun hookInstallCommand(
     provider: String,
     workspacePath: String,
     agentId: String,
     projectId: String,
-    apiBaseUrl: String = BuildConfig.AIXION_API_BASE_URL
+    apiBaseUrl: String = BuildConfig.AIXION_API_BASE_URL,
+    host: HostPlatform = HostPlatform.MACOS
 ): String? {
-    val normalizedWorkspace = normalizeWorkspacePath(workspacePath) ?: return null
-    val normalizedApiBaseUrl = normalizedMacApiBaseUrl(apiBaseUrl) ?: return null
+    if (!isSupportedProviderHost(provider, host)) return null
+    val normalizedWorkspace = normalizeWorkspacePath(workspacePath, host) ?: return null
+    val normalizedApiBaseUrl = normalizedApiBaseUrl(apiBaseUrl) ?: return null
     val hookDirectory = if (provider == "CODEX") "codex" else "antigravity"
-    return "python3 ${shellQuote("integrations/$hookDirectory/setup_workspace.py")} \\\n" +
-        "  --workspace ${shellQuote(normalizedWorkspace)} \\\n" +
-        "  --api-base-url ${shellQuote(normalizedApiBaseUrl)} \\\n" +
-        "  --agent-id ${shellQuote(agentId)} \\\n" +
-        "  --project-id ${shellQuote(projectId)}"
+    return if (host == HostPlatform.WINDOWS) {
+        "py -3 ${powerShellQuote("integrations/$hookDirectory/setup_workspace.py")} `\n" +
+            "  --workspace ${powerShellQuote(normalizedWorkspace)} `\n" +
+            "  --api-base-url ${powerShellQuote(normalizedApiBaseUrl)} `\n" +
+            "  --agent-id ${powerShellQuote(agentId)} `\n" +
+            "  --project-id ${powerShellQuote(projectId)}"
+    } else {
+        "python3 ${shellQuote("integrations/$hookDirectory/setup_workspace.py")} \\\n" +
+            "  --workspace ${shellQuote(normalizedWorkspace)} \\\n" +
+            "  --api-base-url ${shellQuote(normalizedApiBaseUrl)} \\\n" +
+            "  --agent-id ${shellQuote(agentId)} \\\n" +
+            "  --project-id ${shellQuote(projectId)}"
+    }
 }
 
 internal fun isMacCompatibleApiBaseUrl(rawUrl: String): Boolean =
-    normalizedMacApiBaseUrl(rawUrl) != null
+    normalizedApiBaseUrl(rawUrl) != null
 
-private fun normalizedMacApiBaseUrl(rawUrl: String): String? = runCatching {
+private fun normalizedApiBaseUrl(rawUrl: String): String? = runCatching {
     if (rawUrl != rawUrl.trim()) return null
     val value = rawUrl.trimEnd('/')
     if (value.isBlank() || '?' in value || '#' in value) return null
@@ -646,6 +716,7 @@ internal fun AgentCard(agentSummary: AgentAccessSummary, working: Boolean, onRot
 internal fun OneTimeTokenPanel(
     token: String,
     provider: String,
+    host: HostPlatform = HostPlatform.MACOS,
     agentName: String,
     agentId: String,
     projectId: String,
@@ -657,14 +728,15 @@ internal fun OneTimeTokenPanel(
 ) {
     val palette = LocalTowerPalette.current
     val providerName = agentProviderName(provider)
-    var keychainCopyMessage by remember(provider, agentId, projectId) { mutableStateOf<String?>(null) }
-    var hookCopyMessage by remember(provider, agentId, projectId) { mutableStateOf<String?>(null) }
-    var workspacePath by remember(provider, agentId, projectId) { mutableStateOf("") }
-    val normalizedWorkspacePath = normalizeWorkspacePath(workspacePath)
-    val keychainCommand = keychainSetupCommand(agentId)
+    var keychainCopyMessage by remember(provider, host, agentId, projectId) { mutableStateOf<String?>(null) }
+    var hookCopyMessage by remember(provider, host, agentId, projectId) { mutableStateOf<String?>(null) }
+    var workspacePath by remember(provider, host, agentId, projectId) { mutableStateOf("") }
+    val normalizedWorkspacePath = normalizeWorkspacePath(workspacePath, host)
+    val credentialSetupSupported = isSupportedProviderHost(provider, host)
+    val keychainCommand = if (credentialSetupSupported) hostCredentialSetupCommand(provider, host, agentId) else null
     val apiUrlUsable = isMacCompatibleApiBaseUrl(apiBaseUrl)
-    val installCommand = if (apiUrlUsable) normalizedWorkspacePath?.let {
-        hookInstallCommand(provider, it, agentId, projectId, apiBaseUrl)
+    val installCommand = if (apiUrlUsable && isSupportedProviderHost(provider, host)) normalizedWorkspacePath?.let {
+        hookInstallCommand(provider, it, agentId, projectId, apiBaseUrl, host)
     } else {
         null
     }
@@ -672,7 +744,7 @@ internal fun OneTimeTokenPanel(
         StatusBadge(label = "One-time secret", color = palette.caution, uppercase = false)
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
-            "Save this $providerName token in macOS Keychain now",
+            "Save this $providerName token on ${host.label} now",
             modifier = Modifier
                 .testTag("agent-token-created-announcement")
                 .semantics { liveRegion = LiveRegionMode.Polite },
@@ -699,21 +771,25 @@ internal fun OneTimeTokenPanel(
             TextButton(onClick = onHide) { Text("Hide now") }
         }
         Text(
-            "Store the token in macOS Keychain. This command contains no token; Terminal prompts you to enter it securely.",
+            if (host == HostPlatform.MACOS) "Store the token in macOS Keychain. This command contains no token; Terminal prompts you to enter it securely."
+            else "Store the token in Windows Credential Manager. This command contains no token; PowerShell prompts you to enter it securely.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
-        Text(keychainCommand, color = palette.ink, style = TowerCodeTextStyle)
+        keychainCommand?.let { Text(it, color = palette.ink, style = TowerCodeTextStyle) }
         OutlinedButton(
             onClick = {
-                keychainCopyMessage = if (onCopyKeychainCommand(keychainCommand)) {
-                    "Keychain command copied. Enter the token only at the secure prompt."
+                val command = keychainCommand ?: return@OutlinedButton
+                keychainCopyMessage = if (onCopyKeychainCommand(command)) {
+                    if (host == HostPlatform.MACOS) "Keychain command copied. Enter the token only at the secure prompt."
+                    else "Credential Manager command copied. Enter the token only at the secure prompt."
                 } else {
-                    "Could not copy the Keychain command. Try again."
+                    "Could not copy the credential command. Try again."
                 }
             },
+            enabled = credentialSetupSupported,
             modifier = Modifier.fillMaxWidth()
-        ) { Text("Copy Keychain command") }
+        ) { Text(if (host == HostPlatform.MACOS) "Copy Keychain command" else "Copy Credential Manager command") }
         keychainCopyMessage?.let { message ->
             Text(
                 message,
@@ -724,7 +800,8 @@ internal fun OneTimeTokenPanel(
         }
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
-            "Install the ${providerName} hook only in the project you want to protect. Enter that project's absolute folder path on your Mac. Run the command from the Control Tower repository root, with this local hook repository available, and confirm the API URL in the command is reachable from your Mac. This does not install a Control Tower Mac app; it adds project-scoped hook settings and preserves other hooks.",
+            if (host == HostPlatform.MACOS) "Install the ${providerName} hook only in the project you want to protect. Enter that project's absolute folder path on your Mac. Run the command from the Control Tower repository root, with this local hook repository available, and confirm the API URL in the command is reachable from your Mac. This does not install a Control Tower Mac app; it adds project-scoped hook settings and preserves other hooks."
+            else "Install the Codex CLI hook only in the project you want to protect. Enter that project's absolute folder path on Windows. Run the command in PowerShell from the Control Tower repository root, with this local hook repository available, and confirm the API URL in the command is reachable from Windows. This does not install a desktop app; it adds project-scoped hook settings and preserves existing hooks.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
@@ -732,13 +809,15 @@ internal fun OneTimeTokenPanel(
             value = workspacePath,
             onValueChange = { workspacePath = it },
             label = { Text("Absolute local project directory") },
-            placeholder = { Text("/Users/you/Projects/example") },
+            placeholder = { Text(if (host == HostPlatform.MACOS) "/Users/you/Projects/example" else "C:\\Users\\you\\Projects\\example") },
             supportingText = {
                 Text(
                     if (workspacePath.isBlank() || normalizedWorkspacePath != null) {
-                        "Use a normalized absolute Mac path, for example /Users/you/Projects/example."
+                        if (host == HostPlatform.MACOS) "Use a normalized absolute Mac path, for example /Users/you/Projects/example."
+                        else "Use a normalized absolute Windows path, for example C:\\Users\\you\\Projects\\example."
                     } else {
-                        "Enter a valid absolute project path, such as /Users/you/Projects/example."
+                        if (host == HostPlatform.MACOS) "Enter a valid absolute project path, such as /Users/you/Projects/example."
+                        else "Enter a valid absolute project path, such as C:\\Users\\you\\Projects\\example."
                     }
                 )
             },
@@ -747,7 +826,7 @@ internal fun OneTimeTokenPanel(
         )
         if (!apiUrlUsable) {
             Text(
-                "This app build's API URL cannot be used from the Mac. Configure an HTTPS endpoint, or localhost/127.0.0.1/::1 for development, then rebuild the app. The hook command is unavailable until then.",
+                "This app build's API URL cannot be used from ${host.label}. Configure an HTTPS endpoint, or localhost/127.0.0.1/::1 for development, then rebuild the app. The hook command is unavailable until then.",
                 color = palette.danger,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }
@@ -779,8 +858,19 @@ internal fun OneTimeTokenPanel(
         if (provider == "CODEX") {
             Spacer(Modifier.height(TowerSpacing.sm))
             Text(
-                "Open that project in Codex and review/trust the PermissionRequest hook when prompted. It covers local permission prompts only; verify the same paused Codex action continues after approval.",
+                if (host == HostPlatform.WINDOWS) {
+                    "Open that project in Codex CLI and review/trust the PermissionRequest hook when prompted. Windows setup is available, but live Windows phone approve/deny is not certified; test a harmless request before relying on it. Codex Desktop interception is unsupported/unverified."
+                } else {
+                    "Open that project in Codex CLI and review/trust the PermissionRequest hook when prompted. It covers local permission prompts only; verify the same paused action continues after approval. Codex Desktop interception is unsupported/unverified."
+                },
                 color = palette.inkMuted,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+        if (!isSupportedProviderHost(provider, host)) {
+            Text(
+                "Antigravity on Windows is unsupported. Choose macOS to set up Antigravity.",
+                color = palette.danger,
                 style = MaterialTheme.typography.bodyMedium
             )
         }
@@ -788,6 +878,15 @@ internal fun OneTimeTokenPanel(
 }
 
 private fun agentProviderName(provider: String): String = when (provider) {
-    "CODEX" -> "Codex"
+    "CODEX" -> "Codex CLI"
     else -> "Antigravity"
 }
+
+private fun hostCredentialSetupCommand(provider: String, host: HostPlatform, agentId: String): String =
+    when {
+        host == HostPlatform.MACOS -> keychainSetupCommand(agentId)
+        provider == "CODEX" -> "py -3 integrations/codex/setup_workspace.py --store-token --agent-id ${powerShellQuote(agentId)}"
+        else -> ""
+    }
+
+private fun powerShellQuote(value: String): String = "'${value.replace("'", "''")}'"
