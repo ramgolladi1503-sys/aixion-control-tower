@@ -2,7 +2,7 @@
 
 ## Result
 
-The existing `aixion-approval-api35-local` AVD reaches Android boot-complete and retains its installed `com.aixion.controltower.debug` app. After allowing the guest to warm and relaunching the installed app, the sign-in screen became interactive with no ANR overlay. The intended local API on port 8004 is still absent, so login and approval verification cannot proceed. No credentials were entered, and no approval was decided or created on this AVD.
+The existing `aixion-approval-api35-local` AVD reaches Android boot-complete and retains its installed `com.aixion.controltower.debug` app. After allowing the guest to warm and relaunching the installed app, the sign-in screen became interactive with no ANR overlay. The isolated local API is now running on port 8004 and the emulator can reach it. No credentials were entered, and no approval was decided or created on this AVD.
 
 ## Recovery performed
 
@@ -13,15 +13,17 @@ The existing `aixion-approval-api35-local` AVD reaches Android boot-complete and
 - `adb root` was used briefly to inspect guest process state and was reverted with `adb unroot`; ADB returned to the normal `shell` user.
 - On a later recovery attempt, the Android “Wait” action did not dismiss the ANR. The app was on its sign-in screen with no credentials entered or active session, so only its unresponsive process was stopped (equivalent to Android’s “Close app”); the same installed activity was relaunched without clearing app data. A cold launch remained on the splash screen and Android logged that the process failed to complete startup. After the guest had more time to warm, relaunching the same app reached the interactive sign-in screen. The package remains installed and app data was not cleared. No approval was made on this AVD.
 
-## Backend endpoint mismatch
+## Local API recovery and boundary
 
-The sign-in screen previously displayed `Failed to connect to /10.0.2.2:8004`; after app recovery the error is not currently displayed. A read-only host check still finds no listener on `127.0.0.1:8004`. Port 8000 is a local proxy configured to connect to host port 8006, where no listener was found. Port 8003 returned health OK, but it is the separate local SQLite-backed API and is not a safe substitute for the intended test backend. No listener, proxy, API configuration, or active backend was changed.
+- The app previously displayed `Failed to connect to /10.0.2.2:8004`. Restarted the API from the current PR worktree at `127.0.0.1:8004`, in the local profile, using the existing isolated PostgreSQL E2E database. Host `GET /health` returned HTTP 200; the emulator completed a TCP connection to `10.0.2.2:8004`.
+- This is a local test service, not hosted HTTPS. Its outbox mode is scheduled, so the API did not start email or push dispatch loops; the temporary local-only crypto configuration is not a production secret. No real SMTP or FCM delivery was attempted.
+- Port 8000 still proxies to unavailable port 8006. Port 8003 is a separate local SQLite-backed API and was left untouched. No DNS, cloud resource, production database, or app API configuration was changed.
 
 ## Remaining verification
 
-- The AVD and app are currently responsive at sign-in; login and approval acceptance remain unverified until the intended local backend is available.
-- Identify and start the intended isolated API endpoint for this app build; do not redirect it to the SQLite-only port 8003.
+- The AVD and app are responsive at sign-in, and the configured local API is reachable; authenticated login and phone approval acceptance remain unverified because no credentials were entered.
+- The API process is local and temporary; hosted HTTPS on `api.aixionlab.com` and locked-phone push remain separate production gates.
 - The missed request `approval_2ce511ce6cb7` remains **missed/expired**, not denied. No decision or same-invocation result is claimed.
-- After the correct backend is restored, create a fresh request only under the existing authorization and record the exact phone decision and resumed invocation.
+- After a valid account signs in against this local API, create a fresh request only under the existing authorization and record the exact phone decision and resumed invocation.
 
 This recovery does not close any production gate. The AVD and user data were preserved; no cloud, billing, DNS, deployment, database migration, or merge action occurred.
