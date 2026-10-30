@@ -79,7 +79,7 @@ jobs:
           terraform_version: 1.17.0
 
       - name: Check Terraform formatting
-        run: terraform fmt -check -diff cloud-scheduler-staging.tf
+        run: terraform fmt -check -diff
 
       - name: Initialize locked provider without a backend
         run: terraform init -backend=false -input=false -lockfile=readonly
