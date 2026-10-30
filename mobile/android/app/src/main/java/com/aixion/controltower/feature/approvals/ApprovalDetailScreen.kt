@@ -348,13 +348,13 @@ fun ApprovalDetailContent(
                         )
                     }
                     item {
-                        ExactToolDecisionContext(approval = approval)
-                    }
-                    item {
-                        ExactToolRequestReviewAcknowledgement(
-                            checked = exactToolRequestReviewed,
-                            onCheckedChange = { exactToolRequestReviewed = it }
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)) {
+                            ExactToolDecisionContext(approval = approval)
+                            ExactToolRequestReviewAcknowledgement(
+                                checked = exactToolRequestReviewed,
+                                onCheckedChange = { exactToolRequestReviewed = it }
+                            )
+                        }
                     }
                 } else {
                     item {

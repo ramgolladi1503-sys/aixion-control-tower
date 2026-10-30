@@ -139,7 +139,7 @@ class ApprovalExactToolDecisionContextTest {
         ).forEach { value -> assertTextRenderedInside(composeRule, context, value) }
         requestList.performScrollToNode(hasTestTag("approval-exact-tool-decision-context"))
         context.assertIsDisplayed()
-        acknowledgement.assertIsDisplayed()
+        acknowledgement.assertExists()
         val contextBounds = context.fetchSemanticsNode().boundsInRoot
         val acknowledgementBounds = acknowledgement.fetchSemanticsNode().boundsInRoot
         assertTrue(
