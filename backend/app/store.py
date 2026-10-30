@@ -540,7 +540,16 @@ class SQLiteBackedStore:
                 self._load_entities("audit_event", AuditEvent).values()
             )
 
+    @staticmethod
+    def _require_sqlite_persistence_allowed() -> None:
+        settings = validate_startup_environment()
+        if settings.is_production or settings.postgres_auth_enabled:
+            raise RuntimeError(
+                "SQLite persistence is disabled when PostgreSQL is authoritative"
+            )
+
     def persist(self, *, extra_write: Callable[[sqlite3.Connection], None] | None = None) -> None:
+        self._require_sqlite_persistence_allowed()
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM kv_store")
             self._write_map(conn, "user", self.users)
@@ -591,6 +600,7 @@ class SQLiteBackedStore:
         inserts: list[tuple[str, str, BaseModel]] | None = None,
     ) -> None:
         """Insert append-only records without rewriting unrelated process state."""
+        self._require_sqlite_persistence_allowed()
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             for entity_type, entity_id, model in inserts or []:

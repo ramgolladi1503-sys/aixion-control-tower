@@ -456,7 +456,9 @@ def test_partial_delivery_does_not_retry_entire_workspace_fanout(monkeypatch: An
 
 def test_unregistered_token_is_removed_and_audited(monkeypatch: Any) -> None:
     store.reset()
-    monkeypatch.setenv("AIXION_PROFILE", "production")
+    # This directly exercises the SQLite-only helper with production recipient
+    # filtering. The hosted production dispatcher uses PostgreSQL outbox tests.
+    monkeypatch.setenv("AIXION_PROFILE", "test")
     workspace = Workspace(name="Account", owner_user_id="owner")
     store.workspaces[workspace.id] = workspace
     store.users["owner"] = AuthUser(
