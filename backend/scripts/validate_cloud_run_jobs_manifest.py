@@ -255,6 +255,7 @@ def _validate_job(
         "AIXION_PROFILE": "production",
         "AIXION_OUTBOX_DISPATCH_MODE": "scheduled",
         "AIXION_POSTGRES_RUNTIME_PROBE_ENABLED": "true",
+        "AIXION_POSTGRES_AUTH_ENABLED": "true",
         "AIXION_PUSH_DISPATCH_ENABLED": "true" if name == "aixion-push-dispatch" else "false",
         "AIXION_EMAIL_DISPATCH_ENABLED": "true" if name == "aixion-email-dispatch" else "false",
     }

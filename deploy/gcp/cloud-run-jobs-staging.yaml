@@ -38,6 +38,8 @@ spec:
                   value: scheduled
                 - name: AIXION_POSTGRES_RUNTIME_PROBE_ENABLED
                   value: "true"
+                - name: AIXION_POSTGRES_AUTH_ENABLED
+                  value: "true"
                 - name: AIXION_PUSH_DISPATCH_ENABLED
                   value: "true"
                 - name: AIXION_EMAIL_DISPATCH_ENABLED
@@ -91,6 +93,8 @@ spec:
                 - name: AIXION_OUTBOX_DISPATCH_MODE
                   value: scheduled
                 - name: AIXION_POSTGRES_RUNTIME_PROBE_ENABLED
+                  value: "true"
+                - name: AIXION_POSTGRES_AUTH_ENABLED
                   value: "true"
                 - name: AIXION_PUSH_DISPATCH_ENABLED
                   value: "false"

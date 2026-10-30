@@ -58,6 +58,23 @@ def test_reviewed_candidate_shape_passes_local_checks() -> None:
     assert _issues(jobs, scheduler) == []
 
 
+@pytest.mark.parametrize("auth_flag_value", [None, "false"])
+def test_outbox_jobs_require_postgres_application_authority(
+    auth_flag_value: str | None,
+) -> None:
+    jobs, scheduler = _valid_inputs()
+    documents = list(yaml.safe_load_all(jobs))
+    for document in documents:
+        env = document["spec"]["template"]["spec"]["template"]["spec"]["containers"][0]["env"]
+        env[:] = [item for item in env if item["name"] != "AIXION_POSTGRES_AUTH_ENABLED"]
+        if auth_flag_value is not None:
+            env.append({"name": "AIXION_POSTGRES_AUTH_ENABLED", "value": auth_flag_value})
+    jobs = "\n---\n".join(yaml.safe_dump(document) for document in documents)
+
+    issues = _issues(jobs, scheduler)
+    assert sum("AIXION_POSTGRES_AUTH_ENABLED to true" in issue for issue in issues) == 2
+
+
 def test_staging_region_defaults_match_owner_india_direction() -> None:
     jobs = JOBS_PATH.read_text(encoding="utf-8")
     scheduler = SCHEDULER_PATH.read_text(encoding="utf-8")
