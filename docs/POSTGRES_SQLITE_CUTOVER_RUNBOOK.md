@@ -4,9 +4,9 @@
 
 ## 1. Scope and limits
 
-The supported importer is `backend/scripts/import_approval_slice_to_postgres.py`. Its current scope identifier is `approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14`. It imports a bounded set of records from the legacy SQLite `kv_store` into an otherwise empty PostgreSQL schema. It is deliberately partial: nonzero omitted entity counts require explicit acknowledgement, and even a clean staging import does not make PostgreSQL authoritative for every route, worker, scheduler, or process-local state path.
+The supported importer is `backend/scripts/import_approval_slice_to_postgres.py`. Its current scope identifier is `approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_global_auth_quarantine_v15`. It imports a bounded set of records from the legacy SQLite `kv_store` into an otherwise empty PostgreSQL schema. It is deliberately partial: nonzero omitted entity counts require explicit acknowledgement, and even a clean staging import does not make PostgreSQL authoritative for every route, worker, scheduler, or process-local state path.
 
-The script applies the checked-in PostgreSQL migrations as part of `--apply`, then writes the supported import in a transaction. Inactive or exhausted AgentRun fault settings are imported only when the exact parent AgentRun is present and supplies the matching workspace; active fault settings block the plan. It also fails closed for unsupported data, nonempty application tables, broken scope/parent relationships, invalid payloads, native invocation approvals that have not drained, or a source snapshot that changes during inspection. It does not certify the source snapshot (`snapshot_certified` remains false); that is an operator-controlled prerequisite.
+The script applies the checked-in PostgreSQL migrations as part of `--apply`, then writes the supported import in a transaction. Inactive or exhausted AgentRun fault settings are imported only when the exact parent AgentRun is present and supplies the matching workspace; active fault settings block the plan. It also fails closed for unsupported data, nonempty application tables, broken scope/parent relationships, invalid payloads, native invocation approvals that have not drained, or a source snapshot that changes during inspection. The exact `agent.auth_failed` event for an unknown agent with no workspace is retained in `legacy_audit_events` with `workspace_id NULL` and reason `UNSCOPED_UNKNOWN_AGENT_AUTH_FAILURE`; it never enters tenant-scoped audit reads. This is a staging data-preservation disposition, not proof that the event belongs to an account. All other unscoped events continue to block. The importer does not certify the source snapshot (`snapshot_certified` remains false); that is an operator-controlled prerequisite.
 
 The runbook does not authorize a production migration. Do not point production traffic at this imported target. Do not remove or weaken the production startup refusal.
 
@@ -59,7 +59,7 @@ python backend/scripts/audit_legacy_sqlite.py \
   --output /secure/path/sqlite-audit.json
 ```
 
-Review the complete JSON report. Require `STRUCTURAL_REVIEW_PASSED`, no unknown source tables, no invalid payloads, no unresolved ownership/parent conflicts, and a valid trust-event chain. Any finding that changes data coverage or ownership is an abort condition. The auditor is read-only and reports `migration_authorized: false`; it does not certify a coordinated backup or prove that all application state is in this database.
+Review the complete JSON report. Require `STRUCTURAL_REVIEW_PASSED`, no unknown source tables, no invalid payloads, no unresolved ownership/parent conflicts other than the explicit ownerless unknown-agent authentication events counted for quarantine, and a valid trust-event chain. Verify that the importer plan places those exact records in the immutable legacy archive with `workspace_id` null and does not include them in `audit_events`. Any other finding that changes data coverage or ownership is an abort condition. The auditor is read-only and reports `migration_authorized: false`; it does not certify a coordinated backup or prove that all application state is in this database.
 
 Run the importer without `--apply` to produce a dry-run plan:
 
@@ -68,7 +68,7 @@ python backend/scripts/import_approval_slice_to_postgres.py \
   --source /secure/path/control-tower-snapshot.sqlite
 ```
 
-Review and retain the JSON output. Require `status` equal to `DRY_RUN_VALIDATED`, `migration_authorized: false`, `snapshot_certified: false`, `invocation_drain.status` equal to `CLEAR`, and the exact source hash to agree with the drain report. Reconcile `source_counts`, `planned_counts`, `omitted_counts`, and `partial`; identify each omitted entity and business impact with the reviewer. Unsupported notifications, malformed data, unresolved scope, or nonzero omissions that have not been explicitly accepted for this *staging rehearsal* block apply. Do not use `--allow-partial-slice` to conceal or waive a production completeness gap.
+Review and retain the JSON output. Require `status` equal to `DRY_RUN_VALIDATED`, `migration_authorized: false`, `snapshot_certified: false`, `invocation_drain.status` equal to `CLEAR`, and the exact source hash to agree with the drain report. Reconcile `source_counts`, `planned_counts`, `omitted_counts`, and `partial`; verify every ownerless unknown-agent auth failure is counted under `legacy_audit_event`, has the explicit quarantine reason, and has no tenant scope. Identify every other omitted entity and its business impact with the reviewer. Unsupported notifications, malformed payloads, any other unresolved scope, or nonzero omissions that have not been explicitly accepted for this *staging rehearsal* block apply. Do not use `--allow-partial-slice` to conceal or waive a production completeness gap.
 
 The importer rehashes the source and compares file identity/size/mtime before and after inspection. Any source mutation invalidates the plan. Recreate the snapshot and rerun the audit, drain report, and dry run; do not reuse stale evidence.
 
@@ -113,7 +113,7 @@ The operator and reviewer must compare the following as one evidence packet, all
 - Import manifest row in `sqlite_import_runs` for the exact source SHA and importer scope, plus row counts/payload reconciliation reported by the importer. Retain a read-only query/export showing the manifest and expected target counts, with workspace/parent consistency checks. Protect all exports as sensitive data.
 - Reviewer sign-off listing residual gaps, aborts, and whether the rehearsal is accepted. Record pass/fail per checklist item; do not convert unknown results into pass.
 
-Any difference in source hash, count, scope, target identity, migration ledger, payload comparison, workspace boundary, or parent linkage is a failed reconciliation. Stop application use of that staging target and investigate; do not patch rows manually and proceed.
+Any difference in source hash, count, scope, target identity, migration ledger, payload comparison, workspace boundary, quarantine reason, or parent linkage is a failed reconciliation. Stop application use of that staging target and investigate; do not patch rows manually and proceed.
 
 ## 8. Cutover decision gate and rollback boundary
 
@@ -138,7 +138,7 @@ Abort before apply if any of these occur:
 - source writer/process state is unknown, a write resumes, or the snapshot procedure/WAL handling is not evidenced;
 - snapshot has a WAL/SHM sidecar, is mutable during planning, is a symlink, has unsafe ownership/permissions, or its recorded hash differs between artifacts;
 - drain status is `BLOCKED`, a pending/approved-unconsumed/unverifiable native invocation remains, or lease identity/currentness is uncertain;
-- audit is not `STRUCTURAL_REVIEW_PASSED`, trust-chain verification fails, or source has unknown tables, malformed payloads, unresolved ownership/identity/parent findings, or unsupported notification types;
+- audit is not `STRUCTURAL_REVIEW_PASSED`, trust-chain verification fails, or source has unknown tables, malformed payloads, unresolved ownership/identity/parent findings other than the explicit unknown-agent auth quarantine, or unsupported notification types;
 - importer does not return `DRY_RUN_VALIDATED`, omissions are unexplained, or scope/target compatibility is unclear;
 - target is not disposable and empty, its database/schema identity cannot be confirmed, environment/credentials are ambiguous, remote TLS is not verified, or the target name does not satisfy importer guards;
 - reviewer is unavailable, evidence is incomplete, or the application revision changes after evidence was generated.
@@ -162,7 +162,7 @@ Abort after apply if exit status is nonzero, result is not `STAGING_IMPORT_APPLI
 
 ## 11. Current configuration keys and migration notes
 
-This runbook adds **no application configuration keys**. It documents existing operational variables/guards: `AIXION_TEST_POSTGRES_DSN` for the partial importer, and `AIXION_POSTGRES_DSN` for the read-only migration checker. Keep credentials out of files and logs. A remote test/staging importer target requires the existing `--allow-remote-staging` flag and verified TLS. Schema migrations are versioned and applied by the importer during `--apply`; the target must be disposable and empty of application records. Existing production databases are outside this runbook's support.
+This runbook adds **no application configuration keys**. It documents existing operational variables/guards: `AIXION_TEST_POSTGRES_DSN` for the partial importer, and `AIXION_POSTGRES_DSN` for the read-only migration checker. Keep credentials out of files and logs. A remote test/staging importer target requires the existing `--allow-remote-staging` flag and verified TLS. Schema migration `pg_0040_unscoped_legacy_auth_audit_quarantine` makes `legacy_audit_events.workspace_id` nullable and adds a constrained `quarantine_reason`; only the exact unknown-agent auth-failure reason may have null workspace. The target must be disposable and empty of application records. Existing production databases are outside this runbook's support.
 
 ## 12. Run instructions
 

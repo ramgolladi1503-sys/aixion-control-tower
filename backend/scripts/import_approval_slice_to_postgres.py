@@ -66,7 +66,7 @@ from app.trust_models import (
     TrustEvent,
 )
 
-SCOPE = "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14"
+SCOPE = "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_global_auth_quarantine_v15"
 ENTITY_TYPES = {
     "workspace": Workspace,
     "user": User,
@@ -170,15 +170,19 @@ SOURCE_TABLE_DISPOSITIONS: dict[str, tuple[str, str | None]] = {
 # Explicit coverage for serialized rows in SQLiteBackedStore.kv_store. The
 # Store's persistence calls and the repository write paths are the source of
 # truth; tests compare those source-defined types with this inventory. Supported
-# audit parents enter the live table; scoped unresolved history is segregated.
+# audit parents enter the live table; unresolved history is segregated.
 SOURCE_KV_ENTITY_DISPOSITIONS: dict[str, tuple[str, str, str | None]] = {
     kind: (
         "segregated_import" if kind == "audit_event" else "imported",
-        "audit_events + legacy_audit_events" if kind == "audit_event" else IMPORT_TABLES[kind][0],
+        (
+            "audit_events + legacy_audit_events (workspace-scoped archive and ownerless auth quarantine)"
+            if kind == "audit_event" else IMPORT_TABLES[kind][0]
+        ),
         (
             "Supported, workspace-verified parents enter audit_events; unresolved history is "
-            "preserved separately only with explicit in-snapshot workspace scope. Sensitive "
-            "delivery events and unscoped history block import."
+            "preserved in legacy_audit_events. Ownerless unknown-agent auth failures are "
+            "quarantined with workspace_id NULL; sensitive delivery events and all other "
+            "unscoped history block import."
             if kind == "audit_event"
             else None
         ),
@@ -1707,7 +1711,16 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
             raise ImportBlocked(
                 f"audit_event/{event_id} references an unscoped device lifecycle event"
             )
-        if entity_type == "external_agent" and parent is None:
+        details = payload.get("details")
+        details = details if isinstance(details, dict) else {}
+        auth_agent_id = details.get("agent_id") or entity_id
+        is_unscoped_unknown_auth_failure = (
+            event_type == "agent.auth_failed"
+            and payload.get("workspace_id") is None
+            and isinstance(auth_agent_id, str)
+            and auth_agent_id not in agents
+        )
+        if entity_type == "external_agent" and parent is None and not is_unscoped_unknown_auth_failure:
             raise ImportBlocked(
                 f"audit_event/{event_id} references an unimported external agent"
             )
@@ -1721,11 +1734,11 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
                     f"audit_event/{event_id} is an unresolved sensitive approval delivery event"
                 )
             workspace_id = payload.get("workspace_id")
-            if not isinstance(workspace_id, str) or not workspace_id:
+            if (not isinstance(workspace_id, str) or not workspace_id) and not is_unscoped_unknown_auth_failure:
                 raise ImportBlocked(
                     f"audit_event/{event_id} has no explicit workspace for legacy preservation"
                 )
-            if workspace_id not in workspaces:
+            if workspace_id is not None and workspace_id not in workspaces:
                 raise ImportBlocked(
                     f"audit_event/{event_id} workspace is missing or not included in this snapshot"
                 )
@@ -1737,6 +1750,11 @@ def build_plan(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, dict[str
                 "source_sha256": digest,
                 "event_id": event_id,
                 "workspace_id": workspace_id,
+                "quarantine_reason": (
+                    "UNSCOPED_UNKNOWN_AGENT_AUTH_FAILURE"
+                    if is_unscoped_unknown_auth_failure
+                    else "UNLINKED_HISTORY_WITH_VERIFIED_WORKSPACE"
+                ),
                 "original_entity_id": legacy_model.entity_id,
                 "original_event_type": legacy_model.event_type,
                 "actor": legacy_model.actor,
@@ -1894,10 +1912,11 @@ def _insert_payload(conn: psycopg.Connection, kind: str, entity_id: str, payload
     if kind == "legacy_audit_event":
         conn.execute(
             "INSERT INTO legacy_audit_events(source_sha256,event_id,workspace_id,"
-            "original_entity_id,original_event_type,actor,details,created_at,source_payload) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "quarantine_reason,original_entity_id,original_event_type,actor,details,created_at,source_payload) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (
                 payload["source_sha256"], entity_id, payload["workspace_id"],
+                payload["quarantine_reason"],
                 payload["original_entity_id"], payload["original_event_type"],
                 payload["actor"], Jsonb(payload["details"]),
                 datetime.fromisoformat(payload["created_at"]),
@@ -2355,17 +2374,18 @@ def _first_payload_mismatch(
     for kind, (table, id_column) in IMPORT_TABLES.items():
         if kind == "legacy_audit_event":
             rows = conn.execute(
-                "SELECT source_sha256,event_id,workspace_id,original_entity_id,"
+                "SELECT source_sha256,event_id,workspace_id,quarantine_reason,original_entity_id,"
                 "original_event_type,actor,details,created_at,source_payload "
                 "FROM legacy_audit_events"
             ).fetchall()
             actual = {
                 (row[0], row[1]): {
                     "source_sha256": row[0], "event_id": row[1], "workspace_id": row[2],
-                    "original_entity_id": row[3], "original_event_type": row[4],
-                    "actor": row[5], "details": row[6],
-                    "created_at": row[7].astimezone(timezone.utc).isoformat(),
-                    "source_payload": row[8],
+                    "quarantine_reason": row[3],
+                    "original_entity_id": row[4], "original_event_type": row[5],
+                    "actor": row[6], "details": row[7],
+                    "created_at": row[8].astimezone(timezone.utc).isoformat(),
+                    "source_payload": row[9],
                 }
                 for row in rows
             }

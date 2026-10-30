@@ -231,7 +231,7 @@ def test_audit_resolves_external_agent_security_audits_to_agent_workspace(tmp_pa
         "agent.rate_limited",
     ],
 )
-def test_audit_keeps_agent_event_unresolved_without_exact_agent_parent(tmp_path, event_type):
+def test_audit_quarantines_only_ownerless_unknown_agent_auth_failures(tmp_path, event_type):
     path = tmp_path / "orphan_agent_audit_scope.sqlite3"
     _create_db(path, [
         ("workspace", "ws1", {"id": "ws1", "name": "Account", "owner_user_id": "u1"}),
@@ -246,9 +246,14 @@ def test_audit_keeps_agent_event_unresolved_without_exact_agent_parent(tmp_path,
 
     result = audit(path)
 
-    assert result["status"] == "REVIEW_REQUIRED"
-    assert result["ownership_review_counts"] == {"audit_event": 1}
-    assert result["record_findings"][0]["findings"] == ["workspace_unresolved"]
+    if event_type == "agent.auth_failed":
+        assert result["status"] == "STRUCTURAL_REVIEW_PASSED"
+        assert result["unscoped_auth_failure_quarantine_count"] == 1
+        assert result["ownership_review_counts"] == {}
+    else:
+        assert result["status"] == "REVIEW_REQUIRED"
+        assert result["ownership_review_counts"] == {"audit_event": 1}
+        assert result["record_findings"][0]["findings"] == ["workspace_unresolved"]
 
 
 def test_audit_flags_external_agent_security_audit_with_wrong_workspace(tmp_path):

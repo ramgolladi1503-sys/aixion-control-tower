@@ -52,7 +52,7 @@ def test_inactive_agent_run_faults_are_imported_and_counted(
     assert plan["planned_counts"]["agent_run_fault"] == 1
     assert plan["omitted_counts"].get("agent_run_fault", 0) == 0
     assert plan["agent_run_fault_injection"]["inactive_import_count"] == 1
-    assert plan["scope"].endswith("_faults_legacy_audit_v14")
+    assert plan["scope"].endswith("_faults_legacy_audit_global_auth_quarantine_v15")
 
 
 def test_fault_import_binds_workspace_to_exact_agent_run_parent():

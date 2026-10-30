@@ -308,6 +308,21 @@ def audit(path: Path) -> dict[str, Any]:
                 return None
             return workspace_owner.get(user_id)
 
+        def is_unscoped_unknown_agent_auth_failure(
+            entity_id: str, payload: dict[str, Any] | None
+        ) -> bool:
+            if not payload or payload.get("event_type") != "agent.auth_failed":
+                return False
+            if payload.get("workspace_id") is not None:
+                return False
+            details = payload.get("details")
+            details = details if isinstance(details, dict) else {}
+            agent_id = details.get("agent_id") or payload.get("entity_id")
+            return not (
+                isinstance(agent_id, str)
+                and ("external_agent", agent_id) in payload_by_key
+            )
+
         def resolve_workspace(entity_type: str, entity_id: str, seen: set[tuple[str, str]] | None = None) -> str | None:
             seen = set() if seen is None else seen
             key = (entity_type, entity_id)
@@ -374,7 +389,11 @@ def audit(path: Path) -> dict[str, Any]:
                         return None
                     return resolve_workspace("agent_task", payload.get("entity_id") or "", seen)
                 details = payload.get("details") or {}
-                linked_id = details.get("entity_id") or payload.get("entity_id")
+                linked_id = (
+                    details.get("agent_id")
+                    or details.get("entity_id")
+                    or payload.get("entity_id")
+                )
                 if payload.get("event_type") in {
                     "agent.registered",
                     "agent.token_rotated",
@@ -390,11 +409,21 @@ def audit(path: Path) -> dict[str, Any]:
             return None
 
         conflicts: Counter[str] = Counter()
+        quarantined_global_audit_keys: set[tuple[str, str]] = set()
         ownership_review_keys: set[tuple[str, str]] = set()
         ownership_conflict_keys: set[tuple[str, str]] = set()
         workspace_resolutions: dict[tuple[str, str], tuple[str | None, str | None]] = {}
         for entity_type, entity_id, payload in parsed_rows:
             if entity_type not in SCOPED_ENTITIES or payload is None:
+                continue
+            if entity_type == "audit_event" and is_unscoped_unknown_agent_auth_failure(
+                entity_id, payload
+            ):
+                # Failed authentication for an unknown agent has no tenant
+                # owner. Preserve it in the importer quarantine, never infer
+                # ownership from another entity with the same identifier.
+                quarantined_global_audit_keys.add((entity_type, entity_id))
+                workspace_resolutions[(entity_type, entity_id)] = (None, None)
                 continue
             explicit = payload.get("workspace_id")
             if explicit:
@@ -587,6 +616,9 @@ def audit(path: Path) -> dict[str, Any]:
         report["unknown_entity_counts"] = dict(sorted(unknown.items()))
         report["invalid_payload_counts"] = dict(sorted(invalid.items()))
         report["ownership_review_counts"] = dict(sorted(needs_review.items()))
+        report["unscoped_auth_failure_quarantine_count"] = len(
+            quarantined_global_audit_keys
+        )
         report["ownership_conflict_counts"] = dict(sorted(conflicts.items()))
         report["identity_conflict_counts"] = dict(sorted(identity_conflicts.items()))
         report["parent_relationship_conflict_counts"] = dict(sorted(parent_conflicts.items()))

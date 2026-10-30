@@ -15,6 +15,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.database_migrations import run_migrations
+from app.postgres_database import run_postgres_migrations
 from app.agent_run_models import (
     AgentRun, AgentRunEvent, AgentRunEventType, AgentRunStatus, AgentRunStep,
     AgentRunStepType,
@@ -119,7 +120,7 @@ def test_entity_coverage_reports_segregated_audit_counts():
 
     assert coverage["audit_event"] == {
         "disposition": "segregated_import",
-        "target": "audit_events + legacy_audit_events",
+        "target": "audit_events + legacy_audit_events (workspace-scoped archive and ownerless auth quarantine)",
         "reason": SOURCE_KV_ENTITY_DISPOSITIONS["audit_event"][2],
         "source_count": 5,
         "imported_count": 4,
@@ -644,6 +645,7 @@ def test_plan_segregates_workspace_verified_unlinked_audit_history(tmp_path):
     legacy = selected["legacy_audit_event"][original["id"]]
     assert legacy["source_sha256"] == digest
     assert legacy["workspace_id"] == "ws1"
+    assert legacy["quarantine_reason"] == "UNLINKED_HISTORY_WITH_VERIFIED_WORKSPACE"
     assert legacy["original_entity_id"] == "removed-parent"
     assert legacy["original_event_type"] == "legacy.note"
     assert legacy["actor"] == "legacy-actor"
@@ -673,6 +675,86 @@ def test_plan_blocks_unlinked_sensitive_approval_delivery_audit(tmp_path, event_
         build_plan(path)
 
 
+def test_plan_quarantines_unscoped_unknown_agent_auth_failure_without_workspace(tmp_path):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    payload = _add_unlinked_audit(
+        path, event_type="agent.auth_failed", workspace_id=None
+    )
+
+    plan, selected, digest = build_plan(path)
+
+    assert plan["status"] == "DRY_RUN_VALIDATED"
+    assert plan["audit_status"] == "STRUCTURAL_REVIEW_PASSED"
+    assert plan["planned_counts"]["legacy_audit_event"] == 1
+    quarantined = selected["legacy_audit_event"][payload["id"]]
+    assert quarantined["source_sha256"] == digest
+    assert quarantined["event_id"] == payload["id"]
+    assert quarantined["quarantine_reason"] == "UNSCOPED_UNKNOWN_AGENT_AUTH_FAILURE"
+    assert quarantined["source_payload"] == payload
+    assert quarantined["workspace_id"] is None
+    assert payload["id"] not in selected["audit_event"]
+
+
+def test_staging_import_preserves_unscoped_auth_failure_outside_tenant_audit(
+    tmp_path, postgres_import_dsn
+):
+    path = tmp_path / "snapshot.sqlite3"
+    _snapshot(path)
+    payload = _add_unlinked_audit(
+        path, event_type="agent.auth_failed", workspace_id=None
+    )
+    plan, selected, digest = build_plan(path)
+
+    apply_import(postgres_import_dsn, digest, plan, selected)
+    apply_import(postgres_import_dsn, digest, plan, selected)
+
+    with psycopg.connect(postgres_import_dsn) as conn:
+        row = conn.execute(
+            "SELECT source_sha256,event_id,quarantine_reason,source_payload "
+            "FROM legacy_audit_events WHERE event_id=%s",
+            (payload["id"],),
+        ).fetchone()
+        assert row == (digest, payload["id"], "UNSCOPED_UNKNOWN_AGENT_AUTH_FAILURE", payload)
+        assert conn.execute(
+            "SELECT count(*) FROM audit_events WHERE event_id=%s", (payload["id"],)
+        ).fetchone()[0] == 0
+        with pytest.raises(psycopg.errors.RaiseException, match="legacy audit records are immutable"):
+            conn.execute(
+                "UPDATE legacy_audit_events SET quarantine_reason='changed' "
+                "WHERE event_id=%s",
+                (payload["id"],),
+            )
+
+
+def test_legacy_audit_database_constraint_rejects_unscoped_non_auth_event(
+    postgres_import_dsn,
+):
+    run_postgres_migrations(lambda: psycopg.connect(postgres_import_dsn))
+    with psycopg.connect(postgres_import_dsn) as conn:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                """
+                INSERT INTO legacy_audit_events (
+                    source_sha256,event_id,workspace_id,quarantine_reason,
+                    original_entity_id,original_event_type,actor,details,
+                    created_at,source_payload
+                ) VALUES (%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    "a" * 64,
+                    "unscoped-project-created",
+                    "UNSCOPED_UNKNOWN_AGENT_AUTH_FAILURE",
+                    "project-1",
+                    "project.created",
+                    "legacy-actor",
+                    Jsonb({}),
+                    datetime.now(timezone.utc),
+                    Jsonb({"id": "unscoped-project-created"}),
+                ),
+            )
+
+
 def test_legacy_audit_verifier_keys_rows_by_source_digest(monkeypatch):
     import scripts.import_approval_slice_to_postgres as importer
 
@@ -681,16 +763,19 @@ def test_legacy_audit_verifier_keys_rows_by_source_digest(monkeypatch):
     created_at = datetime.now(timezone.utc).isoformat()
     selected_payload = {
         "source_sha256": source_sha256, "event_id": event_id, "workspace_id": "ws1",
+        "quarantine_reason": "UNLINKED_HISTORY_WITH_VERIFIED_WORKSPACE",
         "original_entity_id": "removed-parent", "original_event_type": "legacy.note",
         "actor": "legacy-actor", "details": {"note": "same"},
         "created_at": created_at, "source_payload": {"id": event_id},
     }
     other_snapshot_row = (
-        "b" * 64, event_id, "ws1", "removed-parent", "legacy.note", "legacy-actor",
+        "b" * 64, event_id, "ws1", "UNLINKED_HISTORY_WITH_VERIFIED_WORKSPACE",
+        "removed-parent", "legacy.note", "legacy-actor",
         {"note": "same"}, datetime.fromisoformat(created_at), {"id": event_id},
     )
     matching_snapshot_row = (
-        source_sha256, event_id, "ws1", "removed-parent", "legacy.note", "legacy-actor",
+        source_sha256, event_id, "ws1", "UNLINKED_HISTORY_WITH_VERIFIED_WORKSPACE",
+        "removed-parent", "legacy.note", "legacy-actor",
         {"note": "same"}, datetime.fromisoformat(created_at), {"id": event_id},
     )
 
@@ -763,14 +848,17 @@ def test_import_keeps_legacy_audit_immutable_and_idempotent(tmp_path, postgres_i
 
     with psycopg.connect(postgres_import_dsn) as conn:
         row = conn.execute(
-            "SELECT source_sha256,workspace_id,original_entity_id,original_event_type,"
+            "SELECT source_sha256,workspace_id,quarantine_reason,original_entity_id,original_event_type,"
             "actor,details,created_at,source_payload FROM legacy_audit_events "
             "WHERE event_id=%s",
             (payload["id"],),
         ).fetchone()
-        assert row[0:5] == (digest, "ws1", "removed-parent", "legacy.note", "legacy-actor")
-        assert row[5] == payload["details"]
-        assert row[7]["entity_id"] == "removed-parent"
+        assert row[0:6] == (
+            digest, "ws1", "UNLINKED_HISTORY_WITH_VERIFIED_WORKSPACE",
+            "removed-parent", "legacy.note", "legacy-actor",
+        )
+        assert row[6] == payload["details"]
+        assert row[8]["entity_id"] == "removed-parent"
         assert conn.execute(
             "SELECT count(*) FROM audit_events WHERE event_id=%s", (payload["id"],)
         ).fetchone()[0] == 0
@@ -818,7 +906,9 @@ def test_plan_is_read_only_for_supported_snapshot(tmp_path):
     entity_coverage = plan["source_kv_entity_coverage"]
     assert set(entity_coverage) == set(SOURCE_KV_ENTITY_DISPOSITIONS)
     assert entity_coverage["audit_event"]["disposition"] == "segregated_import"
-    assert entity_coverage["audit_event"]["target"] == "audit_events + legacy_audit_events"
+    assert entity_coverage["audit_event"]["target"] == (
+        "audit_events + legacy_audit_events (workspace-scoped archive and ownerless auth quarantine)"
+    )
     assert entity_coverage["audit_event"]["reason"]
     for kind, coverage in entity_coverage.items():
         source_count = plan["source_counts"].get(kind, 0)
@@ -1455,7 +1545,7 @@ def test_delivery_state_is_included_and_requires_matching_invocation_audit(tmp_p
 
     plan, selected, digest = build_plan(path)
 
-    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14"
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_global_auth_quarantine_v15"
     assert plan["planned_counts"]["approval_delivery_claim"] == 1
     assert plan["planned_counts"]["approval_delivery_failure"] == 1
     assert plan["planned_counts"]["approval_invocation_lease"] == 1
@@ -2259,7 +2349,7 @@ def test_import_scopes_external_agent_security_audit_to_known_agent(
     assert persisted[4]["details"] == event["details"]
 
 
-def test_plan_fails_closed_for_unscoped_external_agent_auth_failure(tmp_path):
+def test_plan_quarantines_unscoped_external_agent_auth_failure(tmp_path):
     path = tmp_path / "snapshot_with_unknown_agent_auth_failure.sqlite3"
     _snapshot(path)
     event = {
@@ -2275,8 +2365,11 @@ def test_plan_fails_closed_for_unscoped_external_agent_auth_failure(tmp_path):
         )
     os.chmod(path, 0o600)
 
-    with pytest.raises(ImportBlocked, match="structural audit did not pass"):
-        build_plan(path)
+    plan, selected, _digest = build_plan(path)
+    assert plan["audit_status"] == "STRUCTURAL_REVIEW_PASSED"
+    quarantined = selected["legacy_audit_event"][event["id"]]
+    assert quarantined["workspace_id"] is None
+    assert quarantined["quarantine_reason"] == "UNSCOPED_UNKNOWN_AGENT_AUTH_FAILURE"
 
 
 @pytest.mark.parametrize(
@@ -2663,7 +2756,7 @@ def test_import_preserves_trust_state_signatures_and_hash_chain(tmp_path, postgr
     _snapshot(path, include_omitted=False, include_trust=True)
     plan, selected, digest = build_plan(path)
 
-    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14"
+    assert plan["scope"] == "approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_global_auth_quarantine_v15"
     assert plan["planned_counts"]["agent_run"] == 1
     assert plan["planned_counts"]["agent_run_step"] == 1
     assert plan["planned_counts"]["agent_run_event"] == 1

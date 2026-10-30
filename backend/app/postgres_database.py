@@ -1840,6 +1840,35 @@ POSTGRES_MIGRATIONS = (
             """,
         ),
     ),
+    PostgresMigration(
+        migration_id="pg_0040_unscoped_legacy_auth_audit_quarantine",
+        name="Preserve ownerless unknown-agent authentication failures without tenant scope",
+        statements=(
+            "ALTER TABLE legacy_audit_events ALTER COLUMN workspace_id DROP NOT NULL",
+            "ALTER TABLE legacy_audit_events ADD COLUMN quarantine_reason TEXT NOT NULL "
+            "DEFAULT 'UNLINKED_HISTORY_WITH_VERIFIED_WORKSPACE'",
+            "ALTER TABLE legacy_audit_events ADD CONSTRAINT legacy_audit_quarantine_scope_check "
+            "CHECK ((workspace_id IS NULL AND quarantine_reason = "
+            "'UNSCOPED_UNKNOWN_AGENT_AUTH_FAILURE' AND original_event_type = "
+            "'agent.auth_failed') OR "
+            "(workspace_id IS NOT NULL AND quarantine_reason = "
+            "'UNLINKED_HISTORY_WITH_VERIFIED_WORKSPACE'))",
+            "ALTER TABLE sqlite_import_runs DROP CONSTRAINT IF EXISTS sqlite_import_runs_scope_check",
+            "ALTER TABLE sqlite_import_runs ADD CONSTRAINT sqlite_import_runs_scope_check "
+            "CHECK (scope IN ('approval_transaction_slice_v1','approval_and_trust_slice_v2',"
+            "'approval_trust_agent_history_v3','approval_trust_agent_history_connectors_v4',"
+            "'approval_auth_agent_history_connectors_v5','approval_auth_agent_history_connectors_email_v6',"
+            "'approval_auth_agent_mcp_connectors_email_v7',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_v8',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_v9',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_v10',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_v11',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_v12',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_v13',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_v14',"
+            "'approval_auth_agent_mcp_test_runs_connectors_email_task_notifications_delivery_rate_limits_invocation_leases_faults_legacy_audit_global_auth_quarantine_v15'))",
+        ),
+    ),
 )
 
 
