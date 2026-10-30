@@ -2,8 +2,8 @@
 # DO NOT APPLY: the application currently rejects the production profile because
 # the complete PostgreSQL runtime is not implemented and verified (Slice 1).
 # This file creates nothing until an operator explicitly applies it after review.
-# Public Cloud Run invocation is needed for Android clients; application routes
-# must continue to enforce account/connector authentication.
+# Android clients reach this service only through the external Application Load
+# Balancer; application routes must still enforce account/connector authentication.
 # Scale-to-zero cannot host reliable background dispatch loops. The API uses
 # scheduled mode; external scheduled invocations may run the bounded one-shot
 # push/email workers only after the full PostgreSQL application path is certified.
@@ -14,7 +14,7 @@ metadata:
   name: aixion-control-tower-staging
   namespace: REPLACE_WITH_GCP_PROJECT_NUMBER
   annotations:
-    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress: internal-and-cloud-load-balancing
     run.googleapis.com/invoker-iam-disabled: "true"
     run.googleapis.com/maxScale: "1"
 spec:

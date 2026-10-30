@@ -80,8 +80,8 @@ def validate_manifest_text(text: str) -> list[str]:
     if not isinstance(service_annotations, dict):
         issues.append("metadata.annotations must be a mapping")
         service_annotations = {}
-    if service_annotations.get("run.googleapis.com/ingress") != "all":
-        issues.append("Cloud Run ingress must be explicitly set to all for mobile clients")
+    if service_annotations.get("run.googleapis.com/ingress") != "internal-and-cloud-load-balancing":
+        issues.append("Cloud Run ingress must be internal-and-cloud-load-balancing")
     if service_annotations.get("run.googleapis.com/invoker-iam-disabled") != "true":
         issues.append("public invocation must be explicit; API authentication remains mandatory")
     if service_annotations.get("run.googleapis.com/maxScale") != "1":

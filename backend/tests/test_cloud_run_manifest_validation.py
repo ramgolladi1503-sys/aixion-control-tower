@@ -39,6 +39,18 @@ def test_resolved_candidate_passes_local_shape_and_security_checks() -> None:
     assert validate_manifest_text(_resolved_candidate()) == []
 
 
+def test_candidate_with_direct_public_ingress_is_rejected() -> None:
+    candidate = _resolved_candidate().replace(
+        "    run.googleapis.com/ingress: internal-and-cloud-load-balancing",
+        "    run.googleapis.com/ingress: all",
+    )
+
+    assert (
+        "Cloud Run ingress must be internal-and-cloud-load-balancing"
+        in validate_manifest_text(candidate)
+    )
+
+
 def test_candidate_with_sqlite_path_is_rejected() -> None:
     candidate = _resolved_candidate().replace(
         "            - name: AIXION_PROFILE\n",
