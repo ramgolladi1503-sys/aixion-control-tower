@@ -137,9 +137,13 @@ class ApprovalExactToolDecisionContextTest {
             formatApprovalExpiry(expiresAt),
             "12345678"
         ).forEach { value -> assertTextRenderedInside(composeRule, context, value) }
-        requestList.performScrollToNode(hasTestTag("approval-exact-tool-decision-context"))
+        // Bring the acknowledgement into the same viewport before comparing
+        // rendered bounds. A composed lazy-list child can exist while still
+        // being outside the viewport, which makes its root bounds unsuitable
+        // for a visible-order assertion.
+        requestList.performScrollToNode(hasTestTag("approval-exact-tool-review-acknowledgement"))
         context.assertIsDisplayed()
-        acknowledgement.assertExists()
+        acknowledgement.assertIsDisplayed()
         val contextBounds = context.fetchSemanticsNode().boundsInRoot
         val acknowledgementBounds = acknowledgement.fetchSemanticsNode().boundsInRoot
         assertTrue(
@@ -151,7 +155,8 @@ class ApprovalExactToolDecisionContextTest {
             executableAbsoluteBounds.second <= contextAbsoluteBounds.first
         )
         assertTrue(
-            "Reviewer context must precede acknowledgement in rendered content",
+            "Reviewer context must precede acknowledgement in rendered content: " +
+                "context=$contextBounds acknowledgement=$acknowledgementBounds",
             contextBounds.bottom <= acknowledgementBounds.top
         )
 
