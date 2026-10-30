@@ -356,7 +356,10 @@ private fun HostPlatformSelector(
     }
 }
 
-internal enum class HostPlatform(val label: String) { MACOS("macOS"), WINDOWS("Windows") }
+internal enum class HostPlatform(val label: String, val computerName: String) {
+    MACOS("macOS", "Mac"),
+    WINDOWS("Windows", "Windows PC")
+}
 
 internal fun isSupportedProviderHost(provider: String, host: HostPlatform): Boolean =
     provider == "CODEX" || (provider == "ANTIGRAVITY" && host == HostPlatform.MACOS)
@@ -375,7 +378,7 @@ internal fun AgentAccessHero(provider: String, host: HostPlatform = HostPlatform
         )
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
-            "Create a project-limited connector credential here, then install its local hook in that project on your ${host.label}. Approval decisions stay in this phone app.",
+            "Create a project-limited connector credential here, then install its local hook in that project on your ${host.computerName}. Approval decisions stay in this phone app.",
             color = palette.inkMuted,
             style = MaterialTheme.typography.bodyMedium
         )
@@ -432,12 +435,12 @@ internal fun AgentAccessSetupGuide(state: AgentAccessUiState, host: HostPlatform
             detail = if (connectorReady) {
                 "An active project-scoped credential is available."
             } else {
-                "Create it below. The token is shown once for secure installation on your ${host.label}."
+                "Create it below. The token is shown once for secure installation on your ${host.computerName}."
             },
             complete = connectorReady
         )
         Spacer(Modifier.height(TowerSpacing.md))
-        StatusBadge(label = "${host.label} setup not confirmed", color = palette.caution, uppercase = false)
+        StatusBadge(label = "${host.computerName} setup not confirmed", color = palette.caution, uppercase = false)
         Spacer(Modifier.height(TowerSpacing.xs))
         Text(
             "After creating the connector, run its local hook setup command on the computer. This app cannot confirm hook installation or same-session resume.",
@@ -744,7 +747,7 @@ internal fun OneTimeTokenPanel(
         StatusBadge(label = "One-time secret", color = palette.caution, uppercase = false)
         Spacer(Modifier.height(TowerSpacing.sm))
         Text(
-            "Save this $providerName token on ${host.label} now",
+            "Save this $providerName token on your ${host.computerName} now",
             modifier = Modifier
                 .testTag("agent-token-created-announcement")
                 .semantics { liveRegion = LiveRegionMode.Polite },
@@ -826,7 +829,7 @@ internal fun OneTimeTokenPanel(
         )
         if (!apiUrlUsable) {
             Text(
-                "This app build's API URL cannot be used from ${host.label}. Configure an HTTPS endpoint, or localhost/127.0.0.1/::1 for development, then rebuild the app. The hook command is unavailable until then.",
+                "This app build's API URL cannot be used from your ${host.computerName}. Configure an HTTPS endpoint, or localhost/127.0.0.1/::1 for development, then rebuild the app. The hook command is unavailable until then.",
                 color = palette.danger,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }

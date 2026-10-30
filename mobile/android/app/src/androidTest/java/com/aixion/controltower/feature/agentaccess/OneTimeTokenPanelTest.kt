@@ -109,7 +109,7 @@ class OneTimeTokenPanelTest {
         ).assertExists()
         composeRule.onNodeWithText("Absolute local project directory").assertExists()
         composeRule.onNodeWithText(
-            "This app build's API URL cannot be used from the Mac.",
+            "This app build's API URL cannot be used from your Mac.",
             substring = true
         ).assertExists()
         composeRule.onNodeWithText("Absolute local project directory")
