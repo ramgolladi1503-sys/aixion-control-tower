@@ -74,29 +74,59 @@ fun AuthScreen(
     viewModel: AuthViewModel = viewModel(),
     onLogoutRequested: () -> Unit = viewModel::logout
 ) {
-    val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
 
     if (state.authenticated) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(palette.canvas)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-            verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
-        ) {
-            AccountHero(state = state)
-            NotificationPermissionPanel()
-            AccountInfoPanel(
-                state = state,
-                onLogout = onLogoutRequested
-            )
-        }
+        AuthenticatedAccountContent(
+            state = state,
+            onLogout = onLogoutRequested,
+            onRemovalReasonChange = viewModel::updatePrivacyRemovalReason,
+            onRemovalRequest = viewModel::requestPrivacyAccountRemoval,
+            showNotificationPermission = true
+        )
     } else {
         AuthFormViewport {
             AuthForm(state = state, viewModel = viewModel)
         }
+    }
+}
+
+@Composable
+internal fun AuthenticatedAccountContent(
+    state: AuthUiState,
+    onLogout: () -> Unit,
+    onRemovalReasonChange: (String) -> Unit,
+    onRemovalRequest: () -> Unit,
+    showNotificationPermission: Boolean = false
+) {
+    val palette = LocalTowerPalette.current
+    var showRemovalConfirmation by rememberSaveable { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.canvas)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
+    ) {
+        AccountHero(state = state)
+        if (showNotificationPermission) NotificationPermissionPanel()
+        AccountInfoPanel(state = state, onLogout = onLogout)
+        PrivacyControlsPanel(
+            state = state,
+            onReasonChange = onRemovalReasonChange,
+            onRequestRemoval = { showRemovalConfirmation = true }
+        )
+    }
+    if (showRemovalConfirmation) {
+        AccountRemovalConfirmation(
+            loading = state.loading,
+            onDismiss = { showRemovalConfirmation = false },
+            onConfirm = {
+                showRemovalConfirmation = false
+                onRemovalRequest()
+            }
+        )
     }
 }
 
@@ -497,7 +527,11 @@ internal fun developmentVerificationCodeForDisplay(
 ): String? = code?.takeIf { isDebugBuild && it.isNotBlank() }
 
 @Composable
-private fun PrivacyControlsPanel(state: AuthUiState, viewModel: AuthViewModel) {
+private fun PrivacyControlsPanel(
+    state: AuthUiState,
+    onReasonChange: (String) -> Unit,
+    onRequestRemoval: () -> Unit
+) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
         Text("Privacy and data controls", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
@@ -516,13 +550,13 @@ private fun PrivacyControlsPanel(state: AuthUiState, viewModel: AuthViewModel) {
         )
         OutlinedTextField(
             value = state.privacyRemovalReason,
-            onValueChange = viewModel::updatePrivacyRemovalReason,
+            onValueChange = onReasonChange,
             label = { Text("Optional reason") },
             modifier = Modifier.fillMaxWidth(),
             maxLines = 3
         )
         Button(
-            onClick = viewModel::requestPrivacyAccountRemoval,
+            onClick = onRequestRemoval,
             enabled = !state.loading,
             modifier = Modifier.fillMaxWidth()
         ) {
