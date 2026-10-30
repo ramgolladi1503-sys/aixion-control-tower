@@ -121,9 +121,8 @@ resource "google_sql_database_instance" "staging" {
     ip_configuration {
       # Cloud Run connects through the Cloud SQL connector. No authorized
       # networks are configured; connector TLS is mandatory.
-      ipv4_enabled          = true
-      ssl_mode              = "ENCRYPTED_ONLY"
-      connector_enforcement = "REQUIRED"
+      ipv4_enabled = true
+      ssl_mode     = "ENCRYPTED_ONLY"
     }
   }
 
