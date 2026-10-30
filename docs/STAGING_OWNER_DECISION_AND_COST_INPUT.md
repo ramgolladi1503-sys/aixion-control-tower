@@ -23,13 +23,13 @@ Do not infer a project from a local CLI default, account page, project name, or 
 
 | Decision | Owner input | Evidence/reference | Reviewer | Status/date |
 | --- | --- | --- | --- | --- |
-| Approved Cloud Run region | **PENDING** | **PENDING** | **PENDING** | **PENDING** |
-| Approved Cloud SQL region and any cross-region placement | **PENDING** | **PENDING** | **PENDING** | **PENDING** |
+| Approved Cloud Run region | **India is the requested region; Mumbai (`asia-south1`) is the planning default** | Owner direction in Codex, 2026-10-30 | **PENDING** | **India region requested; exact service-region review and cost review pending** |
+| Approved Cloud SQL region and any cross-region placement | **India is the requested region; Mumbai (`asia-south1`) is the planning default; cross-region placement/replication not specified** | Owner direction in Codex, 2026-10-30 | **PENDING** | **India region requested; exact service-region, cost, and recovery review pending** |
 | Approved Scheduler, Artifact Registry, Logging, and Monitoring locations | **PENDING** | **PENDING** | **PENDING** | **PENDING** |
 | Data-residency requirement and rationale | **PENDING** | **PENDING** | **PENDING** | **PENDING** |
 | Firebase/FCM project boundary, if push is enabled | **PENDING** | **PENDING** | **PENDING** | **PENDING** |
 
-`asia-south1`/Mumbai is a proposal only until approved here. Record a distinct value for each service where location choices differ.
+The owner directed that staging use an Indian region. Mumbai (`asia-south1`) is recorded as the planning default for Cloud Run and Cloud SQL; exact location approval and any cross-region recovery placement remain open. Scheduler, Artifact Registry, Logging, Monitoring, and Firebase location/boundary details still require service-specific review. This direction does not authorize billing, provisioning, or deployment. Record a distinct value for each service where location choices differ.
 
 ## 3. Staging workload and topology inputs
 

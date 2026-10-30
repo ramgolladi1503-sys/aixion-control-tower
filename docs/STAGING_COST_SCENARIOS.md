@@ -1,19 +1,21 @@
 # Staging Cloud Run Cost Scenarios
 
 **Status:** Planning worksheet only; not a quote, a billing cap, or authorization to provision resources.
-**Pricing checked:** 2026-10-24 against the official Google Cloud pricing pages linked below.
+**Pricing checked:** 2026-10-30 against the official Google Cloud pricing pages linked below.
 **Currency and period:** USD, 30-day month.
-**Region:** `asia-south1` is proposed, not owner-approved. Published default rates below are reference rates, not a Mumbai calculator export.
+**Region:** Owner directed India for staging; Mumbai (`asia-south1`) is the selected planning default for Cloud Run and Cloud SQL. Published default rates below are reference rates, not a Mumbai calculator export.
 
 ## What these numbers cover
 
-These scenarios estimate only Cloud Run request-based API compute/requests and two
-Cloud Run Jobs. They exclude Cloud SQL, database storage and backups, network
-egress, Artifact Registry, Cloud Logging/Monitoring, Secret Manager, Scheduler,
-taxes, and any other workloads on the billing account. Cloud SQL runs continuously
-in the proposed topology and is therefore a separate fixed monthly cost. The
-scenario total must not be represented as the all-in monthly cost or as proof that
-the proposed `$75/month` exposure is adequate.
+The compute scenarios estimate only Cloud Run request-based API compute/requests
+and two Cloud Run Jobs. They exclude Cloud SQL, database storage and backups,
+network egress, Artifact Registry, Cloud Logging/Monitoring, Secret Manager,
+Scheduler, taxes, and any other workloads on the billing account. The worked
+baseline below separately adds the planned HTTPS load balancer's fixed forwarding
+rule fee, but still excludes load-balancer traffic processing and internet egress.
+Cloud SQL runs continuously in the proposed topology and is therefore a separate
+fixed monthly cost. No subtotal here is an all-in monthly cost or proof that the
+proposed `$75/month` exposure is adequate.
 
 Google's pricing page lists default request-based service rates of `$0.000024`
 per vCPU-second, `$0.0000025` per GiB-second, and `$0.40` per million requests.
@@ -67,25 +69,28 @@ all-in deployment fits that amount.
 This worked example makes the excluded-service problem concrete. It is an
 account-independent **reference-rate subtotal**, not a Mumbai quote, invoice
 forecast, or spend guarantee. The 30-day month uses 720 hours; where a published
-rate is hourly it is multiplied by 720. Mumbai remains a proposed region only.
+rate is hourly it is multiplied by 720. Mumbai is the owner-directed planning
+region, but the region-specific calculator export remains pending.
 
 | Component | Explicit low-case quantity | Arithmetic / reference rate | Monthly reference cost |
 | --- | --- | --- | ---: |
 | Cloud Run API and two Jobs | Low scenario above; assume all free-tier allowances are exhausted | Existing low-case calculation | **$7.24** |
 | Cloud SQL shared-core compute | One `db-g1-small`, always on for 720 hours | `720 × $0.035/hour`; default displayed table rate only, not confirmed for Mumbai | **$25.20** |
+| Global external Application Load Balancer | One global forwarding rule, 720 hours; no traffic included | `720 × $0.025/hour`; published rate for the first five global forwarding rules | **$18.00** |
 | Cloud Scheduler | Two continuously configured schedules; conservatively assume all three free jobs on the billing account are already consumed | `2 × $0.10 per 31 days × 30/31 days`; actual billing is per billable day | **$0.194 ≈ $0.20** |
 | Artifact Registry | 5 GiB average retained image storage; assume account free allowance exhausted | `(5 − 0.5) GiB × $0.000136986/GiB-hour × 720 hours` | **$0.44** |
 | Secret Manager | At most 6 active versions and 10,000 accesses in the billing account | Within published account free allowances; if exhausted, add version-hour and access charges | **$0.00 assumed** |
 | Cloud Logging | At most 50 GiB/project/month, default retention only; no vended network logs | Within published project monthly free allowance | **$0.00 assumed** |
 | Cloud Monitoring | Google Cloud metrics only; no custom metrics, Prometheus, uptime checks, or synthetic monitors | Assumed non-chargeable system metrics; confirm actual metric inventory | **$0.00 assumed** |
-| **Known reference-rate subtotal** | Does not include the unresolved items listed below | Sum of the rows above | **$33.08** |
+| **Known reference-rate subtotal** | Includes one global HTTPS forwarding rule; excludes unresolved items listed below | Sum of the rows above | **$51.08** |
 
 The subtotal is **not all-in**. It includes the known Cloud SQL compute line at a
-non-regional reference rate, while Cloud SQL storage, backup/PITR, egress,
-taxes, billing-account free-tier consumption, and the selected Mumbai rates are
-not known. The $33.08 amount must therefore not be described as an affordable
+non-regional reference rate and one global forwarding-rule fee, while Cloud SQL
+storage, backup/PITR, load-balancer data processing, internet egress, taxes,
+billing-account free-tier consumption, and the selected Mumbai rates are not
+known. The $51.08 amount must therefore not be described as an affordable
 monthly budget or maximum exposure. The previous `$75/month` proposal leaves
-only `$41.92` over this incomplete subtotal; that difference is not a validated
+only `$23.92` over this incomplete subtotal; that difference is not a validated
 reserve.
 
 The scenario assumes Cloud Run request-based API billing with zero minimum
@@ -102,6 +107,8 @@ Official rates and limits used above: [Cloud Run pricing](https://cloud.google.c
 (request/Jobs rates, free-tier scope, regional pricing, and minimum Job duration);
 [Cloud SQL pricing](https://cloud.google.com/sql/pricing)
 (`db-g1-small` reference rate and regional selection for storage/network);
+[Cloud Load Balancing pricing](https://cloud.google.com/load-balancing/pricing)
+(`$0.025/hour` global forwarding-rule rate and traffic processing charges);
 [Cloud Scheduler pricing](https://cloud.google.com/scheduler/pricing)
 (`$0.10/job/31 days`, three free jobs per billing account);
 [Artifact Registry pricing](https://cloud.google.com/artifact-registry/pricing)
@@ -109,7 +116,7 @@ Official rates and limits used above: [Cloud Run pricing](https://cloud.google.c
 [Secret Manager pricing](https://cloud.google.com/secret-manager/pricing)
 (active-version/access allowances and rates); and
 [Cloud Observability pricing](https://cloud.google.com/products/observability/pricing)
-(Logging and Monitoring pricing). References checked 2026-10-24. The official
+(Logging and Monitoring pricing). References checked 2026-10-30. The official
 [Pricing Calculator](https://cloud.google.com/products/calculator) estimate
 still requires owner-selected region/project/workload inputs and a saved dated
 export; this arithmetic does not replace it.
