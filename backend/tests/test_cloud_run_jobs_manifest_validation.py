@@ -58,6 +58,25 @@ def test_reviewed_candidate_shape_passes_local_checks() -> None:
     assert _issues(jobs, scheduler) == []
 
 
+def test_staging_region_defaults_match_owner_india_direction() -> None:
+    jobs = JOBS_PATH.read_text(encoding="utf-8")
+    scheduler = SCHEDULER_PATH.read_text(encoding="utf-8")
+    documents = list(yaml.safe_load_all(jobs))
+
+    assert len(documents) == 2
+    assert all(
+        document["metadata"]["labels"]["cloud.googleapis.com/location"]
+        == "asia-south1"
+        for document in documents
+    )
+    assert jobs.count(
+        "run.googleapis.com/cloudsql-instances: "
+        "REPLACE_WITH_PROJECT_ID:asia-south1:REPLACE_WITH_CLOUDSQL_INSTANCE"
+    ) == 2
+    assert 'default     = "asia-south1"' in scheduler
+    assert 'default     = "REPLACE_WITH_SCHEDULER_REGION"' not in scheduler
+
+
 def test_fcm_sender_role_is_required_and_limited_to_push_runtime_identity() -> None:
     jobs, scheduler = _valid_inputs()
     assert _issues(jobs, scheduler) == []
@@ -182,9 +201,7 @@ def test_scheduler_project_must_match_job_project() -> None:
 def test_scheduler_cloud_run_region_must_match_job_region() -> None:
     jobs, scheduler = _valid_inputs()
     scheduler = scheduler.replace(
-        'variable "cloud_run_region" {\n  description = "Owner-approved region matching the Cloud Run Job manifests."\n  type        = string\n  default     = "asia-south1"',
-        'variable "cloud_run_region" {\n  description = "Owner-approved region matching the Cloud Run Job manifests."\n  type        = string\n  default     = "us-central1"',
-        1,
+        'default     = "asia-south1"', 'default     = "us-central1"', 1
     )
     assert any("cloud_run_region must match the Job" in issue for issue in _issues(jobs, scheduler))
 

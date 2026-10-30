@@ -18,15 +18,15 @@ variable "project_id" {
 }
 
 variable "cloud_run_region" {
-  description = "Owner-approved region matching the Cloud Run Job manifests."
+  description = "India staging planning region matching the Cloud Run Job manifests; confirm cost and owner gates before apply."
   type        = string
-  default     = "REPLACE_WITH_REGION"
+  default     = "asia-south1"
 }
 
 variable "scheduler_region" {
-  description = "Owner-approved Cloud Scheduler region."
+  description = "India staging planning region for Cloud Scheduler; confirm service location before apply."
   type        = string
-  default     = "REPLACE_WITH_SCHEDULER_REGION"
+  default     = "asia-south1"
 }
 
 variable "push_schedule" {

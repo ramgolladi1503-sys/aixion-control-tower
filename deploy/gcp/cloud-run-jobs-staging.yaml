@@ -9,14 +9,14 @@ metadata:
   name: aixion-push-dispatch
   namespace: REPLACE_WITH_GCP_PROJECT_NUMBER
   labels:
-    cloud.googleapis.com/location: REPLACE_WITH_REGION
+    cloud.googleapis.com/location: asia-south1
   annotations:
     run.googleapis.com/description: "PRE-BILLING DRAFT ONLY; do not apply before Slice 1 and owner approval"
 spec:
   template:
     metadata:
       annotations:
-        run.googleapis.com/cloudsql-instances: REPLACE_WITH_PROJECT_ID:REPLACE_WITH_REGION:REPLACE_WITH_CLOUDSQL_INSTANCE
+        run.googleapis.com/cloudsql-instances: REPLACE_WITH_PROJECT_ID:asia-south1:REPLACE_WITH_CLOUDSQL_INSTANCE
         run.googleapis.com/secrets: >-
           postgres-dsn:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/REPLACE_WITH_POSTGRES_SECRET_NAME
     spec:
@@ -60,14 +60,14 @@ metadata:
   name: aixion-email-dispatch
   namespace: REPLACE_WITH_GCP_PROJECT_NUMBER
   labels:
-    cloud.googleapis.com/location: REPLACE_WITH_REGION
+    cloud.googleapis.com/location: asia-south1
   annotations:
     run.googleapis.com/description: "PRE-BILLING DRAFT ONLY; do not apply before Slice 1 and owner approval"
 spec:
   template:
     metadata:
       annotations:
-        run.googleapis.com/cloudsql-instances: REPLACE_WITH_PROJECT_ID:REPLACE_WITH_REGION:REPLACE_WITH_CLOUDSQL_INSTANCE
+        run.googleapis.com/cloudsql-instances: REPLACE_WITH_PROJECT_ID:asia-south1:REPLACE_WITH_CLOUDSQL_INSTANCE
         run.googleapis.com/secrets: >-
           postgres-dsn:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/REPLACE_WITH_POSTGRES_SECRET_NAME,
           smtp-username:projects/REPLACE_WITH_GCP_PROJECT_NUMBER/secrets/REPLACE_WITH_SMTP_USERNAME_SECRET_NAME,
