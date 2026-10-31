@@ -40,3 +40,26 @@ The full run reported one Starlette/httpx `TestClient` deprecation warning and f
 ## Configuration, migration, and rollout
 
 No application configuration or migration changed for this validation. Keep cloud billing, cloud resources, deployment, and production database activation disabled. The next Slice 1 work remains binding application routes and lifespan workers to one runtime-owned PostgreSQL repository path, then proving route-level and cross-process behavior.
+
+## Exact PR-head full-suite run — 2026-10-31
+
+**Checkout:** PR #204 branch `ram/pre-billing-readiness-snapshot`, commit `c262c2e27c97e7f19e71dfda6a0ed95c19bd5b46`.
+
+**Test database:** newly created local PostgreSQL 17 database `aixion_pr204_full_20261031` on the isolated socket `/tmp/aixion-codex-native-e2e-20261029/socket`. The approved staging rehearsal database and live SQLite API were not used as test targets.
+
+**Command, run from `backend/`:**
+
+```sh
+AIXION_TEST_POSTGRES_DSN='host=/tmp/aixion-codex-native-e2e-20261029/socket port=59174 dbname=aixion_pr204_full_20261031 user=madhuram' \
+PYTHONDONTWRITEBYTECODE=1 \
+python -m pytest -q -p no:cacheprovider \
+  --basetemp=/tmp/aixion-pr204-backend-pg-tests-20261031
+```
+
+**Result:** **2,823 passed, 5 skipped, 6 warnings in 628.35s**.
+
+This runs the full backend suite with the PostgreSQL integration DSN configured. Tests that explicitly opt into PostgreSQL integration exercised the isolated PostgreSQL database; tests using their normal adapter continued to use their own test setup. This result does not claim that every test executed against PostgreSQL.
+
+This is local test evidence only. It does not prove application-wide PostgreSQL runtime authority, source-data reconciliation/import, production backup/PITR or recovery objectives, or production cutover. The live source remains active, and no staging import, cloud resource, billing setting, deployment, or merge was changed.
+
+No new configuration keys or application migrations were added. To repeat, start the existing local PostgreSQL 17 test cluster, ensure the named test database exists, then run the command above. The local cluster and `/tmp` test artifacts are ephemeral and are not a production backup.
