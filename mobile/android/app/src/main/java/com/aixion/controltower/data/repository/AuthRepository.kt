@@ -1,6 +1,7 @@
 package com.aixion.controltower.data.repository
 
 import android.content.Context
+import android.util.Log
 import com.aixion.controltower.core.api.ControlTowerApi
 import com.aixion.controltower.core.api.dto.AccountDeletionRequestDto
 import com.aixion.controltower.core.api.dto.AccountDeletionResponseDto
@@ -11,14 +12,122 @@ import com.aixion.controltower.core.api.dto.ResendVerificationRequestDto
 import com.aixion.controltower.core.api.dto.VerifyEmailRequestDto
 import com.aixion.controltower.core.api.dto.VerifyEmailResponseDto
 import com.aixion.controltower.core.auth.AuthSession
+import com.aixion.controltower.notifications.PushDeviceRegistrationRepository
+import com.aixion.controltower.notifications.PushDeviceRegistrationWorker
+import com.aixion.controltower.notifications.PushRegistrationResult
+import kotlinx.coroutines.CancellationException
+
+internal suspend fun <T> establishAuthenticatedSession(
+    token: String,
+    saveToken: (String) -> Unit,
+    validateSession: suspend () -> T,
+    clearToken: () -> Unit
+): T {
+    try {
+        saveToken(token)
+        return validateSession()
+    } catch (failure: Throwable) {
+        try {
+            clearToken()
+        } catch (cleanupFailure: Throwable) {
+            failure.addSuppressed(cleanupFailure)
+        }
+        throw failure
+    }
+}
+
+internal suspend fun logoutWithCleanup(
+    cancelPushRegistration: suspend () -> Unit = {},
+    unregisterPushDevice: suspend () -> Boolean,
+    revokeServerSession: suspend () -> Unit,
+    clearLocalSession: () -> Unit,
+    onFailure: (stage: String, error: Exception) -> Unit
+): Boolean {
+    var cleanupSucceeded = true
+    try {
+        try {
+            cancelPushRegistration()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            cleanupSucceeded = false
+            onFailure("push-registration-cancel", error)
+        }
+        try {
+            if (!unregisterPushDevice()) cleanupSucceeded = false
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            cleanupSucceeded = false
+            onFailure("push-device-unregister", error)
+        }
+        try {
+            revokeServerSession()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            cleanupSucceeded = false
+            onFailure("server-session-revocation", error)
+        }
+    } finally {
+        clearLocalSession()
+    }
+    return cleanupSucceeded
+}
+
+internal suspend fun registerPushDeviceAndScheduleRetries(
+    register: suspend () -> PushRegistrationResult,
+    scheduleRetry: () -> Unit,
+    onRegistrationFailure: (Exception) -> Unit = {},
+    onScheduleFailure: (Exception) -> Unit = {}
+): PushRegistrationResult {
+    val result = try {
+        register()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        onRegistrationFailure(error)
+        PushRegistrationResult.BACKEND_UNAVAILABLE
+    }
+    if (!PushDeviceRegistrationWorker.shouldRetry(result)) return result
+
+    try {
+        scheduleRetry()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        onScheduleFailure(error)
+    }
+    return result
+}
 
 class AuthRepository(
     private val api: ControlTowerApi,
     private val context: Context
 ) {
-    suspend fun login(email: String, password: String) {
+    private val pushRegistrationRepository = PushDeviceRegistrationRepository(context)
+
+    suspend fun login(email: String, password: String): String {
         val response = api.login(LoginRequestDto(email = email.trim(), password = password))
-        AuthSession.saveAccessToken(context, response.access_token)
+        val label = establishAuthenticatedSession(
+            token = response.access_token,
+            saveToken = { AuthSession.saveAccessToken(context, it) },
+            validateSession = {
+                val user = api.me()
+                listOf(user.display_name, user.email, user.role)
+                    .filter { it.isNotBlank() }
+                    .joinToString(" • ")
+            },
+            clearToken = { AuthSession.clear(context) }
+        )
+        try {
+            pushRegistrationRepository.retryPendingUnregistrations()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.w("AuthRepository", "Post-login push cleanup could not complete.", error)
+        }
+        return label
     }
 
     suspend fun register(email: String, password: String, displayName: String, inviteCode: String = ""): RegistrationResponseDto {
@@ -47,6 +156,18 @@ class AuthRepository(
             .joinToString(" • ")
     }
 
+    internal suspend fun registerPushDeviceIfAllowed(): PushRegistrationResult =
+        registerPushDeviceAndScheduleRetries(
+            register = { pushRegistrationRepository.registerCurrentDevice() },
+            scheduleRetry = { PushDeviceRegistrationWorker.enqueue(context) },
+            onRegistrationFailure = { error ->
+                Log.w("AuthRepository", "Push registration failed unexpectedly.", error)
+            },
+            onScheduleFailure = { error ->
+                Log.w("AuthRepository", "Push registration retry could not be queued.", error)
+            }
+        )
+
     suspend fun requestPrivacyAccountRemoval(reason: String): AccountDeletionResponseDto {
         val response = api.requestAccountDeletion(AccountDeletionRequestDto(reason = reason.trim()))
         AuthSession.clear(context)
@@ -55,7 +176,15 @@ class AuthRepository(
 
     fun hasSavedToken(): Boolean = AuthSession.getAccessToken(context).isNotBlank()
 
-    fun logout() {
-        AuthSession.clear(context)
+    suspend fun logout(): Boolean {
+        return logoutWithCleanup(
+            cancelPushRegistration = { PushDeviceRegistrationWorker.cancelAndAwait(context) },
+            unregisterPushDevice = { pushRegistrationRepository.unregisterCurrentDevice() },
+            revokeServerSession = { api.logout() },
+            clearLocalSession = { AuthSession.clear(context) },
+            onFailure = { stage, error ->
+                Log.w("AuthRepository", "Logout cleanup stage failed: $stage", error)
+            }
+        )
     }
 }

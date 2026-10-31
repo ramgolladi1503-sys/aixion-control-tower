@@ -10,6 +10,7 @@ from .agent_run_models import (
     AgentRunStepType,
 )
 from .agent_run_state_machine import transition_run, transition_step
+from .approval_decisions import approval_decision_repository
 from .models import now_utc
 from .settings import get_settings
 from .store import store
@@ -29,6 +30,15 @@ from .trust_service import evaluate_gateway_action, refresh_lease_status
 
 class AgentRunTrustConflict(RuntimeError):
     pass
+
+
+def _require_local_trust_authority() -> None:
+    """Reject process-local trust operations in authoritative PostgreSQL modes."""
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        raise AgentRunTrustConflict(
+            "AgentRun trust operations require the app-bound durable PostgreSQL path."
+        )
 
 
 SIDE_EFFECT_STEPS = {
@@ -72,7 +82,7 @@ def _append_run_event(
 
 def _validate_lease_for_run(run: AgentRun, lease: CapabilityLease) -> None:
     task = store.agent_tasks.get(run.task_id)
-    approval = store.approval_requests.get(run.approval_request_id or "")
+    approval = approval_decision_repository.get(run.approval_request_id or "")
     refresh_lease_status(lease)
     reasons: list[str] = []
     if task is None:
@@ -117,6 +127,7 @@ def attach_capability_lease(
     *,
     actor: str,
 ) -> AgentRun:
+    _require_local_trust_authority()
     if run.capability_lease_id:
         if run.capability_lease_id == lease_id:
             return run
@@ -186,7 +197,7 @@ def _step_actions(
     timeout_seconds: int,
 ) -> list[ProposedAction]:
     task = store.agent_tasks.get(run.task_id)
-    approval = store.approval_requests.get(run.approval_request_id or "")
+    approval = approval_decision_repository.get(run.approval_request_id or "")
     if task is None or approval is None:
         raise AgentRunTrustConflict(
             "Run trust evaluation requires task and approval truth."
@@ -329,6 +340,8 @@ def authorize_run_step(
     actor: str,
     timeout_seconds: int,
 ) -> list[ProposedAction]:
+    if step.step_type in SIDE_EFFECT_STEPS:
+        _require_local_trust_authority()
     if not get_settings().trust_enforcement or step.step_type not in SIDE_EFFECT_STEPS:
         return []
     if not run.capability_lease_id:
@@ -469,6 +482,7 @@ def consume_run_step_actions(
 ) -> None:
     if not actions or step.status != AgentRunStepStatus.SUCCEEDED:
         return
+    _require_local_trust_authority()
     duration_seconds = max(0, int((step.duration_ms or 0) / 1000))
     per_action_runtime = duration_seconds // len(actions)
     remainder = duration_seconds - per_action_runtime * len(actions)

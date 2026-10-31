@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from app.agent_task_retry import RETRY_REQUESTED_OPERATION, retry_summary
+from app.approval_integrity import compute_approval_payload_hash
 from app.main import app
 from app.models import AgentProvider, ApprovalRequest, ApprovalStatus, Project, RiskAssessment, RiskLevel
 from app.store import store
@@ -41,6 +42,7 @@ def _failed_task(*, with_approval: bool = True) -> AgentTask:
             risk=RiskAssessment(level=RiskLevel.LOW),
             status=ApprovalStatus.APPROVED,
         )
+        approval.approved_payload_hash = compute_approval_payload_hash(approval)
         store.approval_requests[approval.id] = approval
         approval_id = approval.id
     task = AgentTask(
@@ -70,6 +72,7 @@ def _retry_event(task: AgentTask, retry_count: int) -> AgentTaskEvent:
         metadata={"operation_type": RETRY_REQUESTED_OPERATION, "retry_count": retry_count},
     )
     store.agent_task_events[event.id] = event
+    store.persist_records(inserts=[("agent_task_event", event.id, event)])
     return event
 
 
@@ -126,6 +129,23 @@ def test_retry_refuses_failed_task_without_approval() -> None:
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Agent task has no linked approval request."
+
+
+def test_retry_refuses_when_linked_approval_is_no_longer_approved() -> None:
+    task = _failed_task()
+    approval = store.approval_requests[task.approval_request_id]
+    approval.status = ApprovalStatus.FAILED
+    store.persist()
+
+    summary = client.get(f"/agent/tasks/{task.id}/retry")
+    response = client.post(f"/agent/tasks/{task.id}/retry", json={"reason": "retry"})
+
+    assert summary.status_code == 200
+    assert summary.json()["retry_allowed"] is False
+    assert "obtain approval again" in summary.json()["reason"]
+    assert response.status_code == 409
+    assert response.json()["detail"] == summary.json()["reason"]
+    assert store.agent_tasks[task.id].status == AgentTaskStatus.FAILED
 
 
 def test_retry_refuses_after_retry_limit() -> None:

@@ -115,6 +115,13 @@ def test_agent_created_work_order_derives_source_from_scoped_agent() -> None:
     assert audit_event.actor == f"agent:{agent_id}"
     assert audit_event.details["source_agent_id"] == agent_id
     assert audit_event.details["verified_source"] is True
+    persisted = store.work_order_repository.get(work_order["id"])
+    assert persisted is not None
+    assert persisted.source_agent_id == agent_id
+    assert any(
+        event.id == audit_event.id
+        for event in store._load_entities("audit_event", type(audit_event)).values()
+    )
 
 
 def test_agent_created_work_order_ignores_client_supplied_agent_identity() -> None:

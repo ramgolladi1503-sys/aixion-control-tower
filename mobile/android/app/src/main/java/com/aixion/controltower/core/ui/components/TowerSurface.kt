@@ -10,22 +10,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.aixion.controltower.core.ui.theme.TowerBorder
-import com.aixion.controltower.core.ui.theme.TowerBorderSoft
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerRadius
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerSurface
-import com.aixion.controltower.core.ui.theme.TowerSurfaceRaised
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
 
 @Composable
 fun TowerPanel(
@@ -33,15 +31,21 @@ fun TowerPanel(
     elevated: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val shape = RoundedCornerShape(TowerRadius.lg)
-    val background = if (elevated) TowerSurfaceRaised else TowerSurface
+    val palette = LocalTowerPalette.current
+    val shape = RoundedCornerShape(TowerRadius.md)
+    val background = if (elevated) palette.surfaceRaised else palette.surface
 
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .shadow(
+                elevation = if (elevated) 1.dp else 0.dp,
+                shape = shape,
+                clip = false
+            )
             .clip(shape)
             .background(background)
-            .border(BorderStroke(1.dp, TowerBorderSoft), shape)
+            .border(BorderStroke(1.dp, palette.line.copy(alpha = 0.34f)), shape)
             .padding(TowerSpacing.lg),
         content = content
     )
@@ -50,23 +54,17 @@ fun TowerPanel(
 @Composable
 fun TowerHeroPanel(
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    val shape = RoundedCornerShape(TowerRadius.xl)
+    val palette = LocalTowerPalette.current
+    val shape = RoundedCornerShape(if (compact) TowerRadius.md else TowerRadius.lg)
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        TowerSurfaceRaised.copy(alpha = 0.98f),
-                        TowerSurface.copy(alpha = 0.94f)
-                    )
-                )
-            )
-            .border(BorderStroke(1.dp, TowerBorder), shape)
-            .padding(TowerSpacing.xl),
+            .background(palette.surfaceSubtle.copy(alpha = 0.72f))
+            .padding(if (compact) TowerSpacing.lg else TowerSpacing.xl),
         content = content
     )
 }
@@ -77,19 +75,19 @@ fun TowerSectionHeader(
     subtitle: String? = null,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalTowerPalette.current
     Column(modifier = modifier.fillMaxWidth()) {
         Text(
             text = title,
-            color = TowerTextPrimary,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.SemiBold
+            color = palette.ink,
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.semantics { heading() }
         )
         if (!subtitle.isNullOrBlank()) {
             Text(
                 text = subtitle,
-                color = TowerTextMuted,
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
+                color = palette.inkMuted,
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
@@ -97,10 +95,11 @@ fun TowerSectionHeader(
 }
 
 @Composable
-fun TowerDivider(modifier: Modifier = Modifier, color: Color = TowerBorderSoft) {
+fun TowerDivider(modifier: Modifier = Modifier, color: Color? = null) {
+    val dividerColor = color ?: LocalTowerPalette.current.line.copy(alpha = 0.62f)
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .background(color)
+            .background(dividerColor)
     )
 }

@@ -18,4 +18,12 @@ object AuthFailure {
             error.message ?: "backend request failed"
         }
     }
+
+    fun loginMessage(error: Throwable): String {
+        return if (isUnauthorized(error)) {
+            "Email or password was not recognized. Check your details and try again."
+        } else {
+            operatorMessage(error)
+        }
+    }
 }

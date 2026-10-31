@@ -34,7 +34,7 @@ Revoke secret:
 POST /connectors/{connector_id}/secret/revoke
 ```
 
-Mark health success/failure manually or from future connector checks:
+Legacy manual health routes (return HTTP 409 and do not mutate connector state):
 
 ```http
 POST /connectors/{connector_id}/health/success
@@ -81,6 +81,14 @@ DEGRADED
 FAILING
 DISABLED
 ```
+
+Runtime health and authentication counters are derived from observed
+connector traffic. Owner-authenticated management calls cannot assert either
+success or failure: a successful management request does not prove that the
+connector can authenticate, and a manually supplied failure is not an
+authentication attempt. The legacy success/failure routes are retained for
+compatibility, workspace-authorize the connector, and return HTTP 409 without
+changing health, usage timestamps, authentication counters, or audit events.
 
 ## What this PR does not add
 

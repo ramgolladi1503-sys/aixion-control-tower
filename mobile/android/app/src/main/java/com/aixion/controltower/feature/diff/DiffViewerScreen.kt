@@ -28,17 +28,14 @@ import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerAccent
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 import com.aixion.controltower.feature.approvals.ApprovalsViewModel
 
 @Composable
 fun DiffViewerScreen(viewModel: ApprovalsViewModel = viewModel()) {
+    val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
     val approval = state.selectedApproval ?: state.approvals.firstOrNull()
 
@@ -46,14 +43,14 @@ fun DiffViewerScreen(viewModel: ApprovalsViewModel = viewModel()) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(TowerBackground)
-                .padding(18.dp),
+                .background(palette.canvas)
+                .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
             verticalArrangement = Arrangement.Center
         ) {
             TowerPanel(elevated = true) {
-                Text("No diff selected", color = TowerTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                Text("No diff selected", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text("Select an approval request first.", color = TowerTextMuted, fontSize = 14.sp)
+                Text("Select an approval request first.", color = palette.inkMuted, fontSize = 14.sp)
             }
         }
         return
@@ -62,8 +59,8 @@ fun DiffViewerScreen(viewModel: ApprovalsViewModel = viewModel()) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
-            .padding(18.dp),
+            .background(palette.canvas)
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
@@ -74,11 +71,11 @@ fun DiffViewerScreen(viewModel: ApprovalsViewModel = viewModel()) {
                     verticalAlignment = Alignment.Top
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        StatusBadge(label = "FULL DIFF REVIEW", color = RiskMedium)
+                        StatusBadge(label = "Full diff review", color = palette.caution, uppercase = false)
                         Spacer(modifier = Modifier.height(TowerSpacing.md))
                         Text(
                             text = approval.title,
-                            color = TowerTextPrimary,
+                            color = palette.ink,
                             fontSize = 25.sp,
                             fontWeight = FontWeight.SemiBold,
                             lineHeight = 30.sp
@@ -86,18 +83,18 @@ fun DiffViewerScreen(viewModel: ApprovalsViewModel = viewModel()) {
                         Spacer(modifier = Modifier.height(TowerSpacing.sm))
                         Text(
                             text = "Review every changed file before approving execution.",
-                            color = TowerTextMuted,
+                            color = palette.inkMuted,
                             fontSize = 14.sp,
                             lineHeight = 20.sp
                         )
                     }
-                    ForgedLogoMark(size = 50.dp, color = TowerTextPrimary.copy(alpha = 0.78f))
+                    ForgedLogoMark(size = 50.dp, color = palette.ink.copy(alpha = 0.78f))
                 }
                 Spacer(modifier = Modifier.height(TowerSpacing.lg))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     RiskBadge(approval.risk)
-                    StatusBadge("${approval.files.size} files", TowerAccent)
-                    StatusBadge("Review gate", RiskLow)
+                    StatusBadge("${approval.files.size} files", palette.brand, uppercase = false)
+                    StatusBadge("Review gate", palette.positive, uppercase = false)
                 }
             }
         }

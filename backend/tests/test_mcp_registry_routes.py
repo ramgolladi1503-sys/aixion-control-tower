@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app import mcp_registry_routes
+from app.models import AuthUser, MCPChildServerCreate, UserRole
 from app.store import store
 
 client = TestClient(app)
@@ -112,6 +118,59 @@ def test_register_child_server_blocks_unknown_project_and_duplicate_name() -> No
 
     assert missing_project.status_code == 404
     assert duplicate.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=("production", "postgres-auth"),
+)
+def test_direct_mcp_registry_registration_and_query_fail_closed_without_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: SimpleNamespace,
+) -> None:
+    monkeypatch.setattr(mcp_registry_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        store,
+        "_connect",
+        lambda: pytest.fail("direct MCP registry access attempted SQLite"),
+    )
+    monkeypatch.setattr(
+        "app.workspace_access.workspace_id_for_user",
+        lambda _user: pytest.fail("direct MCP registry query attempted SQLite workspace lookup"),
+    )
+    user = AuthUser(
+        id="registry-owner",
+        email="owner@example.test",
+        display_name="Registry owner",
+        role=UserRole.OWNER,
+        workspace_id="workspace_registry",
+    )
+    payload = MCPChildServerCreate(
+        project_id="project_registry",
+        name="must-not-register",
+        description="Fail-closed direct route regression",
+        transport="test",
+        endpoint="memory://must-not-register",
+        enabled=True,
+        tools=[],
+    )
+
+    before_servers = dict(store.mcp_child_servers)
+    before_audit_events = list(store.audit_events)
+    with pytest.raises(HTTPException) as registration_error:
+        mcp_registry_routes.register_child_server(payload, user=user)
+    assert registration_error.value.status_code == 503
+    assert registration_error.value.headers == {"Retry-After": "30"}
+
+    with pytest.raises(HTTPException) as query_error:
+        mcp_registry_routes.list_child_servers(user=user)
+    assert query_error.value.status_code == 503
+    assert store.mcp_child_servers == before_servers
+    assert store.audit_events == before_audit_events
 
 
 def test_child_server_detail_returns_404_for_missing_id() -> None:

@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import os
+from contextlib import contextmanager
+from datetime import timedelta
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 os.environ.setdefault("AIXION_PROFILE", "test")
@@ -9,17 +17,40 @@ os.environ.setdefault("AIXION_LEASE_SIGNING_KEY", "route-test-signing-key-with-s
 from fastapi.testclient import TestClient
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.approval_integrity import compute_approval_payload_hash
 from app.main import app
 from app.models import (
+    AgentAction,
+    AgentAuthType,
+    AuthUser,
     AgentProvider,
+    ExternalAgent,
     ApprovalRequest,
     ApprovalStatus,
     FileChange,
     Project,
     RiskAssessment,
     RiskLevel,
+    UserRole,
+    now_utc,
 )
+from app.agent_credential_models import AgentCredentialRecord
 from app.store import store
+from app.trust_models import (
+    ActionConsumption,
+    CapabilityActionType,
+    ProposedAction,
+    ReviewerAttestationCreate,
+    ReviewerAttestationDecision,
+)
+from app.trust_routes import (
+    consume_external_agent_action,
+    create_attestation,
+    evaluate_manual_action,
+    get_exact_action_decision,
+    list_attestations,
+    list_flight_recorder_events,
+)
 
 client = TestClient(app)
 
@@ -51,8 +82,8 @@ def _seed_approval() -> ApprovalRequest:
         status=ApprovalStatus.APPROVED,
         created_by_user_id="creator",
         approved_by_user_id="reviewer",
-        approved_payload_hash="route-approved-hash",
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
@@ -98,6 +129,170 @@ def _create_lease(approval: ApprovalRequest) -> dict:
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_reviewer_attestation_create_and_list_keep_sqlite_local_behavior() -> None:
+    approval = _seed_approval()
+    reviewer = AuthUser(
+        id="reviewer-local",
+        email="reviewer-local@example.test",
+        display_name="Local reviewer",
+        role=UserRole.REVIEWER,
+    )
+    payload = ReviewerAttestationCreate(
+        approval_request_id=approval.id,
+        decision=ReviewerAttestationDecision.APPROVE,
+        reason="Reviewed the exact request.",
+    )
+
+    created = create_attestation(payload, user=reviewer, request=None)
+    listed = list_attestations(
+        approval_request_id=approval.id,
+        user=reviewer,
+        request=None,
+    )
+
+    assert created.id in store.reviewer_attestations
+    assert [item.id for item in listed] == [created.id]
+
+
+def test_flight_recorder_fails_closed_for_incomplete_postgres_bundle(monkeypatch) -> None:
+    reviewer = AuthUser(
+        id="reviewer-incomplete-postgres",
+        email="reviewer@example.test",
+        display_name="Reviewer",
+        role=UserRole.REVIEWER,
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(postgres_repositories=object()),
+        )
+    )
+    monkeypatch.setattr(
+        "app.trust_routes.get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        list_flight_recorder_events(user=reviewer, request=request)
+
+    assert error.value.status_code == 503
+    assert "PostgreSQL" in error.value.detail
+
+
+def test_postgres_agent_action_consume_rechecks_grants_after_preflight(monkeypatch) -> None:
+    raw_token = "aixion_agent_route_race_test"
+    stale_agent = ExternalAgent(
+        provider=AgentProvider.CODEX,
+        display_name="Gateway agent",
+        auth_type=AgentAuthType.API_KEY,
+        allowed_actions=[AgentAction.EXECUTE_GITHUB],
+        workspace_id="workspace-route-race",
+        secret_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+    )
+    current_agent = stale_agent.model_copy(deep=True)
+    credential = AgentCredentialRecord(
+        agent_id=stale_agent.id,
+        token_expires_at=now_utc() + timedelta(hours=1),
+    )
+    action = ProposedAction(
+        provider=AgentProvider.CODEX,
+        agent_id=stale_agent.id,
+        workspace_id=stale_agent.workspace_id,
+        project_id="project-route-race",
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository="owner/repo",
+        command="python -m compileall",
+    )
+
+    class Connection:
+        autocommit = False
+
+        def transaction(self):
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+    connection = Connection()
+
+    @contextmanager
+    def connect():
+        yield connection
+
+    class TrustRepository:
+        consumed = False
+
+        @staticmethod
+        def task_actions_enabled():
+            return False
+
+        @staticmethod
+        def get_proposed_action(_conn, action_id, workspace_id, *, for_update=False):
+            assert action_id == action.id
+            assert workspace_id == stale_agent.workspace_id
+            return action
+
+        def consume_effective_action(self, *_args, **_kwargs):
+            self.consumed = True
+            return ActionConsumption()
+
+    class ExternalAuthRepository:
+        def get_for_workspace_for_update(self, _conn, agent_id, *, workspace_id):
+            assert agent_id == stale_agent.id
+            assert workspace_id == stale_agent.workspace_id
+            return current_agent, credential
+
+    trust = TrustRepository()
+    external_auth = ExternalAuthRepository()
+    repositories = SimpleNamespace(trust=trust, external_agent_auth=external_auth)
+    runtime = SimpleNamespace(connect=connect)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/trust/gateway/actions/{action.id}/consume",
+        "headers": [(b"x-aixion-agent-token", raw_token.encode())],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("test", 80),
+        "client": ("test", 1),
+        "http_version": "1.1",
+    }
+    scope["app"] = SimpleNamespace(
+        state=SimpleNamespace(postgres_repositories=repositories)
+    )
+    request = Request(scope)
+
+    monkeypatch.setattr("app.trust_routes._postgres_action_runtime", lambda _request: runtime)
+    monkeypatch.setattr(
+        "app.trust_routes.external_agent_auth_repository_for_request",
+        lambda _request: external_auth,
+    )
+    checks = 0
+
+    def assert_current_agent_can(agent, _action, **_kwargs):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            # Simulate an owner restricting the agent after auth preflight and
+            # before the consume transaction reloads its locked snapshot.
+            current_agent.allowed_actions = []
+            return
+        if AgentAction.EXECUTE_GITHUB not in agent.allowed_actions:
+            raise HTTPException(status_code=403, detail="Agent grant was revoked")
+
+    monkeypatch.setattr("app.trust_routes.assert_agent_can", assert_current_agent_can)
+
+    with pytest.raises(HTTPException) as error:
+        consume_external_agent_action(
+            action.id,
+            ActionConsumption(),
+            agent=stale_agent,
+            request=request,
+        )
+
+    assert error.value.status_code == 403
+    assert checks == 2
+    assert trust.consumed is False
 
 
 def test_lease_gateway_consumption_scorecard_and_flight_recorder_routes() -> None:
@@ -231,3 +426,102 @@ def test_external_credential_brokers_fail_honestly_until_configured() -> None:
     )
     assert response.status_code == 501
     assert "deployment-specific issuer" in response.json()["detail"]
+
+
+def test_postgres_task_only_action_route_fails_closed_when_flag_is_off(monkeypatch) -> None:
+    workspace_id = "workspace-task-action-route"
+    trust_repository = SimpleNamespace(task_actions_enabled=lambda: False)
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_repositories=SimpleNamespace(
+                    trust=trust_repository,
+                    projects=SimpleNamespace(
+                        get=lambda _project_id: SimpleNamespace(workspace_id=workspace_id)
+                    ),
+                )
+            )
+        )
+    )
+    user = AuthUser(
+        id="maintainer-task-action-route",
+        email="maintainer@example.test",
+        display_name="Task action reviewer",
+        role=UserRole.MAINTAINER,
+        workspace_id=workspace_id,
+        email_verified=True,
+    )
+    payload = ProposedAction(
+        task_id="task-route-test",
+        project_id="project-route-test",
+        workspace_id=workspace_id,
+        action_type=CapabilityActionType.RUN_COMMAND,
+        repository="owner/repo",
+        branch="feature/task-action",
+        command="pytest -q",
+        metadata={
+            "approval_request_id": "approval-route-test",
+            "approved_payload_hash": "sha256:" + "a" * 64,
+        },
+    )
+    monkeypatch.setattr("app.trust_routes._postgres_action_runtime", lambda _request: object())
+    monkeypatch.setattr(
+        "app.trust_routes.workspace_id_for_request",
+        lambda _user, _request: workspace_id,
+    )
+    with pytest.raises(HTTPException) as error:
+        evaluate_manual_action(payload, user, request)
+    assert error.value.status_code == 409
+    assert "disabled" in str(error.value.detail)
+
+
+@pytest.mark.parametrize(
+    ("binding", "expected_status"),
+    [
+        ("repositories_only", 409),
+        ("auth_selected_missing_runtime", 503),
+        ("auth_selected_mismatched_runtime", 503),
+    ],
+)
+def test_action_decision_read_fails_closed_without_postgres_runtime(
+    monkeypatch,
+    binding: str,
+    expected_status: int,
+) -> None:
+    class RejectStoreMap(dict):
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("PostgreSQL-selected action read touched a Store map")
+
+        def values(self):
+            raise AssertionError("PostgreSQL-selected action read touched a Store map")
+
+    monkeypatch.setattr(store, "proposed_actions", RejectStoreMap())
+    monkeypatch.setattr(store, "action_authorizations", RejectStoreMap())
+    if binding == "repositories_only":
+        state = SimpleNamespace(postgres_repositories=object())
+        settings = SimpleNamespace(is_production=False, postgres_auth_enabled=False)
+    elif binding == "auth_selected_missing_runtime":
+        state = SimpleNamespace()
+        settings = SimpleNamespace(is_production=False, postgres_auth_enabled=True)
+    else:
+        state = SimpleNamespace(
+            postgres_repositories=object(),
+            postgres_runtime=SimpleNamespace(repositories=object()),
+        )
+        settings = SimpleNamespace(is_production=False, postgres_auth_enabled=True)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    user = AuthUser(
+        id="reviewer-incomplete-action-runtime",
+        email="reviewer@example.test",
+        display_name="Reviewer",
+        role=UserRole.REVIEWER,
+        workspace_id="workspace-action-runtime",
+        email_verified=True,
+    )
+    monkeypatch.setattr("app.trust_routes.get_settings", lambda: settings)
+
+    with pytest.raises(HTTPException) as error:
+        get_exact_action_decision("action_missing", user=user, request=request)
+
+    assert error.value.status_code == expected_status
+    assert "PostgreSQL" in error.value.detail

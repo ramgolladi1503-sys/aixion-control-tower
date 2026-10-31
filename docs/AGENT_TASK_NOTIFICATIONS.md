@@ -79,8 +79,8 @@ DONE         -> Agent task done
 ## Current limits
 
 ```text
-FCM transport still depends on FCM_SERVER_KEY
-missing FCM_SERVER_KEY marks push as SKIPPED
+FCM transport uses the HTTP v1 API, `AIXION_FCM_PROJECT_ID`, and Google Application Default Credentials
+missing project ID marks push as SKIPPED; missing or invalid ADC marks push as FAILED
 no Android deep-link routing into a specific task yet
 no notification preference model yet
 no retry queue for failed push sends yet

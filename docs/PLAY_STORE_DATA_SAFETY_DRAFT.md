@@ -17,7 +17,7 @@ App may process server/network logs through backend hosting or monitoring system
 Backend authenticated account deletion request endpoint exists.
 Backend public account deletion info endpoint exists.
 Public outside-the-app account deletion URL is still TODO.
-In-app user-facing deletion/request UI is still TODO if account creation remains available.
+Authenticated in-app account-removal request UI is present in the current source, but release-build and live-backend verification remain open.
 App does not use third-party advertising SDKs.
 App does not sell user data.
 App does not intentionally collect precise location, contacts, SMS, photos/videos/audio from the Android device, calendar, health, or payment card data.
@@ -63,7 +63,7 @@ Draft answers:
 
 ```text
 Data encrypted in transit: Yes, for production/review builds only if HTTPS is enforced.
-Users can request data deletion: Not ready for Play submission until public URL and in-app path exist. Backend request foundation exists.
+Users can request data deletion: Not ready for Play submission until the public outside-the-app URL is published, the in-app path is verified in the release build, and final processing/retention terms are approved.
 Data is not sold: Yes, if final SDK/backend review confirms no sale.
 ```
 
@@ -548,7 +548,7 @@ Do not submit Data Safety answers until these are done:
 - [ ] Public privacy policy URL created.
 - [ ] In-app privacy policy link added.
 - [ ] Public outside-the-app account deletion URL created.
-- [ ] In-app account deletion/request path added if account creation remains in app.
+- [ ] In-app account deletion/request path verified in the release build and against the live backend.
 - [x] Backend authenticated account deletion request endpoint exists.
 - [x] Backend public account deletion info endpoint exists.
 - [ ] Final deletion/anonymization workflow defined.

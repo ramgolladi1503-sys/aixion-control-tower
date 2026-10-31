@@ -8,15 +8,28 @@ It is intentionally honest: the project can validate the release build variant a
 
 ```text
 Debug APK:                 supported
-Release variant build:     validated by local/CI commands when run
-Signing config scaffold:   supported through local properties or environment variables
-Signed production APK/AAB: possible only after real keystore values are provided
+Release variant build:     blocked until real Firebase config and HTTPS API URL are available
+Signing config scaffold:   supported through local properties, environment variables, or the manual GitHub workflow
+Signed production APK/AAB: workflow is configured; no real signed artifact has been verified
 Play Store / internal app: not configured yet
 ```
 
 Do not claim signed release readiness until a real keystore-backed APK/AAB has been generated and smoke tested.
 
 Do not claim Play Store readiness until signing, store metadata, privacy/compliance, production backend configuration, and physical-device release smoke testing are complete.
+
+## Android build JDK
+
+Use JDK 17 with the checked-in Gradle wrapper and Kotlin Gradle plugin. On macOS,
+select it explicitly when another JDK is the system default:
+
+```bash
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+
+The current Kotlin build-script toolchain fails under JDK 25. Do not interpret
+that toolchain error as an Android source or API URL failure.
 
 Privacy/data-safety drafts now live at:
 
@@ -29,13 +42,23 @@ These are planning drafts, not final legal/compliance approval.
 
 ## What release validation means today
 
-Release validation currently proves:
+Current CI release-related validation proves:
 
-1. The Android release variant compiles.
-2. Release-only build configuration does not break compilation.
-3. The same configured API base URL mechanism works for release builds.
-4. CI or local commands can catch Android release compile failures before merge.
-5. The build can optionally sign the release variant when valid local signing values are present.
+1. The debug variant and Android JVM tests compile/pass.
+2. The release API URL guard accepts and rejects the documented URL cases.
+3. A release build fails closed when Firebase push configuration is missing.
+
+Current CI does **not** compile the release variant. It intentionally checks
+that `assembleRelease` refuses to proceed without Firebase configuration.
+Release compilation requires a real Firebase project configuration file and a
+real HTTPS Control Tower API URL. A successful `verifyReleaseFirebaseConfigGuard`
+task checks only the guard's boolean cases; it does not prove that a Firebase
+project is valid or reachable.
+
+The manual `Build signed Android AAB` workflow can compile and sign the release
+after its required GitHub secrets are configured. That workflow has not yet
+produced a verified release artifact. See the Firebase setup guide for its
+temporary config secret and cleanup behavior.
 
 Release validation currently does **not** prove:
 
@@ -45,7 +68,7 @@ Release validation currently does **not** prove:
 4. App integrity / Play App Signing enrollment.
 5. Runtime smoke test on a real physical device.
 6. Production backend URL correctness.
-7. Production secrets or Firebase release setup.
+7. Production secrets and Firebase release setup.
 8. Privacy policy readiness.
 9. Store listing readiness.
 10. Review-compliant screenshots and feature graphics.
@@ -59,6 +82,11 @@ cd mobile/android
 ./gradlew assembleDebug
 ```
 
+Debug builds use the separate application ID `com.aixion.controltower.debug`.
+This lets local and instrumentation builds coexist with the release-identity
+application without replacing its app data. Release builds keep the
+`com.aixion.controltower` application ID.
+
 Default backend URL:
 
 ```text
@@ -67,23 +95,39 @@ http://10.0.2.2:8000/
 
 That is correct for Android emulator only.
 
-## Local unsigned release variant build
+## Release variant build prerequisites
 
-Use this to prove the release variant compiles without signing values:
+The release variant is intentionally fail-closed unless Firebase configuration
+is enabled and `mobile/android/app/google-services.json` exists. Do not use a
+placeholder Firebase file to bypass this check. Obtain the project's real
+Firebase Android configuration and the actual HTTPS Control Tower API URL
+before attempting a release build.
+
+`https://aixionlab.com/` is the Aixion Lab website, not a Control Tower API
+endpoint. It is not a valid substitute for a release backend URL.
+
+With the real Firebase file in place, compile an unsigned release variant with:
 
 ```bash
 cd mobile/android
-./gradlew assembleRelease
+./gradlew assembleRelease \
+  -PAIXION_FIREBASE_CONFIG_ENABLED=true \
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ```
 
-For a release build pointed at a LAN backend:
+This command still does not prove the API is reachable, sign the artifact, or
+make it suitable for distribution.
 
-```bash
-cd mobile/android
-./gradlew assembleRelease -PAIXION_API_BASE_URL=http://YOUR_LAN_IP:8000/
-```
-
-The API base URL must end with `/` because Retrofit requires a trailing slash.
+Release API URLs must use HTTPS, include a dotted DNS host, and omit
+credentials, query, and fragment components. The build rejects localhost,
+local hostnames, IP literals, reserved `.test`/`.invalid` hosts, and the
+reserved `example.com`, `example.net`, and `example.org` domains. The URL must
+end with `/` because Retrofit requires a trailing slash. Use the actual HTTPS
+staging or production URL for an installable release artifact. This check
+validates URL syntax only; it does not verify domain ownership, DNS answers,
+TLS configuration, or service reachability.
 
 ## Local signed release build
 
@@ -118,9 +162,21 @@ ANDROID_KEY_PASSWORD=your-local-key-password
 Then build:
 
 ```bash
-./gradlew assembleRelease
-./gradlew bundleRelease
+./gradlew assembleRelease \
+  -PAIXION_FIREBASE_CONFIG_ENABLED=true \
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
+./gradlew bundleRelease \
+  -PAIXION_FIREBASE_CONFIG_ENABLED=true \
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ```
+
+The real `google-services.json` must be present in `app/` for both commands.
+Set `AIXION_RELEASE_API_URL` in the shell or CI secret/configuration. Do not
+use a LAN, loopback, or emulator URL for release builds.
 
 Expected outputs:
 
@@ -133,42 +189,33 @@ Hard rule: never commit `keystore.properties`, `release.keystore`, `*.jks`, `*.k
 
 ## CI release validation
 
-CI should run without signing secrets:
+CI can run without signing secrets or Firebase project credentials:
 
 ```bash
 cd mobile/android
 ./gradlew testDebugUnitTest
 ./gradlew assembleDebug
-./gradlew assembleRelease
+./gradlew :app:verifyReleaseApiUrlGuard
+./gradlew :app:verifyReleaseFirebaseConfigGuard
 ```
 
-This means every PR must prove:
+The workflow also runs `assembleRelease` expecting it to fail specifically
+because Firebase release configuration is absent. This is a fail-closed guard
+check, **not a release compilation check**. Current CI proves:
 
 ```text
 Android JVM tests pass
 Debug APK compiles
-Release variant compiles
+Release URL guard cases pass
+Missing Firebase release configuration is rejected
 ```
 
 Hard truth: this is still not the same as a signed production release.
 
-## Unsigned release output
-
-After running without signing values:
-
-```bash
-./gradlew assembleRelease
-```
-
-Expected output location is normally:
-
-```text
-mobile/android/app/build/outputs/apk/release/
-```
-
-Depending on Android Gradle Plugin behavior and signing configuration, the release output may be unsigned or may not be installable on a normal device.
-
-Do not distribute an unsigned release APK as a real release.
+Do not expect a release APK/AAB from the current CI workflow. Do not claim
+release compilation until a build has succeeded with the real Firebase file
+and actual API URL. An unsigned artifact is for controlled local validation
+only; never distribute it as a release.
 
 ## Signed APK/AAB requirement
 
@@ -213,8 +260,34 @@ For Play Store, prefer Android App Bundle output:
 
 ```bash
 cd mobile/android
-./gradlew bundleRelease
+./gradlew bundleRelease \
+  -PAIXION_FIREBASE_CONFIG_ENABLED=true \
+  -PAIXION_API_BASE_URL="${AIXION_RELEASE_API_URL:?set the real HTTPS Control Tower API URL}" \
+  -PAIXION_VERSION_CODE="${AIXION_RELEASE_VERSION_CODE:?set an unused increasing Play version code}" \
+  -PAIXION_VERSION_NAME="${AIXION_RELEASE_VERSION_NAME:?set MAJOR.MINOR.PATCH}"
 ```
+
+This command requires the real `app/google-services.json`, the actual HTTPS
+Control Tower API URL, and signing values configured outside source control.
+The manual GitHub workflow targets the `android-release` GitHub Environment,
+accepts Firebase config and signing material through its protected secrets,
+creates temporary files in the runner, and removes them at job completion.
+Configure required reviewers and branch restrictions on that environment, then
+set these environment secrets and variable before dispatching:
+
+```text
+ANDROID_KEYSTORE_BASE64
+ANDROID_KEYSTORE_PASSWORD
+ANDROID_KEY_ALIAS
+ANDROID_KEY_PASSWORD
+ANDROID_GOOGLE_SERVICES_JSON_BASE64
+AIXION_FCM_PROJECT_ID (GitHub Environment variable)
+```
+
+The workflow validates the release app package in the Firebase JSON and invokes
+Gradle with `-PAIXION_FIREBASE_CONFIG_ENABLED=true` and explicit version inputs;
+it does not expose secret values in the job log. No exact signed build or
+physical release smoke test has been recorded yet.
 
 Expected artifact:
 
@@ -222,27 +295,26 @@ Expected artifact:
 mobile/android/app/build/outputs/bundle/release/*.aab
 ```
 
-## Future CI signing implementation
+## GitHub Actions signing workflow
 
-The current scaffold supports signing from local properties or environment variables. A later PR can add CI artifact publishing after repository secrets exist.
-
-CI signing should use GitHub Actions secrets such as:
+The workflow uses GitHub Actions secrets:
 
 ```text
 ANDROID_KEYSTORE_BASE64
 ANDROID_KEYSTORE_PASSWORD
 ANDROID_KEY_ALIAS
 ANDROID_KEY_PASSWORD
+ANDROID_GOOGLE_SERVICES_JSON_BASE64
 ```
 
-The CI signing flow should support:
+The manual workflow currently performs:
 
-1. Decode keystore from secret into a temporary file.
-2. Pass signing values through environment variables.
-3. Run `./gradlew bundleRelease`.
-4. Upload the AAB as a workflow artifact.
-5. Never echo secrets.
-6. Never commit the keystore.
+1. Validate required secrets are present without printing their values.
+2. Decode the keystore and Firebase JSON into owner-only temporary files.
+3. Run `./gradlew bundleRelease -PAIXION_FIREBASE_CONFIG_ENABLED=true -PAIXION_API_BASE_URL="$AIXION_RELEASE_API_URL" -PAIXION_VERSION_CODE="$AIXION_RELEASE_VERSION_CODE" -PAIXION_VERSION_NAME="$AIXION_RELEASE_VERSION_NAME"` with the actual HTTPS API URL and explicit version values.
+4. Upload the AAB as a short-retention workflow artifact.
+5. Remove the temporary keystore and Firebase JSON on success or failure.
+6. Never echo secrets or commit the keystore/config file.
 
 ## Play Store preflight checklist
 
@@ -313,8 +385,10 @@ docs/PLAY_STORE_DATA_SAFETY_DRAFT.md
 
 - [ ] `./gradlew testDebugUnitTest` passes.
 - [ ] `./gradlew assembleDebug` passes.
-- [ ] `./gradlew assembleRelease` passes.
-- [ ] `./gradlew bundleRelease` passes with real signing values.
+- [ ] `./gradlew :app:verifyReleaseFirebaseConfigGuard` passes its guard cases.
+- [ ] `./gradlew :app:verifyReleaseApiUrlGuard` passes all accepted/rejected URL cases.
+- [ ] `assembleRelease` passes with the real `app/google-services.json`, `-PAIXION_FIREBASE_CONFIG_ENABLED=true`, and actual HTTPS Control Tower API URL.
+- [ ] `bundleRelease` passes with those same real Firebase/API inputs and signing values.
 - [ ] Signed release APK or AAB is generated.
 - [ ] Signed artifact installs or upload-validates.
 - [ ] Version code is incremented.
@@ -401,6 +475,9 @@ bash scripts/run_demo_server.sh
 http://YOUR_LAN_IP:8000/health
 ```
 
+This HTTP/LAN path is for a debug APK only. Release builds reject HTTP and
+require a reachable HTTPS API URL.
+
 3. APK is built with:
 
 ```bash
@@ -426,12 +503,20 @@ Current Android version fields live in:
 mobile/android/app/build.gradle.kts
 ```
 
-Current values:
+Debug builds retain these development defaults:
 
 ```text
 versionCode = 1
 versionName = "0.1.0"
 ```
+
+Every release build now requires both `AIXION_VERSION_CODE` and
+`AIXION_VERSION_NAME`. The code must be an integer from 1 through 2,100,000,000;
+the name must follow `MAJOR.MINOR.PATCH`, with an optional prerelease or build
+suffix. The manual signed-AAB workflow takes both as required dispatch inputs.
+Choose a code higher than every version code already uploaded to any Play track;
+the build validates format and bounds, while the release operator must compare
+against Play Console because the workflow has no Play publishing credentials.
 
 Before a real release:
 
@@ -485,7 +570,8 @@ Production mobile deployment is solved.
 | `testDebugUnitTest` fails | Android logic/test compile issue | Fix before merge. |
 | `assembleDebug` fails | Debug build broken | Fix before demo. |
 | `assembleRelease` fails | Release variant broken | Fix before claiming release readiness. |
-| `bundleRelease` fails | App Bundle release path or signing path is not ready | Fix before Play Store upload. |
+| `bundleRelease` fails | App Bundle release path, signing inputs, or explicit version inputs are not ready | Fix before Play Store upload. |
+| Release build rejects API URL | URL is missing or is not valid HTTPS | Configure the intended HTTPS staging/production URL; never switch release traffic to HTTP. |
 | APK cannot reach backend | Wrong API URL or LAN/network issue | Prove `/health` from phone first. |
 | APK not installable | Likely unsigned/release signing issue | Use debug for demo or provide real signing values. |
 | Missing signing secrets | Expected until signing values exist | Do not claim signed release. |

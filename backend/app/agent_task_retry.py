@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from .approval_decisions import agent_task_repository
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
-from .models import AuditEvent, now_utc
-from .store import store
+from .agent_task_repository import AgentTaskRepository
+from .approval_integrity import compute_approval_payload_hash
+from .models import ApprovalRequest, ApprovalStatus, AuditEvent, now_utc
+from .agent_task_repository import RETRY_REQUESTED_OPERATION
 
-RETRY_REQUESTED_OPERATION = "agent_task_retry_requested"
 DEFAULT_MAX_RETRIES = 3
 
 
@@ -23,16 +25,28 @@ class AgentTaskRetrySummary(BaseModel):
     reason: str
 
 
-def count_retry_requests(task_id: str) -> int:
-    return sum(
-        1
-        for event in store.agent_task_events.values()
-        if event.task_id == task_id and event.metadata.get("operation_type") == RETRY_REQUESTED_OPERATION
+def count_retry_requests(
+    task_id: str,
+    *,
+    repository: AgentTaskRepository | None = None,
+) -> int:
+    # Request routes always pass their selected repository. The module-level
+    # adapter remains only for direct local/test callers that have no request.
+    selected_repository = (
+        agent_task_repository if repository is None else repository
     )
+    return selected_repository.count_retries(task_id)
 
 
-def retry_summary(task: AgentTask, *, max_retries: int = DEFAULT_MAX_RETRIES) -> AgentTaskRetrySummary:
-    retry_count = count_retry_requests(task.id)
+def retry_summary(
+    task: AgentTask,
+    *,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    repository: AgentTaskRepository | None = None,
+    approval: ApprovalRequest | None = None,
+    require_approved_linked_approval: bool = False,
+) -> AgentTaskRetrySummary:
+    retry_count = count_retry_requests(task.id, repository=repository)
     if task.status != AgentTaskStatus.FAILED:
         return AgentTaskRetrySummary(
             task_id=task.id,
@@ -49,6 +63,48 @@ def retry_summary(task: AgentTask, *, max_retries: int = DEFAULT_MAX_RETRIES) ->
             retry_allowed=False,
             reason="Agent task has no linked approval request.",
         )
+    if require_approved_linked_approval:
+        if approval is None:
+            return AgentTaskRetrySummary(
+                task_id=task.id,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                retry_allowed=False,
+                reason="Linked approval request was not found.",
+            )
+        if (
+            approval.id != task.approval_request_id
+            or approval.project_id != task.project_id
+            or approval.workspace_id != task.workspace_id
+        ):
+            return AgentTaskRetrySummary(
+                task_id=task.id,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                retry_allowed=False,
+                reason="Linked approval scope does not match the AgentTask.",
+            )
+        if approval.status != ApprovalStatus.APPROVED:
+            return AgentTaskRetrySummary(
+                task_id=task.id,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                retry_allowed=False,
+                reason=(
+                    "Linked approval is not approved; obtain approval again before retrying."
+                ),
+            )
+        if (
+            not approval.approved_payload_hash
+            or approval.approved_payload_hash != compute_approval_payload_hash(approval)
+        ):
+            return AgentTaskRetrySummary(
+                task_id=task.id,
+                retry_count=retry_count,
+                max_retries=max_retries,
+                retry_allowed=False,
+                reason="Linked approval is missing a valid frozen action hash.",
+            )
     if retry_count >= max_retries:
         return AgentTaskRetrySummary(
             task_id=task.id,
@@ -94,7 +150,6 @@ def append_retry_requested_event(
             "worker_lease_cleared": True,
         },
     )
-    store.agent_task_events[event.id] = event
     return event
 
 
@@ -102,6 +157,7 @@ def audit_retry_requested(task: AgentTask, *, actor: str, event: AgentTaskEvent)
     audit = AuditEvent(
         event_type="agent_task.retry_requested",
         entity_id=task.id,
+        workspace_id=task.workspace_id,
         actor=actor,
         details={
             "event_id": event.id,
@@ -112,5 +168,4 @@ def audit_retry_requested(task: AgentTask, *, actor: str, event: AgentTaskEvent)
             "worker_lease_cleared": True,
         },
     )
-    store.audit_events.append(audit)
     return audit

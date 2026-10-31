@@ -1,0 +1,294 @@
+from __future__ import annotations
+
+import os
+import uuid
+from collections.abc import Callable, Iterator
+from types import SimpleNamespace
+
+import psycopg
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from psycopg import Connection, sql
+from psycopg.types.json import Jsonb
+
+from app import main, mcp_registry_routes
+from app.application_repositories import ApplicationRepositories
+from app.mcp_gateway_routes import child_received_count_for_test
+from app.models import AuthUser, Project, User, UserRole, Workspace
+from app.postgres_database import run_postgres_migrations
+from app.store import store
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production-misconfiguration", "missing-postgres-runtime"],
+)
+def test_mcp_registry_repository_failure_is_retryable_and_never_uses_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    monkeypatch.setattr(
+        "app.application_repository_access.get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    def unexpected_sqlite_construction(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("SQLite MCP repository must not be constructed")
+
+    monkeypatch.setattr(
+        mcp_registry_routes, "SQLiteMCPChildServerRepository", unexpected_sqlite_construction
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                postgres_runtime=None,
+                postgres_repositories=None,
+                mcp_child_server_repository=None,
+            )
+        )
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        mcp_registry_routes._repository_for_route(request)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers == {"Retry-After": "1"}
+    assert raised.value.detail == "MCP registry storage is temporarily unavailable"
+
+
+@pytest.fixture
+def postgres_mcp_registry_route_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[Callable[[], Connection], Workspace, Project, AuthUser]]:
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL MCP registry route tests")
+
+    schema = f"ct_mcp_registry_routes_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    def connect() -> Connection:
+        connection = psycopg.connect(dsn)
+        connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        return connection
+
+    try:
+        run_postgres_migrations(connect)
+        workspace = Workspace(
+            id=f"workspace_{uuid.uuid4().hex}",
+            name="MCP registry route workspace",
+            owner_user_id=f"user_{uuid.uuid4().hex}",
+        )
+        persisted_user = User(
+            id=workspace.owner_user_id,
+            email="mcp-reviewer@example.test",
+            display_name="MCP Reviewer",
+            role=UserRole.OWNER,
+            password_hash="0" * 64,
+            password_salt="0" * 32,
+            workspace_id=workspace.id,
+        )
+        project = Project(
+            id=f"project_{uuid.uuid4().hex}",
+            name="MCP registry route project",
+            workspace_id=workspace.id,
+        )
+        with connect() as connection:
+            connection.execute(
+                "INSERT INTO workspaces(workspace_id,payload) VALUES (%s,%s)",
+                (workspace.id, Jsonb(workspace.model_dump(mode="json"))),
+            )
+            connection.execute(
+                "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    persisted_user.id,
+                    persisted_user.workspace_id,
+                    persisted_user.email,
+                    persisted_user.email.lower(),
+                    persisted_user.role,
+                    persisted_user.disabled,
+                    persisted_user.email_verified,
+                    Jsonb(persisted_user.model_dump(mode="json")),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO projects(project_id,workspace_id,payload) VALUES (%s,%s,%s)",
+                (project.id, project.workspace_id, Jsonb(project.model_dump(mode="json"))),
+            )
+
+        repositories = ApplicationRepositories.from_connector(connect)
+        monkeypatch.setattr(
+            "app.application_repository_access.get_settings",
+            lambda: SimpleNamespace(postgres_auth_enabled=True),
+        )
+        monkeypatch.setattr(
+            main.app.state,
+            "mcp_child_server_repository",
+            repositories.mcp_child_servers,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            main.app.state,
+            "project_repository",
+            repositories.projects,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            main.app.state,
+            "postgres_repositories",
+            repositories,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            main.app.state,
+            "postgres_runtime",
+            SimpleNamespace(repositories=repositories),
+            raising=False,
+        )
+        user = AuthUser(
+            id=workspace.owner_user_id,
+            email="mcp-reviewer@example.test",
+            display_name="MCP Reviewer",
+            role=UserRole.OWNER,
+            workspace_id=workspace.id,
+        )
+        monkeypatch.setattr(
+            mcp_registry_routes,
+            "workspace_id_for_request",
+            lambda _user, _request: workspace.id,
+        )
+        monkeypatch.setitem(
+            main.app.dependency_overrides,
+            mcp_registry_routes.MaintainerDependency.dependency,
+            lambda: user,
+        )
+        monkeypatch.setitem(
+            main.app.dependency_overrides,
+            mcp_registry_routes.ReviewerDependency.dependency,
+            lambda: user,
+        )
+        yield connect, workspace, project, user
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_mcp_registry_http_routes_use_bound_postgres_repository(
+    postgres_mcp_registry_route_runtime,
+) -> None:
+    connect, workspace, project, _user = postgres_mcp_registry_route_runtime
+    client = TestClient(main.app)
+    initial_server_ids = set(store.mcp_child_servers)
+    initial_audit_ids = {event.id for event in store.audit_events}
+
+    created = client.post(
+        "/mcp-registry/child-servers",
+        json={
+            "project_id": project.id,
+            "name": "approval-gated-tools",
+            "description": "Isolated PostgreSQL route test",
+            "transport": "stdio",
+            "endpoint": "local://approval-gated-tools",
+            "enabled": True,
+            "tools": [{"name": "inspect", "description": "Read-only test tool"}],
+        },
+    )
+    assert created.status_code == 200, created.text
+    server = created.json()
+    assert server["workspace_id"] == workspace.id
+
+    listed = client.get("/mcp-registry/child-servers", params={"project_id": project.id})
+    assert listed.status_code == 200, listed.text
+    assert [item["id"] for item in listed.json()] == [server["id"]]
+
+    disabled = client.post(f"/mcp-registry/child-servers/{server['id']}/disable")
+    assert disabled.status_code == 200, disabled.text
+    assert disabled.json()["enabled"] is False
+
+    enabled = client.post(f"/mcp-registry/child-servers/{server['id']}/enable")
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["enabled"] is True
+
+    detail = client.get(f"/mcp-registry/child-servers/{server['id']}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["updated_at"] == enabled.json()["updated_at"]
+    with connect() as connection:
+        events = connection.execute(
+            "SELECT event_type FROM audit_events WHERE entity_id=%s ORDER BY created_at,event_id",
+            (server["id"],),
+        ).fetchall()
+    assert [event[0] for event in events] == [
+        "mcp.child_server.registered",
+        "mcp.child_server.disabled",
+        "mcp.child_server.enabled",
+    ]
+    assert set(store.mcp_child_servers) == initial_server_ids
+    assert {event.id for event in store.audit_events} == initial_audit_ids
+
+
+def test_mcp_jsonrpc_fails_closed_with_bound_postgres_registry(
+    postgres_mcp_registry_route_runtime,
+) -> None:
+    connect, _workspace, project, _user = postgres_mcp_registry_route_runtime
+    client = TestClient(main.app)
+    registered = client.post(
+        "/mcp-registry/child-servers",
+        json={
+            "project_id": project.id,
+            "name": "postgres-backed-child",
+            "description": "Registry entry for transport fail-closed regression",
+            "transport": "test",
+            "endpoint": "memory://postgres-backed-child",
+            "enabled": True,
+            "tools": [
+                {
+                    "name": "write_file",
+                    "description": "Mutating test tool",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["path"],
+                        "additionalProperties": False,
+                        "properties": {"path": {"type": "string"}},
+                    },
+                    "mutating": True,
+                }
+            ],
+        },
+    )
+    assert registered.status_code == 200, registered.text
+
+    before_sqlite_pending = set(store.mcp_pending_requests)
+    before_sqlite_approvals = set(store.approval_requests)
+    before_sqlite_audit_ids = {event.id for event in store.audit_events}
+    before_child_received = child_received_count_for_test()
+    response = client.post(
+        f"/mcp/{project.id}/jsonrpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "postgres-guard",
+            "method": "tools/call",
+            "params": {
+                "name": "write_file",
+                "server_name": "postgres-backed-child",
+                "arguments": {"path": "README.md"},
+                "mutating": False,
+            },
+        },
+    )
+
+    assert response.status_code == 503
+    with connect() as connection:
+        assert connection.execute("SELECT count(*) FROM mcp_pending_requests").fetchone()[0] == 0
+        assert connection.execute("SELECT count(*) FROM approval_requests").fetchone()[0] == 0
+    assert set(store.mcp_pending_requests) == before_sqlite_pending
+    assert set(store.approval_requests) == before_sqlite_approvals
+    assert {event.id for event in store.audit_events} == before_sqlite_audit_ids
+    assert child_received_count_for_test() == before_child_received

@@ -39,4 +39,11 @@ object AuthSessionGate {
     fun canOpenProtectedRoute(authenticated: Boolean, sessionChecked: Boolean): Boolean {
         return authenticated && sessionChecked
     }
+
+    /** Keep an approval notification queued while an earlier decision is unresolved. */
+    fun canHandleApprovalNotification(
+        authenticated: Boolean,
+        sessionChecked: Boolean,
+        decisionBlocked: Boolean
+    ): Boolean = canOpenProtectedRoute(authenticated, sessionChecked) && !decisionBlocked
 }

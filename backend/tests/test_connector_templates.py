@@ -7,6 +7,7 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.connector_templates import connector_templates
+from app.connector_models import ConnectorCreate
 from app.main import app
 from app.store import store
 
@@ -30,6 +31,15 @@ def test_connector_templates_are_listed_before_dynamic_connector_routes() -> Non
     assert "gemini-custom-agent" in template_ids
     assert "claude-cursor-agent" in template_ids
     assert "local-agent-bridge" in template_ids
+
+
+def test_generic_inbound_connector_defaults_keep_their_existing_rate_budget() -> None:
+    assert ConnectorCreate(name="Default connector").rate_limit_per_minute == 60
+    assert all(
+        template.connector_defaults["rate_limit_per_minute"]
+        == 60
+        for template in connector_templates()
+    )
 
 
 def test_get_openclaw_template_contains_connector_defaults_mapper_and_sample_payload() -> None:

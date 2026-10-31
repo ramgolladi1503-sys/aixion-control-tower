@@ -44,6 +44,7 @@ def test_legacy_statuses_map_to_honest_dashboard_buckets() -> None:
 
 def test_invalid_terminal_transitions_are_blocked() -> None:
     assert can_transition(ApprovalStatus.REQUESTED, ApprovalStatus.APPROVED)
+    assert can_transition(ApprovalStatus.REQUESTED, ApprovalStatus.REVISION_REQUESTED)
     assert can_transition(ApprovalStatus.APPROVED, ApprovalStatus.EXECUTING)
     assert can_transition(ApprovalStatus.EXECUTING, ApprovalStatus.READY_FOR_PR)
 
@@ -51,3 +52,4 @@ def test_invalid_terminal_transitions_are_blocked() -> None:
     assert not can_transition(ApprovalStatus.EXPIRED, ApprovalStatus.EXECUTING)
     assert not can_transition(ApprovalStatus.MERGED, ApprovalStatus.EXECUTING)
     assert not can_transition(ApprovalStatus.REQUESTED, ApprovalStatus.READY_FOR_PR)
+    assert not can_transition(ApprovalStatus.EXPIRED, ApprovalStatus.APPROVED)

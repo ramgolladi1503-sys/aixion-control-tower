@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /ABSOLUTE/PATH/TO/aixion-control-tower/integrations/codex/aixion_permission_request_hook.py --config /ABSOLUTE/PATH/TO/PROTECTED/codex-workspace.json",
+            "timeout": 960,
+            "statusMessage": "Waiting for Aixion phone approval"
+          }
+        ]
+      }
+    ]
+  }
+}

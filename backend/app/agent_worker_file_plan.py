@@ -10,6 +10,7 @@ from typing import Any
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
 from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
 from .models import ApprovalRequest, AuditEvent, FileChange
+from .settings import get_settings
 from .store import store
 
 ALLOWED_CHANGE_TYPES = {"create", "update", "delete"}
@@ -181,6 +182,18 @@ def run_agent_worker_file_plan_dry_run(
     worker_id: str = "agent-worker-file-plan",
     lease_seconds: int = 300,
 ) -> AgentWorkerFilePlanResult:
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        return AgentWorkerFilePlanResult(
+            success=False,
+            task_id=task_id,
+            worker_id=worker_id,
+            reason=(
+                "File patch planning is unavailable in production or PostgreSQL auth mode; "
+                "use a durable PostgreSQL worker path."
+            ),
+        )
+
     if not task_id and not first_approved:
         return AgentWorkerFilePlanResult(
             success=False,

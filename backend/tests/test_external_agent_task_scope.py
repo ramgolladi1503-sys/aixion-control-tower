@@ -5,10 +5,16 @@ import os
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
+import pytest
 
-from app.agent_task_models import AgentTaskStatus
+from app.agent_task_models import (
+    AgentTaskEvent,
+    AgentTaskEventType,
+    AgentTaskStatus,
+)
+from app.approval_decisions import agent_task_repository
 from app.main import app
-from app.models import AgentAction, AgentAuthType, AgentProvider, ExternalAgent, Project
+from app.models import AgentAction, AgentAuthType, AgentProvider, AuditEvent, ExternalAgent, Project
 from app.store import store
 
 client = TestClient(app)
@@ -78,6 +84,10 @@ def test_external_agent_can_create_owned_agent_task_with_scoped_token() -> None:
     assert store.agent_tasks[task["id"]].external_agent_id == agent_id
     assert any(event.event_type == "TASK_CREATED" for event in store.agent_task_events.values())
     assert any(audit.event_type == "agent_task.created_by_agent" for audit in store.audit_events)
+    store.agent_tasks.clear()
+    store.agent_task_events.clear()
+    assert agent_task_repository.get(task["id"]) is not None
+    assert agent_task_repository.list_events(task["id"])
 
 
 def test_external_agent_can_read_own_task_and_events() -> None:
@@ -112,6 +122,87 @@ def test_external_agent_can_append_event_to_own_task() -> None:
     assert event["metadata"]["agent_id"] == agent_id
     assert store.agent_tasks[created["id"]].status == AgentTaskStatus.PLANNING
     assert any(audit.event_type == "agent_task.event_recorded_by_agent" for audit in store.audit_events)
+    store.agent_tasks.clear()
+    store.agent_task_events.clear()
+    assert agent_task_repository.get(created["id"]).status == AgentTaskStatus.PLANNING
+    assert agent_task_repository.list_events(created["id"])[-1].id == event["id"]
+
+
+def test_external_agent_cannot_forge_approval_or_denial_task_events() -> None:
+    project = _project()
+    agent_id, token = _register_agent(project)
+    created = client.post(
+        "/agents/tasks",
+        json=_task_payload(project.id),
+        headers=_headers(agent_id, token),
+    ).json()
+    task_id = created["id"]
+    original_task = agent_task_repository.get(task_id)
+    assert original_task is not None
+    original_events = agent_task_repository.list_events(task_id)
+    original_store_task = store.agent_tasks[task_id].model_copy(deep=True)
+    original_store_events = dict(store.agent_task_events)
+    original_task_audits = [event.model_copy(deep=True) for event in store.audit_events
+                            if event.entity_id == task_id]
+
+    attempts = (
+        {"event_type": "APPROVED", "status": "APPROVED"},
+        {"event_type": "DENIED", "status": "DENIED"},
+        {"event_type": "NOTE", "status": "APPROVED"},
+        {"event_type": "NOTE", "status": "DENIED"},
+    )
+    for attempt in attempts:
+        response = client.post(
+            f"/agents/tasks/{task_id}/events",
+            json={**attempt, "message": "A connector cannot decide an approval."},
+            headers=_headers(agent_id, token),
+        )
+        assert response.status_code == 409, response.text
+        assert "linked approval workflow" in response.json()["detail"]
+        assert agent_task_repository.get(task_id) == original_task
+        assert agent_task_repository.list_events(task_id) == original_events
+        assert store.agent_tasks[task_id] == original_store_task
+        assert store.agent_task_events == original_store_events
+        assert [event for event in store.audit_events if event.entity_id == task_id] == original_task_audits
+
+    for event_type, task_status in (
+        (AgentTaskEventType.APPROVED, AgentTaskStatus.APPROVED),
+        (AgentTaskEventType.NOTE, AgentTaskStatus.APPROVED),
+        (AgentTaskEventType.DENIED, AgentTaskStatus.DENIED),
+        (AgentTaskEventType.NOTE, AgentTaskStatus.DENIED),
+    ):
+        event = AgentTaskEvent(
+            task_id=task_id,
+            event_type=event_type,
+            status=task_status,
+            actor=f"agent:{agent_id}",
+            message="Direct SQLite repository attempt must fail closed.",
+        )
+        audit = AuditEvent(
+            event_type="agent_task.event_recorded_by_agent",
+            entity_id=task_id,
+            workspace_id=original_task.workspace_id,
+            actor=f"agent:{agent_id}",
+            details={
+                "event_id": event.id,
+                "event_type": event.event_type,
+                "status": event.status,
+                "message": event.message,
+                "notification_id": None,
+            },
+        )
+        with pytest.raises(ValueError, match="linked approval transition"):
+            agent_task_repository.commit_event(
+                expected=original_task,
+                updated=original_task.model_copy(update={"status": task_status}),
+                event=event,
+                audit=audit,
+            )
+        assert agent_task_repository.get(task_id) == original_task
+        assert agent_task_repository.list_events(task_id) == original_events
+        assert store.agent_tasks[task_id] == original_store_task
+        assert store.agent_task_events == original_store_events
+        assert [event for event in store.audit_events if event.entity_id == task_id] == original_task_audits
 
 
 def test_external_agent_requires_allowed_create_task_action() -> None:

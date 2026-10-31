@@ -3,9 +3,16 @@ package com.aixion.controltower.feature.auth
 object AuthUxCopy {
     const val PASSWORD_REQUIREMENTS = "Use 12+ characters with uppercase, lowercase, number, and symbol. Do not use your email, spaces, or obvious sequences."
 
+    fun feedbackMessage(message: String): String = when (message) {
+        "Login failed: Session expired or invalid. Open Acct and log in again." ->
+            "Your session expired. Log in again to continue."
+
+        else -> message
+    }
+
     fun heroTitle(state: AuthUiState): String {
         return when {
-            state.authenticated -> "You are connected"
+            state.authenticated -> "Your account"
             state.verificationRequired -> "Check your email"
             state.emailVerified -> "Email verified"
             else -> "Sign in to continue"
@@ -14,7 +21,7 @@ object AuthUxCopy {
 
     fun heroSubtitle(state: AuthUiState): String {
         return when {
-            state.authenticated -> "This phone can now review approvals, agent tasks, and owner controls."
+            state.authenticated -> "You are signed in and can review approval requests on this phone."
             state.verificationRequired -> "Registration is created, but app access stays locked until this email is verified."
             state.emailVerified -> "Now log in with the same password to open the Control Tower."
             else -> "Register once, verify your email, then log in before using the app shell."
@@ -32,10 +39,9 @@ object AuthUxCopy {
 
     fun primaryLoginLabel(state: AuthUiState): String {
         return when {
-            state.loading -> "Working..."
-            state.verificationRequired -> "Verify first"
-            state.emailVerified -> "Login now"
-            else -> "Login"
+            state.loading -> "Please wait..."
+            state.verificationRequired -> "Verify email first"
+            else -> "Log in"
         }
     }
 

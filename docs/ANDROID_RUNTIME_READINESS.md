@@ -21,7 +21,7 @@ database reachability
 migration status
 recovery snapshot availability
 GitHub token configured boolean
-FCM server key configured boolean
+FCM project ID configured boolean (legacy response field name)
 warnings
 errors
 ```
@@ -35,7 +35,7 @@ It must not show:
 ```text
 database path
 GitHub token value
-FCM server key value
+Google service-account credential or access-token value
 recovery snapshot content
 user/session/invite/device data
 ```
@@ -48,7 +48,7 @@ The screen is exposed as:
 Route.Ops
 ```
 
-Bottom navigation label:
+The screen is available from the top-bar **More** menu under this label:
 
 ```text
 Ops

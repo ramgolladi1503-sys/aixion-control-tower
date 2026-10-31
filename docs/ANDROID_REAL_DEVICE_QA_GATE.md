@@ -99,7 +99,7 @@ Pass criteria:
 
 Backend prerequisites:
 
-- FCM server key configured for the environment
+- FCM project ID configured and backend ADC credentials available
 - Android build includes valid Firebase config
 - device has notifications allowed
 

@@ -20,6 +20,7 @@ from app.models import (
     RiskLevel,
     UserRole,
 )
+from app.approval_integrity import compute_approval_payload_hash
 from app.store import store
 from app.trust_credentials import (
     CredentialIntrospectionRequest,
@@ -90,8 +91,8 @@ def _approved_task() -> tuple[ApprovalRequest, AgentTask]:
         status=ApprovalStatus.APPROVED,
         created_by_user_id="creator",
         approved_by_user_id="reviewer_1",
-        approved_payload_hash="approved-payload-hash",
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
@@ -167,8 +168,28 @@ def test_lease_rejects_broader_paths_commands_and_self_approval() -> None:
     with pytest.raises(TrustControlConflict, match="approved test plan"):
         issue_capability_lease(command, user=_user("issuer"))
 
-    approval.created_by_user_id = "reviewer_1"
+    store.approval_requests[approval.id].created_by_user_id = "reviewer_1"
+    store.persist()
     with pytest.raises(TrustControlConflict, match="Self-approved"):
+        issue_capability_lease(_lease_payload(approval.id), user=_user("issuer"))
+
+
+def test_lease_issuance_uses_durable_approval_and_rejects_changed_payload() -> None:
+    approval, _ = _approved_task()
+    approval.files[0].diff = "+uncommitted local map change"
+
+    lease = issue_capability_lease(_lease_payload(approval.id), user=_user("issuer"))
+
+    assert lease.approved_payload_hash == store.approval_requests[approval.id].approved_payload_hash
+    assert store.approval_requests[approval.id].files[0].diff != "+uncommitted local map change"
+
+    persisted = store.approval_requests[approval.id].model_copy(deep=True)
+    persisted.files[0].diff = "+changed after approval"
+    store.approval_requests[persisted.id] = persisted
+    store.persist()
+    store.capability_leases.clear()
+
+    with pytest.raises(TrustControlConflict, match="frozen hash check"):
         issue_capability_lease(_lease_payload(approval.id), user=_user("issuer"))
 
 

@@ -4,13 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       api_base_url:
-        description: "Release/review backend base URL. Must end with /."
+        description: "Production API base URL. Must be exactly https://api.aixionlab.com/."
         required: true
-        default: "https://TODO.example.com/"
+        default: "https://api.aixionlab.com/"
       artifact_name:
         description: "Uploaded artifact name"
         required: true
         default: "aixion-control-tower-release-aab"
+      version_code:
+        description: "Integer greater than the highest version code already uploaded to any Play track"
+        required: true
+        type: string
+      version_name:
+        description: "Release version in MAJOR.MINOR.PATCH form, with an optional prerelease/build suffix"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -22,23 +30,71 @@ jobs:
   build-signed-aab:
     name: Build signed release AAB
     runs-on: ubuntu-latest
+    environment: android-release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate required signing secrets
+      - name: Validate production API target and Android version
+        shell: bash
+        env:
+          AIXION_API_BASE_URL: ${{ inputs.api_base_url }}
+          AIXION_VERSION_CODE: ${{ inputs.version_code }}
+          AIXION_VERSION_NAME: ${{ inputs.version_name }}
+        run: python3 scripts/validate_android_release_inputs.py
+
+      - name: Require healthy production API over HTTPS
+        shell: bash
+        env:
+          AIXION_API_BASE_URL: ${{ inputs.api_base_url }}
+        run: |
+          set -euo pipefail
+          health_body="$(mktemp)"
+          trap 'rm -f "$health_body"' EXIT
+          status="$(curl \
+            --silent --show-error --fail \
+            --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 20 \
+            --retry 3 --retry-delay 2 --retry-max-time 20 \
+            --output "$health_body" --write-out '%{http_code}' \
+            "${AIXION_API_BASE_URL}health")"
+          if [[ "$status" != "200" ]]; then
+            echo "Production API health probe returned HTTP $status; refusing to build a release AAB." >&2
+            exit 1
+          fi
+          python3 - "$health_body" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          try:
+              payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          except (OSError, json.JSONDecodeError):
+              raise SystemExit("Production API health response was not valid JSON.")
+          healthy = (
+              isinstance(payload, dict)
+              and payload.get("status") == "ok"
+              and payload.get("service") == "aixion-control-tower"
+          )
+          if not healthy:
+              raise SystemExit("Production API health response did not match the expected service.")
+          PY
+
+      - name: Validate required release secrets
         shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+          AIXION_FCM_PROJECT_ID: ${{ vars.AIXION_FCM_PROJECT_ID }}
         run: |
           set -euo pipefail
           missing=0
-          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_GOOGLE_SERVICES_JSON_BASE64 AIXION_FCM_PROJECT_ID; do
             if [ -z "${!name:-}" ]; then
-              echo "Missing required GitHub secret: $name"
+              echo "Missing required GitHub Actions setting: $name"
               missing=1
             fi
           done
@@ -65,20 +121,67 @@ jobs:
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > mobile/android/release.keystore
           chmod 600 mobile/android/release.keystore
 
+      - name: Install Firebase Android configuration
+        id: firebase_config
+        shell: bash
+        env:
+          ANDROID_GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}
+          AIXION_FCM_PROJECT_ID: ${{ vars.AIXION_FCM_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          python3 scripts/install_android_firebase_config.py
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
       - name: Build signed release AAB
         working-directory: mobile/android
         env:
+          AIXION_API_BASE_URL: ${{ inputs.api_base_url }}
+          AIXION_VERSION_CODE: ${{ inputs.version_code }}
+          AIXION_VERSION_NAME: ${{ inputs.version_name }}
           ANDROID_KEYSTORE_FILE: release.keystore
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: ./gradlew bundleRelease -PAIXION_API_BASE_URL=${{ inputs.api_base_url }}
+        run: |
+          set -euo pipefail
+          ./gradlew bundleRelease \
+            -PAIXION_FIREBASE_CONFIG_ENABLED=true \
+            "-PAIXION_API_BASE_URL=${AIXION_API_BASE_URL}" \
+            "-PAIXION_VERSION_CODE=${AIXION_VERSION_CODE}" \
+            "-PAIXION_VERSION_NAME=${AIXION_VERSION_NAME}"
+
+      - name: Verify signed release AAB
+        id: verify_aab
+        working-directory: mobile/android
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          release_aabs=(app/build/outputs/bundle/release/*.aab)
+          if [[ "${#release_aabs[@]}" -ne 1 ]]; then
+            echo "Expected exactly one release AAB; found ${#release_aabs[@]}." >&2
+            exit 1
+          fi
+
+          aab="${release_aabs[0]}"
+          if ! verification_output="$(LC_ALL=C jarsigner -verify "$aab" 2>&1)"; then
+            printf '%s\n' "$verification_output" >&2
+            echo "JDK signature verification failed for release AAB." >&2
+            exit 1
+          fi
+          printf '%s\n' "$verification_output"
+          if ! grep -Fq 'jar verified.' <<< "$verification_output"; then
+            echo "Release AAB has no verified JAR signature." >&2
+            exit 1
+          fi
+
+          echo "path=mobile/android/$aab" >> "$GITHUB_OUTPUT"
 
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
-          path: mobile/android/app/build/outputs/bundle/release/*.aab
+          path: ${{ steps.verify_aab.outputs.path }}
           if-no-files-found: error
           retention-days: 14
 
@@ -86,3 +189,8 @@ jobs:
         if: always()
         shell: bash
         run: rm -f mobile/android/release.keystore
+
+      - name: Remove installed Firebase Android configuration
+        if: always() && steps.firebase_config.outputs.created == 'true'
+        shell: bash
+        run: rm -f mobile/android/app/google-services.json
