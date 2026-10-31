@@ -4,13 +4,11 @@ import base64
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
-from scripts.validate_android_release_inputs import validate_release_inputs
-
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "android-signed-release.yml"
@@ -210,6 +208,9 @@ def test_release_preflight_pins_production_https_origin_and_health_before_secret
 
 
 def test_release_input_validator_fails_closed_for_nonproduction_targets_and_versions() -> None:
+    validate_release_inputs = runpy.run_path(
+        str(REPOSITORY_ROOT / "scripts" / "validate_android_release_inputs.py")
+    )["validate_release_inputs"]
     valid = ("https://api.aixionlab.com/", "7", "1.2.3-rc.1")
     assert validate_release_inputs(*valid) is None
 
