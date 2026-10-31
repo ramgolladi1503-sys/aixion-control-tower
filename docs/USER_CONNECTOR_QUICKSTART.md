@@ -21,7 +21,7 @@ computer or resume a terminated agent task.
 | Provider and host | Setup available | Live same-invocation phone flow |
 |---|---|---|
 | Antigravity on macOS | Documented workspace hook and Keychain setup | Historical local phone rounds exist; current-hook and production delivery certification remain open. |
-| Codex CLI on macOS | Workspace hook and Keychain setup | Historical CLI phone approve/deny rounds exist; rerun is required after current hook changes. |
+| Codex CLI on macOS | Workspace hook and Keychain setup | Current-source local CLI phone approval and denial are recorded for the adapter at the current PR head. This does not certify hosted delivery, Codex Desktop, or Windows. |
 | Codex CLI on Windows | Workspace hook and Windows Credential Manager setup; Windows CI validates the installer and security checks | Native Windows phone approve/deny has not been certified. CI is not a live-provider test. |
 | Codex Desktop or Codex-hosted tools | No verified session interception | Unsupported/unverified. A local CLI hook result does not establish this path. |
 
@@ -150,6 +150,15 @@ py -3 integrations/codex/aixion_permission_request_hook.py `
   --config "<config-path-printed-by-installer>" --check
 ```
 
+In the Codex runtime you intend to use, review and trust the hook through
+Codex's hook review UI or `/hooks` in the CLI, and confirm it lists the
+`PermissionRequest` hook. This verifies configuration only. The
+[current-source Codex CLI E2E report](verification/CODEX_NATIVE_PHONE_E2E_20261031.md)
+records a local emulator approval and denial for the same invocations; its
+adapter files match the current PR head. This does not certify hosted delivery,
+Codex Desktop, or Windows. Verify network interruption and timeout fail closed
+before relying on your installation.
+
 The check verifies API health and that the token belongs to the expected
 provider, project, and connector. It does not prove that the native agent app
 will invoke the hook, that the phone can reach the same API, or that the phone
@@ -213,13 +222,13 @@ Detailed steps and protocol limits are in the [Antigravity connector
 README](../integrations/antigravity/README.md) and [Codex connector
 README](../integrations/codex/README.md).
 
-**Production support is not yet certified.** Earlier local Android phone runs
-recorded Antigravity and Codex CLI approve/deny outcomes; those results remain
-valid evidence for the exact revisions and local setups documented in the
-linked reports. The Codex hook changed after its recorded native run, so the
-same-invocation flow must be repeated against the current hook before claiming
-current-source certification. Current Antigravity failure/restart certification,
-native Windows runtime behavior, and Codex Desktop interception are also open.
-Push notification wake-up, hosted HTTPS delivery, and PostgreSQL production
-runtime remain unverified. Treat a successful `--check` as connector
-configuration evidence only, not production readiness.
+**Production support is not yet certified.** The [current-source Codex CLI
+phone E2E report](verification/CODEX_NATIVE_PHONE_E2E_20261031.md) records
+same-invocation approval and denial on an Android emulator. Its Codex adapter
+files match the current PR head. This is local CLI evidence only; it does not
+prove hosted delivery, a real locked phone, Codex Desktop interception, or
+Windows runtime behavior. Current Antigravity same-invocation proof and
+failure/restart certification remain open. Push notification wake-up, hosted
+HTTPS delivery, and PostgreSQL production runtime also remain unverified.
+Treat a successful `--check` as connector configuration evidence only, not
+production readiness.
