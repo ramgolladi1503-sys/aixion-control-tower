@@ -4,15 +4,14 @@
 # It reserves billable global networking resources when applied.
 
 variable "api_domain" {
-  description = "Owner-approved API hostname served by the HTTPS load balancer."
+  description = "Required owner-approved staging API hostname; must not be the production api.aixionlab.com hostname."
   type        = string
-  default     = "api.aixionlab.com"
 
   validation {
-    condition = length(var.api_domain) <= 253 && length(split(".", var.api_domain)) >= 2 && alltrue([
+    condition = var.api_domain != "api.aixionlab.com" && length(var.api_domain) <= 253 && length(split(".", var.api_domain)) >= 2 && alltrue([
       for label in split(".", var.api_domain) : can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", label))
     ])
-    error_message = "api_domain must be a valid lowercase DNS hostname with valid labels."
+    error_message = "api_domain must be a valid lowercase staging DNS hostname and must not be api.aixionlab.com."
   }
 }
 
