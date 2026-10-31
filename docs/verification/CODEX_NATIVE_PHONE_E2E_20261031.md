@@ -52,7 +52,7 @@ This closes the current-source Codex CLI phone approve/deny round-trip evidence 
 
 ## Current-head source equivalence recheck
 
-On 2026-10-31, PR head `6e4cb03bf4ccddb7bd65e007441db2fc86d0dc00` was checked against the recorded E2E source. These adapter files have identical Git blob IDs at both revisions:
+On 2026-10-31, PR head `df1a4481b54982559e340fd0e720715532170f4d` was checked against the recorded E2E source. These adapter files have identical Git blob IDs at both revisions:
 
 | File | Git blob ID |
 |---|---|
