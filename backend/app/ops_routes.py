@@ -59,6 +59,16 @@ class RuntimeReadinessResponse(BaseModel):
     approval_expiry_task_running: bool = False
     approval_expiry_last_completion_fresh: bool = False
     approval_expiry_max_completion_age_seconds: int = 180
+    agent_run_lease_recovery_status: Literal[
+        "not_started", "starting", "healthy", "failed"
+    ] = "not_started"
+    agent_run_lease_recovery_failure_count: int = 0
+    agent_run_lease_recovery_last_completed_at: datetime | None = None
+    agent_run_lease_recovery_last_recovered_count: int = 0
+    agent_run_lease_recovery_task_present: bool = False
+    agent_run_lease_recovery_task_running: bool = False
+    agent_run_lease_recovery_last_completion_fresh: bool = False
+    agent_run_lease_recovery_max_completion_age_seconds: int = 180
     app_state_repository_bindings: dict[
         str, Literal["postgresql", "sqlite", "unbound", "other", "unavailable"]
     ] = Field(default_factory=dict)
@@ -304,6 +314,67 @@ def build_runtime_readiness(
                 )
         except (OverflowError, ValueError):
             expiry_last_completion_fresh = False
+    agent_run_lease_recovery_status = getattr(
+        application_state, "agent_run_lease_recovery_status", "not_started"
+    )
+    if agent_run_lease_recovery_status not in {
+        "not_started", "starting", "healthy", "failed"
+    }:
+        agent_run_lease_recovery_status = "failed"
+    agent_run_lease_recovery_failure_count = max(
+        0,
+        int(
+            getattr(
+                application_state,
+                "agent_run_lease_recovery_failure_count",
+                0,
+            )
+            or 0
+        ),
+    )
+    agent_run_lease_recovery_last_completed_at = getattr(
+        application_state, "agent_run_lease_recovery_last_completed_at", None
+    )
+    agent_run_lease_recovery_last_recovered_count = max(
+        0,
+        int(
+            getattr(
+                application_state,
+                "agent_run_lease_recovery_last_recovered_count",
+                0,
+            )
+            or 0
+        ),
+    )
+    agent_run_lease_recovery_task = getattr(
+        application_state, "agent_run_lease_recovery_task", None
+    )
+    agent_run_lease_recovery_task_present = agent_run_lease_recovery_task is not None
+    try:
+        agent_run_lease_recovery_task_running = (
+            agent_run_lease_recovery_task_present
+            and not agent_run_lease_recovery_task.done()
+        )
+    except Exception:
+        agent_run_lease_recovery_task_running = False
+    agent_run_lease_recovery_last_completion_fresh = False
+    if isinstance(agent_run_lease_recovery_last_completed_at, datetime):
+        try:
+            if (
+                agent_run_lease_recovery_last_completed_at.tzinfo is not None
+                and agent_run_lease_recovery_last_completed_at.utcoffset() is not None
+            ):
+                current_time = now_utc()
+                completed_at_utc = agent_run_lease_recovery_last_completed_at.astimezone(
+                    current_time.tzinfo
+                )
+                age_seconds = (current_time - completed_at_utc).total_seconds()
+                agent_run_lease_recovery_last_completion_fresh = (
+                    age_seconds >= 0
+                    and age_seconds <= expiry_max_completion_age_seconds
+                )
+        except (OverflowError, ValueError):
+            agent_run_lease_recovery_last_completion_fresh = False
     if settings.is_production and recovery_status != "healthy":
         errors.append(
             "Approval recovery is not healthy: status=" + recovery_status
@@ -328,6 +399,21 @@ def build_runtime_readiness(
 
     postgres_schema_status = None
     postgres_is_authoritative = settings.postgres_auth_enabled or settings.is_production
+    if postgres_is_authoritative:
+        if agent_run_lease_recovery_status != "healthy":
+            errors.append(
+                "PostgreSQL AgentRun lease recovery is not healthy: status="
+                + agent_run_lease_recovery_status
+            )
+        if (
+            not agent_run_lease_recovery_task_present
+            or not agent_run_lease_recovery_task_running
+        ):
+            errors.append("PostgreSQL AgentRun lease recovery worker task is not running")
+        if not agent_run_lease_recovery_last_completion_fresh:
+            errors.append(
+                "PostgreSQL AgentRun lease recovery completion is stale or unavailable"
+            )
     if settings.postgres_runtime_probe_enabled or postgres_is_authoritative:
         postgres_probe_status = "not_ready"
         if postgres_runtime is None:
@@ -546,6 +632,22 @@ def build_runtime_readiness(
         approval_expiry_task_running=expiry_task_running,
         approval_expiry_last_completion_fresh=expiry_last_completion_fresh,
         approval_expiry_max_completion_age_seconds=expiry_max_completion_age_seconds,
+        agent_run_lease_recovery_status=agent_run_lease_recovery_status,
+        agent_run_lease_recovery_failure_count=agent_run_lease_recovery_failure_count,
+        agent_run_lease_recovery_last_completed_at=(
+            agent_run_lease_recovery_last_completed_at
+        ),
+        agent_run_lease_recovery_last_recovered_count=(
+            agent_run_lease_recovery_last_recovered_count
+        ),
+        agent_run_lease_recovery_task_present=agent_run_lease_recovery_task_present,
+        agent_run_lease_recovery_task_running=agent_run_lease_recovery_task_running,
+        agent_run_lease_recovery_last_completion_fresh=(
+            agent_run_lease_recovery_last_completion_fresh
+        ),
+        agent_run_lease_recovery_max_completion_age_seconds=(
+            expiry_max_completion_age_seconds
+        ),
         app_state_repository_bindings=application_repository_bindings,
         postgres_probe_enabled=settings.postgres_runtime_probe_enabled,
         postgres_auth_rate_limits_enabled=settings.postgres_auth_rate_limits_enabled,

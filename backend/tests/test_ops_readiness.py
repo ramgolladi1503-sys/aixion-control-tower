@@ -732,6 +732,115 @@ def test_readiness_defaults_approval_expiry_worker_to_not_started() -> None:
     assert readiness.approval_expiry_last_changed_count == 0
 
 
+def test_readiness_defaults_agent_run_lease_recovery_worker_to_not_started() -> None:
+    readiness = build_runtime_readiness(application_state=None)
+
+    assert readiness.agent_run_lease_recovery_status == "not_started"
+    assert readiness.agent_run_lease_recovery_failure_count == 0
+    assert readiness.agent_run_lease_recovery_last_completed_at is None
+    assert readiness.agent_run_lease_recovery_last_recovered_count == 0
+    assert readiness.agent_run_lease_recovery_task_present is False
+    assert readiness.agent_run_lease_recovery_task_running is False
+    assert readiness.agent_run_lease_recovery_last_completion_fresh is False
+
+
+class _AgentRunLeaseRecoveryTask:
+    def __init__(self, done: bool = False) -> None:
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+
+def _production_agent_run_recovery_readiness(monkeypatch, **state_values):
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+    settings = replace(
+        get_settings(),
+        profile="production",
+        trust_enforcement=True,
+        lease_signing_key_configured=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    base_state = {
+        "approval_recovery_status": "healthy",
+        "approval_expiry_status": "healthy",
+        "approval_expiry_last_completed_at": datetime.now(timezone.utc),
+        "approval_expiry_task": _ExpiryTask(),
+        "agent_run_lease_recovery_status": "healthy",
+        "agent_run_lease_recovery_failure_count": 0,
+        "agent_run_lease_recovery_last_completed_at": datetime.now(timezone.utc),
+        "agent_run_lease_recovery_last_recovered_count": 0,
+        "agent_run_lease_recovery_task": _AgentRunLeaseRecoveryTask(),
+    }
+    base_state.update(state_values)
+    return build_runtime_readiness(
+        application_state=SimpleNamespace(**base_state)
+    )
+
+
+def test_production_readiness_requires_live_agent_run_recovery_task(monkeypatch) -> None:
+    for task in (None, _AgentRunLeaseRecoveryTask(done=True)):
+        readiness = _production_agent_run_recovery_readiness(
+            monkeypatch,
+            agent_run_lease_recovery_task=task,
+        )
+
+        assert readiness.status == "not_ready"
+        assert readiness.agent_run_lease_recovery_task_running is False
+        assert "PostgreSQL AgentRun lease recovery worker task is not running" in (
+            readiness.errors
+        )
+
+
+@pytest.mark.parametrize(
+    "status,failure_count,completed_at,completion_fresh",
+    [
+        ("not_started", 0, datetime.now(timezone.utc), True),
+        ("failed", 1, datetime.now(timezone.utc), True),
+        ("healthy", 0, None, False),
+        ("healthy", 0, datetime(2020, 1, 1, tzinfo=timezone.utc), False),
+        ("healthy", 0, datetime(2026, 10, 23, 12, 0), False),
+    ],
+)
+def test_production_readiness_requires_healthy_fresh_agent_run_recovery(
+    monkeypatch, status, failure_count, completed_at, completion_fresh
+) -> None:
+    readiness = _production_agent_run_recovery_readiness(
+        monkeypatch,
+        agent_run_lease_recovery_status=status,
+        agent_run_lease_recovery_failure_count=failure_count,
+        agent_run_lease_recovery_last_completed_at=completed_at,
+    )
+
+    assert readiness.status == "not_ready"
+    assert readiness.agent_run_lease_recovery_status == status
+    assert readiness.agent_run_lease_recovery_failure_count == failure_count
+    assert (
+        readiness.agent_run_lease_recovery_last_completion_fresh
+        is completion_fresh
+    )
+    assert any(
+        error.startswith("PostgreSQL AgentRun lease recovery")
+        for error in readiness.errors
+    )
+
+
+def test_production_readiness_accepts_healthy_agent_run_recovery_worker(monkeypatch) -> None:
+    readiness = _production_agent_run_recovery_readiness(monkeypatch)
+
+    assert readiness.agent_run_lease_recovery_status == "healthy"
+    assert readiness.agent_run_lease_recovery_failure_count == 0
+    assert readiness.agent_run_lease_recovery_task_present is True
+    assert readiness.agent_run_lease_recovery_task_running is True
+    assert readiness.agent_run_lease_recovery_last_completion_fresh is True
+    assert readiness.agent_run_lease_recovery_max_completion_age_seconds == 180
+    assert not any(
+        error.startswith("PostgreSQL AgentRun lease recovery")
+        for error in readiness.errors
+    )
+
+
 def test_readiness_reports_healthy_approval_expiry_worker() -> None:
     completed_at = datetime.now(timezone.utc)
     state = type(

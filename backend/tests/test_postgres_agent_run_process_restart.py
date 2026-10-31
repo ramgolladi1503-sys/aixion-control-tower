@@ -19,6 +19,7 @@ def _recover_stale_run_in_restarted_api_process(
     dsn: str,
     schema: str,
     user_data: dict[str, object],
+    run_id: str,
     results,
 ) -> None:
     """Start a fresh app lifespan and recover durable state in a new OS process."""
@@ -71,13 +72,29 @@ def _recover_stale_run_in_restarted_api_process(
     process_main.app.dependency_overrides[MaintainerDependency.dependency] = lambda: user
 
     try:
-        with ProcessTestClient(process_main.app) as client:
+        with ProcessTestClient(process_main.app):
             lifespan_bound = (
                 process_main.app.state.postgres_runtime is runtime
                 and process_main.app.state.postgres_repositories is runtime.repositories
             )
-            response = client.post("/agent/runs/watchdog/recover-stale")
-            results.put((lifespan_bound, response.status_code, response.json()))
+            recovery_task = getattr(
+                process_main.app.state, "agent_run_lease_recovery_task", None
+            )
+            recovery_task_running = (
+                recovery_task is not None and not recovery_task.done()
+            )
+            recovered = runtime.repositories.agent_runs.get(run_id)
+            events = runtime.repositories.agent_runs.list_events_for_run(run_id)
+            results.put(
+                (
+                    lifespan_bound,
+                    recovery_task_running,
+                    process_main.app.state.agent_run_lease_recovery_status,
+                    recovered.status.value if recovered is not None else None,
+                    recovered.lease_token if recovered is not None else "missing-run",
+                    sum(event.event_type.value == "STALE_LEASE_RECOVERED" for event in events),
+                )
+            )
     except BaseException as error:
         results.put((False, None, f"{type(error).__name__}: {error}"))
 
@@ -193,6 +210,7 @@ def test_postgres_agent_run_stale_lease_recovers_after_os_process_restart(
             os.environ["AIXION_TEST_POSTGRES_DSN"],
             schema,
             state["users"][0].model_dump(mode="json"),
+            run_id,
             results,
         ),
     )
@@ -206,7 +224,7 @@ def test_postgres_agent_run_stale_lease_recovers_after_os_process_restart(
         if process.is_alive():
             pytest.fail("Fresh API process did not exit after lease recovery")
         assert process.exitcode == 0
-        assert outcome == (True, 200, {"recovered": 1}), outcome
+        assert outcome == (True, True, "healthy", "RETRY_WAIT", None, 1), outcome
     finally:
         if process.pid is not None:
             if process.is_alive():
@@ -226,3 +244,9 @@ def test_postgres_agent_run_stale_lease_recovers_after_os_process_restart(
             (workspace.id, run_id),
         ).fetchone()[0]
         assert events == 1
+        audit_events = connection.execute(
+            "SELECT count(*) FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "AND event_type='agent_run.stale_lease_recovered'",
+            (workspace.id, run_id),
+        ).fetchone()[0]
+        assert audit_events == 1

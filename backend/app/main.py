@@ -17,6 +17,8 @@ from .agent_auth import agent_auth_repository
 from .agent_routes import router as agent_router
 from .agent_run_routes import router as agent_run_router
 from .agent_task_routes import propagate_approval_decision_to_agent_task, router as agent_task_router
+from .agent_run_repository import PostgresAgentRunRepository
+from .agent_run_supervisor import recover_stale_leases
 from .approval_integrity import (
     compute_approval_payload_hash,
     compute_approval_review_fingerprint,
@@ -291,6 +293,61 @@ async def _approval_recovery_loop(
             )
 
 
+def _set_agent_run_lease_recovery_state(
+    application: FastAPI,
+    *,
+    failure_count: int,
+    recovered_count: int,
+    completed_at: datetime,
+) -> None:
+    application.state.agent_run_lease_recovery_failure_count = failure_count
+    application.state.agent_run_lease_recovery_last_recovered_count = recovered_count
+    application.state.agent_run_lease_recovery_last_completed_at = completed_at
+    application.state.agent_run_lease_recovery_status = "failed" if failure_count else "healthy"
+
+
+async def _agent_run_lease_recovery_loop(
+    application: FastAPI,
+    *,
+    run_repository: PostgresAgentRunRepository,
+    poll_seconds: int,
+) -> None:
+    """Recover only expired PostgreSQL leases from the lifespan-owned bundle."""
+    while True:
+        await asyncio.sleep(poll_seconds)
+        try:
+            recovered_count = recover_stale_leases(
+                actor="system:agent-run-lease-recovery",
+                run_repository=run_repository,
+            )
+            _set_agent_run_lease_recovery_state(
+                application,
+                failure_count=0,
+                recovered_count=recovered_count,
+                completed_at=now_utc(),
+            )
+            if recovered_count:
+                logger.info(
+                    "PostgreSQL AgentRun lease recovery committed count=%s",
+                    recovered_count,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            failure_count = (
+                getattr(application.state, "agent_run_lease_recovery_failure_count", 0)
+                + 1
+            )
+            application.state.agent_run_lease_recovery_failure_count = failure_count
+            application.state.agent_run_lease_recovery_last_recovered_count = 0
+            application.state.agent_run_lease_recovery_last_completed_at = now_utc()
+            application.state.agent_run_lease_recovery_status = "failed"
+            logger.exception(
+                "PostgreSQL AgentRun lease recovery failed error_type=%s",
+                type(error).__name__,
+            )
+
+
 async def _approval_expiry_loop(
     application: FastAPI,
     *,
@@ -410,6 +467,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     email_task: asyncio.Task[None] | None = None
     recovery_task: asyncio.Task[None] | None = None
     expiry_task: asyncio.Task[None] | None = None
+    agent_run_lease_recovery_task: asyncio.Task[None] | None = None
     try:
         if getattr(settings, "postgres_auth_enabled", False):
             if postgres_runtime is None:
@@ -487,6 +545,51 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             recovery_approval_repository = recovery_repositories.approval_decisions
             recovery_task_repository = recovery_repositories.agent_tasks
             recovery_run_repository = recovery_repositories.agent_runs
+            if not isinstance(recovery_run_repository, PostgresAgentRunRepository):
+                raise RuntimeError(
+                    "PostgreSQL AgentRun lease recovery requires the lifespan-bound PostgreSQL repository"
+                )
+            application.state.agent_run_lease_recovery_status = "starting"
+            application.state.agent_run_lease_recovery_failure_count = 0
+            application.state.agent_run_lease_recovery_last_recovered_count = 0
+            application.state.agent_run_lease_recovery_last_completed_at = None
+            try:
+                startup_recovered = recover_stale_leases(
+                    actor="system:agent-run-lease-recovery",
+                    run_repository=recovery_run_repository,
+                )
+                _set_agent_run_lease_recovery_state(
+                    application,
+                    failure_count=0,
+                    recovered_count=startup_recovered,
+                    completed_at=now_utc(),
+                )
+                if startup_recovered:
+                    logger.info(
+                        "Startup PostgreSQL AgentRun lease recovery committed count=%s",
+                        startup_recovered,
+                    )
+            except Exception as error:
+                application.state.agent_run_lease_recovery_status = "failed"
+                application.state.agent_run_lease_recovery_failure_count = 1
+                application.state.agent_run_lease_recovery_last_completed_at = now_utc()
+                logger.exception(
+                    "Startup PostgreSQL AgentRun lease recovery failed error_type=%s",
+                    type(error).__name__,
+                )
+            agent_run_lease_recovery_task = asyncio.create_task(
+                _agent_run_lease_recovery_loop(
+                    application,
+                    run_repository=recovery_run_repository,
+                    poll_seconds=max(
+                        1, int(getattr(settings, "approval_recovery_poll_seconds", 60))
+                    ),
+                ),
+                name="postgres-agent-run-lease-recovery",
+            )
+            application.state.agent_run_lease_recovery_task = (
+                agent_run_lease_recovery_task
+            )
         else:
             profile = getattr(settings, "profile", None)
             if profile not in {"local", "test"}:
@@ -591,12 +694,25 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     email_task = asyncio.create_task(email_dispatch_loop())
         yield
     finally:
-        for task in (dispatch_task, email_task, recovery_task, expiry_task):
+        for task in (
+            dispatch_task,
+            email_task,
+            recovery_task,
+            expiry_task,
+            agent_run_lease_recovery_task,
+        ):
             if task is not None:
                 task.cancel()
         application.state.approval_expiry_task = None
+        application.state.agent_run_lease_recovery_task = None
         shutdown_failure: BaseException | None = None
-        for task in (dispatch_task, email_task, recovery_task, expiry_task):
+        for task in (
+            dispatch_task,
+            email_task,
+            recovery_task,
+            expiry_task,
+            agent_run_lease_recovery_task,
+        ):
             if task is not None:
                 try:
                     await task
