@@ -49,3 +49,15 @@ This closes the current-source Codex CLI phone approve/deny round-trip evidence 
 - Off-LAN API availability, HTTPS, push credentials, or locked-phone delivery
 - PostgreSQL production authority, production import/cutover, or backup recovery
 - A signed Android release, Play acceptance, or production readiness
+
+## Current-head source equivalence recheck
+
+On 2026-10-31, PR head `6e4cb03bf4ccddb7bd65e007441db2fc86d0dc00` was checked against the recorded E2E source. These adapter files have identical Git blob IDs at both revisions:
+
+| File | Git blob ID |
+|---|---|
+| `integrations/codex/aixion_permission_request_hook.py` | `97119a50b8d98a9bb2caee1c2a62cfcd0bebdfcc` |
+| `integrations/codex/setup_workspace.py` | `63bccd1d2d1a5c9294bbbd0ab3e9c9646d35d326` |
+| `integrations/codex/host_security.py` | `9b3839d1ca255dfb4c364c1945ef63afbe326d35` |
+
+The registered Codex CLI workspace configuration passed the current hook's authenticated `--check` against the isolated local API. Therefore the recorded same-invocation approval and denial exercised the same adapter implementation present at this PR head. This source-equivalence check does not create a new native invocation and does not upgrade the result to Codex Desktop, Windows, hosted, or production certification.
