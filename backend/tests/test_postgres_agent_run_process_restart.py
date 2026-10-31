@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import multiprocessing
 import os
 import queue as queue_module
@@ -97,6 +98,49 @@ def _recover_stale_run_in_restarted_api_process(
             )
     except BaseException as error:
         results.put((False, None, f"{type(error).__name__}: {error}"))
+
+
+def test_agent_run_lease_recovery_loop_repeats_and_records_success(monkeypatch) -> None:
+    from app import main
+
+    completed_twice = asyncio.Event()
+    calls = 0
+
+    def recover_stale_leases(*, actor: str, run_repository: object) -> int:
+        nonlocal calls
+        assert actor == "system:agent-run-lease-recovery"
+        assert run_repository is repository
+        calls += 1
+        if calls >= 2:
+            completed_twice.set()
+        return 2
+
+    repository = object()
+    application = SimpleNamespace(state=SimpleNamespace())
+    monkeypatch.setattr(main, "recover_stale_leases", recover_stale_leases)
+
+    async def run_loop() -> None:
+        task = asyncio.create_task(
+            main._agent_run_lease_recovery_loop(
+                application,
+                run_repository=repository,
+                poll_seconds=0.005,
+            )
+        )
+        try:
+            await asyncio.wait_for(completed_twice.wait(), timeout=1)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run_loop())
+
+    assert calls >= 2
+    assert application.state.agent_run_lease_recovery_status == "healthy"
+    assert application.state.agent_run_lease_recovery_failure_count == 0
+    assert application.state.agent_run_lease_recovery_last_recovered_count == 2
+    assert application.state.agent_run_lease_recovery_last_completed_at.tzinfo is not None
 
 
 def test_postgres_agent_run_stale_lease_recovers_after_os_process_restart(
