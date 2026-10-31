@@ -6,6 +6,7 @@ import sqlite3
 import stat
 import threading
 from contextlib import contextmanager
+from types import TracebackType
 from typing import Callable, Iterator, TypeVar
 
 from pydantic import BaseModel
@@ -48,6 +49,21 @@ from .trust_models import (
 )
 
 T = TypeVar("T", bound=BaseModel)
+
+
+class _ClosingSQLiteConnection(sqlite3.Connection):
+    """Close SQLite connections after their transaction context exits."""
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 class SQLiteBackedStore:
@@ -389,7 +405,11 @@ class SQLiteBackedStore:
 
     def _connect(self) -> sqlite3.Connection:
         self._secure_database_files(create_main=True)
-        connection = sqlite3.connect(self.db_path, timeout=30.0)
+        connection = sqlite3.connect(
+            self.db_path,
+            timeout=30.0,
+            factory=_ClosingSQLiteConnection,
+        )
         try:
             self._secure_database_files(create_main=False)
             connection.execute("PRAGMA busy_timeout = 30000")
