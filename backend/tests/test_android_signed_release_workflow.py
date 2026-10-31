@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from scripts.validate_android_release_inputs import validate_release_inputs
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "android-signed-release.yml"
@@ -186,6 +188,42 @@ def test_signed_release_workflow_does_not_interpolate_dispatch_inputs_into_shell
     assert 'echo "created=true" >> "$GITHUB_OUTPUT"' in workflow
     assert "run: rm -f mobile/android/release.keystore" in workflow
     assert "run: rm -f mobile/android/app/google-services.json" in workflow
+
+
+def test_release_preflight_pins_production_https_origin_and_health_before_secrets() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert 'default: "https://api.aixionlab.com/"' in workflow
+    assert "python3 scripts/validate_android_release_inputs.py" in workflow
+    assert "Require healthy production API over HTTPS" in workflow
+    assert "--proto '=https' --tlsv1.2" in workflow
+    assert '"${AIXION_API_BASE_URL}health"' in workflow
+    assert 'if [[ "$status" != "200" ]]' in workflow
+    assert 'payload.get("status") == "ok"' in workflow
+    assert 'payload.get("service") == "aixion-control-tower"' in workflow
+
+    target_validation_position = workflow.index("Validate production API target and Android version")
+    health_validation_position = workflow.index("Require healthy production API over HTTPS")
+    secrets_position = workflow.index("Validate required release secrets")
+    build_position = workflow.index("      - name: Build signed release AAB")
+    assert target_validation_position < health_validation_position < secrets_position < build_position
+
+
+def test_release_input_validator_fails_closed_for_nonproduction_targets_and_versions() -> None:
+    valid = ("https://api.aixionlab.com/", "7", "1.2.3-rc.1")
+    assert validate_release_inputs(*valid) is None
+
+    invalid_inputs = (
+        ("http://api.aixionlab.com/", "7", "1.2.3"),
+        ("https://api.aixionlab.com:443/", "7", "1.2.3"),
+        ("https://api.aixionlab.com.evil.example/", "7", "1.2.3"),
+        ("https://api.aixionlab.com/", " 7", "1.2.3"),
+        ("https://api.aixionlab.com/", "0", "1.2.3"),
+        ("https://api.aixionlab.com/", "2100000001", "1.2.3"),
+        ("https://api.aixionlab.com/", "7", "1.2"),
+    )
+    for inputs in invalid_inputs:
+        assert validate_release_inputs(*inputs) is not None
 
 
 def test_signed_aab_is_uniquely_resolved_and_verified_before_upload() -> None:
