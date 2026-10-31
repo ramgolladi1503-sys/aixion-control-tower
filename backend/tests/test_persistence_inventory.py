@@ -6,6 +6,10 @@ from pathlib import Path
 
 from scripts.inventory_persistence import (
     PersistenceVisitor,
+    _call_graph,
+    _function_nodes,
+    _imported_symbols,
+    _route_persistence_accesses,
     _store_aliases,
     _store_maps,
     inventory,
@@ -120,7 +124,45 @@ def test_inventory_report_states_dependency_alias_coverage_precisely() -> None:
 
     assert len(route_limitations) == 1
     assert "common module-level Depends/Security aliases" in route_limitations[0]
-    assert "does not resolve every dependency-factory pattern" in route_limitations[0]
+    assert "aliases wrapping a direct dependency-factory call" in route_limitations[0]
+    assert "does not resolve arbitrary returned callables" in route_limitations[0]
+
+
+def test_call_graph_resolves_module_level_dependency_factory_alias() -> None:
+    source = textwrap.dedent(
+        """
+        from fastapi import Depends
+        from app.store import store
+
+        def make_project_dependency():
+            def load_project():
+                return store.projects.get("project-1")
+            return load_project
+
+        project_dependency = Depends(make_project_dependency())
+
+        @router.get("/projects/current")
+        def current_project(project=project_dependency):
+            return project
+        """
+    )
+    tree = ast.parse(source)
+    module = "app.routes"
+    graph = _call_graph(
+        {module: tree},
+        {module: _function_nodes(tree)},
+        {module: _imported_symbols(tree, module)},
+    )
+
+    visitor = PersistenceVisitor("app/routes.py", _store_aliases(tree), {"projects"})
+    visitor.visit(tree)
+    routes = _route_persistence_accesses(
+        {module: _function_nodes(tree)}, {module: {}}, graph, visitor.events
+    )
+
+    route = next(item for item in routes if item["entrypoint"] == f"{module}:current_project")
+    assert route["reachable_functions"] == [f"{module}:current_project", f"{module}:make_project_dependency"]
+    assert route["persistence_accesses_by_action"] == {"read": 1}
 
 
 def test_inventory_expands_static_api_route_methods() -> None:

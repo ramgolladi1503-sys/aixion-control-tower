@@ -103,6 +103,22 @@ def _call_name(node: ast.AST) -> str | None:
     return None
 
 
+def _dependency_reference(node: ast.AST) -> str | None:
+    """Return the dependency callable referenced by a Depends/Security value.
+
+    FastAPI commonly uses direct references (``Depends(get_repo)``), but
+    module-level aliases can also call a dependency factory
+    (``repo = Depends(make_repo())``). For the latter, attribute the alias to
+    the factory that constructs the returned dependency. This remains a
+    static approximation: arbitrary returned callables cannot be resolved.
+    """
+    if not isinstance(node, ast.Call):
+        return _call_name(node)
+    if isinstance(node.func, ast.Name) and node.func.id in {"Depends", "Security"}:
+        return _dependency_reference(node.args[0]) if node.args else None
+    return _call_name(node.func)
+
+
 def _function_nodes(tree: ast.Module) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
     return {
         node.name: node
@@ -159,7 +175,7 @@ def _call_graph(
             if not isinstance(value, ast.Call):
                 continue
             if isinstance(value.func, ast.Name) and value.func.id in {"Depends", "Security"}:
-                reference = _call_name(value.args[0]) if value.args else None
+                reference = _dependency_reference(value)
             else:
                 reference = _call_name(value.func)
             if reference is None or not (
@@ -667,7 +683,7 @@ def inventory(root: Path) -> dict[str, Any]:
             "AST inventory is static and may miss dynamic attribute access or indirect mutations.",
             "A map read followed by mutation of a returned object may appear as a read unless represented as a direct assignment target.",
             "Route metadata resolves literal APIRouter prefixes in the route's module; mounted sub-app prefixes, included-router prefixes, dynamic prefixes, and dynamically generated routes still require manual review.",
-            "Route call-graph attribution resolves direct imported and same-module calls plus common module-level Depends/Security aliases; it does not resolve every dependency-factory pattern, callbacks, dynamic imports, or router prefixes.",
+            "Route call-graph attribution resolves direct imported and same-module calls, common module-level Depends/Security aliases, and aliases wrapping a direct dependency-factory call; it does not resolve arbitrary returned callables, callbacks, dynamic imports, or router prefixes.",
             "Background call graphs resolve direct imports and same-module calls only; dynamic scheduling and callbacks require manual review.",
             "Script entrypoints include only direct imported or same-module calls under a conventional __main__ guard; unresolved bare calls are reported but not resolved. Shell wrappers, task schedulers, package entrypoint metadata, dynamic imports, and arbitrary top-level side effects require manual review.",
             "Review raw SQL, computed aliases, callbacks, and runtime-loaded modules separately.",
