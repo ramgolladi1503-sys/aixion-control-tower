@@ -763,6 +763,60 @@ def _validate_source(path: Path) -> None:
         raise ImportBlocked("SQLite WAL/SHM sidecar exists; create a coordinated snapshot first")
 
 
+def _validate_source_snapshot_manifest(path: Path, digest: str) -> None:
+    """Require owner-only provenance bound to the exact import source.
+
+    This validates the operator's recorded snapshot assertions; it cannot
+    independently prove that a writer was stopped. The separate apply flag
+    remains an explicit operator acknowledgement of the coordinated freeze.
+    """
+    manifest_path = path.with_name(path.name + ".manifest.json")
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ImportBlocked(
+            "apply requires an adjacent owner-only <source-filename>.manifest.json"
+        )
+    manifest_stat = manifest_path.stat()
+    if manifest_stat.st_uid != os.getuid():
+        raise ImportBlocked("snapshot manifest must be owned by the current user")
+    if stat.S_IMODE(manifest_stat.st_mode) & 0o077:
+        raise ImportBlocked("snapshot manifest permissions must be owner-only (0600 or stricter)")
+    if manifest_stat.st_size > 64 * 1024:
+        raise ImportBlocked("snapshot manifest exceeds the 64 KiB limit")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ImportBlocked("snapshot manifest is unreadable or invalid JSON") from exc
+    if not isinstance(manifest, dict):
+        raise ImportBlocked("snapshot manifest must be a JSON object")
+
+    if manifest.get("snapshot_path") != str(path.resolve()):
+        raise ImportBlocked("snapshot manifest path does not match the import source")
+    if manifest.get("snapshot_sha256") != digest:
+        raise ImportBlocked("snapshot manifest SHA-256 does not match the import source")
+    if manifest.get("snapshot_bytes") != path.stat().st_size:
+        raise ImportBlocked("snapshot manifest size does not match the import source")
+    if manifest.get("snapshot_integrity_check") != "ok":
+        raise ImportBlocked("snapshot manifest does not record a successful SQLite integrity check")
+    source_uri = f"file:{quote(path.resolve().as_posix(), safe='/')}?mode=ro"
+    with sqlite3.connect(source_uri, uri=True, timeout=5) as connection:
+        connection.execute("PRAGMA query_only = ON")
+        integrity_result = connection.execute("PRAGMA integrity_check").fetchone()
+    if integrity_result != ("ok",):
+        raise ImportBlocked("SQLite integrity check did not return ok for the import source")
+    if manifest.get("writer_quiesced") is not True:
+        raise ImportBlocked("snapshot manifest does not attest that source writers were quiesced")
+    if manifest.get("source_writable_database_handles_at_capture_end") != 0:
+        raise ImportBlocked("snapshot manifest must record zero writable source handles at capture end")
+    if manifest.get("owner_source_identity_confirmed") is not True:
+        raise ImportBlocked("snapshot manifest does not attest owner-confirmed source identity")
+    source_path = manifest.get("source_path")
+    if not isinstance(source_path, str) or not Path(source_path).is_absolute():
+        raise ImportBlocked("snapshot manifest must record an absolute owner-confirmed source path")
+    capture_method = manifest.get("capture_method")
+    if not isinstance(capture_method, str) or not capture_method.strip():
+        raise ImportBlocked("snapshot manifest must record the capture method")
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -2720,6 +2774,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         plan, records, digest = build_plan(args.source)
         if args.apply:
+            _validate_source_snapshot_manifest(args.source, digest)
             dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "")
             if not dsn:
                 raise ImportBlocked("AIXION_TEST_POSTGRES_DSN is required for apply")

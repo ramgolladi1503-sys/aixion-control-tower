@@ -576,6 +576,107 @@ def _snapshot(
                 ],
             )
     os.chmod(path, 0o600)
+    snapshot_bytes = path.stat().st_size
+    snapshot_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = {
+        "capture_method": "synthetic pytest fixture",
+        "owner_source_identity_confirmed": True,
+        "source_path": str(path.resolve()),
+        "source_writable_database_handles_at_capture_end": 0,
+        "snapshot_bytes": snapshot_bytes,
+        "snapshot_integrity_check": "ok",
+        "snapshot_path": str(path.resolve()),
+        "snapshot_sha256": snapshot_digest,
+        "writer_quiesced": True,
+    }
+    manifest_path = path.with_name(path.name + ".manifest.json")
+    descriptor = os.open(manifest_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(manifest, output, sort_keys=True)
+        output.write("\n")
+
+
+@pytest.mark.parametrize(
+    ("manifest_change", "expected_error"),
+    [
+        ({"snapshot_path": "/tmp/another-source.sqlite3"}, "path does not match"),
+        ({"snapshot_bytes": 0}, "size does not match"),
+        ({"writer_quiesced": False}, "source writers were quiesced"),
+        ({"source_writable_database_handles_at_capture_end": 1}, "zero writable source handles"),
+        ({"owner_source_identity_confirmed": False}, "owner-confirmed source identity"),
+        ({"snapshot_sha256": "0" * 64}, "SHA-256 does not match"),
+    ],
+)
+def test_apply_requires_manifest_bound_to_quiesced_exact_source(
+    tmp_path, monkeypatch, capsys, manifest_change, expected_error,
+):
+    path = tmp_path / "manifest-gated-snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    manifest_path = path.with_name(path.name + ".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update(manifest_change)
+    manifest_path.write_text(json.dumps(manifest))
+    os.chmod(manifest_path, 0o600)
+    monkeypatch.setenv("AIXION_TEST_POSTGRES_DSN", "postgresql://unused.invalid/approval_staging")
+    applied = []
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.apply_import",
+        lambda *args, **kwargs: applied.append((args, kwargs)),
+    )
+
+    result = main([
+        "--source", str(path), "--apply", "--allow-partial-slice",
+        "--confirm-source-snapshot",
+    ])
+
+    assert result == 2
+    assert expected_error in capsys.readouterr().err
+    assert applied == []
+
+
+def test_apply_rejects_missing_snapshot_manifest_before_database_apply(
+    tmp_path, monkeypatch, capsys,
+):
+    path = tmp_path / "missing-manifest-snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    path.with_name(path.name + ".manifest.json").unlink()
+    monkeypatch.setenv("AIXION_TEST_POSTGRES_DSN", "postgresql://unused.invalid/approval_staging")
+    applied = []
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.apply_import",
+        lambda *args, **kwargs: applied.append((args, kwargs)),
+    )
+
+    result = main([
+        "--source", str(path), "--apply", "--allow-partial-slice",
+        "--confirm-source-snapshot",
+    ])
+
+    assert result == 2
+    assert "apply requires an adjacent owner-only" in capsys.readouterr().err
+    assert applied == []
+
+
+def test_apply_accepts_valid_manifest_bound_to_integral_snapshot(
+    tmp_path, monkeypatch, capsys,
+):
+    path = tmp_path / "valid-manifest-snapshot.sqlite3"
+    _snapshot(path, include_omitted=False)
+    monkeypatch.setenv("AIXION_TEST_POSTGRES_DSN", "dbname=approval_staging host=localhost")
+    applied = []
+    monkeypatch.setattr(
+        "scripts.import_approval_slice_to_postgres.apply_import",
+        lambda *args, **kwargs: applied.append((args, kwargs)),
+    )
+
+    result = main([
+        "--source", str(path), "--apply", "--allow-partial-slice",
+        "--confirm-source-snapshot",
+    ])
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "STAGING_IMPORT_APPLIED"
+    assert len(applied) == 1
 
 
 def _set_approval_status(path, status):
