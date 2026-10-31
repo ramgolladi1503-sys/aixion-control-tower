@@ -20,7 +20,17 @@ def test_staging_load_balancer_requires_explicit_hostname() -> None:
     assert re.search(r"(?m)^\s*default\s*=", body) is None
 
 
-def test_staging_load_balancer_rejects_production_hostname() -> None:
+def test_staging_load_balancer_requires_owned_staging_hostname() -> None:
     body = _api_domain_variable_body()
 
-    assert 'var.api_domain != "api.aixionlab.com"' in body
+    assert 'endswith(var.api_domain, ".aixionlab.com")' in body
+    assert 'can(regex("(^|[.-])(staging|stage)([.-]|$)", var.api_domain))' in body
+    assert 'length(split(".", var.api_domain)) >= 3' in body
+
+
+def test_staging_load_balancer_requires_staging_label_under_owned_domain() -> None:
+    body = _api_domain_variable_body()
+
+    assert 'endswith(var.api_domain, ".aixionlab.com")' in body
+    assert 'can(regex("(^|[.-])(staging|stage)([.-]|$)", var.api_domain))' in body
+    assert "alltrue([" in body

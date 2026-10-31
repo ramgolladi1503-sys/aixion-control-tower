@@ -4,14 +4,14 @@
 # It reserves billable global networking resources when applied.
 
 variable "api_domain" {
-  description = "Required owner-approved staging API hostname; must not be the production api.aixionlab.com hostname."
+  description = "Required owner-approved staging API hostname under aixionlab.com, with an explicit stage or staging label."
   type        = string
 
   validation {
-    condition = var.api_domain != "api.aixionlab.com" && length(var.api_domain) <= 253 && length(split(".", var.api_domain)) >= 2 && alltrue([
+    condition = endswith(var.api_domain, ".aixionlab.com") && can(regex("(^|[.-])(staging|stage)([.-]|$)", var.api_domain)) && length(var.api_domain) <= 253 && length(split(".", var.api_domain)) >= 3 && alltrue([
       for label in split(".", var.api_domain) : can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", label))
     ])
-    error_message = "api_domain must be a valid lowercase staging DNS hostname and must not be api.aixionlab.com."
+    error_message = "api_domain must be a valid lowercase subdomain of aixionlab.com with an explicit stage or staging label."
   }
 }
 
