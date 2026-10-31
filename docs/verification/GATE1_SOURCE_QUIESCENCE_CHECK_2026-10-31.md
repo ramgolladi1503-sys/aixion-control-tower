@@ -32,3 +32,14 @@ The open writable handles establish that the source is not quiesced. The absence
 No process was stopped, no source file was changed, and no new snapshot or import was attempted. The previously imported staging rehearsal must not be treated as a fresh capture of this currently active source.
 
 Gate 1 remains open. A new source snapshot requires a coordinated maintenance window in which the owner-approved application/API writer is stopped through its normal shutdown procedure, all writer handles are confirmed closed, and a new owner-only SQLite backup is captured and hashed. The production startup guard remains enabled.
+
+## Follow-up read-only check (2026-10-31 04:22 UTC)
+
+The same source remains open and unmodified:
+
+- `ps` identifies PID `38201` as `uvicorn app.main:app --host 127.0.0.1 --port 8003 --log-level info`.
+- `lsof` reports 112 descriptors in read/write (`u`) mode for the source path. These are file descriptors, not a count of distinct SQLite connections; any read/write descriptor means quiescence has not been established.
+- The source remains 110,592 bytes with no reported modification since Oct 30 03:41:47 local time. Current SHA-256: `17f49ae6989393e12fc9d8d88789f492a1bda20cb5ab90bc7552056d3f072491`.
+- The current hash differs from the older non-quiesced candidate hash above. That candidate remains unsuitable and is not a substitute for a fresh coordinated snapshot.
+
+No service was stopped, and no source, staging, or production database was written. Gate 1 remains open.

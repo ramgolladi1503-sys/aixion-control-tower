@@ -34,6 +34,18 @@ If any prerequisite is unknown, stop. Do not treat a successful script exit as a
 4. Place the standalone snapshot in a private directory, set owner-only permissions (`0600` file; private owner-only directory), and record its path, byte size, SHA-256, owner, source freeze interval, SQLite integrity/backup evidence, and the exact procedure used. Ensure the snapshot is a regular file, not a symlink. The report itself contains sensitive metadata; protect it accordingly.
 5. Keep source writers frozen until drain and snapshot validation are complete. If any writer resumes or the snapshot procedure is uncertain, discard the candidate snapshot and restart this section.
 
+To capture the staging rehearsal snapshot after steps 1–2 have completed, run the guarded helper from the repository root. It never stops processes and fails before creating the output directory if `lsof` is missing, errors, or reports any read/write or write-only source descriptor. It checks again after backup, compares source stats and hashes before/after, validates the new database, and writes the `<snapshot-filename>.manifest.json` required by importer `--apply`:
+
+```sh
+python backend/scripts/create_quiesced_sqlite_snapshot.py \
+  --source "/Users/madhuram/Library/Application Support/AixionControlTower/antigravity-native-m1-20261029/backend.sqlite3" \
+  --output-dir "/Volumes/TradeBot/AixionControlTower/gate1-source-snapshot-YYYYMMDDTHHMMSSZ" \
+  --confirm-source-identity \
+  --confirm-writers-stopped
+```
+
+Replace the output directory suffix with a new UTC timestamp; the directory must not already exist and its parent must exist. The flags acknowledge operator actions; they do not stop the service or prove that a process will not reopen the source after preflight. Review the manifest, retain the independent source recovery copy, and rerun the read-only drain/audit reports before any staging apply. Do not run this while the known API PID still holds the source open.
+
 ## 4. Drain native approval invocations
 
 Native Antigravity/Codex approval state is invocation-bound. A persisted approval timestamp or connector record is not proof that the original invocation remains paused, and an operator must never manufacture or extend an invocation lease to make the import pass.
