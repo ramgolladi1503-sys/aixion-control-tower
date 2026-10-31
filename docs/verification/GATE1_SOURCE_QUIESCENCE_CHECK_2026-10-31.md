@@ -43,3 +43,13 @@ The same source remains open and unmodified:
 - The current hash differs from the older non-quiesced candidate hash above. That candidate remains unsuitable and is not a substitute for a fresh coordinated snapshot.
 
 No service was stopped, and no source, staging, or production database was written. Gate 1 remains open.
+
+## Read-only source/staging reconciliation (2026-10-31)
+
+The owner-selected SQLite source was opened with `mode=ro` and `PRAGMA query_only=ON`; no values or identifiers were read. SQLite `integrity_check` returned `ok`. The file SHA-256 is `17f49ae6989393e12fc9d8d88789f492a1bda20cb5ab90bc7552056d3f072491`; its `schema_migrations` table contains `0001_baseline_kv_store` through `0010_approval_expiry_due_index`, and `PRAGMA user_version` is `0`.
+
+The source contains these key counts: `user=3`, `workspace=3`, `project=1`, `session=5`, `external_agent=1`, `external_agent_credential=1`, `audit_event=4`, `auth_rate_limit_bucket=17`, and zero rows for `auth_email_outbox`, `approval_delivery_claim`, `approval_delivery_failure`, and `approval_invocation_lease`. Its four audit events are stored in `kv_store`; the importer must split the two confirmed unscoped auth failures into the approved quarantine while retaining the two workspace-scoped events in `audit_events`.
+
+The approved staging PostgreSQL database is available through the existing private Unix-socket cluster at `/private/tmp/aixion-codex-native-e2e-20261029/socket`, port `59174`; it is not listening on TCP/5432. Read-only inspection shows 40 migrations, `users=3`, `workspaces=3`, `projects=1`, `sessions=5`, `external_agents=1`, `external_agent_credentials=1`, `auth_rate_limit_buckets=17`, `audit_events=2`, and `legacy_audit_events=2`. Its `sqlite_import_runs` record is for source hash `2dd8f2e50250f2afa09160aab81d034b7bece0e575fb9be9bff604339561ba2e`, not the current source hash above. Counts match but source hashes differ, so this target is a prior rehearsal and is not reconciled to the current exact source. No PostgreSQL data was changed and the shared cluster was not stopped or cleaned.
+
+The live SQLite API remains on `127.0.0.1:8003` under PID `38201` with writable database handles. Although it currently has no established TCP client, the writer is not quiesced. No snapshot, import, or cutover was attempted. A new exact-source rehearsal still requires an owner-coordinated writer-freeze window and a successful run of `backend/scripts/create_quiesced_sqlite_snapshot.py` against that stable source.
