@@ -53,3 +53,11 @@ The source contains these key counts: `user=3`, `workspace=3`, `project=1`, `ses
 The approved staging PostgreSQL database is available through the existing private Unix-socket cluster at `/private/tmp/aixion-codex-native-e2e-20261029/socket`, port `59174`; it is not listening on TCP/5432. Read-only inspection shows 40 migrations, `users=3`, `workspaces=3`, `projects=1`, `sessions=5`, `external_agents=1`, `external_agent_credentials=1`, `auth_rate_limit_buckets=17`, `audit_events=2`, and `legacy_audit_events=2`. Its `sqlite_import_runs` record is for source hash `2dd8f2e50250f2afa09160aab81d034b7bece0e575fb9be9bff604339561ba2e`, not the current source hash above. Counts match but source hashes differ, so this target is a prior rehearsal and is not reconciled to the current exact source. No PostgreSQL data was changed and the shared cluster was not stopped or cleaned.
 
 The live SQLite API remains on `127.0.0.1:8003` under PID `38201` with writable database handles. Although it currently has no established TCP client, the writer is not quiesced. No snapshot, import, or cutover was attempted. A new exact-source rehearsal still requires an owner-coordinated writer-freeze window and a successful run of `backend/scripts/create_quiesced_sqlite_snapshot.py` against that stable source.
+
+## Read-only follow-up (2026-11-01 03:02 IST)
+
+- PID `38201` is still the same `uvicorn app.main:app --host 127.0.0.1 --port 8003` process (parent PID 1). `lsof` reported 1,453 descriptor entries matching the source `backend.sqlite3` path. This is a descriptor count, not a count of distinct SQLite connections; this observation alone does not establish a growth rate.
+- PR #204 now contains SQLite store connections that close on context exit (`eb926eda`) and a regression for commit-time failure (`e6cf6d86`). Those commits do not alter the already-running PID `38201`; no process restart occurred in this check.
+- No source database was opened, hashed, copied, or written. No process was stopped. No snapshot, import, or cutover was attempted. The 2026-10-31 source hash and staging manifest comparison above are historical observations, not a fresh reconciliation.
+
+Gate 1 remains open. Exact-source rehearsal still requires the coordinated writer-freeze and snapshot procedure above; the production startup guard remains required.
