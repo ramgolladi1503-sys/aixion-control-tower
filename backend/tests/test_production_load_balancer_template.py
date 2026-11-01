@@ -7,6 +7,7 @@ PRODUCTION_TERRAFORM = (
     / "production"
     / "main.tf"
 )
+PRODUCTION_LOCKFILE = PRODUCTION_TERRAFORM.with_name(".terraform.lock.hcl")
 
 
 def test_production_https_template_is_pinned_to_requested_host_and_region() -> None:
@@ -28,3 +29,12 @@ def test_production_resources_remain_explicitly_disabled_by_default() -> None:
     assert "default     = false" in source
     assert 'resource "terraform_data" "production_apply_guard"' in source
     assert "depends_on = [terraform_data.production_apply_guard]" in source
+
+
+def test_production_root_requires_gcs_state_and_locks_provider() -> None:
+    source = PRODUCTION_TERRAFORM.read_text(encoding="utf-8")
+    lockfile = PRODUCTION_LOCKFILE.read_text(encoding="utf-8")
+
+    assert 'backend "gcs" {}' in source
+    assert 'version     = "7.46.1"' in lockfile
+    assert "registry.terraform.io/hashicorp/google" in lockfile
