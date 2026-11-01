@@ -17,6 +17,8 @@
 - Host: Python 3.14.2, pytest 9.0.3.
 - Result: 2,849 collected; **2,845 passed, 4 skipped**, 5 existing password-policy deprecation warnings; 640.95 seconds.
 - The PostgreSQL cluster was stopped cleanly after the run. Its data directory and test database were retained. No database directories or artifacts were deleted.
+- GitHub Actions Backend CI run `41284934938` completed successfully on code commit `0b40a69791373e7ac45e254b8b8e21948658f132` (`success`, completed 2026-11-01T07:31:40Z).
+- Current PR #204 head `dadcee66a633b4875692d7cfbff81645e2b4ba50` contains this documentation-only evidence update. GitHub reported no checks for that SHA at the time of this report update.
 
 ## What this proves
 
@@ -28,6 +30,6 @@ The complete backend test suite ran at this source commit with `AIXION_TEST_POST
 - This does not authorize a production source import or cutover.
 - This does not establish Cloud SQL backup retention, point-in-time recovery, IAM/encryption policy, or measured production RPO/RTO.
 - The four skipped test cases remain skipped in this recorded run; this report does not infer their reasons.
-- The independent GitHub Actions run `41284934938` remained `in_progress` when checked. Its logs were unavailable while running. Do not treat this local result as a completed GitHub check.
+- Successful CI applies to commit `0b40a697`; the current documentation-only PR head has no reported check result.
 
 Gate 1 remains open.
