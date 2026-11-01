@@ -1957,7 +1957,9 @@ def list_audit_events(
     http_request: Request = None,  # type: ignore[assignment]
 ) -> list[AuditEvent]:
     settings = get_settings()
-    if http_request is None and (settings.is_production or settings.postgres_auth_enabled):
+    is_production = bool(getattr(settings, "is_production", False))
+    postgres_auth_enabled = bool(getattr(settings, "postgres_auth_enabled", False))
+    if http_request is None and (is_production or postgres_auth_enabled):
         raise HTTPException(
             status_code=503,
             detail=(
@@ -1968,7 +1970,11 @@ def list_audit_events(
     if http_request is not None:
         state = http_request.app.state
         postgres_runtime = getattr(state, "postgres_runtime", None)
-        if settings.postgres_auth_enabled or postgres_runtime is not None:
+        if (
+            is_production
+            or postgres_auth_enabled
+            or postgres_runtime is not None
+        ):
             repositories = getattr(state, "postgres_repositories", None)
             runtime_repositories = getattr(postgres_runtime, "repositories", None)
             runtime_audit_repository = getattr(repositories, "audit_events", None)

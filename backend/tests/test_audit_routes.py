@@ -255,6 +255,34 @@ def test_root_audit_read_fails_closed_instead_of_serving_sqlite_during_postgres_
     assert len(store.audit_events) == len(events)
 
 
+def test_root_audit_read_fails_closed_in_production_without_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from app import main
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(postgres_runtime=None))
+    )
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+
+    class UnexpectedAuditEvents:
+        def __iter__(self):
+            raise AssertionError("Production audit read must not touch SQLite")
+
+    monkeypatch.setattr(main.store, "audit_events", UnexpectedAuditEvents())
+
+    with pytest.raises(HTTPException) as raised:
+        main.list_audit_events(user=None, http_request=request)  # type: ignore[arg-type]
+
+    assert raised.value.status_code == 503
+
+
 def test_audit_and_recovery_reads_fail_closed_when_postgres_auth_is_selected_without_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
