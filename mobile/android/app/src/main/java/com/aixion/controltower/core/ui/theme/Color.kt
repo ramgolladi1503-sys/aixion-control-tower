@@ -3,7 +3,7 @@ package com.aixion.controltower.core.ui.theme
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
-/** Semantic colors for the quiet, warm Control Tower visual system. */
+/** Semantic colors for Control Tower's calm, high-clarity approval surfaces. */
 internal data class TowerPalette(
     val canvas: Color,
     val surface: Color,
@@ -39,7 +39,7 @@ internal val LightTowerPalette = TowerPalette(
     info = Color(0xFF3B6178)
 )
 
-/** Warm charcoal companion to the paper/olive light palette. */
+/** Deep charcoal companion to the warm-paper light palette. */
 internal val DarkTowerPalette = TowerPalette(
     canvas = Color(0xFF171A16),
     surface = Color(0xFF20241F),

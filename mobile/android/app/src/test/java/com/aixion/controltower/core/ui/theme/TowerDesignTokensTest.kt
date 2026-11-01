@@ -8,6 +8,18 @@ import org.junit.Test
 
 class TowerDesignTokensTest {
     @Test
+    fun primaryTypographyMatchesTheProductionReadingScale() {
+        assertEquals(28.sp, TowerTypography.displayLarge.fontSize)
+        assertEquals(34.sp, TowerTypography.displayLarge.lineHeight)
+        assertEquals(28.sp, TowerTypography.headlineLarge.fontSize)
+        assertEquals(34.sp, TowerTypography.headlineLarge.lineHeight)
+        assertEquals(20.sp, TowerTypography.titleLarge.fontSize)
+        assertEquals(26.sp, TowerTypography.titleLarge.lineHeight)
+        assertEquals(16.sp, TowerTypography.bodyMedium.fontSize)
+        assertEquals(24.sp, TowerTypography.bodyMedium.lineHeight)
+    }
+
+    @Test
     fun bodyLargeMatchesApprovalReadingContract() {
         val body = TowerTypography.bodyLarge
 

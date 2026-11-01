@@ -25,6 +25,9 @@ data class AgentAccessUiState(
     val working: Boolean = false,
     val agents: List<AgentAccessSummary> = emptyList(),
     val projects: List<ProjectDto> = emptyList(),
+    val newProjectName: String = "",
+    val newProjectDescription: String = "",
+    val creatingProject: Boolean = false,
     val selectedProvider: String = "ANTIGRAVITY",
     val selectedProjectId: String? = null,
     val displayName: String = "Antigravity on this Mac",
@@ -90,6 +93,76 @@ class AgentAccessViewModel(
 
     fun setDisplayName(value: String) {
         _state.value = _state.value.copy(displayName = value.take(100), error = "")
+    }
+
+    fun setNewProjectName(value: String) {
+        _state.value = _state.value.copy(newProjectName = value.take(120), error = "")
+    }
+
+    fun setNewProjectDescription(value: String) {
+        _state.value = _state.value.copy(newProjectDescription = value.take(500), error = "")
+    }
+
+    fun createFirstProject() {
+        val current = _state.value
+        val name = current.newProjectName.trim()
+        if (current.working || current.loading || current.creatingProject) return
+        if (current.projects.isNotEmpty()) return
+        if (name.isBlank()) {
+            _state.value = current.copy(error = "Enter a project name to continue.")
+            return
+        }
+        viewModelScope.launch {
+            _state.value = current.copy(creatingProject = true, error = "", notice = "")
+            val created = try {
+                repository.createProject(name, current.newProjectDescription)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(
+                    creatingProject = false,
+                    error = "Project creation was not confirmed. Refresh the project list before retrying to avoid duplicates."
+                )
+                return@launch
+            }
+            if (created.id.isBlank() || created.name.isBlank()) {
+                _state.value = _state.value.copy(
+                    creatingProject = false,
+                    error = "The server returned an incomplete project. Refresh before creating a connector."
+                )
+                return@launch
+            }
+            val projects = try {
+                repository.listProjects()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                _state.value = _state.value.copy(
+                    creatingProject = false,
+                    error = "Project may have been created, but its visibility could not be confirmed. Refresh before retrying."
+                )
+                return@launch
+            }
+            val confirmed = projects.firstOrNull { it.id == created.id }
+            if (confirmed == null) {
+                _state.value = _state.value.copy(
+                    creatingProject = false,
+                    projects = projects,
+                    selectedProjectId = projects.firstOrNull()?.id,
+                    error = "Project creation was submitted, but the project is not visible in this account yet. Refresh before creating a connector."
+                )
+                return@launch
+            }
+            _state.value = _state.value.copy(
+                creatingProject = false,
+                projects = projects,
+                selectedProjectId = confirmed.id,
+                newProjectName = "",
+                newProjectDescription = "",
+                notice = "Project created. You can now create a project-limited connector.",
+                error = ""
+            )
+        }
     }
 
     fun selectProvider(provider: String) {

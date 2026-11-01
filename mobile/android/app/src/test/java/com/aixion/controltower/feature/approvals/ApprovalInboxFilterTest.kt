@@ -12,6 +12,24 @@ import org.junit.Test
 
 class ApprovalInboxFilterTest {
     @Test
+    fun historyEmptyStateDistinguishesNoRecordsFromNoFilterMatches() {
+        assertEquals(
+            ApprovalHistoryEmptyState(
+                title = "No decisions recorded",
+                message = "Recorded approve, deny, and revision decisions will appear here."
+            ),
+            approvalHistoryEmptyState(hasRecordedDecisions = false)
+        )
+        assertEquals(
+            ApprovalHistoryEmptyState(
+                title = "No decisions match this filter",
+                message = "Change the filter or choose All to see other recorded decisions."
+            ),
+            approvalHistoryEmptyState(hasRecordedDecisions = true)
+        )
+    }
+
+    @Test
     fun approvalExpiryLabelUsesLocalTimeOffsetAndFailsClosedForMissingOrInvalidValues() {
         val formatted = formatApprovalExpiry("2026-10-22T10:00:00Z")
 
@@ -88,9 +106,7 @@ class ApprovalInboxFilterTest {
         assertEquals(listOf("unknown_status", "unknown_risk"), all
             .filter(::isUnsupportedInboxApproval)
             .map { it.id })
-        assertTrue(
-            filterApprovalsForInbox(all, ApprovalInboxSection.NEEDS_REVIEW).isEmpty()
-        )
+        assertTrue(filterApprovalsForInbox(all, ApprovalInboxSection.NEEDS_REVIEW).isEmpty())
         assertTrue(filterApprovalsForInbox(all, ApprovalInboxSection.HISTORY).isEmpty())
     }
 

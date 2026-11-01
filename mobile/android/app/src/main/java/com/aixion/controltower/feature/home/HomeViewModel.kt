@@ -45,8 +45,8 @@ data class HomeUiState(
 }
 
 internal fun homeHeroTitle(state: HomeUiState): String = when {
-    state.loading -> "Loading command state"
-    state.refreshing -> "Refreshing command state"
+    state.loading -> "Loading approvals"
+    state.refreshing -> "Refreshing approvals"
     state.hasError -> "Backend sync failed"
     state.unsupportedApprovals.isNotEmpty() -> "${state.unsupportedApprovals.size} approvals need an app update"
     state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"

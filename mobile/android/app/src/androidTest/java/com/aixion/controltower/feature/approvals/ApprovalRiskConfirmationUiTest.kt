@@ -3,9 +3,12 @@ package com.aixion.controltower.feature.approvals
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.FileChangeSummary
@@ -33,9 +36,12 @@ class ApprovalRiskConfirmationUiTest {
             )
         }
 
+        openAndAcknowledgeFullDiff()
+
         composeRule.onNodeWithText("Approve request").assertIsEnabled().performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
-        composeRule.onNodeWithText("High impact operation", substring = true).assertExists()
+        composeRule.onNodeWithTag("approval-high-risk-confirmation")
+            .assertTextContains("High impact operation", substring = true)
         composeRule.onNodeWithText("Target: Production workspace · release", substring = true).assertExists()
         composeRule.onNodeWithText("Risk: High", substring = true).assertExists()
         composeRule.runOnIdle { assertEquals("Opening confirmation must not submit a decision", 0, decisionCount) }
@@ -58,6 +64,8 @@ class ApprovalRiskConfirmationUiTest {
             )
         }
 
+        openAndAcknowledgeFullDiff()
+
         composeRule.onNodeWithText("Approve request").assertIsEnabled().performClick()
         composeRule.onNodeWithText("Confirm high-risk approval").assertExists()
         composeRule.runOnIdle {
@@ -68,6 +76,15 @@ class ApprovalRiskConfirmationUiTest {
         composeRule.onNodeWithText("Approve this request").assertIsNotEnabled()
         composeRule.runOnIdle { assertEquals("An expired request must not submit", 0, decisionCount) }
     }
+}
+
+private fun ApprovalRiskConfirmationUiTest.openAndAcknowledgeFullDiff() {
+    composeRule.onNodeWithTag("approval-detail-list")
+        .performScrollToNode(hasTestTag("approval-full-diff-review"))
+    composeRule.onNodeWithTag("approval-full-diff-review").performClick()
+    composeRule.onNodeWithTag("approval-detail-list")
+        .performScrollToNode(hasTestTag("approval-full-diff-review-acknowledgement"))
+    composeRule.onNodeWithTag("approval-full-diff-review-acknowledgement").performClick()
 }
 
 private fun approval(risk: RiskLevel) = ApprovalSummary(

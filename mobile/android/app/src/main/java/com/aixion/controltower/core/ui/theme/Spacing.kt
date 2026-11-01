@@ -22,7 +22,7 @@ object TowerRadius {
     val sm = 12.dp
     val md = 16.dp
     val lg = 24.dp
-    val xl = 24.dp
+    val xl = 28.dp
 }
 
 object TowerLayout {

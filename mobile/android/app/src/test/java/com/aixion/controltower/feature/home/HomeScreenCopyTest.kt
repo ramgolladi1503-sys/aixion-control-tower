@@ -58,7 +58,7 @@ class HomeScreenCopyTest {
     fun allClearRequiresACompletedSuccessfulSync() {
         assertEquals("Status not verified", homeHeroTitle(HomeUiState(loading = false)))
         assertEquals(
-            "Refreshing command state",
+            "Refreshing approvals",
             homeHeroTitle(
                 HomeUiState(
                     loading = false,
@@ -75,6 +75,15 @@ class HomeScreenCopyTest {
                     lastSuccessfulSyncAt = Instant.parse("2026-10-22T00:00:00Z")
                 )
             )
+        )
+    }
+
+    @Test
+    fun loadingAndRefreshCopyNamesTheUserVisibleApprovalState() {
+        assertEquals("Loading approvals", homeHeroTitle(HomeUiState()))
+        assertEquals(
+            "Refreshing approvals",
+            homeHeroTitle(HomeUiState(loading = false, refreshing = true))
         )
     }
 }

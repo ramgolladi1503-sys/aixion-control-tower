@@ -8,16 +8,22 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
+import com.aixion.controltower.core.ui.theme.TowerRadius
 import com.aixion.controltower.core.ui.theme.TowerSpacing
 import java.time.Instant
 import java.time.ZoneId
@@ -58,12 +64,20 @@ fun ApprovalCard(
         Text(
             text = approval.title,
             color = palette.ink,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.SemiBold,
-            lineHeight = 22.sp
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(text = approval.summary, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            text = approval.summary,
+            color = palette.ink,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("approval-card-summary-surface")
+                .clip(RoundedCornerShape(TowerRadius.sm))
+                .background(palette.surfaceSubtle)
+                .padding(horizontal = TowerSpacing.md, vertical = TowerSpacing.sm)
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         val expiryLabel = formatApprovalExpiry(approval.expiresAt)
         Text(

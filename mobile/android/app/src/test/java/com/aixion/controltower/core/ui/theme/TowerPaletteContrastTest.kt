@@ -3,9 +3,20 @@ package com.aixion.controltower.core.ui.theme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class TowerPaletteContrastTest {
+    @Test
+    fun semanticPaletteMatchesTheReleaseOneWarmPaperAndOliveTokens() {
+        assertEquals(Color(0xFFF4F2EC), LightTowerPalette.canvas)
+        assertEquals(Color(0xFFFBFAF6), LightTowerPalette.surface)
+        assertEquals(Color(0xFF53664D), LightTowerPalette.brand)
+        assertEquals(Color(0xFF171A16), DarkTowerPalette.canvas)
+        assertEquals(Color(0xFF20241F), DarkTowerPalette.surface)
+        assertEquals(Color(0xFFA9C19B), DarkTowerPalette.brand)
+    }
+
     @Test
     fun primaryAndSupportingTextMeetWcagAaInBothThemes() {
         listOf(LightTowerPalette, DarkTowerPalette).forEach { palette ->
@@ -30,6 +41,15 @@ class TowerPaletteContrastTest {
         }
     }
 
+    @Test
+    fun semanticStateColorsRemainReadableOnLightAndDarkCanvases() {
+        listOf(LightTowerPalette, DarkTowerPalette).forEach { palette ->
+            listOf(palette.positive, palette.caution, palette.danger, palette.info).forEach { foreground ->
+                assertContrastAtLeast(foreground, palette.canvas, 4.5)
+            }
+        }
+    }
+
     private fun assertContrastAtLeast(foreground: Color, background: Color, minimum: Double) {
         val actual = contrastRatio(foreground, background)
         assertTrue(
@@ -49,7 +69,7 @@ class TowerPaletteContrastTest {
 
     private fun relativeLuminance(color: Color): Double {
         fun linear(channel: Float): Double =
-            if (channel <= 0.04045f) channel / 12.92 else Math.pow(((channel + 0.055) / 1.055).toDouble(), 2.4)
+            if (channel <= 0.04045f) channel / 12.92 else Math.pow(((channel + 0.055f) / 1.055f).toDouble(), 2.4)
 
         return 0.2126 * linear(color.red) +
             0.7152 * linear(color.green) +

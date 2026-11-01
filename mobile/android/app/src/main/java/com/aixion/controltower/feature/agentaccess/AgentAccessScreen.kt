@@ -208,6 +208,19 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
                 subtitle = "The credential is limited to one selected project and five approval-only actions."
             )
         }
+        if (!state.loading && state.error.isBlank() && state.projects.isEmpty()) {
+            item {
+                FirstProjectSetupPanel(
+                    name = state.newProjectName,
+                    description = state.newProjectDescription,
+                    creating = state.creatingProject,
+                    enabled = !state.working && !state.creatingProject,
+                    onNameChange = viewModel::setNewProjectName,
+                    onDescriptionChange = viewModel::setNewProjectDescription,
+                    onCreate = viewModel::createFirstProject
+                )
+            }
+        }
         item {
             TowerPanel(elevated = true) {
                 OutlinedTextField(
@@ -275,6 +288,51 @@ fun AgentAccessScreen(viewModel: AgentAccessViewModel = viewModel()) {
             OutlinedButton(onClick = viewModel::refresh, enabled = !state.working, modifier = Modifier.fillMaxWidth()) {
                 Text("Refresh agent status")
             }
+        }
+    }
+}
+
+@Composable
+internal fun FirstProjectSetupPanel(
+    name: String,
+    description: String,
+    creating: Boolean,
+    enabled: Boolean,
+    onNameChange: (String) -> Unit,
+    onDescriptionChange: (String) -> Unit,
+    onCreate: () -> Unit
+) {
+    TowerPanel(elevated = true) {
+        Text("Create your first project", color = TowerTextPrimary, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(TowerSpacing.xs))
+        Text(
+            "A project keeps this connector scoped to the work you choose.",
+            color = TowerTextMuted,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
+        Spacer(Modifier.height(TowerSpacing.sm))
+        OutlinedTextField(
+            value = name,
+            onValueChange = onNameChange,
+            label = { Text("Project name") },
+            singleLine = true,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(TowerSpacing.sm))
+        OutlinedTextField(
+            value = description,
+            onValueChange = onDescriptionChange,
+            label = { Text("Description (optional)") },
+            enabled = enabled,
+            minLines = 2,
+            maxLines = 3,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(Modifier.height(TowerSpacing.md))
+        Button(onClick = onCreate, enabled = enabled && name.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+            Text(if (creating) "Creating project…" else "Create project")
         }
     }
 }

@@ -1,6 +1,10 @@
 package com.aixion.controltower.feature.auth
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,15 +12,19 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -25,11 +33,30 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.autofill.AutofillNode
+import androidx.compose.ui.autofill.AutofillType
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalAutofill
+import androidx.compose.ui.platform.LocalAutofillTree
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -53,23 +80,52 @@ fun AuthScreen(
     val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(palette.canvas)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
-    ) {
-        if (state.authenticated) {
+    if (state.authenticated) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(palette.canvas)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
+        ) {
             AccountHero(state = state)
             NotificationPermissionPanel()
             AccountInfoPanel(
                 state = state,
                 onLogout = onLogoutRequested
             )
-        } else {
+        }
+    } else {
+        AuthFormViewport {
             AuthForm(state = state, viewModel = viewModel)
+        }
+    }
+}
+
+@Composable
+internal fun AuthFormViewport(content: @Composable () -> Unit) {
+    val palette = LocalTowerPalette.current
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.canvas)
+    ) {
+        val viewportHeight = maxHeight
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = viewportHeight)
+                    .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+                contentAlignment = Alignment.Center
+            ) {
+                content()
+            }
         }
     }
 }
@@ -78,38 +134,45 @@ fun AuthScreen(
 private fun AccountHero(state: AuthUiState) {
     val palette = LocalTowerPalette.current
     TowerHeroPanel {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(
-                    label = when {
-                        state.authenticated -> "SESSION ACTIVE"
-                        state.verificationRequired -> "EMAIL VERIFICATION REQUIRED"
-                        state.emailVerified -> "READY TO LOGIN"
-                        else -> "ACCESS REQUIRED"
-                    },
-                    color = if (state.authenticated || state.emailVerified) palette.positive else palette.caution
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.md))
-                Text(
-                    text = AuthUxCopy.heroTitle(state),
-                    color = palette.ink,
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 32.sp
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(
-                    text = AuthUxCopy.heroSubtitle(state),
-                    color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp
-                )
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val showBrandMark = maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.md),
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = if (showBrandMark) Modifier.weight(1f) else Modifier.fillMaxWidth()) {
+                    StatusBadge(
+                        label = when {
+                            state.authenticated -> "SESSION ACTIVE"
+                            state.verificationRequired -> "EMAIL VERIFICATION REQUIRED"
+                            state.emailVerified -> "READY TO LOGIN"
+                            else -> "ACCESS REQUIRED"
+                        },
+                        color = if (state.authenticated || state.emailVerified) palette.positive else palette.caution
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Text(
+                        text = AuthUxCopy.heroTitle(state),
+                        modifier = Modifier.semantics { heading() },
+                        color = palette.ink,
+                        style = MaterialTheme.typography.headlineLarge
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(
+                        text = AuthUxCopy.heroSubtitle(state),
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                if (showBrandMark) {
+                    ForgedLogoMark(
+                        modifier = Modifier.testTag("account-hero-logo"),
+                        size = 52.dp,
+                        color = palette.ink.copy(alpha = 0.78f)
+                    )
+                }
             }
-            ForgedLogoMark(size = 52.dp, color = palette.ink.copy(alpha = 0.78f))
         }
     }
 }
@@ -123,19 +186,17 @@ private fun AccountInfoPanel(
     TowerPanel(elevated = true) {
         StatusBadge(label = "SIGNED IN", color = palette.positive)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Account information", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text("Account information", color = palette.ink, style = MaterialTheme.typography.titleMedium)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            text = state.userLabel ?: "Current session is active.",
+            text = formatAccountIdentityLabel(state.userLabel) ?: "Current session is active.",
             color = palette.ink,
-            fontSize = 14.sp,
-            lineHeight = 20.sp
+            style = MaterialTheme.typography.bodyLarge
         )
         Text(
             text = "Registration, login, and verification controls are hidden because this session is already active.",
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
         Spacer(modifier = Modifier.height(TowerSpacing.md))
@@ -160,6 +221,7 @@ private fun AuthForm(state: AuthUiState, viewModel: AuthViewModel) {
 }
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 internal fun AuthFormContent(
     state: AuthUiState,
     onEmailChange: (String) -> Unit,
@@ -175,74 +237,122 @@ internal fun AuthFormContent(
     // Keep the opt-in reveal only for this composition; recreation starts masked.
     var passwordVisible by remember { mutableStateOf(false) }
     val verificationStarted = state.verificationRequired || state.emailVerified || state.devVerificationCode != null
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val passwordFocusRequester = remember { FocusRequester() }
+    val isErrorMessage = isAuthErrorMessage(state.message)
+
+    fun submitPrimaryAction() {
+        if (state.loading) return
+        if (registrationExpanded && !verificationStarted) {
+            if (AuthUxCopy.canAttemptRegister(state)) onRegister()
+        } else if (AuthUxCopy.canAttemptLogin(state)) {
+            onLogin()
+        }
+        keyboardController?.hide()
+    }
 
     LaunchedEffect(verificationStarted) {
         if (verificationStarted) registrationExpanded = true
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)) {
-        Text(
-            text = when {
-                state.verificationRequired -> "Verify your email"
-                state.emailVerified -> "Email verified"
-                registrationExpanded -> "Create your account"
-                else -> "Welcome back"
-            },
-            color = palette.ink,
-            fontSize = 26.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        Text(
-            text = when {
-                state.verificationRequired -> "Verify your email to finish creating your account."
-                state.emailVerified -> "Log in to review and decide on pending approvals."
-                registrationExpanded -> "Create an account once to use Control Tower."
-                else -> "Log in to review and decide on pending approvals."
-            },
-            color = palette.inkMuted,
-            fontSize = 14.sp
-        )
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 640.dp)
+                    .testTag("auth-form-content"),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.md)
+            ) {
+                Text(
+                    text = when {
+                        state.verificationRequired -> "Verify your email"
+                        state.emailVerified -> "Email verified"
+                        registrationExpanded -> "Create your account"
+                        else -> "Welcome back"
+                    },
+                    modifier = Modifier.semantics { heading() },
+                    color = palette.ink,
+                    style = MaterialTheme.typography.headlineMedium
+                )
+                Text(
+                    text = when {
+                        state.verificationRequired -> "Verify your email to finish creating your account."
+                        state.emailVerified -> "Log in to review and decide on pending approvals."
+                        registrationExpanded -> "Create an account once to use Control Tower."
+                        else -> "Log in to review and decide on pending approvals."
+                    },
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
 
         TowerPanel(elevated = true) {
-            OutlinedTextField(
-                value = state.email,
-                onValueChange = onEmailChange,
-                label = { Text("Email address") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-            OutlinedTextField(
-                value = state.password,
-                onValueChange = onPasswordChange,
-                label = { Text("Password") },
-                supportingText = if (registrationExpanded && !verificationStarted) {
-                    { Text(AuthUxCopy.PASSWORD_REQUIREMENTS) }
+            AutofillField(
+                autofillTypes = if (registrationExpanded) {
+                    listOf(AutofillType.NewUsername, AutofillType.EmailAddress)
                 } else {
-                    null
+                    listOf(AutofillType.EmailAddress, AutofillType.Username)
                 },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                visualTransformation = if (passwordVisible) {
-                    VisualTransformation.None
-                } else {
-                    PasswordVisualTransformation()
-                },
-                trailingIcon = {
-                    TextButton(
-                        onClick = { passwordVisible = !passwordVisible },
-                        enabled = !state.loading,
-                        modifier = Modifier.semantics {
-                            contentDescription = if (passwordVisible) {
-                                "Hide password"
-                            } else {
-                                "Show password"
+                onFill = onEmailChange
+            ) {
+                OutlinedTextField(
+                    value = state.email,
+                    onValueChange = onEmailChange,
+                    label = { Text("Email address") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Email,
+                        imeAction = ImeAction.Next
+                    ),
+                    keyboardActions = KeyboardActions(onNext = { passwordFocusRequester.requestFocus() })
+                )
+            }
+            AutofillField(
+                autofillTypes = listOf(if (registrationExpanded) AutofillType.NewPassword else AutofillType.Password),
+                onFill = onPasswordChange
+            ) {
+                OutlinedTextField(
+                    value = state.password,
+                    onValueChange = onPasswordChange,
+                    label = { Text("Password") },
+                    supportingText = if (registrationExpanded && !verificationStarted) {
+                        { Text(AuthUxCopy.PASSWORD_REQUIREMENTS) }
+                    } else {
+                        null
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(passwordFocusRequester),
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Password,
+                        imeAction = ImeAction.Done
+                    ),
+                    keyboardActions = KeyboardActions(onDone = { submitPrimaryAction() }),
+                    visualTransformation = if (passwordVisible) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        TextButton(
+                            onClick = { passwordVisible = !passwordVisible },
+                            enabled = !state.loading,
+                            modifier = Modifier.semantics {
+                                contentDescription = if (passwordVisible) {
+                                    "Hide password"
+                                } else {
+                                    "Show password"
+                                }
                             }
+                        ) {
+                            Text(if (passwordVisible) "Hide" else "Show")
                         }
-                    ) {
-                        Text(if (passwordVisible) "Hide" else "Show")
                     }
-                }
-            )
+                )
+            }
 
             if (registrationExpanded && !verificationStarted) {
                 Button(
@@ -278,7 +388,16 @@ internal fun AuthFormContent(
                 }
             }
 
-            state.message?.let { Text(text = it, color = palette.brand, fontSize = 14.sp) }
+            state.message?.let {
+                Text(
+                    text = it,
+                    color = if (isErrorMessage) palette.danger else palette.brand,
+                    fontSize = 14.sp,
+                    modifier = Modifier.semantics {
+                        liveRegion = if (isErrorMessage) LiveRegionMode.Assertive else LiveRegionMode.Polite
+                    }
+                )
+            }
 
             if (verificationStarted) {
                 TowerPanel(elevated = false) {
@@ -294,7 +413,15 @@ internal fun AuthFormContent(
                             onValueChange = onVerificationCodeChange,
                             label = { Text("Verification code") },
                             modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
+                            singleLine = true,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                keyboardType = KeyboardType.Number,
+                                imeAction = ImeAction.Done
+                            ),
+                            keyboardActions = KeyboardActions(onDone = {
+                                if (AuthUxCopy.canAttemptVerify(state)) onVerify()
+                                keyboardController?.hide()
+                            })
                         )
                         Button(
                             onClick = onVerify,
@@ -314,6 +441,41 @@ internal fun AuthFormContent(
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Suppress("DEPRECATION")
+@Composable
+private fun AutofillField(
+    autofillTypes: List<AutofillType>,
+    onFill: (String) -> Unit,
+    content: @Composable BoxScope.() -> Unit
+) {
+    val autofill = LocalAutofill.current
+    val autofillTree = LocalAutofillTree.current
+    val autofillNode = remember(autofillTypes, onFill) {
+        AutofillNode(autofillTypes = autofillTypes, onFill = onFill)
+    }
+
+    Box(
+        modifier = Modifier
+            .onFocusChanged { focusState ->
+                if (focusState.isFocused) {
+                    autofill?.requestAutofillForNode(autofillNode)
+                } else {
+                    autofill?.cancelAutofillForNode(autofillNode)
+                }
+            }
+            .onGloballyPositioned { coordinates ->
+                autofillNode.boundingBox = coordinates.boundsInWindow()
+            },
+        content = content
+    )
+
+    DisposableEffect(autofillNode) {
+        autofillTree.children[autofillNode.id] = autofillNode
+        onDispose { autofillTree.children.remove(autofillNode.id) }
     }
 }
 
@@ -433,6 +595,25 @@ private fun SessionCard(session: SessionDto, loading: Boolean, clearing: Boolean
         session.expires_at?.let { Text("Expires: $it", color = palette.inkMuted, fontSize = 14.sp) }
         if (session.active) OutlinedButton(onClick = { onExpireAccess(session.user_id) }, enabled = !loading) { Text(if (clearing) "Expiring..." else "Expire user access") }
     }
+}
+
+internal fun formatAccountIdentityLabel(value: String?): String? {
+    val parts = value.orEmpty()
+        .split('•')
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .distinctBy { it.lowercase() }
+    return parts.joinToString(" • ").ifBlank { null }
+}
+
+internal fun isAuthErrorMessage(message: String?): Boolean {
+    val normalized = message?.trim()?.lowercase() ?: return false
+    return normalized.startsWith("login failed:") ||
+        normalized.startsWith("registration failed:") ||
+        normalized.startsWith("verification failed:") ||
+        normalized.startsWith("resend failed:") ||
+        normalized.startsWith("privacy request failed:") ||
+        normalized.startsWith("session expired or invalid.")
 }
 
 @Composable

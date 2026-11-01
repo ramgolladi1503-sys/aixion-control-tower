@@ -4,6 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -26,6 +28,9 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -44,7 +49,10 @@ import com.aixion.controltower.feature.agenttasks.AgentTasksScreen
 import com.aixion.controltower.feature.agentaccess.AgentAccessScreen
 import com.aixion.controltower.feature.approvals.ApprovalDetailScreen
 import com.aixion.controltower.feature.approvals.ApprovalInboxScreen
+import com.aixion.controltower.feature.approvals.ApprovalInboxSection
+import com.aixion.controltower.feature.approvals.ApprovalsUiState
 import com.aixion.controltower.feature.approvals.ApprovalsViewModel
+import com.aixion.controltower.feature.approvals.filterApprovalsForInbox
 import com.aixion.controltower.feature.audit.AuditTrailScreen
 import com.aixion.controltower.feature.auth.AuthScreen
 import com.aixion.controltower.feature.auth.AuthViewModel
@@ -80,6 +88,7 @@ fun ControlTowerApp(
         val authViewModel: AuthViewModel = viewModel()
         val authState by authViewModel.state.collectAsState()
         val approvalsViewModel: ApprovalsViewModel = viewModel()
+        val approvalsState by approvalsViewModel.state.collectAsState()
         val mcpQueueViewModel: MCPQueueViewModel = viewModel()
         var showLogoutConfirmation by remember { mutableStateOf(false) }
         val backStackEntry = navController.currentBackStackEntryAsState().value
@@ -104,7 +113,12 @@ fun ControlTowerApp(
         }
 
         BackHandler(
-            enabled = authState.authenticated && authState.sessionChecked && currentRoute == Route.Home.value
+            enabled = shouldShowLogoutConfirmationOnBack(
+                authenticated = authState.authenticated,
+                sessionChecked = authState.sessionChecked,
+                currentRoute = currentRoute,
+                dialogVisible = showLogoutConfirmation
+            )
         ) {
             requestLogoutConfirmation()
         }
@@ -171,9 +185,12 @@ fun ControlTowerApp(
             bottomBar = {
                 if (showMainShell) {
                     NavigationBar(
+                        modifier = Modifier.testTag("primary-navigation-bar"),
                         containerColor = MaterialTheme.colorScheme.surface,
-                        contentColor = MaterialTheme.colorScheme.onSurface
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        tonalElevation = 0.dp
                     ) {
+                        val pendingApprovalCount = pendingApprovalNavigationCount(approvalsState)
                         primaryRoutes.forEach { route ->
                             NavigationBarItem(
                                 selected = primaryRouteFor(currentRoute) == route,
@@ -197,10 +214,28 @@ fun ControlTowerApp(
                                     unselectedTextColor = palette.inkMuted
                                 ),
                                 icon = {
-                                    Icon(
-                                        imageVector = primaryRouteIcon(route.value),
-                                        contentDescription = null
-                                    )
+                                    val icon = primaryRouteIcon(route.value)
+                                    if (route == Route.Inbox && pendingApprovalCount > 0) {
+                                        BadgedBox(
+                                            badge = {
+                                                Badge(modifier = Modifier.testTag("approval-navigation-badge")) {
+                                                    Text(
+                                                        text = if (pendingApprovalCount > 99) "99+" else pendingApprovalCount.toString(),
+                                                        modifier = Modifier.semantics {
+                                                            contentDescription = "$pendingApprovalCount pending approvals"
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                        ) {
+                                            Icon(
+                                                imageVector = icon,
+                                                contentDescription = "Approvals, $pendingApprovalCount pending"
+                                            )
+                                        }
+                                    } else {
+                                        Icon(imageVector = icon, contentDescription = null)
+                                    }
                                 }
                             )
                         }
@@ -306,6 +341,19 @@ fun ControlTowerApp(
             }
         }
     }
+}
+
+internal fun shouldShowLogoutConfirmationOnBack(
+    authenticated: Boolean,
+    sessionChecked: Boolean,
+    currentRoute: String,
+    dialogVisible: Boolean
+): Boolean = authenticated && sessionChecked && currentRoute == Route.Home.value && !dialogVisible
+
+/** Never badge the app bar from a loading, stale, or failed approval snapshot. */
+internal fun pendingApprovalNavigationCount(state: ApprovalsUiState): Int {
+    if (state.loading || state.refreshing || state.hasError) return 0
+    return filterApprovalsForInbox(state.approvals, ApprovalInboxSection.NEEDS_REVIEW).size
 }
 
 internal fun primaryRouteIcon(route: String): ImageVector = when (route) {

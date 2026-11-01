@@ -1,15 +1,26 @@
 package com.aixion.controltower.feature.approvals
 
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertAll
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -23,7 +34,9 @@ import com.aixion.controltower.core.model.FileChangeSummary
 import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.components.formatApprovalExpiry
 import com.aixion.controltower.core.ui.ForegroundRefreshEffect
+import java.time.Instant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -47,21 +60,90 @@ class ApprovalInboxScreenTest {
             )
         }
 
-        composeRule.onAllNodesWithText("Approvals").assertCountEquals(0)
-        composeRule.onNodeWithText("Review pending requests and see the decisions recorded for each one.").assertExists()
+        composeRule.onAllNodesWithText("Approvals").assertCountEquals(1)
+        assertTrue(
+            "The approvals page title should be exposed as a heading",
+            composeRule.onNodeWithText("Approvals").fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+        )
+        composeRule.onNodeWithText("Review pending requests or browse recorded decisions.").assertExists()
         composeRule.onNodeWithText("Needs review 2").assertExists()
         composeRule.onNodeWithText("Status blocked 1").assertExists()
+        val inbox = composeRule.onNodeWithTag("approval-inbox-list")
+        inbox.performScrollToNode(hasText("Pending approval"))
         composeRule.onNodeWithText("Pending approval").assertExists()
+        inbox.performScrollToNode(hasText("Blocked approval"))
         composeRule.onNodeWithText("Blocked approval").assertExists()
-        composeRule.onNodeWithText("Approved approval").assertExists()
-        composeRule.onNodeWithText("Aixion Control Tower").assertExists()
-        composeRule.onNodeWithText("Regression approval summary").assertExists()
-        composeRule.onNodeWithText("Low").assertExists()
+        composeRule.onNodeWithText("Blocked").assertExists()
+        composeRule.onAllNodesWithText("Approve").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Approved approval").assertCountEquals(0)
+        inbox.performScrollToNode(hasText("Pending approval"))
+        composeRule.onAllNodesWithText("Aixion Control Tower").assertCountEquals(3)
+        composeRule.onAllNodesWithText("Regression approval summary").assertCountEquals(3)
+        composeRule.onAllNodesWithText("Low").assertCountEquals(3)
         composeRule.onNodeWithText("Pending review").assertExists()
-        composeRule.onAllNodesWithText("Review request").assertCountEquals(3)
-        composeRule.onNodeWithText("Review request").assert(
+        composeRule.onAllNodesWithText("Review request").assertAll(
             SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button)
         )
+    }
+
+    @Test
+    fun inboxSectionsWrapWithinNarrowLargeTextLayout() {
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp).testTag("narrow-inbox-viewport")) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 1.5f)) {
+                    ApprovalInboxContent(state = ApprovalsUiState(loading = false))
+                }
+            }
+        }
+
+        val reviewSection = composeRule.onNodeWithText("Needs review")
+        val historySection = composeRule.onNodeWithText("History")
+        val viewport = composeRule.onNodeWithTag("narrow-inbox-viewport").fetchSemanticsNode().boundsInRoot
+        reviewSection.assertExists()
+        historySection.assertExists()
+        historySection.performClick()
+        val finalHistoryFilter = composeRule.onNodeWithText("Revision requested")
+        finalHistoryFilter.assertExists()
+        composeRule.waitForIdle()
+        assertTrue(
+            "Needs review tab should remain within the narrow viewport",
+            reviewSection.fetchSemanticsNode().boundsInRoot.let { it.left >= viewport.left && it.right <= viewport.right }
+        )
+        assertTrue(
+            "History tab should remain within the narrow viewport",
+            historySection.fetchSemanticsNode().boundsInRoot.let { it.left >= viewport.left && it.right <= viewport.right }
+        )
+        assertTrue(
+            "History filters should wrap inside the narrow viewport rather than requiring a horizontal swipe",
+            finalHistoryFilter.fetchSemanticsNode().boundsInRoot.let { it.left >= viewport.left && it.right <= viewport.right }
+        )
+    }
+
+    @Test
+    fun longApprovalTitleWrapsAtTwoHundredPercentFontScale() {
+        val title = "Review the proposed changes to the production approval connector"
+        composeRule.setContent {
+            Box(modifier = Modifier.width(240.dp).testTag("narrow-inbox-viewport")) {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    ApprovalInboxContent(
+                        state = ApprovalsUiState(
+                            loading = false,
+                            approvals = listOf(
+                                approval("large-text", title, ApprovalStatus.REQUESTED)
+                            )
+                        )
+                    )
+                }
+            }
+        }
+
+        val titleNode = composeRule.onNodeWithText(title)
+        titleNode.assertExists()
+        composeRule.waitForIdle()
+        val bounds = titleNode.fetchSemanticsNode().boundsInRoot
+        val viewport = composeRule.onNodeWithTag("narrow-inbox-viewport").fetchSemanticsNode().boundsInRoot
+        assertTrue("Approval title must remain inside the narrow screen", bounds.left >= viewport.left && bounds.right <= viewport.right)
+        assertTrue("Approval title must wrap instead of clipping", bounds.height > 48f)
     }
 
     @Test
@@ -84,7 +166,7 @@ class ApprovalInboxScreenTest {
 
     @Test
     fun approvalCardsShowLocalExpiryOrExplicitUnavailableState() {
-        val validExpiry = "2026-10-22T10:00:00Z"
+        val validExpiry = Instant.now().plusSeconds(600).toString()
         val approvals = listOf(
             approval("approval_valid_expiry", "Valid expiry", ApprovalStatus.REQUESTED)
                 .copy(expiresAt = validExpiry),
@@ -113,13 +195,15 @@ class ApprovalInboxScreenTest {
                     loading = false,
                     approvals = listOf(
                         approval(id = "approval_a", title = "First approval", status = ApprovalStatus.REQUESTED),
-                        approval(id = "approval_b", title = "Second approval", status = ApprovalStatus.APPROVED),
+                        approval(id = "approval_b", title = "Second approval", status = ApprovalStatus.REQUESTED),
                     )
                 ),
                 onApprovalSelected = { selectedId = it.id }
             )
         }
 
+        composeRule.onNodeWithTag("approval-inbox-list")
+            .performScrollToNode(hasText("Second approval"))
         composeRule.onNodeWithText("Second approval").performClick()
 
         assertEquals("approval_b", selectedId)
@@ -131,7 +215,7 @@ class ApprovalInboxScreenTest {
             ApprovalInboxContent(state = ApprovalsUiState(loading = true))
         }
 
-        composeRule.onNodeWithText("Loading approval decisions...").assertExists()
+        composeRule.onNodeWithText("Loading requests…").assertExists()
         composeRule.onNodeWithText("Needs review 0").assertExists()
     }
 
@@ -250,7 +334,7 @@ class ApprovalInboxScreenTest {
 
         composeRule.onNodeWithText("History").performClick()
 
-        composeRule.onNodeWithText("Approved").assertExists()
+        composeRule.onAllNodesWithText("Approved").assertCountEquals(2)
         composeRule.onNodeWithText("Reviewer · Workspace reviewer").assertExists()
         composeRule.onNodeWithText("Request details unavailable").assertExists()
         composeRule.onNodeWithText("This older or unverifiable record is shown without request details.").assertExists()

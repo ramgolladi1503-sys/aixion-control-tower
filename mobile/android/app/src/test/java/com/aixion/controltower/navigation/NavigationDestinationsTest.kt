@@ -32,6 +32,9 @@ class NavigationDestinationsTest {
         assertEquals(Route.Inbox, primaryRouteFor(Route.ApprovalDetail.value))
         assertEquals(Route.Inbox, primaryRouteFor(Route.Diff.value))
         assertEquals(Route.Connectors, primaryRouteFor(Route.AgentAccess.value))
+        assertEquals(Route.Connectors, primaryRouteFor("agent_access/antigravity"))
+        assertEquals(Route.Connectors, primaryRouteFor("agent_access/codex"))
+        assertNull(primaryRouteFor("agent_access/unsupported"))
         assertNull(primaryRouteFor(Route.Command.value))
     }
 

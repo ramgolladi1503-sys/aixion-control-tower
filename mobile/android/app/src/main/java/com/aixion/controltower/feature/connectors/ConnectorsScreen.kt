@@ -2,6 +2,7 @@ package com.aixion.controltower.feature.connectors
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,14 +12,17 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
@@ -56,27 +60,37 @@ fun ConnectorsContent(
 private fun ConnectorsHero() {
     val palette = LocalTowerPalette.current
     TowerHeroPanel {
-        Row(verticalAlignment = Alignment.Top) {
-            Column(modifier = Modifier.weight(1f)) {
-                StatusBadge(label = "ONE-TIME SETUP", color = palette.brand)
-                Spacer(modifier = Modifier.height(TowerSpacing.md))
-                Text(
-                    "Approve desktop work from your phone",
-                    color = palette.ink,
-                    fontSize = 25.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 31.sp
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(
-                    "Connect the coding agent on your computer. Keep that computer and the same agent session running while an approval is waiting.",
-                    color = palette.inkMuted,
-                    fontSize = 14.sp,
-                    lineHeight = 21.sp
-                )
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val showBrandMark = maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.md),
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = if (showBrandMark) Modifier.weight(1f) else Modifier.fillMaxWidth()) {
+                    StatusBadge(label = "ONE-TIME SETUP", color = palette.brand)
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Text(
+                        "Approve desktop work from your phone",
+                        modifier = Modifier.semantics { heading() },
+                        color = palette.ink,
+                        style = MaterialTheme.typography.headlineLarge
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(
+                        "Connect the coding agent on your computer. Keep that computer and the same agent session running while an approval is waiting.",
+                        color = palette.inkMuted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                if (showBrandMark) {
+                    ForgedLogoMark(
+                        modifier = Modifier.testTag("connect-hero-logo"),
+                        size = 44.dp,
+                        color = palette.ink.copy(alpha = 0.78f)
+                    )
+                }
             }
-            Spacer(modifier = Modifier.padding(horizontal = TowerSpacing.xs))
-            ForgedLogoMark(size = 44.dp, color = palette.ink.copy(alpha = 0.78f))
         }
     }
 }
@@ -85,7 +99,12 @@ private fun ConnectorsHero() {
 private fun SetupJourneyPanel() {
     val palette = LocalTowerPalette.current
     TowerPanel {
-        Text("How phone approvals work", color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "How phone approvals work",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.titleLarge
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         SetupStep(number = "1", title = "Set up the agent", detail = "Install its Control Tower hook on the computer running your project.")
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
@@ -104,8 +123,8 @@ private fun SetupStep(number: String, title: String, detail: String) {
     ) {
         StatusBadge(label = number, color = palette.brand)
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, lineHeight = 20.sp)
-            Text(detail, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp)
+            Text(title, color = palette.ink, style = MaterialTheme.typography.titleSmall)
+            Text(detail, color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -116,13 +135,17 @@ private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
     TowerPanel(elevated = true) {
         StatusBadge(label = "Phone flow not verified", color = palette.caution, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Antigravity", color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Antigravity",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.titleLarge
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             "Hook and connector setup is available, but returning a phone decision to the same Antigravity task has not been verified.",
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Button(onClick = { onOpenAgentAccess("ANTIGRAVITY") }, modifier = Modifier.fillMaxWidth()) {
@@ -133,13 +156,17 @@ private fun NativeAgentAccessPanel(onOpenAgentAccess: (String) -> Unit) {
     TowerPanel {
         StatusBadge(label = "Phone flow not verified", color = palette.caution, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Codex", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Codex",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.titleMedium
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
         Text(
             "Setup is available, but returning a phone decision to the same Codex task has not been verified.",
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         OutlinedButton(onClick = { onOpenAgentAccess("CODEX") }, modifier = Modifier.fillMaxWidth()) {

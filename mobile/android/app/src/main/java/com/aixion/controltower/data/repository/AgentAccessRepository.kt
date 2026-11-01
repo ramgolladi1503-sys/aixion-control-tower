@@ -8,6 +8,7 @@ import com.aixion.controltower.core.api.dto.AgentRegistrationResponseDto
 import com.aixion.controltower.core.api.dto.ExternalAgentDto
 import com.aixion.controltower.core.api.dto.LOCAL_APPROVAL_CONNECTOR_PROVIDERS
 import com.aixion.controltower.core.api.dto.ProjectDto
+import com.aixion.controltower.core.api.dto.ProjectCreateDto
 
 data class AgentAccessSummary(
     val agent: ExternalAgentDto,
@@ -37,6 +38,14 @@ class AgentAccessRepository(private val api: ControlTowerApi) {
     }
 
     suspend fun listProjects(): List<ProjectDto> = api.listProjects()
+
+    suspend fun createProject(name: String, description: String): ProjectDto {
+        val normalizedName = name.trim()
+        require(normalizedName.isNotEmpty()) { "Enter a project name." }
+        return api.createProject(
+            ProjectCreateDto(name = normalizedName, description = description.trim())
+        )
+    }
 
     suspend fun createApprovalAgent(
         displayName: String,

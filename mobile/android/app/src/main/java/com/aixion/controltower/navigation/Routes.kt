@@ -62,9 +62,11 @@ fun routeTitleFor(currentRoute: String): String = when {
     else -> allNavigationRoutes.firstOrNull { it.value == currentRoute }?.label ?: "Control Tower"
 }
 
-fun primaryRouteFor(currentRoute: String): Route? = when (currentRoute) {
-    Route.ApprovalDetail.value, Route.Diff.value -> Route.Inbox
-    Route.AgentAccess.value -> Route.Connectors
+fun primaryRouteFor(currentRoute: String): Route? = when {
+    currentRoute == Route.ApprovalDetail.value || currentRoute == Route.Diff.value -> Route.Inbox
+    currentRoute == Route.AgentAccess.value ||
+        currentRoute == Route.AgentAccess.forProvider("ANTIGRAVITY") ||
+        currentRoute == Route.AgentAccess.forProvider("CODEX") -> Route.Connectors
     else -> primaryRoutes.firstOrNull { it.value == currentRoute }
 }
 

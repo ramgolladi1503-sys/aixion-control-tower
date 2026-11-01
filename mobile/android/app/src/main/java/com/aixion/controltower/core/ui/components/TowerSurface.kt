@@ -9,15 +9,15 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerRadius
 import com.aixion.controltower.core.ui.theme.TowerSpacing
@@ -49,19 +49,12 @@ fun TowerHeroPanel(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val palette = LocalTowerPalette.current
-    val shape = RoundedCornerShape(TowerRadius.xl)
+    val shape = RoundedCornerShape(TowerRadius.lg)
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        palette.surfaceRaised.copy(alpha = 0.98f),
-                        palette.surface.copy(alpha = 0.94f)
-                    )
-                )
-            )
+            .background(palette.surfaceRaised)
             .border(BorderStroke(1.dp, palette.line), shape)
             .padding(TowerSpacing.xl),
         content = content
@@ -79,15 +72,14 @@ fun TowerSectionHeader(
         Text(
             text = title,
             color = palette.ink,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.SemiBold
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.semantics { heading() }
         )
         if (!subtitle.isNullOrBlank()) {
             Text(
                 text = subtitle,
                 color = palette.inkMuted,
-                fontSize = 14.sp,
-                lineHeight = 21.sp,
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = 4.dp)
             )
         }

@@ -1,5 +1,12 @@
 package com.aixion.controltower.feature.connectors
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
@@ -8,13 +15,40 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
 class ConnectorsScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun connectorHeroPreservesFullWidthAtLargeTextScale() {
+        composeRule.setContent {
+            ControlTowerTheme {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    Box(modifier = Modifier.width(320.dp).height(700.dp).testTag("connect-viewport")) {
+                        ConnectorsContent()
+                    }
+                }
+            }
+        }
+
+        val viewport = composeRule.onNodeWithTag("connect-viewport").fetchSemanticsNode().boundsInRoot
+        val heading = composeRule.onNodeWithText("Approve desktop work from your phone")
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+        assertTrue("Large connector heading should wrap within the compact screen", heading.boundsInRoot.left >= viewport.left && heading.boundsInRoot.right <= viewport.right)
+        assertTrue("Large connector heading should use a multi-line layout", heading.boundsInRoot.height > 48f)
+        composeRule.onNodeWithTag("connect-hero-logo").assertDoesNotExist()
+    }
 
     @Test
     fun showsOnlyNativeProviderSetupAndDoesNotExposeWebhookTaskIntake() {
@@ -38,6 +72,19 @@ class ConnectorsScreenTest {
         composeRule.onNodeWithText("Set up Antigravity").assertExists()
         composeRule.onNodeWithText("Codex").assertExists()
         composeRule.onNodeWithText("View Codex setup").assertExists()
+
+        listOf(
+            "Approve desktop work from your phone",
+            "How phone approvals work",
+            "Antigravity",
+            "Codex"
+        ).forEach { label ->
+            val heading = composeRule.onNodeWithText(label)
+            assertTrue(
+                "Connect screen section '$label' should be exposed as an accessibility heading",
+                heading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
+            )
+        }
 
         composeRule.onAllNodesWithText("Other integrations and webhooks").assertCountEquals(0)
         composeRule.onAllNodesWithText("Webhook task intake").assertCountEquals(0)

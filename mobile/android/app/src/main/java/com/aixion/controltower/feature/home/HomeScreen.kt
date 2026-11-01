@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -19,6 +21,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,6 +41,7 @@ import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
 import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
+import com.aixion.controltower.core.ui.theme.TowerPalette
 import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 import java.text.DateFormat
 import java.time.Instant
@@ -68,49 +77,7 @@ fun HomeScreen(
 
         item {
             TowerHeroPanel {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        StatusBadge(
-                            label = when {
-                                state.hasError -> "Backend error"
-                                !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "Not verified"
-                                state.unsupportedApprovals.isNotEmpty() -> "Unsupported approval"
-                                state.actionRequiredCount > 0 -> "Approval queue"
-                                state.refreshing -> "Syncing"
-                                else -> "Command state"
-                            },
-                            color = when {
-                                state.hasError -> palette.danger
-                                state.unsupportedApprovals.isNotEmpty() -> palette.danger
-                                state.actionRequiredCount > 0 -> palette.caution
-                                state.refreshing -> palette.caution
-                                else -> palette.positive
-                            },
-                            fontSize = 14.sp,
-                            uppercase = false
-                        )
-                        Spacer(modifier = Modifier.height(TowerSpacing.md))
-                        Text(
-                            text = homeHeroTitle(state),
-                            color = palette.ink,
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            lineHeight = 33.sp
-                        )
-                        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                        Text(
-                            text = homeHeroSubtitle(state),
-                            color = palette.inkMuted,
-                            fontSize = 14.sp,
-                            lineHeight = 20.sp
-                        )
-                    }
-                    ForgedLogoMark(size = 56.dp, color = palette.ink.copy(alpha = 0.82f))
-                }
+                HomeStatusHero(state)
             }
         }
 
@@ -180,21 +147,82 @@ fun HomeScreen(
 }
 
 @Composable
+internal fun HomeStatusHero(state: HomeUiState) {
+    val palette = LocalTowerPalette.current
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val showBrandMark = maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.md),
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = if (showBrandMark) Modifier.weight(1f) else Modifier.fillMaxWidth()) {
+                StatusBadge(
+                    label = when {
+                        state.hasError -> "Backend error"
+                        !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "Not verified"
+                        state.unsupportedApprovals.isNotEmpty() -> "Unsupported approval"
+                        state.actionRequiredCount > 0 -> "Approval queue"
+                        state.refreshing -> "Syncing"
+                        else -> "Approval status"
+                    },
+                    color = homeHeroStatusColor(state, palette),
+                    fontSize = 14.sp,
+                    uppercase = false
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.md))
+                Text(
+                    text = homeHeroTitle(state),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("home-status-title")
+                        .semantics {
+                            heading()
+                            liveRegion = LiveRegionMode.Polite
+                        },
+                    color = palette.ink,
+                    style = MaterialTheme.typography.headlineLarge
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                Text(
+                    text = homeHeroSubtitle(state),
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            if (showBrandMark) {
+                ForgedLogoMark(
+                    modifier = Modifier.testTag("home-hero-logo"),
+                    size = 52.dp,
+                    color = palette.ink.copy(alpha = 0.78f)
+                )
+            }
+        }
+    }
+}
+
+internal fun homeHeroStatusColor(state: HomeUiState, palette: TowerPalette) = when {
+    state.hasError || state.unsupportedApprovals.isNotEmpty() -> palette.danger
+    state.actionRequiredCount > 0 -> palette.caution
+    state.loading || state.refreshing || !state.hasSuccessfulSync -> palette.caution
+    else -> palette.inkMuted
+}
+
+@Composable
 internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
     val palette = LocalTowerPalette.current
     TowerPanel(elevated = false) {
         Text(
             text = "Connect an agent",
+            modifier = Modifier.semantics { heading() },
             color = palette.ink,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold
+            style = MaterialTheme.typography.titleMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = "Set up Antigravity or Codex on the computer running your work. Keep that computer online while approvals are pending.",
             color = palette.inkMuted,
-            fontSize = 14.sp,
-            lineHeight = 21.sp
+            style = MaterialTheme.typography.bodyMedium
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {

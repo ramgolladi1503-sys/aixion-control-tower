@@ -1,7 +1,6 @@
 package com.aixion.controltower.feature.approvals
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -11,11 +10,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -26,7 +25,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -58,6 +60,21 @@ internal enum class ApprovalHistoryFilter {
     REJECTED,
     REVISION_REQUESTED
 }
+
+internal data class ApprovalHistoryEmptyState(val title: String, val message: String)
+
+internal fun approvalHistoryEmptyState(hasRecordedDecisions: Boolean): ApprovalHistoryEmptyState =
+    if (hasRecordedDecisions) {
+        ApprovalHistoryEmptyState(
+            title = "No decisions match this filter",
+            message = "Change the filter or choose All to see other recorded decisions."
+        )
+    } else {
+        ApprovalHistoryEmptyState(
+            title = "No decisions recorded",
+            message = "Recorded approve, deny, and revision decisions will appear here."
+        )
+    }
 
 internal fun orderApprovalsForInbox(approvals: List<ApprovalSummary>): List<ApprovalSummary> =
     approvals.sortedWith(
@@ -163,6 +180,7 @@ fun ApprovalInboxContent(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
+            .testTag("approval-inbox-list")
             .background(palette.canvas)
             .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
@@ -178,15 +196,24 @@ fun ApprovalInboxContent(
                 }
             }
             Text(
+                text = when (selectedSection) {
+                    ApprovalInboxSection.NEEDS_REVIEW -> "Needs your review"
+                    ApprovalInboxSection.HISTORY -> "Decision history"
+                },
+                modifier = Modifier.semantics { heading() },
+                color = palette.ink,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+            )
+            Text(
                 text = when {
                     state.loading && state.approvals.isEmpty() -> "Loading requests…"
                     state.refreshing -> "Refreshing. Requests are read-only until sync completes."
                     state.hasError -> "Approval sync unavailable."
-                    else -> "Review pending requests or browse recorded decisions."
+                    selectedSection == ApprovalInboxSection.NEEDS_REVIEW -> "Review requests from your connected agents."
+                    else -> "Browse decisions you have recorded. Delivery to the agent is shown separately."
                 },
                 color = palette.inkMuted,
-                fontSize = 14.sp,
-                lineHeight = 20.sp
+                style = MaterialTheme.typography.bodyMedium
             )
         }
 
@@ -226,7 +253,11 @@ fun ApprovalInboxContent(
         }
 
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm)) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+            ) {
                 ApprovalInboxSection.entries.forEach { section ->
                     FilterChip(
                         selected = selectedSection == section,
@@ -257,9 +288,10 @@ fun ApprovalInboxContent(
                 )
             }
             item {
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                    verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
                 ) {
                     ApprovalHistoryFilter.entries.forEach { filter ->
                         FilterChip(
@@ -274,7 +306,11 @@ fun ApprovalInboxContent(
                                         ApprovalHistoryFilter.REVISION_REQUESTED -> "Revision requested"
                                     }
                                 )
-                            }
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = palette.surfaceSubtle,
+                                selectedLabelColor = palette.ink
+                            )
                         )
                     }
                 }
@@ -353,13 +389,18 @@ fun ApprovalInboxContent(
             state.historyLoaded && visibleHistory.isEmpty()
         ) {
             item {
+                val emptyState = approvalHistoryEmptyState(state.approvalHistory.isNotEmpty())
                 TowerPanel(elevated = true) {
-                    Text("No decisions recorded", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Text(
-                        "Recorded approve, deny, and revision decisions will appear here.",
+                        emptyState.title,
+                        modifier = Modifier.semantics { heading() },
+                        color = palette.ink,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        emptyState.message,
                         color = palette.inkMuted,
-                        fontSize = 14.sp,
-                        lineHeight = 21.sp
+                        style = MaterialTheme.typography.bodyMedium
                     )
                 }
             }
@@ -427,6 +468,8 @@ fun ApprovalInboxContent(
 @Composable
 private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
     val palette = LocalTowerPalette.current
+    val metaStyle = MaterialTheme.typography.bodySmall
+    val sectionHeadingStyle = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
     TowerPanel(elevated = true) {
         StatusBadge(
             event.decision.let(::decisionHistoryLabel),
@@ -439,15 +482,15 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
             uppercase = false
         )
         Spacer(modifier = Modifier.height(TowerSpacing.xs))
-        Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, fontSize = 14.sp)
-        Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, fontSize = 14.sp)
+        Text("Decided ${formatHistoryTime(event.decidedAt)}", color = palette.inkMuted, style = metaStyle)
+        Text("Reviewer · ${event.reviewerLabel}", color = palette.inkMuted, style = metaStyle)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text("Reason", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("Reason", color = palette.ink, style = sectionHeadingStyle)
         Text(event.reason ?: "No reason was provided.", color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         val snapshot = event.requestSnapshot.takeIf { event.requestSnapshotVerified }
         if (snapshot == null) {
-            Text("Request details unavailable", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("Request details unavailable", color = palette.ink, style = sectionHeadingStyle)
             Text(
                 "This older or unverifiable record is shown without request details.",
                 color = palette.inkMuted,
@@ -468,14 +511,17 @@ private fun ApprovalDecisionHistoryCard(event: ApprovalHistoryEvent) {
 @Composable
 private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
     val palette = LocalTowerPalette.current
-    Text("Verified request", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-    Text(snapshot.title?.takeIf(String::isNotBlank) ?: "Untitled request", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    val metaStyle = MaterialTheme.typography.bodySmall
+    val sectionHeadingStyle = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+    val snapshotTitleStyle = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+    Text("Verified request", color = palette.ink, style = sectionHeadingStyle)
+    Text(snapshot.title?.takeIf(String::isNotBlank) ?: "Untitled request", color = palette.ink, style = snapshotTitleStyle)
     Text(snapshot.summary?.takeIf(String::isNotBlank) ?: "Request summary unavailable", color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
     val provider = listOfNotNull(
         snapshot.sourceAgentName?.takeIf(String::isNotBlank) ?: snapshot.agentName?.takeIf(String::isNotBlank),
         snapshot.sourceProvider?.takeIf(String::isNotBlank)
     ).distinct().joinToString(" · ")
-    if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, fontSize = 14.sp)
+    if (provider.isNotBlank()) Text(provider, color = palette.inkMuted, style = metaStyle)
     val risk = snapshot.riskLevel.name.lowercase().replaceFirstChar { it.uppercase() }
     StatusBadge(
         if (snapshot.riskLevel == RiskLevel.UNKNOWN) "Risk unavailable" else "$risk risk",
@@ -484,18 +530,18 @@ private fun VerifiedRequestSnapshot(snapshot: ApprovalHistoryRequestSnapshot) {
         uppercase = false
     )
     snapshot.targetBranch?.takeIf(String::isNotBlank)?.let { branch ->
-        Text("Target branch · $branch", color = palette.inkMuted, fontSize = 14.sp)
+        Text("Target branch · $branch", color = palette.inkMuted, style = metaStyle)
     }
     if (snapshot.files.isNotEmpty()) {
-        Text("Affected files", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-        snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, fontSize = 14.sp, lineHeight = 21.sp) }
+        Text("Affected files", color = palette.ink, style = sectionHeadingStyle)
+        snapshot.files.forEach { file -> Text(file.path, color = palette.inkMuted, style = metaStyle.copy(lineHeight = 21.sp)) }
     }
     if (snapshot.testPlan.isNotEmpty()) {
-        Text("Test plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("Test plan", color = palette.ink, style = sectionHeadingStyle)
         snapshot.testPlan.forEach { Text(it, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge) }
     }
     snapshot.rollbackPlan?.takeIf(String::isNotBlank)?.let { plan ->
-        Text("Rollback plan", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text("Rollback plan", color = palette.ink, style = sectionHeadingStyle)
         Text(plan, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
     }
 }
