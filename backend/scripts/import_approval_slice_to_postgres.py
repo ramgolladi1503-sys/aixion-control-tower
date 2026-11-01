@@ -25,14 +25,21 @@ import psycopg
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
-from app.agent_task_models import AgentTask
-from app.agent_task_models import AgentTaskEvent
-from app.agent_credential_models import AgentCredentialRecord
-from app.agent_run_models import AgentRun, AgentRunEvent, AgentRunFaultConfig, AgentRunStep
-from app.approval_integrity import compute_approval_payload_hash
-from app.connector_models import AgentConnector
-from app.email_delivery import _decrypt_code
-from app.models import (
+# This file is both imported by tests and executed directly from the repository
+# root by the cutover runbook. In direct-script mode, Python places this
+# ``scripts`` directory (not its parent ``backend`` directory) on sys.path.
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+
+from app.agent_task_models import AgentTask  # noqa: E402
+from app.agent_task_models import AgentTaskEvent  # noqa: E402
+from app.agent_credential_models import AgentCredentialRecord  # noqa: E402
+from app.agent_run_models import AgentRun, AgentRunEvent, AgentRunFaultConfig, AgentRunStep  # noqa: E402
+from app.approval_integrity import compute_approval_payload_hash  # noqa: E402
+from app.connector_models import AgentConnector  # noqa: E402
+from app.email_delivery import _decrypt_code  # noqa: E402
+from app.models import (  # noqa: E402
     ApprovalRequest,
     ApprovalStatus,
     Invite,
@@ -50,13 +57,13 @@ from app.models import (
     WorkOrder,
     Workspace,
 )
-from app.postgres_database import run_postgres_migrations
-from scripts.audit_legacy_sqlite import audit
-from app.trust_action_authorization import action_payload_hash, authorization_signature_payload
-from app.trust_action_authorization_models import ActionAuthorization
-from app.trust_policy import lease_receipt_payload
-from app.trust_crypto import verify_payload_signature
-from app.trust_models import (
+from app.postgres_database import run_postgres_migrations  # noqa: E402
+from scripts.audit_legacy_sqlite import audit  # noqa: E402
+from app.trust_action_authorization import action_payload_hash, authorization_signature_payload  # noqa: E402
+from app.trust_action_authorization_models import ActionAuthorization  # noqa: E402
+from app.trust_policy import lease_receipt_payload  # noqa: E402
+from app.trust_crypto import verify_payload_signature  # noqa: E402
+from app.trust_models import (  # noqa: E402
     ActionConsumption,
     CapabilityLease,
     CredentialGrant,
