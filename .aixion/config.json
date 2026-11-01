@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "project_name": "aixion-control-tower",
+  "project_type": "platform",
+  "tech_stack": [],
+  "agent_os_repository": "ramgolladi1503-sys/aixion-agent-os",
+  "lifecycle_profile": "production_software",
+  "governance_mode": "strict",
+  "evidence_dir": ".aixion/evidence"
+}

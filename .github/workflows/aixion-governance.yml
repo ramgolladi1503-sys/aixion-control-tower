@@ -1,0 +1,9 @@
+name: Aixion Agent OS governance
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  governance:
+    uses: ramgolladi1503-sys/aixion-agent-os/.github/workflows/reusable-governance.yml@3509b5546bd63c18126eede603c1d52fff67cd34
