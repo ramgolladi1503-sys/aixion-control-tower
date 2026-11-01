@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
-from .agent_task_models import AgentTask, AgentTaskStatus
-from .models import new_id
+from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskStatus
+from .agent_task_repository import (
+    AgentTaskRepository,
+    PostgresAgentTaskRepository,
+    SQLiteAgentTaskRepository,
+)
+from .approval_decisions import agent_task_repository
+from .approval_repository import ApprovalDecisionRepository, PostgresApprovalDecisionRepository
+from .models import AuditEvent, now_utc
+from .settings import get_settings
 from .store import store
-
-TERMINAL_STATUSES = {
-    AgentTaskStatus.DENIED,
-    AgentTaskStatus.FAILED,
-    AgentTaskStatus.CANCELLED,
-    AgentTaskStatus.DONE,
-}
 
 
 @dataclass
@@ -39,48 +40,147 @@ class AgentWorkerClaimResult:
         }
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _is_lease_available(task: AgentTask) -> bool:
-    if not task.worker_lease_owner:
-        return True
-    if task.worker_lease_expires_at is None:
+def _same_postgres_connector(
+    task_repository: AgentTaskRepository,
+    approval_repository: ApprovalDecisionRepository,
+) -> bool:
+    task_connect = getattr(task_repository, "_connect", None)
+    approval_connect = getattr(approval_repository, "_connect", None)
+    if not callable(task_connect) or not callable(approval_connect):
         return False
-    return task.worker_lease_expires_at <= _now()
+    if task_connect is approval_connect:
+        return True
+    # Runtime.connect returns a fresh bound-method object on each access. Accept
+    # only the same implementation bound to the same runtime instance; arbitrary
+    # callable equality is not a reliable database-authority check.
+    return (
+        getattr(task_connect, "__self__", None) is not None
+        and getattr(task_connect, "__self__", None) is getattr(approval_connect, "__self__", None)
+        and getattr(task_connect, "__func__", None) is getattr(approval_connect, "__func__", None)
+    )
 
 
-def _eligibility_failure(task: AgentTask | None, task_id: str | None) -> str | None:
-    if task is None:
-        return f"Agent task not found or unavailable: {task_id or 'first-approved'}"
-    if task.status in TERMINAL_STATUSES:
-        return f"Agent task is terminal: {task.status}"
-    if task.status != AgentTaskStatus.APPROVED:
-        return f"Agent task is not approved: {task.status}"
-    if not task.approval_request_id:
-        return "Agent task is approved but missing approval_request_id"
-    if not _is_lease_available(task):
-        return f"Agent task already leased by {task.worker_lease_owner} until {task.worker_lease_expires_at}"
-    return None
+def validate_agent_worker_repository_pair(
+    task_repository: AgentTaskRepository | None,
+    approval_repository: ApprovalDecisionRepository | None,
+    *,
+    worker_name: str,
+) -> bool:
+    """Validate worker task/approval authority and return whether it is PostgreSQL-backed.
+
+    PostgreSQL task and approval repositories must be the pair owned by one runtime.
+    Production and PostgreSQL-auth modes require that pair. In local/test modes,
+    omitted or SQLite repositories remain available to existing callers.
+    """
+    task_is_postgres = isinstance(task_repository, PostgresAgentTaskRepository)
+    approval_is_postgres = isinstance(approval_repository, PostgresApprovalDecisionRepository)
+    if task_is_postgres != approval_is_postgres:
+        raise ValueError(
+            f"{worker_name} requires paired PostgreSQL task and approval repositories."
+        )
+    if task_is_postgres and not _same_postgres_connector(task_repository, approval_repository):
+        raise ValueError(
+            f"{worker_name} requires task and approval repositories to share the same PostgreSQL connection factory."
+        )
+
+    settings = get_settings()
+    if (settings.is_production or settings.postgres_auth_enabled) and not (
+        task_is_postgres and approval_is_postgres
+    ):
+        raise ValueError(
+            f"{worker_name} requires PostgreSQL task and approval repositories in production or PostgreSQL-auth mode."
+        )
+    return task_is_postgres
 
 
-def _claim_loaded_task(task: AgentTask, worker_id: str, lease_seconds: int) -> AgentWorkerClaimResult:
-    lease_token = new_id("agent_task_lease")
-    lease_expires_at = _now() + timedelta(seconds=lease_seconds)
-    task.worker_lease_owner = worker_id
-    task.worker_lease_token = lease_token
-    task.worker_lease_expires_at = lease_expires_at
-    task.updated_at = _now()
+def _claim(
+    task_id: str | None,
+    worker_id: str,
+    lease_seconds: int,
+    repository: AgentTaskRepository | None = None,
+) -> AgentWorkerClaimResult:
+    settings = get_settings()
+    active_repository = repository or agent_task_repository
+    if (settings.is_production or settings.postgres_auth_enabled) and not isinstance(
+        active_repository, PostgresAgentTaskRepository
+    ):
+        raise RuntimeError(
+            "Agent worker claims require a PostgreSQL task repository in production "
+            "or PostgreSQL-auth mode"
+        )
+    task, reason, claim_audit = active_repository.claim(
+        task_id=task_id,
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
+    )
+    if claim_audit is not None and isinstance(active_repository, SQLiteAgentTaskRepository):
+        _project_claim_audit(claim_audit)
+    if task is None or reason:
+        return AgentWorkerClaimResult(
+            success=False,
+            task=task,
+            task_id=task.id if task else task_id,
+            worker_id=worker_id,
+            reason=reason or "Agent task not eligible for claim.",
+        )
+    # The durable transaction is authoritative. Update this process-local projection
+    # only after the repository confirms the lease commit.
+    if isinstance(active_repository, SQLiteAgentTaskRepository):
+        store.agent_tasks[task.id] = task
     return AgentWorkerClaimResult(
         success=True,
         task=task,
         task_id=task.id,
         worker_id=worker_id,
-        lease_token=lease_token,
-        lease_expires_at=lease_expires_at,
+        lease_token=task.worker_lease_token,
+        lease_expires_at=task.worker_lease_expires_at,
         reason="Agent task claimed.",
     )
+
+
+def _project_claim_audit(event: AuditEvent) -> None:
+    if not any(existing.id == event.id for existing in store.audit_events):
+        store.audit_events.append(event)
+
+
+def commit_agent_task_worker_outcome(
+    task: AgentTask,
+    *,
+    worker_id: str,
+    repository: AgentTaskRepository,
+    audit_type: str,
+    details: dict[str, Any],
+    event: AgentTaskEvent | None = None,
+    updated_status: AgentTaskStatus | None = None,
+) -> AgentTask:
+    """Commit a claimed worker's outcome and lease release as one durable unit."""
+    updated = task.model_copy(deep=True)
+    updated.worker_lease_owner = None
+    updated.worker_lease_expires_at = None
+    updated.worker_lease_token = None
+    if updated_status is not None:
+        updated.status = updated_status
+    updated.updated_at = now_utc()
+    audit_details = {"worker_id": worker_id, **details}
+    if event is not None:
+        audit_details["event_id"] = event.id
+    audit = AuditEvent(
+        event_type=audit_type,
+        entity_id=task.id,
+        workspace_id=task.workspace_id,
+        actor=worker_id,
+        details=audit_details,
+    )
+    repository.commit_worker_outcome(
+        expected=task, updated=updated, event=event, audit=audit,
+    )
+    if isinstance(repository, SQLiteAgentTaskRepository):
+        for field_name in AgentTask.model_fields:
+            setattr(task, field_name, getattr(updated, field_name))
+        if event is not None:
+            store.agent_task_events[event.id] = event
+        store.audit_events.append(audit)
+    return updated
 
 
 def claim_agent_task_for_worker(
@@ -88,71 +188,17 @@ def claim_agent_task_for_worker(
     task_id: str,
     worker_id: str,
     lease_seconds: int = 300,
+    repository: AgentTaskRepository | None = None,
 ) -> AgentWorkerClaimResult:
-    """Claim one approved task using SQLite BEGIN IMMEDIATE.
-
-    This is intentionally stronger than the previous in-memory check. It serializes
-    claim attempts at the SQLite writer level before reading and updating the task
-    JSON payload.
-    """
-
-    with store._connect() as conn:  # noqa: SLF001 - store owns the SQLite-backed MVP persistence boundary.
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT payload FROM kv_store WHERE entity_type = ? AND entity_id = ?",
-            ("agent_task", task_id),
-        ).fetchone()
-        task = AgentTask.model_validate_json(row[0]) if row else None
-        failure = _eligibility_failure(task, task_id)
-        if failure or task is None:
-            return AgentWorkerClaimResult(
-                success=False,
-                task=task,
-                task_id=task.id if task else task_id,
-                worker_id=worker_id,
-                reason=failure or "Agent task not eligible for claim.",
-            )
-
-        result = _claim_loaded_task(task, worker_id, lease_seconds)
-        conn.execute(
-            "UPDATE kv_store SET payload = ? WHERE entity_type = ? AND entity_id = ?",
-            (task.model_dump_json(), "agent_task", task.id),
-        )
-        store.agent_tasks[task.id] = task
-        return result
+    """Claim a specific task through the configured durable repository."""
+    return _claim(task_id, worker_id, lease_seconds, repository)
 
 
 def claim_first_approved_agent_task_for_worker(
     *,
     worker_id: str,
     lease_seconds: int = 300,
+    repository: AgentTaskRepository | None = None,
 ) -> AgentWorkerClaimResult:
-    """Transactionally claim the oldest approved, linked, lease-available task."""
-
-    with store._connect() as conn:  # noqa: SLF001
-        conn.execute("BEGIN IMMEDIATE")
-        rows = conn.execute(
-            "SELECT entity_id, payload FROM kv_store WHERE entity_type = ? ORDER BY entity_id",
-            ("agent_task",),
-        ).fetchall()
-        candidates: list[AgentTask] = []
-        for _, payload in rows:
-            task = AgentTask.model_validate_json(payload)
-            if _eligibility_failure(task, task.id) is None:
-                candidates.append(task)
-
-        if not candidates:
-            return AgentWorkerClaimResult(
-                success=False,
-                worker_id=worker_id,
-                reason="No approved, linked, lease-available agent task found.",
-            )
-
-        task = sorted(candidates, key=lambda candidate: candidate.updated_at)[0]
-        result = _claim_loaded_task(task, worker_id, lease_seconds)
-        conn.execute(
-            "UPDATE kv_store SET payload = ? WHERE entity_type = ? AND entity_id = ?",
-            (task.model_dump_json(), "agent_task", task.id),
-        )
-        store.agent_tasks[task.id] = task
-        return result
+    """Claim the oldest eligible approved task through the configured repository."""
+    return _claim(None, worker_id, lease_seconds, repository)

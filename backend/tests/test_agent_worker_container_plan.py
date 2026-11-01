@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
+import pytest
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app import agent_worker_container_plan
 from app.agent_worker_container_plan import (
     ContainerExecutionPolicy,
     run_agent_worker_container_execution_plan_dry_run,
@@ -19,7 +21,7 @@ def setup_function() -> None:
 
 
 def _project() -> Project:
-    project = Project(name="Container Plan", description="demo")
+    project = Project(name="Container Plan", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     return project
 
@@ -35,6 +37,7 @@ def _approval(project: Project) -> ApprovalRequest:
         test_plan=["python -m pytest"],
         rollback_plan="Close PR.",
         risk=RiskAssessment(level=RiskLevel.LOW),
+        status="APPROVED",
     )
     store.approval_requests[approval.id] = approval
     return approval
@@ -119,3 +122,46 @@ def test_container_plan_requires_task_selector() -> None:
 
     assert result.success is False
     assert result.reason == "Provide task_id or set first_approved=true."
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+)
+def test_container_plan_refuses_legacy_store_modes_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    project = _project()
+    approval = _approval(project)
+    task = _approved_task(approval)
+    claim_calls = 0
+
+    def fail_if_claimed(**_kwargs):
+        nonlocal claim_calls
+        claim_calls += 1
+        raise AssertionError("legacy task claim must not run in production/PostgreSQL mode")
+
+    monkeypatch.setattr(
+        agent_worker_container_plan,
+        "get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "is_production": is_production,
+                "postgres_auth_enabled": postgres_auth_enabled,
+            },
+        )(),
+    )
+    monkeypatch.setattr(agent_worker_container_plan, "claim_agent_task_for_worker", fail_if_claimed)
+
+    result = run_agent_worker_container_execution_plan_dry_run(task_id=task.id)
+
+    assert result.success is False
+    assert result.reason.startswith("Container execution planning requires a durable repository-bound")
+    assert claim_calls == 0
+    assert store.agent_tasks[task.id].worker_lease_owner is None
+    assert store.agent_task_events == {}
+    assert not any(audit.entity_id == task.id for audit in store.audit_events)

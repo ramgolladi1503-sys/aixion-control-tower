@@ -1,8 +1,14 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
-from app.auth import create_session, create_user
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+import pytest
+
+import app.auth_routes as auth_routes
+from app.auth import RegisterRequest, create_session, create_user
+from app.auth_routes import register_with_invite
 from app.invite_routes import (
     InviteCreateRequest,
     create_invite,
@@ -145,6 +151,7 @@ def test_invite_creation_and_revocation_audit_events_exist() -> None:
     ]
     assert store.audit_events[0].details["email"] == "new@example.com"
     assert store.audit_events[1].details["status"] == InviteStatus.REVOKED
+    assert all(event.workspace_id == owner.workspace_id for event in store.audit_events)
 
 
 def test_invite_validation_helper_accepts_only_pending_valid_token() -> None:
@@ -172,17 +179,21 @@ def test_first_registration_bootstraps_owner_without_invite(monkeypatch) -> None
     assert response.json()["user"]["role"] == UserRole.OWNER
 
 
-def test_later_registration_requires_invite_token(monkeypatch) -> None:
+def test_later_registration_creates_a_separate_owner_workspace(monkeypatch) -> None:
     monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
-    create_user("owner@example.com", PASSWORD, "Owner")
+    original_owner = create_user("owner@example.com", PASSWORD, "Owner")
 
     response = TestClient(app).post(
         "/auth/register",
         json={"email": "new@example.com", "password": PASSWORD, "display_name": "New User"},
     )
 
-    assert response.status_code == 403
-    assert "new@example.com" not in {user.email for user in store.users.values()}
+    assert response.status_code == 200
+    created = response.json()["user"]
+    assert created["role"] == UserRole.OWNER
+    assert created["workspace_id"] != original_owner.workspace_id
+    assert store.workspaces[created["workspace_id"]].owner_user_id == created["id"]
+    assert store.users[created["id"]].email == "new@example.com"
 
 
 def test_registration_accepts_matching_pending_invite_and_assigns_invite_role(monkeypatch) -> None:
@@ -214,6 +225,120 @@ def test_registration_accepts_matching_pending_invite_and_assigns_invite_role(mo
     assert store.invites[invite.id].status == InviteStatus.ACCEPTED
     assert store.invites[invite.id].accepted_by_user_id == payload["user"]["id"]
     assert store.audit_events[-1].event_type == "auth.invite_accepted"
+    assert store.audit_events[-1].workspace_id == owner.workspace_id
+
+    store.load()
+    assert payload["user"]["id"] in store.users
+    assert store.invites[invite.id].status == InviteStatus.ACCEPTED
+    assert any(
+        event.event_type == "auth.invite_accepted" and event.entity_id == invite.id
+        for event in store.audit_events
+    )
+
+
+def test_invite_registration_joins_only_the_inviter_workspace(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
+    first_owner = create_user("first-owner@example.com", PASSWORD, "First Owner")
+    other_owner_response = TestClient(app).post(
+        "/auth/register",
+        json={
+            "email": "other-owner@example.com",
+            "password": PASSWORD,
+            "display_name": "Other Owner",
+        },
+    )
+    assert other_owner_response.status_code == 200
+    other_workspace_id = other_owner_response.json()["user"]["workspace_id"]
+    invite = create_invite(
+        InviteCreateRequest(email="reviewer@example.com"),
+        auth_user(first_owner.id, first_owner.email, first_owner.role),
+    )
+
+    response = TestClient(app).post(
+        "/auth/register",
+        json={
+            "email": "reviewer@example.com",
+            "password": PASSWORD,
+            "display_name": "Reviewer",
+            "invite_token": invite.token,
+        },
+    )
+
+    assert response.status_code == 200
+    reviewer = response.json()["user"]
+    assert reviewer["workspace_id"] == first_owner.workspace_id
+    assert reviewer["workspace_id"] != other_workspace_id
+    assert reviewer["role"] == UserRole.REVIEWER
+
+
+def test_invite_registration_restores_memory_when_atomic_persist_fails(monkeypatch) -> None:
+    owner = create_user("owner@example.com", PASSWORD, "Owner")
+    invite = create_invite(
+        InviteCreateRequest(email="maintainer@example.com", role=UserRole.MAINTAINER),
+        auth_user(owner.id, owner.email, owner.role),
+    )
+    committed_event_ids = {event.id for event in store.audit_events}
+
+    def fail_persist(*, extra_write=None) -> None:
+        raise RuntimeError("simulated database write failure")
+
+    monkeypatch.setattr(store, "persist", fail_persist)
+
+    with pytest.raises(RuntimeError, match="simulated database write failure"):
+        register_with_invite(
+            RegisterRequest(
+                email="maintainer@example.com",
+                password=PASSWORD,
+                display_name="Maintainer",
+                invite_token=invite.token,
+            )
+        )
+
+    assert "maintainer@example.com" not in {user.email for user in store.users.values()}
+    assert store.invites[invite.id].status == InviteStatus.PENDING
+    assert store.invites[invite.id].accepted_by_user_id is None
+    assert {event.id for event in store.audit_events} == committed_event_ids
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+)
+def test_invite_registration_fails_closed_without_postgres_repository(
+    monkeypatch, is_production: bool, postgres_auth_enabled: bool
+) -> None:
+    owner = create_user("owner@example.com", PASSWORD, "Owner")
+    invite = create_invite(
+        InviteCreateRequest(email="reviewer@example.com"),
+        auth_user(owner.id, owner.email, owner.role),
+    )
+    users_before = set(store.users)
+    invites_before = store.invites[invite.id].model_copy(deep=True)
+    events_before = [event.model_copy(deep=True) for event in store.audit_events]
+    monkeypatch.setattr(
+        auth_routes,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        register_with_invite(
+            RegisterRequest(
+                email="reviewer@example.com",
+                password=PASSWORD,
+                display_name="Reviewer",
+                invite_token=invite.token,
+            )
+        )
+
+    assert error.value.status_code == 503
+    assert error.value.headers == {"Retry-After": "1"}
+    assert set(store.users) == users_before
+    assert store.invites[invite.id] == invites_before
+    assert store.audit_events == events_before
 
 
 def test_registration_rejects_invite_email_mismatch(monkeypatch) -> None:

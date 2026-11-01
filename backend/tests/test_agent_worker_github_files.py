@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
+from app.agent_task_repository import PostgresAgentTaskRepository, SQLiteAgentTaskRepository
+from app.approval_repository import (
+    PostgresApprovalDecisionRepository,
+    SQLiteApprovalDecisionRepository,
+)
+from app import agent_worker_github_files as github_files_worker
+from app import agent_worker_claims as worker_claims
 from app.agent_worker_github_files import run_agent_worker_github_file_application
 from app.models import AgentProvider, ApprovalRequest, FileChange, Project, RiskAssessment, RiskLevel
 from app.store import store
@@ -49,12 +59,17 @@ class FakeGitHubFileClient:
         return f"commit-delete-{self.commit_counter}"
 
 
+class FakePostgresRuntimeConnector:
+    def connect(self):
+        raise AssertionError("repository connector should not be invoked in pairing tests")
+
+
 def setup_function() -> None:
     store.reset()
 
 
 def _project() -> Project:
-    project = Project(name="GitHub Files Worker", description="demo")
+    project = Project(name="GitHub Files Worker", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     return project
 
@@ -62,6 +77,7 @@ def _project() -> Project:
 def _approval(project: Project, files: list[FileChange] | None = None) -> ApprovalRequest:
     approval = ApprovalRequest(
         project_id=project.id,
+        workspace_id=project.workspace_id,
         title="Approved GitHub file changes",
         summary="Apply approved changes to a safe feature branch.",
         agent_name="github-files-worker",
@@ -72,6 +88,7 @@ def _approval(project: Project, files: list[FileChange] | None = None) -> Approv
         test_plan=["python -m pytest"],
         rollback_plan="Revert generated branch.",
         risk=RiskAssessment(level=RiskLevel.LOW),
+        status="APPROVED",
     )
     store.approval_requests[approval.id] = approval
     return approval
@@ -81,6 +98,7 @@ def _approved_task(approval: ApprovalRequest, *, branch_preference: str = "featu
     task = AgentTask(
         provider=AgentProvider.CODEX,
         project_id=approval.project_id,
+        workspace_id=approval.workspace_id,
         title="Apply files",
         goal="Apply approved files to GitHub branch.",
         repository="ramgolladi1503-sys/aixion-control-tower",
@@ -99,7 +117,11 @@ def test_github_files_worker_creates_file_on_existing_branch() -> None:
     task = _approved_task(approval)
     fake = FakeGitHubFileClient()
 
-    result = run_agent_worker_github_file_application(task_id=task.id, worker_id="files-worker", client=fake)
+    result = run_agent_worker_github_file_application(
+        task_id=task.id, worker_id="files-worker", client=fake,
+        task_repository=SQLiteAgentTaskRepository(store._connect),
+        approval_repository=SQLiteApprovalDecisionRepository(store._connect),
+    )
 
     assert result.success is True
     assert result.task_id == task.id
@@ -123,6 +145,122 @@ def test_github_files_worker_creates_file_on_existing_branch() -> None:
     assert event.metadata["commits_created"] == 1
     assert event.metadata["pull_request_opened"] is False
     assert any(audit.event_type == "agent_worker.github_files_applied" for audit in store.audit_events)
+
+
+@pytest.mark.parametrize("approval_repository", [None, "sqlite"])
+def test_github_files_worker_rejects_unpaired_postgres_authority_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    approval_repository: str | None,
+) -> None:
+    postgres_task_repository = PostgresAgentTaskRepository(lambda: None)  # type: ignore[arg-type]
+    sqlite_approval_repository = SQLiteApprovalDecisionRepository(store._connect)
+    selected_approval_repository = (
+        sqlite_approval_repository if approval_repository == "sqlite" else None
+    )
+    fake = FakeGitHubFileClient()
+    audits_before = list(store.audit_events)
+    events_before = dict(store.agent_task_events)
+    claims: list[object] = []
+    outcomes: list[object] = []
+
+    def unexpected_claim(**kwargs):
+        claims.append(kwargs)
+        raise AssertionError("repository mismatch must be rejected before claim")
+
+    def unexpected_outcome(*args, **kwargs):
+        outcomes.append((args, kwargs))
+        raise AssertionError("repository mismatch must not write an outcome")
+
+    monkeypatch.setattr(github_files_worker, "claim_agent_task_for_worker", unexpected_claim)
+    monkeypatch.setattr(github_files_worker, "claim_first_approved_agent_task_for_worker", unexpected_claim)
+    monkeypatch.setattr(github_files_worker, "commit_agent_task_worker_outcome", unexpected_outcome)
+
+    result = run_agent_worker_github_file_application(
+        task_id="postgres-task-authority",
+        client=fake,
+        task_repository=postgres_task_repository,
+        approval_repository=selected_approval_repository,
+    )
+
+    assert result.success is False
+    assert result.reason == "GitHub file worker requires paired PostgreSQL task and approval repositories."
+    assert claims == []
+    assert outcomes == []
+    assert fake.branch_checks == []
+    assert fake.write_calls == []
+    assert store.audit_events == audits_before
+    assert store.agent_task_events == events_before
+
+
+def test_github_files_worker_accepts_paired_postgres_repositories_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakePostgresRuntimeConnector()
+    task_repository = PostgresAgentTaskRepository(runtime.connect)
+    approval_repository = PostgresApprovalDecisionRepository(runtime.connect)
+    claim_repositories: list[object] = []
+
+    def expected_claim(**kwargs):
+        claim_repositories.extend([kwargs["repository"]])
+        return SimpleNamespace(
+            success=False,
+            task=None,
+            task_id=kwargs["task_id"],
+            lease_token=None,
+            reason="claim reached with a valid paired repository",
+        )
+
+    monkeypatch.setattr(worker_claims, "get_settings", lambda: SimpleNamespace(
+        is_production=True, postgres_auth_enabled=True
+    ))
+    monkeypatch.setattr(github_files_worker, "claim_agent_task_for_worker", expected_claim)
+
+    result = run_agent_worker_github_file_application(
+        task_id="postgres-task-authority",
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+    )
+
+    assert result.success is False
+    assert result.reason == "claim reached with a valid paired repository"
+    assert claim_repositories == [task_repository]
+
+
+def test_github_files_worker_rejects_postgres_repositories_from_different_runtimes_before_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_repository = PostgresAgentTaskRepository(FakePostgresRuntimeConnector().connect)
+    approval_repository = PostgresApprovalDecisionRepository(FakePostgresRuntimeConnector().connect)
+    fake = FakeGitHubFileClient()
+    claims: list[object] = []
+    outcomes: list[object] = []
+
+    def unexpected_claim(**kwargs):
+        claims.append(kwargs)
+        raise AssertionError("different PostgreSQL runtimes must be rejected before claim")
+
+    def unexpected_outcome(*args, **kwargs):
+        outcomes.append((args, kwargs))
+        raise AssertionError("different PostgreSQL runtimes must not write an outcome")
+
+    monkeypatch.setattr(github_files_worker, "claim_agent_task_for_worker", unexpected_claim)
+    monkeypatch.setattr(github_files_worker, "commit_agent_task_worker_outcome", unexpected_outcome)
+
+    result = run_agent_worker_github_file_application(
+        task_id="postgres-task-authority",
+        client=fake,
+        task_repository=task_repository,
+        approval_repository=approval_repository,
+    )
+
+    assert result.success is False
+    assert result.reason == (
+        "GitHub file worker requires task and approval repositories to share the same PostgreSQL connection factory."
+    )
+    assert claims == []
+    assert outcomes == []
+    assert fake.branch_checks == []
+    assert fake.write_calls == []
 
 
 def test_github_files_worker_updates_existing_file() -> None:

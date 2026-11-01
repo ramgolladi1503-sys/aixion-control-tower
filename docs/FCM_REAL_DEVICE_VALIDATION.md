@@ -23,7 +23,7 @@ notification permission granted on Android 13+
 backend reachable by the device
 AIXION_PROFILE configured intentionally
 AIXION_AUTH_ENABLED configured intentionally
-FCM_SERVER_KEY configured for push dispatch
+AIXION_FCM_PROJECT_ID configured and backend ADC credentials authorized for FCM sends
 Android device registered with backend through FCM token registration
 ```
 
@@ -54,6 +54,13 @@ screenshot of Agent Tasks screen loading
 
 ### 2. Confirm FCM token registration
 
+The signed-in Account screen requests Android 13+ notification permission only
+after the user taps **Enable approval alerts**. With permission granted, opening
+or resuming Account asks Firebase for the current token and registers it using
+the authenticated `POST /notifications/devices` endpoint. Firebase app
+configuration must be present in the build; without it, the UI reports Firebase
+as unavailable. Never copy the full token into public evidence.
+
 Evidence to capture:
 
 ```text
@@ -62,6 +69,16 @@ backend device registration response
 registered device id/token prefix, never full token in public evidence
 user id associated with device
 ```
+
+### 2a. Confirm logout and account reassignment behavior
+
+With the device registered and online, log out and confirm the backend removes
+only the signed-in user's device registration. If the phone is offline, confirm
+the app reports cleanup as pending, retains only the device ID and owner ID,
+and retries cleanup after that same account signs in again. Registering the
+same installation token under a different signed-in account should leave one
+registration for that token and emit a `notification.device_reassigned` audit
+event. Never include an FCM token in evidence.
 
 ### 3. Trigger AgentTask approval-needed notification
 
@@ -152,7 +169,7 @@ approval details are loaded or backend error is clear
 ```text
 PENDING   notification record exists before dispatch outcome
 NO_DEVICE no registered device matched notification user
-SKIPPED   FCM_SERVER_KEY missing or dispatch intentionally skipped
+SKIPPED   AIXION_FCM_PROJECT_ID missing or dispatch intentionally skipped
 FAILED    backend attempted dispatch and failed
 SENT      FCM accepted send request
 ```
@@ -217,7 +234,7 @@ backend is only reachable from emulator but not real device
 
 ```text
 No automated FCM instrumentation test yet
-No retry queue for FAILED pushes yet
+Eligible transient push-send failures are retried through the durable outbox, up to `AIXION_PUSH_MAX_ATTEMPTS` (default 5). Permanent failures and exhausted attempts remain `FAILED`; no operator redrive path is documented.
 No notification preference model yet
 No full production observability dashboard yet
 ```

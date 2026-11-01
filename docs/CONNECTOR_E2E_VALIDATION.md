@@ -281,7 +281,9 @@ agent_task.status = APPROVED
 events include TASK_CREATED, APPROVAL_CREATED, APPROVED
 ```
 
-## Codex validation
+## Generic CODEX webhook task-intake fixture (not native Codex approval)
+
+This section exercises the generic AgentTask webhook template with a CODEX-labeled sample payload. It does not invoke the Codex `PermissionRequest` hook and does not prove interception, phone approval, or same-invocation continuation in the native Codex app. See the Codex connector instructions in `PRE_BILLING_WORK_LOCK.md` and the provider-hook tests for local callback behavior; the native-app round trip still requires separate live evidence.
 
 Use the same flow with:
 
@@ -320,10 +322,10 @@ Record the following before claiming the connector loop works:
 [ ] audit contains connector webhook, approval creation, approval decision, and propagation events
 ```
 
-## Safe claim after this passes
+## Safe claim after this generic webhook test passes
 
 ```text
-Aixion has a tested connector approval loop: a configured ChatGPT/Codex-style connector can create Agent Work, link an Approval, and receive task status propagation after the mobile/operator decision.
+A generic webhook task-intake flow can create Agent Work, link an Approval, and propagate the mobile/operator decision to the AgentTask status. This test does not establish native ChatGPT, Codex, or Antigravity approval interception or same-invocation continuation.
 ```
 
 ## Unsafe claim after this passes

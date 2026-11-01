@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import os
 from datetime import timedelta
+from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
@@ -16,6 +19,7 @@ client = TestClient(app)
 
 def setup_function() -> None:
     store.reset()
+    app.state.postgres_runtime = None
 
 
 def _normalize_utc_text(value: str) -> str:
@@ -86,6 +90,22 @@ def test_query_audit_events_filters_by_event_type_entity_actor_and_detail() -> N
     assert by_detail_value.json()[0]["entity_id"] == "approval_2"
 
 
+def test_audit_routes_read_durable_repository_when_process_cache_is_empty() -> None:
+    events = _seed_audit_events()
+    store.audit_events.clear()
+
+    response = client.get("/audit/events?entity_id=approval_1")
+    detail = client.get(f"/audit/events/{events[0].id}")
+    exported = client.get("/audit/export?entity_id=approval_1")
+
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()} == {event.id for event in events[:3]}
+    assert detail.status_code == 200
+    assert detail.json()["id"] == events[0].id
+    assert exported.status_code == 200
+    assert exported.json()["count"] == 3
+
+
 def test_query_audit_events_applies_limit_and_returns_newest_first() -> None:
     events = _seed_audit_events()
 
@@ -139,6 +159,38 @@ def test_export_audit_events_redacts_sensitive_detail_keys() -> None:
     assert exported_event["details"]["safe_value"] == "kept"
 
 
+def test_audit_read_endpoints_redact_sensitive_detail_keys() -> None:
+    event = AuditEvent(
+        event_type="agent.registered",
+        actor="owner@example.com",
+        entity_id="agent_sensitive_read",
+        details={
+            "agent_token": "raw-agent-token",
+            "nested": [{"api_secret": "raw-secret", "safe": "visible"}],
+            "safe_value": "kept",
+        },
+    )
+    store.audit_events.append(event)
+    store.persist()
+
+    list_response = client.get("/audit/events?entity_id=agent_sensitive_read")
+    detail_response = client.get(f"/audit/events/{event.id}")
+
+    assert list_response.status_code == 200
+    listed_event = list_response.json()[0]
+    assert listed_event["details"]["agent_token"] == "[REDACTED]"
+    assert listed_event["details"]["nested"][0]["api_secret"] == "[REDACTED]"
+    assert listed_event["details"]["nested"][0]["safe"] == "visible"
+    assert listed_event["details"]["safe_value"] == "kept"
+
+    assert detail_response.status_code == 200
+    detailed_event = detail_response.json()
+    assert detailed_event["details"]["agent_token"] == "[REDACTED]"
+    assert detailed_event["details"]["nested"][0]["api_secret"] == "[REDACTED]"
+    assert detailed_event["details"]["nested"][0]["safe"] == "visible"
+    assert detailed_event["details"]["safe_value"] == "kept"
+
+
 def test_export_audit_events_filters_by_created_window() -> None:
     events = _seed_audit_events()
     created_after = events[1].created_at.isoformat()
@@ -165,3 +217,160 @@ def test_get_audit_event_by_id_and_missing_404() -> None:
     assert response.status_code == 200
     assert response.json()["event_type"] == "approval.created"
     assert missing.status_code == 404
+
+
+def test_audit_and_recovery_reads_fail_closed_when_postgres_runtime_is_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app.state, "postgres_runtime", SimpleNamespace(), raising=False)
+    from app.recovery_routes import recovery_snapshot_repository
+
+    def unexpected_snapshot_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite recovery snapshot must not be read in PostgreSQL mode")
+
+    monkeypatch.setattr(recovery_snapshot_repository, "read_snapshot", unexpected_snapshot_read)
+
+    responses = [
+        client.get("/audit/events"),
+        client.get("/audit/export"),
+        client.get("/audit/events/nonexistent"),
+        client.get("/audit/recovery/export"),
+        client.post("/audit/recovery/validate", json={"snapshot": {}}),
+    ]
+
+    assert [response.status_code for response in responses] == [503] * 5
+    assert all("unified audit writer" in response.json()["detail"] for response in responses)
+
+
+def test_root_audit_read_fails_closed_instead_of_serving_sqlite_during_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _seed_audit_events()
+    monkeypatch.setattr(app.state, "postgres_runtime", SimpleNamespace(), raising=False)
+
+    response = client.get("/audit")
+
+    assert response.status_code == 503
+    assert "unified audit writer" in response.json()["detail"]
+    assert len(store.audit_events) == len(events)
+
+
+def test_audit_and_recovery_reads_fail_closed_when_postgres_auth_is_selected_without_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import audit_routes, main
+    from app import recovery_routes
+    from app.recovery_routes import recovery_snapshot_repository
+
+    settings = SimpleNamespace(postgres_auth_enabled=True)
+    monkeypatch.setattr(audit_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(recovery_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(app.state, "postgres_runtime", None, raising=False)
+
+    def unexpected_audit_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite audit repository must not be read in PostgreSQL auth mode")
+
+    def unexpected_snapshot_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite recovery snapshot must not be read in PostgreSQL auth mode")
+
+    monkeypatch.setattr(audit_routes._local_audit_repository, "list_for_workspace", unexpected_audit_read)
+    monkeypatch.setattr(audit_routes._local_audit_repository, "get_for_workspace", unexpected_audit_read)
+    monkeypatch.setattr(recovery_snapshot_repository, "read_snapshot", unexpected_snapshot_read)
+
+    responses = [
+        client.get("/audit"),
+        client.get("/audit/events"),
+        client.get("/audit/export"),
+        client.get("/audit/events/nonexistent"),
+        client.get("/audit/recovery/export"),
+        client.post("/audit/recovery/validate", json={"snapshot": {}}),
+    ]
+
+    assert [response.status_code for response in responses] == [503] * len(responses)
+    assert "authoritative recovery repository" in responses[4].json()["detail"]
+    assert "unified audit writer" in responses[5].json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+        SimpleNamespace(is_production=False, postgres_auth_enabled=True),
+    ],
+    ids=["production", "postgres-auth"],
+)
+def test_audit_route_rejects_missing_request_context_without_sqlite_fallback(
+    monkeypatch: pytest.MonkeyPatch, settings: SimpleNamespace
+) -> None:
+    from fastapi import HTTPException
+
+    from app import audit_routes
+
+    monkeypatch.setattr(audit_routes, "get_settings", lambda: settings)
+
+    def unexpected_audit_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("SQLite audit repository must not be read without request context")
+
+    monkeypatch.setattr(
+        audit_routes._local_audit_repository,
+        "list_for_workspace",
+        unexpected_audit_read,
+    )
+    monkeypatch.setattr(
+        audit_routes._local_audit_repository,
+        "get_for_workspace",
+        unexpected_audit_read,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        audit_routes.query_audit_events(request=None, user=None)  # type: ignore[arg-type]
+
+    assert raised.value.status_code == 503
+    assert "request context is required" in raised.value.detail
+
+
+def test_audit_repository_keeps_local_direct_behavior_without_production_or_postgres_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import audit_routes
+
+    monkeypatch.setattr(
+        audit_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=False, postgres_auth_enabled=False),
+    )
+
+    assert audit_routes._audit_repository_for_route(None) is audit_routes._local_audit_repository
+
+
+def test_production_audit_reads_fail_closed_without_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from app import audit_routes
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(postgres_runtime=None))
+    )
+    monkeypatch.setattr(
+        audit_routes,
+        "get_settings",
+        lambda: SimpleNamespace(is_production=True, postgres_auth_enabled=False),
+    )
+
+    def unexpected_audit_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Production audit reads must not fall back to SQLite")
+
+    monkeypatch.setattr(
+        audit_routes._local_audit_repository,
+        "list_for_workspace",
+        unexpected_audit_read,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        audit_routes._audit_repository_for_route(request, allow_postgres_reads=True)  # type: ignore[arg-type]
+
+    assert raised.value.status_code == 503
+    assert "unified audit writer" in raised.value.detail

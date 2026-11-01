@@ -1,15 +1,43 @@
 from __future__ import annotations
 
+import time
+import anyio
+from datetime import timedelta
+import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+import psycopg
 
+from .child_mcp_test_server import ChildMCPToolCall
+from .application_repository_access import (
+    approval_decision_repository_for_request,
+    mcp_child_server_repository_for_request,
+    project_repository_for_request,
+    workspace_id_for_request,
+)
 from .auth import require_maintainer
 from .mcp_gateway import MCPGatewayDecision, MCPGatewayToolCall
-from .mcp_gateway_routes import gateway_for_project
-from .models import AuthUser, MCPChildServer
+from .mcp_gateway_routes import (
+    GatewaySubmitRequest,
+    _child_router,
+    _require_mcp_request_context,
+    _postgres_mcp_submission,
+    _resolve_postgres_gateway_request,
+    gateway_for_project,
+)
+from .mcp_child_server_repository import (
+    PostgresMCPChildServerRepository,
+    SQLiteMCPChildServerRepository,
+)
+from .models import ApprovalStatus, AuthUser, MCPChildServer, now_utc
+from .approval_expiry import expire_approval
+from .mcp_pending_repository import MCPPendingRepositoryError
+from .mcp_tool_validation import validate_arguments_against_schema
+from .settings import get_settings
 from .store import store
+from .workspace_access import project_workspace_id, workspace_id_for_user
 
 router = APIRouter(prefix="/mcp", tags=["mcp-transport"])
 MaintainerDependency = Depends(require_maintainer)
@@ -60,8 +88,16 @@ def _enabled_child_servers(project_id: str) -> list[MCPChildServer]:
 
 
 def _registered_tools(project_id: str) -> list[dict[str, Any]]:
+    return _registered_tools_from_servers(_enabled_child_servers(project_id), allow_demo=True)
+
+
+def _registered_tools_from_servers(
+    servers: list[MCPChildServer],
+    *,
+    allow_demo: bool,
+) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
-    for server in _enabled_child_servers(project_id):
+    for server in servers:
         for tool in server.tools:
             tools.append(
                 {
@@ -77,7 +113,7 @@ def _registered_tools(project_id: str) -> list[dict[str, Any]]:
             )
     if tools:
         return tools
-    return _demo_tools()
+    return _demo_tools() if allow_demo else []
 
 
 def _demo_tools() -> list[dict[str, Any]]:
@@ -110,13 +146,18 @@ def _registered_tool_policy(
     project_id: str,
     tool_name: str,
     requested_server_name: str | None,
+    registered_servers: list[MCPChildServer] | None = None,
 ) -> tuple[str, bool, dict[str, Any]] | None:
-    registered_servers = _project_child_servers(project_id)
-    if not registered_servers:
+    servers = (
+        _project_child_servers(project_id)
+        if registered_servers is None
+        else registered_servers
+    )
+    if not servers:
         return None
 
     matches = []
-    for server in registered_servers:
+    for server in servers:
         if requested_server_name is not None and requested_server_name != server.name:
             continue
         if not server.enabled:
@@ -133,69 +174,13 @@ def _registered_tool_policy(
     raise ValueError("tools/call references an unknown or disabled registered tool")
 
 
-def _validate_arguments_against_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> None:
-    """Minimal JSON-schema subset for registry-enforced tool arguments.
-
-    This intentionally supports the subset the registry uses today: object type,
-    required fields, primitive property types, and additionalProperties=false.
-    It is not a full JSON Schema implementation.
-    """
-    if schema.get("type", "object") != "object":
-        raise ValueError("registered tool input_schema must be an object schema")
-
-    required = schema.get("required", [])
-    if not isinstance(required, list):
-        raise ValueError("registered tool input_schema required must be a list")
-    for field_name in required:
-        if not isinstance(field_name, str):
-            raise ValueError("registered tool input_schema required entries must be strings")
-        if field_name not in arguments:
-            raise ValueError(f"tools/call arguments missing required field: {field_name}")
-
-    properties = schema.get("properties", {})
-    if not isinstance(properties, dict):
-        raise ValueError("registered tool input_schema properties must be an object")
-
-    if schema.get("additionalProperties") is False:
-        allowed = set(properties.keys())
-        extra = sorted(set(arguments.keys()) - allowed)
-        if extra:
-            raise ValueError(f"tools/call arguments include unsupported field: {extra[0]}")
-
-    for field_name, value in arguments.items():
-        property_schema = properties.get(field_name)
-        if property_schema is None:
-            continue
-        if not isinstance(property_schema, dict):
-            raise ValueError(f"registered tool input_schema property is invalid: {field_name}")
-        expected_type = property_schema.get("type")
-        if expected_type is None:
-            continue
-        if not _value_matches_json_type(value, expected_type):
-            raise ValueError(f"tools/call argument has wrong type: {field_name} must be {expected_type}")
-
-
-def _value_matches_json_type(value: Any, expected_type: str | list[str]) -> bool:
-    expected_types = expected_type if isinstance(expected_type, list) else [expected_type]
-    for item in expected_types:
-        if item == "string" and isinstance(value, str):
-            return True
-        if item == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
-            return True
-        if item == "integer" and isinstance(value, int) and not isinstance(value, bool):
-            return True
-        if item == "boolean" and isinstance(value, bool):
-            return True
-        if item == "object" and isinstance(value, dict):
-            return True
-        if item == "array" and isinstance(value, list):
-            return True
-        if item == "null" and value is None:
-            return True
-    return False
-
-
-def _tool_call_from_params(project_id: str, params: dict[str, Any]) -> MCPGatewayToolCall:
+def _tool_call_from_params(
+    project_id: str,
+    params: dict[str, Any],
+    *,
+    registered_servers: list[MCPChildServer] | None = None,
+    allow_demo: bool = True,
+) -> MCPGatewayToolCall:
     tool_name = params.get("name")
     if not isinstance(tool_name, str) or not tool_name.strip():
         raise ValueError("tools/call params must include non-empty name")
@@ -220,12 +205,19 @@ def _tool_call_from_params(project_id: str, params: dict[str, Any]) -> MCPGatewa
     if mutating is not None and not isinstance(mutating, bool):
         raise ValueError("mutating must be a boolean when provided")
 
-    registered_policy = _registered_tool_policy(project_id, tool_name, requested_server_name)
+    registered_policy = _registered_tool_policy(
+        project_id,
+        tool_name,
+        requested_server_name,
+        registered_servers=registered_servers,
+    )
     if registered_policy is not None:
         server_name, registered_mutating, input_schema = registered_policy
-        _validate_arguments_against_schema(arguments, input_schema)
+        validate_arguments_against_schema(arguments, input_schema)
         mutating = registered_mutating
     else:
+        if not allow_demo:
+            raise ValueError("tools/call references an unknown or disabled registered tool")
         server_name = requested_server_name or "child-test-server"
 
     return MCPGatewayToolCall(
@@ -258,14 +250,360 @@ def _gateway_decision_to_mcp_result(decision: MCPGatewayDecision) -> dict[str, A
     }
 
 
-@router.post("/{project_id}/jsonrpc", response_model=MCPJsonRpcResponse)
-def handle_mcp_jsonrpc(
+async def _postgres_mcp_tool_call(
+    *,
     project_id: str,
     payload: MCPJsonRpcRequest,
-    _: AuthUser = MaintainerDependency,
+    user: AuthUser,
+    request: Request,
+    registered_servers: list[MCPChildServer],
 ) -> MCPJsonRpcResponse:
-    if project_id not in store.projects:
-        raise HTTPException(status_code=404, detail="Project not found")
+    """Persist, wait for, and forward one PostgreSQL-backed mutating call.
+
+    The JSON-RPC request ID is the transport idempotency key. Approval is read
+    from the application repository on every poll, and forwarding is delegated
+    to the durable claim/finalize implementation shared with MCP Gateway.
+    """
+    try:
+        call = _tool_call_from_params(
+            project_id,
+            payload.params,
+            registered_servers=registered_servers,
+            allow_demo=False,
+        )
+    except ValueError as error:
+        return _error_response(payload.id, code=-32602, message=str(error))
+
+    if call.mutating is False:
+        matching_servers = [
+            server for server in registered_servers if server.name == call.server_name
+        ]
+        if len(matching_servers) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL MCP read-only target is ambiguous or unavailable",
+            )
+        server = matching_servers[0]
+        matching_tools = [tool for tool in server.tools if tool.name == call.tool_name]
+        if (
+            server.project_id != project_id
+            or not server.enabled
+            or len(matching_tools) != 1
+            or matching_tools[0].mutating is not False
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL MCP read-only server or tool binding is invalid",
+            )
+        try:
+            workspace_id = await anyio.to_thread.run_sync(
+                lambda: workspace_id_for_request(user, request)
+            )
+            child_server_repository = await anyio.to_thread.run_sync(
+                lambda: mcp_child_server_repository_for_request(request)
+            )
+            current_servers = await anyio.to_thread.run_sync(
+                lambda: child_server_repository.list_for_workspace(
+                    workspace_id,
+                    project_id=project_id,
+                    enabled=True,
+                )
+            )
+        except (RuntimeError, psycopg.Error) as error:
+            raise HTTPException(
+                status_code=503,
+                detail="PostgreSQL MCP read-only registry is unavailable",
+            ) from error
+        current_matches = [
+            candidate for candidate in current_servers if candidate.name == call.server_name
+        ]
+        if (
+            workspace_id is None
+            or server.workspace_id != workspace_id
+            or len(current_matches) != 1
+            or current_matches[0] != server
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="PostgreSQL MCP read-only server changed; retry with the current registry",
+            )
+
+        child_call = ChildMCPToolCall(
+            server_name=call.server_name,
+            tool_name=call.tool_name,
+            arguments=call.arguments,
+            session_id=call.session_id,
+            requested_by=call.requested_by,
+        )
+
+        def dispatch_read_only() -> dict[str, Any]:
+            if server.transport == "test":
+                return _child_router._call_test_server(server, child_call)
+            if server.transport == "http":
+                return _child_router._call_http_server(server, child_call)
+            if server.transport == "http-jsonrpc":
+                return _child_router._call_http_jsonrpc_server(server, child_call)
+            return {
+                "ok": False,
+                "server_name": server.name,
+                "tool_name": call.tool_name,
+                "reason_code": "UNSUPPORTED_CHILD_TRANSPORT",
+            }
+
+        result = await anyio.to_thread.run_sync(dispatch_read_only)
+        decision = MCPGatewayDecision(
+            forwarded=isinstance(result, dict) and result.get("ok") is not False,
+            approval_required=False,
+            result=result,
+            reason="Registered read-only MCP tool forwarded without approval.",
+        )
+        return _result_response(payload.id, _gateway_decision_to_mcp_result(decision))
+    if call.mutating is not True:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL MCP tool mutability is not registered",
+        )
+    if payload.id is None:
+        return _error_response(
+            payload.id,
+            code=-32600,
+            message="Mutating MCP tools/call requires a JSON-RPC request ID for idempotency.",
+        )
+    idempotency_key = f"{project_id}:{call.session_id or ''}:{payload.id}"
+    if len(idempotency_key) > 256:
+        return _error_response(
+            payload.id,
+            code=-32600,
+            message="Mutating MCP tools/call request ID is too long.",
+        )
+
+    submission = await anyio.to_thread.run_sync(
+        lambda: _postgres_mcp_submission(
+            payload=GatewaySubmitRequest(project_id=project_id, request=call),
+            user=user,
+            request=request,
+            idempotency_key=idempotency_key,
+        )
+    )
+    approval_id = submission.approval_request_id
+    if not approval_id:
+        raise HTTPException(status_code=503, detail="MCP approval identity was not persisted")
+
+    try:
+        approval_repository = await anyio.to_thread.run_sync(
+            lambda: approval_decision_repository_for_request(request)
+        )
+        approval = await anyio.to_thread.run_sync(lambda: approval_repository.get(approval_id))
+    except (RuntimeError, psycopg.Error, MCPPendingRepositoryError) as error:
+        raise HTTPException(status_code=503, detail="MCP approval state is unavailable") from error
+    try:
+        workspace_id = await anyio.to_thread.run_sync(lambda: workspace_id_for_request(user, request))
+    except (RuntimeError, psycopg.Error) as error:
+        raise HTTPException(status_code=503, detail="MCP approval workspace is unavailable") from error
+    if approval is None or workspace_id is None or approval.workspace_id != workspace_id:
+        raise HTTPException(status_code=503, detail="MCP approval state is unavailable")
+
+    # The submission helper resolves the target again before it writes the
+    # durable request. Reject a concurrent registry change so the request can
+    # never be approved against a different tool schema than the one validated
+    # at the transport boundary.
+    matching_servers = [server for server in registered_servers if server.name == call.server_name]
+    try:
+        approved_target = json.loads(approval.files[0].new_content or "")
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=409, detail="Approved MCP target binding is invalid") from error
+    if (
+        len(matching_servers) != 1
+        or approved_target.get("target_server_id") != matching_servers[0].id
+        or approved_target.get("target_server_revision") != matching_servers[0].updated_at.isoformat()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="MCP server configuration changed during submission; create a new request",
+        )
+
+    # Reuse the application's bounded approval TTL. This also bounds the
+    # synchronous HTTP wait even when a caller reuses an older idempotency key.
+    ttl_seconds = get_settings().agent_approval_ttl_seconds
+    effective_expiry = approval.expires_at or (approval.created_at + timedelta(seconds=ttl_seconds))
+    if effective_expiry.tzinfo is None or effective_expiry.utcoffset() is None:
+        raise HTTPException(status_code=503, detail="MCP approval expiry is invalid")
+    deadline = min(
+        effective_expiry,
+        now_utc() + timedelta(seconds=ttl_seconds),
+    )
+    monotonic_deadline = time.monotonic() + max(0.0, (deadline - now_utc()).total_seconds())
+
+    while True:
+        try:
+            approval = await anyio.to_thread.run_sync(lambda: approval_repository.get(approval_id))
+        except (RuntimeError, psycopg.Error, MCPPendingRepositoryError) as error:
+            raise HTTPException(status_code=503, detail="MCP approval state is unavailable") from error
+        if approval is None or workspace_id is None or approval.workspace_id != workspace_id:
+            raise HTTPException(status_code=503, detail="MCP approval state is unavailable")
+
+        if approval.status == ApprovalStatus.APPROVED:
+            decision = await anyio.to_thread.run_sync(
+                lambda: _resolve_postgres_gateway_request(
+                    approval_request_id=approval_id,
+                    user=user,
+                    request=request,
+                    pending_repository=request.app.state.postgres_repositories.mcp_pending_requests,
+                )
+            )
+            return _result_response(payload.id, _gateway_decision_to_mcp_result(decision))
+
+        if approval.status not in {ApprovalStatus.REQUESTED, ApprovalStatus.PENDING_REVIEW}:
+            decision = MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval_id,
+                status=approval.status,
+                reason=f"Approval status is {approval.status}; MCP tool was not forwarded.",
+            )
+            result = _gateway_decision_to_mcp_result(decision)
+            result["isError"] = True
+            return _result_response(payload.id, result)
+
+        now = now_utc()
+        if effective_expiry <= now:
+            try:
+                # The shared expiry path handles both explicit deadlines and
+                # legacy rows whose deadline is derived from the configured TTL.
+                await anyio.to_thread.run_sync(
+                    lambda: expire_approval(
+                        approval,
+                        actor="system:mcp-transport-timeout",
+                        reason="deadline_elapsed",
+                        now=now,
+                        repository=approval_repository,
+                    )
+                )
+                approval = await anyio.to_thread.run_sync(lambda: approval_repository.get(approval_id))
+            except Exception as error:
+                raise HTTPException(status_code=503, detail="MCP approval expiry could not be persisted") from error
+            if approval is None or approval.status not in {
+                ApprovalStatus.EXPIRED,
+                ApprovalStatus.DENIED,
+                ApprovalStatus.REVISION_REQUESTED,
+            }:
+                raise HTTPException(status_code=503, detail="MCP approval expiry is unresolved")
+            decision = MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval_id,
+                status=approval.status,
+                reason="Approval expired before the MCP tool call was approved; the tool was not forwarded.",
+            )
+            result = _gateway_decision_to_mcp_result(decision)
+            result["isError"] = True
+            return _result_response(payload.id, result)
+        if time.monotonic() >= monotonic_deadline:
+            try:
+                await anyio.to_thread.run_sync(
+                    lambda: expire_approval(
+                        approval,
+                        actor="system:mcp-transport-timeout",
+                        reason="transport_wait_timeout",
+                        now=now,
+                        force=True,
+                        repository=approval_repository,
+                    )
+                )
+                approval = await anyio.to_thread.run_sync(lambda: approval_repository.get(approval_id))
+            except Exception as error:
+                raise HTTPException(status_code=503, detail="MCP approval timeout could not be persisted") from error
+            if approval is None or approval.status not in {
+                ApprovalStatus.EXPIRED,
+                ApprovalStatus.DENIED,
+                ApprovalStatus.REVISION_REQUESTED,
+            }:
+                raise HTTPException(status_code=503, detail="MCP approval timeout is unresolved")
+            decision = MCPGatewayDecision(
+                forwarded=False,
+                approval_required=True,
+                approval_request_id=approval_id,
+                status=ApprovalStatus.EXPIRED,
+                reason="MCP approval wait timed out; the tool was not forwarded.",
+            )
+            result = _gateway_decision_to_mcp_result(decision)
+            result["isError"] = True
+            return _result_response(payload.id, result)
+        await anyio.sleep(min(0.5, max(0.0, monotonic_deadline - time.monotonic())))
+
+
+@router.post("/{project_id}/jsonrpc", response_model=MCPJsonRpcResponse)
+async def handle_mcp_jsonrpc(
+    project_id: str,
+    payload: MCPJsonRpcRequest,
+    user: AuthUser = MaintainerDependency,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> MCPJsonRpcResponse:
+    # This route can also be called directly by in-process integrations. In
+    # PostgreSQL/production mode, a missing request must not silently select
+    # the legacy process-local registry and gateway below.
+    _require_mcp_request_context(http_request)
+    postgres_child_servers: list[MCPChildServer] | None = None
+    if http_request is not None:
+        try:
+            repository = await anyio.to_thread.run_sync(
+                lambda: mcp_child_server_repository_for_request(http_request)
+            )
+        except (RuntimeError, psycopg.Error) as error:
+            raise HTTPException(status_code=503, detail="MCP server registry is unavailable") from error
+        if isinstance(repository, PostgresMCPChildServerRepository):
+            try:
+                project_repository, workspace_id = await anyio.to_thread.run_sync(
+                    lambda: (
+                        project_repository_for_request(http_request),
+                        workspace_id_for_request(user, http_request),
+                    )
+                )
+                project = await anyio.to_thread.run_sync(lambda: project_repository.get(project_id))
+            except (RuntimeError, psycopg.Error) as error:
+                raise HTTPException(status_code=503, detail="MCP project data is unavailable") from error
+            if (
+                project is None
+                or workspace_id is None
+                or project.workspace_id != workspace_id
+            ):
+                raise HTTPException(status_code=404, detail="Project not found")
+            if payload.method in {"tools/list", "tools/call"}:
+                try:
+                    postgres_child_servers = await anyio.to_thread.run_sync(
+                        lambda: repository.list_for_workspace(
+                            workspace_id,
+                            project_id=project_id,
+                            enabled=True,
+                        )
+                    )
+                except (RuntimeError, psycopg.Error) as error:
+                    raise HTTPException(status_code=503, detail="MCP server registry is unavailable") from error
+        elif isinstance(repository, SQLiteMCPChildServerRepository):
+            if project_id not in store.projects:
+                raise HTTPException(status_code=404, detail="Project not found")
+            workspace_id, project_workspace = await anyio.to_thread.run_sync(
+                lambda: (
+                    workspace_id_for_request(user, http_request),
+                    project_workspace_id(project_id),
+                )
+            )
+            if workspace_id is not None and project_workspace != workspace_id:
+                raise HTTPException(status_code=404, detail="Project not found")
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "MCP transport is unavailable for this application store until registry, "
+                    "pending-request, approval, and forwarding state share a durable runtime."
+                ),
+            )
+    else:
+        if project_id not in store.projects:
+            raise HTTPException(status_code=404, detail="Project not found")
+        workspace_id = workspace_id_for_user(user)
+        if workspace_id is not None and project_workspace_id(project_id) != workspace_id:
+            raise HTTPException(status_code=404, detail="Project not found")
     if payload.jsonrpc != "2.0":
         return _error_response(payload.id, code=-32600, message="Only JSON-RPC 2.0 is supported")
     if payload.method not in SUPPORTED_METHODS:
@@ -282,12 +620,27 @@ def handle_mcp_jsonrpc(
         )
 
     if payload.method == "tools/list":
-        return _result_response(payload.id, {"tools": _registered_tools(project_id)})
+        tools = (
+            _registered_tools_from_servers(postgres_child_servers, allow_demo=False)
+            if postgres_child_servers is not None
+            else _registered_tools(project_id)
+        )
+        return _result_response(payload.id, {"tools": tools})
 
+    if postgres_child_servers is not None:
+        return await _postgres_mcp_tool_call(
+            project_id=project_id,
+            payload=payload,
+            user=user,
+            request=http_request,
+            registered_servers=postgres_child_servers,
+        )
     try:
         tool_call = _tool_call_from_params(project_id, payload.params)
     except ValueError as exc:
         return _error_response(payload.id, code=-32602, message=str(exc))
 
-    decision = gateway_for_project(project_id).submit_tool_call(tool_call)
+    decision = await anyio.to_thread.run_sync(
+        lambda: gateway_for_project(project_id).submit_tool_call(tool_call)
+    )
     return _result_response(payload.id, _gateway_decision_to_mcp_result(decision))

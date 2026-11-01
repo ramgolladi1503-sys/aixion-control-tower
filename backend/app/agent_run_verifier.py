@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .agent_run_models import AgentRunStepExecutionResult, VerificationDecision
+from .approval_integrity import compute_approval_payload_hash
 
 
 TRANSIENT_MARKERS = (
@@ -34,6 +35,7 @@ POLICY_BLOCK_MARKERS = (
     "credential",
     "approval signature",
     "approved payload hash",
+    "approval scope",
     "outside approved scope",
     "forbidden file",
     "unapproved mutation",
@@ -141,11 +143,32 @@ def validate_scope_contract(task: Any, approval: Any) -> AgentRunStepExecutionRe
     approval_status = str(getattr(approval, "status", "")) if approval is not None else ""
     files = list(getattr(approval, "files", []) or []) if approval is not None else []
     test_plan = list(getattr(approval, "test_plan", []) or []) if approval is not None else []
+    approval_link_valid = bool(
+        approval is not None
+        and getattr(task, "approval_request_id", None) == getattr(approval, "id", None)
+        and getattr(task, "workspace_id", None) == getattr(approval, "workspace_id", None)
+        and getattr(task, "project_id", None) == getattr(approval, "project_id", None)
+    )
+    approved_payload_hash = (
+        getattr(approval, "approved_payload_hash", None) if approval is not None else None
+    )
+    try:
+        payload_hash_valid = bool(
+            approval is not None
+            and approved_payload_hash
+            and approved_payload_hash == compute_approval_payload_hash(approval)
+        )
+    except (TypeError, ValueError):
+        payload_hash_valid = False
 
     if approval is None:
         reasons.append("Linked approval is required.")
     elif approval_status.upper() != "APPROVED":
         reasons.append(f"Linked approval must be APPROVED, got {approval_status or 'missing'}.")
+    if approval is not None and not approval_link_valid:
+        reasons.append("Linked approval scope does not match the approved task, workspace, or project.")
+    if approval is not None and not payload_hash_valid:
+        reasons.append("Approved payload hash does not match the current approval contents.")
     if not repository or "/" not in repository:
         reasons.append("Agent task repository must use owner/name format.")
     if not branch:
@@ -161,6 +184,8 @@ def validate_scope_contract(task: Any, approval: Any) -> AgentRunStepExecutionRe
         "repository": repository,
         "branch": branch,
         "approval_status": approval_status,
+        "approval_link_valid": approval_link_valid,
+        "approved_payload_hash_valid": payload_hash_valid,
         "file_count": len(files),
         "test_count": len(test_plan),
     }

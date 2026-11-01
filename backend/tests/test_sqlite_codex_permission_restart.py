@@ -1,0 +1,674 @@
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import socket
+import sqlite3
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+
+REPOSITORY_ROOT = Path(__file__).parents[2]
+BACKEND_ROOT = Path(__file__).parents[1]
+HOOK_PATH = (
+    REPOSITORY_ROOT
+    / "integrations"
+    / "codex"
+    / "aixion_permission_request_hook.py"
+)
+
+
+def _free_loopback_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _api_environment(db_path: Path) -> dict[str, str]:
+    environment = {
+        key: os.environ[key]
+        for key in ("PATH", "HOME", "TMPDIR", "SYSTEMROOT", "WINDIR")
+        if os.environ.get(key)
+    }
+    environment.update(
+        {
+            "PYTHONPATH": str(BACKEND_ROOT),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "AIXION_PROFILE": "test",
+            "AIXION_AUTH_ENABLED": "false",
+            "AIXION_DB_PATH": str(db_path),
+            "AIXION_OUTBOX_DISPATCH_MODE": "scheduled",
+        }
+    )
+    return environment
+
+
+def _start_api(db_path: Path, port: int) -> tuple[subprocess.Popen[bytes], str]:
+    base_url = f"http://127.0.0.1:{port}"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
+        ],
+        cwd=BACKEND_ROOT,
+        env=_api_environment(db_path),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 20
+    try:
+        with httpx.Client(timeout=0.5) as client:
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    raise AssertionError(
+                        f"Local API exited during startup with {process.returncode}"
+                    )
+                try:
+                    response = client.get(f"{base_url}/health")
+                    if response.status_code == 200 and response.json().get("status") == "ok":
+                        return process, base_url
+                except httpx.HTTPError:
+                    pass
+                time.sleep(0.05)
+        raise AssertionError("Local API did not become healthy before timeout")
+    except BaseException:
+        _stop_api(process)
+        raise
+
+
+def _stop_api(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def _create_codex_agent(base_url: str) -> tuple[str, str, str]:
+    with httpx.Client(base_url=base_url, timeout=5) as api:
+        registration = api.post(
+            "/auth/register",
+            json={
+                "email": "codex-restart-owner@example.com",
+                "password": "Codex-restart-password-123!",
+                "display_name": "Codex restart owner",
+            },
+        )
+        assert registration.status_code == 200, registration.text
+        code = registration.json().get("dev_verification_code")
+        assert code
+        verification = api.post(
+            "/auth/verify-email",
+            json={"email": "codex-restart-owner@example.com", "code": code},
+        )
+        assert verification.status_code == 200, verification.text
+        project_response = api.post(
+            "/projects", json={"name": "Codex SQLite restart project"}
+        )
+        assert project_response.status_code == 200, project_response.text
+        project_id = project_response.json()["id"]
+        registered = api.post(
+            "/agents",
+            json={
+                "provider": "CODEX",
+                "display_name": "Codex SQLite restart test",
+                "auth_type": "API_KEY",
+                "allowed_project_ids": [project_id],
+                "allowed_actions": [
+                    "CREATE_APPROVAL",
+                    "READ_APPROVAL_DECISION",
+                    "CONSUME_APPROVAL_DECISION",
+                    "REPORT_APPROVAL_DELIVERY_FAILURE",
+                    "EXPIRE_OWN_APPROVAL",
+                ],
+                "enabled": True,
+            },
+        )
+        assert registered.status_code == 200, registered.text
+        body = registered.json()
+    return project_id, body["agent"]["id"], body["agent_token"]
+
+
+def _hook_environment(base_url: str, project_id: str, agent_id: str, token: str) -> dict[str, str]:
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", str(Path.home())),
+        "AIXION_API_BASE_URL": base_url,
+        "AIXION_AGENT_ID": agent_id,
+        "AIXION_AGENT_TOKEN": token,
+        "AIXION_ALLOW_AGENT_TOKEN_ENV": "true",
+        "AIXION_PROJECT_ID": project_id,
+        "AIXION_CODEX_WORKSPACE_PATH": str(REPOSITORY_ROOT),
+        "AIXION_CODEX_APPROVAL_TIMEOUT_SECONDS": "30",
+    }
+
+
+def _launch_hook(event: dict[str, Any], environment: dict[str, str]) -> subprocess.Popen[str]:
+    process = subprocess.Popen(
+        [sys.executable, str(HOOK_PATH)],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None
+    process.stdin.write(json.dumps(event) + "\n")
+    process.stdin.close()
+    # communicate() should only drain the output pipes after EOF was sent.
+    process.stdin = None
+    return process
+
+
+def _install_codex_workspace_hook(
+    *,
+    workspace: Path,
+    home: Path,
+    base_url: str,
+    agent_id: str,
+    project_id: str,
+) -> list[str]:
+    """Install through the user-facing CLI and return its generated hook argv."""
+    workspace.mkdir(parents=True)
+    home.mkdir(parents=True)
+    environment = os.environ.copy()
+    environment["HOME"] = str(home)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY_ROOT / "integrations" / "codex" / "setup_workspace.py"),
+            "--workspace",
+            str(workspace),
+            "--api-base-url",
+            base_url,
+            "--agent-id",
+            agent_id,
+            "--project-id",
+            project_id,
+        ],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    hooks_path = workspace / ".codex" / "hooks.json"
+    hooks_file = json.loads(hooks_path.read_text(encoding="utf-8"))
+    entries = hooks_file["hooks"]["PermissionRequest"]
+    assert len(entries) == 1
+    assert entries[0]["matcher"] == "*"
+    handlers = entries[0]["hooks"]
+    assert len(handlers) == 1
+    handler = handlers[0]
+    assert handler["type"] == "command"
+    assert handler["timeout"] == 960
+    command = shlex.split(handler["command"])
+    assert command[0] == sys.executable
+    assert Path(command[1]).resolve() == HOOK_PATH.resolve()
+    assert command[2] == "--config"
+    assert Path(command[3]).is_file()
+    return command
+
+
+def _launch_installed_hook(
+    command: list[str],
+    event: dict[str, Any],
+    environment: dict[str, str],
+    workspace: Path,
+) -> subprocess.Popen[str]:
+    """Execute the exact argv encoded in Codex's generated workspace config."""
+    process = subprocess.Popen(
+        command,
+        cwd=workspace,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None
+    process.stdin.write(json.dumps(event) + "\n")
+    process.stdin.close()
+    process.stdin = None
+    return process
+
+
+def _finish_hook(process: subprocess.Popen[str]) -> tuple[dict[str, Any], str]:
+    stdout, stderr = process.communicate(timeout=20)
+    assert process.returncode == 0, stderr
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    assert lines, "Codex hook emitted no decision"
+    output = json.loads(lines[-1])
+    assert set(output) == {"hookSpecificOutput"}
+    assert output.get("hookSpecificOutput", {}).get("hookEventName") == "PermissionRequest"
+    assert isinstance(output["hookSpecificOutput"].get("decision"), dict)
+    assert output["hookSpecificOutput"]["decision"].get("behavior") in {"allow", "deny"}
+    return output["hookSpecificOutput"]["decision"], stderr
+
+
+def _assert_terminal_diagnostic(
+    stderr: str, *, approval_id: str | None, decision: str
+) -> None:
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    assert len(lines) == 1
+    diagnostic = json.loads(lines[0])
+    assert diagnostic["event"] == "terminal_decision"
+    assert diagnostic["provider"] == "CODEX"
+    assert diagnostic["decision"] == decision
+    assert diagnostic["approval_id"] == approval_id
+
+
+def _read_approvals(db_path: Path, agent_id: str) -> list[dict[str, Any]]:
+    with sqlite3.connect(db_path, timeout=5) as connection:
+        rows = connection.execute(
+            "SELECT payload FROM kv_store WHERE entity_type='approval_request' "
+            "AND json_extract(payload,'$.source_provider')='CODEX' "
+            "AND json_extract(payload,'$.source_agent_id')=?",
+            (agent_id,),
+        ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+def _wait_for_approval(
+    db_path: Path,
+    *,
+    agent_id: str,
+    process: subprocess.Popen[str],
+    exclude_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    excluded = exclude_ids or set()
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        approvals = [
+            approval
+            for approval in _read_approvals(db_path, agent_id)
+            if approval.get("id") not in excluded
+        ]
+        if approvals:
+            return max(approvals, key=lambda approval: approval.get("created_at", ""))
+        assert process.poll() is None, "Codex hook exited before creating a pending approval"
+        time.sleep(0.05)
+    pytest.fail("Codex hook did not persist a pending approval before the deadline")
+
+
+def _decide(base_url: str, approval_id: str, decision: str) -> dict[str, Any]:
+    with httpx.Client(base_url=base_url, timeout=5) as api:
+        reviewed = api.get(f"/approvals/{approval_id}")
+        assert reviewed.status_code == 200, reviewed.text
+        fingerprint = reviewed.json().get("review_fingerprint")
+        assert isinstance(fingerprint, str) and fingerprint
+        response = api.post(
+            f"/approvals/{approval_id}/decision",
+            json={
+                "decision": decision,
+                "reason": "SQLite subprocess integration test",
+                "review_fingerprint": fingerprint,
+            },
+        )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _claim_count(db_path: Path, approval_id: str) -> int:
+    with sqlite3.connect(db_path, timeout=5) as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM approval_delivery_claims WHERE approval_id=?",
+            (approval_id,),
+        ).fetchone()
+    return int(row[0])
+
+
+def _audit_count(db_path: Path, approval_id: str, event_type: str) -> int:
+    with sqlite3.connect(db_path, timeout=5) as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM kv_store WHERE entity_type='audit_event' "
+            "AND json_extract(payload,'$.event_type')=? "
+            "AND json_extract(payload,'$.entity_id')=?",
+            (event_type, approval_id),
+        ).fetchone()
+    return int(row[0])
+
+
+def _permission_event(
+    *, tool_use_id: str | None, cwd: Path = REPOSITORY_ROOT
+) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "hook_event_name": "PermissionRequest",
+        "cwd": str(cwd),
+        "permission_mode": "default",
+        "session_id": "codex-sqlite-restart-session",
+        "turn_id": "codex-sqlite-restart-turn",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo durable-codex-approval"},
+    }
+    if tool_use_id is not None:
+        event["tool_use_id"] = tool_use_id
+    return event
+
+
+@pytest.mark.parametrize(
+    ("decision_value", "expected_behavior", "expected_claims"),
+    [("approve", "allow", 1), ("reject", "deny", 0)],
+)
+def test_installed_codex_permission_hook_survives_api_restart_and_fails_closed_on_replay(
+    tmp_path: Path,
+    decision_value: str,
+    expected_behavior: str,
+    expected_claims: int,
+) -> None:
+    """The installed PermissionRequest command waits across restart and returns once."""
+    db_path = tmp_path / f"codex-installer-{decision_value}.sqlite3"
+    db_path.parent.chmod(0o700)
+    workspace = tmp_path / "project path with spaces"
+    home = tmp_path / "isolated user home"
+    port = _free_loopback_port()
+    api_process: subprocess.Popen[bytes] | None = None
+    hook_process: subprocess.Popen[str] | None = None
+    replay_process: subprocess.Popen[str] | None = None
+
+    try:
+        api_process, base_url = _start_api(db_path, port)
+        project_id, agent_id, token = _create_codex_agent(base_url)
+        command = _install_codex_workspace_hook(
+            workspace=workspace,
+            home=home,
+            base_url=base_url,
+            agent_id=agent_id,
+            project_id=project_id,
+        )
+        environment = _hook_environment(base_url, project_id, agent_id, token)
+        environment["HOME"] = str(home)
+        event = _permission_event(
+            tool_use_id=f"codex-installed-{decision_value}-27", cwd=workspace
+        )
+
+        hook_process = _launch_installed_hook(command, event, environment, workspace)
+        approval = _wait_for_approval(db_path, agent_id=agent_id, process=hook_process)
+        assert approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert approval["source_provider"] == "CODEX"
+        assert approval["source_invocation_id"]
+        assert hook_process.poll() is None, "installed PermissionRequest returned before a decision"
+
+        _stop_api(api_process)
+        api_process = None
+        api_process, restarted_base_url = _start_api(db_path, port)
+        assert restarted_base_url == base_url
+
+        decision = _decide(base_url, approval["id"], decision_value)
+        expected_status = "APPROVED" if decision_value == "approve" else "DENIED"
+        assert decision["status"] == expected_status
+        hook_decision, stderr = _finish_hook(hook_process)
+        hook_process = None
+        _assert_terminal_diagnostic(
+            stderr, approval_id=approval["id"], decision=expected_behavior
+        )
+        assert hook_decision["behavior"] == expected_behavior
+        assert _claim_count(db_path, approval["id"]) == expected_claims
+        assert _audit_count(db_path, approval["id"], "approval.created_by_agent") == 1
+        assert _audit_count(db_path, approval["id"], "approval.decision") == 1
+        if expected_claims:
+            assert _audit_count(db_path, approval["id"], "approval.delivery_claimed") == 1
+
+        # The same installed command and provider identity cannot create a
+        # second approval or return allow after its one-time decision is spent.
+        replay_process = _launch_installed_hook(command, event, environment, workspace)
+        replay_decision, replay_stderr = _finish_hook(replay_process)
+        replay_process = None
+        replay_diagnostics = [
+            json.loads(line) for line in replay_stderr.splitlines() if line.strip()
+        ]
+        assert len(replay_diagnostics) == 1
+        assert replay_diagnostics[0]["event"] == "terminal_decision"
+        assert replay_diagnostics[0]["provider"] == "CODEX"
+        assert replay_diagnostics[0]["decision"] == "deny"
+        assert replay_diagnostics[0]["approval_id"] in {None, approval["id"]}
+        assert replay_decision["behavior"] == "deny"
+        assert _claim_count(db_path, approval["id"]) == expected_claims
+        assert _audit_count(db_path, approval["id"], "approval.created_by_agent") == 1
+        assert _audit_count(db_path, approval["id"], "approval.decision") == 1
+        invocations = [
+            item
+            for item in _read_approvals(db_path, agent_id)
+            if item.get("source_invocation_id") == approval["source_invocation_id"]
+        ]
+        assert [item["id"] for item in invocations] == [approval["id"]]
+    finally:
+        for process in (hook_process, replay_process):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)
+
+
+def test_identified_codex_invocation_recovers_after_api_restart_and_consumes_once(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "codex-hook-restart.sqlite3"
+    db_path.parent.chmod(0o700)
+    port = _free_loopback_port()
+    api_process: subprocess.Popen[bytes] | None = None
+    hook_process: subprocess.Popen[str] | None = None
+    replay_process: subprocess.Popen[str] | None = None
+
+    try:
+        api_process, base_url = _start_api(db_path, port)
+        project_id, agent_id, token = _create_codex_agent(base_url)
+        environment = _hook_environment(base_url, project_id, agent_id, token)
+        event = _permission_event(tool_use_id="codex-tool-use-restart-19")
+
+        hook_process = _launch_hook(event, environment)
+        approval = _wait_for_approval(
+            db_path, agent_id=agent_id, process=hook_process
+        )
+        assert approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert approval["source_provider"] == "CODEX"
+        assert approval["source_invocation_id"]
+        assert hook_process.poll() is None, "hook returned before a reviewer decision"
+
+        _stop_api(api_process)
+        api_process = None
+        api_process, restarted_base_url = _start_api(db_path, port)
+        assert restarted_base_url == base_url
+
+        decision = _decide(base_url, approval["id"], "approve")
+        assert decision["status"] == "APPROVED"
+        hook_decision, stderr = _finish_hook(hook_process)
+        hook_process = None
+        _assert_terminal_diagnostic(stderr, approval_id=approval["id"], decision="allow")
+        assert hook_decision == {"behavior": "allow"}
+        assert _claim_count(db_path, approval["id"]) == 1
+
+        # A restarted hook with the same provider invocation cannot deliver a
+        # second allow: the existing one-time decision claim is authoritative.
+        replay_process = _launch_hook(event, environment)
+        replay_decision, replay_stderr = _finish_hook(replay_process)
+        replay_process = None
+        _assert_terminal_diagnostic(replay_stderr, approval_id=approval["id"], decision="deny")
+        assert replay_decision["behavior"] == "deny"
+        assert _claim_count(db_path, approval["id"]) == 1
+        invocation_approvals = [
+            item
+            for item in _read_approvals(db_path, agent_id)
+            if item.get("source_invocation_id") == approval["source_invocation_id"]
+        ]
+        assert [item["id"] for item in invocation_approvals] == [approval["id"]]
+    finally:
+        if hook_process is not None and hook_process.poll() is None:
+            hook_process.kill()
+            hook_process.communicate(timeout=5)
+        if replay_process is not None and replay_process.poll() is None:
+            replay_process.kill()
+            replay_process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)
+
+
+def test_codex_hook_process_restart_reattaches_same_pending_provider_invocation(
+    tmp_path: Path,
+) -> None:
+    """A restarted hook rejoins the same pending Codex call and can consume once."""
+    db_path = tmp_path / "codex-pending-hook-process-restart.sqlite3"
+    db_path.parent.chmod(0o700)
+    port = _free_loopback_port()
+    api_process: subprocess.Popen[bytes] | None = None
+    interrupted_process: subprocess.Popen[str] | None = None
+    resumed_process: subprocess.Popen[str] | None = None
+    replay_process: subprocess.Popen[str] | None = None
+
+    try:
+        api_process, base_url = _start_api(db_path, port)
+        project_id, agent_id, token = _create_codex_agent(base_url)
+        environment = _hook_environment(base_url, project_id, agent_id, token)
+        event = _permission_event(tool_use_id="codex-stable-provider-tool-use-2026-01")
+
+        interrupted_process = _launch_hook(event, environment)
+        original = _wait_for_approval(
+            db_path, agent_id=agent_id, process=interrupted_process
+        )
+        assert original["status"] in {"PENDING_REVIEW", "REQUESTED"}
+        assert original["source_provider"] == "CODEX"
+        assert original["source_invocation_id"]
+        assert interrupted_process.poll() is None
+
+        # Simulate a host-side hook process crash after the server has durably
+        # recorded the phone request but before the user decides it.
+        interrupted_process.kill()
+        interrupted_process.communicate(timeout=5)
+        interrupted_process = None
+
+        resumed_process = _launch_hook(event, environment)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            assert resumed_process.poll() is None, (
+                "restarted hook returned before the pending approval was decided"
+            )
+            approvals = _read_approvals(db_path, agent_id)
+            same_invocation = [
+                item
+                for item in approvals
+                if item.get("source_invocation_id") == original["source_invocation_id"]
+            ]
+            assert [item["id"] for item in same_invocation] == [original["id"]]
+            time.sleep(0.05)
+
+        assert _claim_count(db_path, original["id"]) == 0
+        assert _audit_count(db_path, original["id"], "approval.created_by_agent") == 1
+
+        decision = _decide(base_url, original["id"], "approve")
+        assert decision["status"] == "APPROVED"
+        resumed_decision, resumed_stderr = _finish_hook(resumed_process)
+        resumed_process = None
+        _assert_terminal_diagnostic(
+            resumed_stderr, approval_id=original["id"], decision="allow"
+        )
+        assert resumed_decision == {"behavior": "allow"}
+        assert _claim_count(db_path, original["id"]) == 1
+        assert _audit_count(db_path, original["id"], "approval.created_by_agent") == 1
+        assert _audit_count(db_path, original["id"], "approval.decision") == 1
+        assert _audit_count(db_path, original["id"], "approval.delivery_claimed") == 1
+
+        # A further replay of the provider-stable event cannot create another
+        # approval or produce a second allow/claim.
+        replay_process = _launch_hook(event, environment)
+        replay_decision, replay_stderr = _finish_hook(replay_process)
+        replay_process = None
+        _assert_terminal_diagnostic(
+            replay_stderr, approval_id=original["id"], decision="deny"
+        )
+        assert replay_decision.get("behavior") == "deny"
+        invocation_approvals = [
+            item
+            for item in _read_approvals(db_path, agent_id)
+            if item.get("source_invocation_id") == original["source_invocation_id"]
+        ]
+        assert [item["id"] for item in invocation_approvals] == [original["id"]]
+        assert _claim_count(db_path, original["id"]) == 1
+        assert _audit_count(db_path, original["id"], "approval.created_by_agent") == 1
+        assert _audit_count(db_path, original["id"], "approval.decision") == 1
+        assert _audit_count(db_path, original["id"], "approval.delivery_claimed") == 1
+    finally:
+        for process in (interrupted_process, resumed_process, replay_process):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)
+
+
+def test_codex_callback_without_tool_use_id_gets_new_identity_after_relaunch(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "codex-callback-identity.sqlite3"
+    db_path.parent.chmod(0o700)
+    port = _free_loopback_port()
+    api_process: subprocess.Popen[bytes] | None = None
+    first_process: subprocess.Popen[str] | None = None
+    second_process: subprocess.Popen[str] | None = None
+
+    try:
+        api_process, base_url = _start_api(db_path, port)
+        project_id, agent_id, token = _create_codex_agent(base_url)
+        environment = _hook_environment(base_url, project_id, agent_id, token)
+        event = _permission_event(tool_use_id=None)
+
+        first_process = _launch_hook(event, environment)
+        first_approval = _wait_for_approval(
+            db_path, agent_id=agent_id, process=first_process
+        )
+        assert first_process.poll() is None
+        first_decision = _decide(base_url, first_approval["id"], "approve")
+        assert first_decision["status"] == "APPROVED"
+        first_output, first_stderr = _finish_hook(first_process)
+        first_process = None
+        _assert_terminal_diagnostic(first_stderr, approval_id=first_approval["id"], decision="allow")
+        assert first_output == {"behavior": "allow"}
+        assert _claim_count(db_path, first_approval["id"]) == 1
+
+        second_process = _launch_hook(event, environment)
+        second_approval = _wait_for_approval(
+            db_path,
+            agent_id=agent_id,
+            process=second_process,
+            exclude_ids={first_approval["id"]},
+        )
+        assert second_process.poll() is None, "new callback inherited an earlier approval"
+        assert second_approval["id"] != first_approval["id"]
+        assert second_approval["source_invocation_id"] != first_approval["source_invocation_id"]
+        assert second_approval["status"] in {"PENDING_REVIEW", "REQUESTED"}
+
+        second_decision = _decide(base_url, second_approval["id"], "reject")
+        assert second_decision["status"] in {"DENIED", "REJECTED"}
+        second_output, second_stderr = _finish_hook(second_process)
+        second_process = None
+        _assert_terminal_diagnostic(second_stderr, approval_id=second_approval["id"], decision="deny")
+        assert second_output["behavior"] == "deny"
+        assert _claim_count(db_path, first_approval["id"]) == 1
+        assert _claim_count(db_path, second_approval["id"]) == 0
+    finally:
+        for process in (first_process, second_process):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+        if api_process is not None:
+            _stop_api(api_process)

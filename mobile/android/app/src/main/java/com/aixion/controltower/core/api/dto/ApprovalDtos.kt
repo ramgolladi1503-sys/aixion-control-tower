@@ -3,7 +3,8 @@ package com.aixion.controltower.core.api.dto
 data class FileChangeDto(
     val path: String,
     val change_type: String = "update",
-    val diff: String
+    val diff: String,
+    val new_content: String? = null
 )
 
 data class RiskAssessmentDto(
@@ -30,9 +31,12 @@ data class ApprovalRequestDto(
     val source_agent_id: String? = null,
     val source_agent_name: String? = null,
     val source_session_id: String? = null,
+    val source_invocation_id: String? = null,
     val source_task_url: String? = null,
+    val expires_at: String? = null,
     val created_by_user_id: String? = null,
-    val verified_source: Boolean = false
+    val verified_source: Boolean = false,
+    val review_fingerprint: String? = null
 ) {
     val uiSourceProvider: String get() = source_provider ?: "MANUAL"
     val uiSourceAgentId: String? get() = source_agent_id
@@ -45,5 +49,6 @@ data class ApprovalRequestDto(
 
 data class DecisionRequestDto(
     val decision: String,
-    val reason: String = ""
+    val reason: String = "",
+    val review_fingerprint: String
 )

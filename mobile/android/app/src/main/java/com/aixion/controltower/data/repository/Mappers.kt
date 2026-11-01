@@ -40,7 +40,7 @@ data class WorkOrderSourceMetadata(
 
 fun String.toRiskLevelOrDefault(): RiskLevel = runCatching {
     RiskLevel.valueOf(uppercase())
-}.getOrDefault(RiskLevel.MEDIUM)
+}.getOrDefault(RiskLevel.UNKNOWN)
 
 fun String.toApprovalStatusOrDefault(): ApprovalStatus {
     val normalized = uppercase()
@@ -54,7 +54,7 @@ fun String.toApprovalStatusOrDefault(): ApprovalStatus {
     }
     return runCatching {
         ApprovalStatus.valueOf(canonical)
-    }.getOrDefault(ApprovalStatus.REQUESTED)
+    }.getOrDefault(ApprovalStatus.UNKNOWN)
 }
 
 fun String.toMCPPendingStatusOrDefault(): MCPPendingStatus {
@@ -116,7 +116,8 @@ fun FileChangeDto.toUiSummary(fallbackRisk: RiskLevel): FileChangeSummary {
         path = path,
         changeType = change_type,
         diff = diff,
-        risk = fallbackRisk
+        risk = fallbackRisk,
+        newContent = new_content
     )
 }
 
@@ -139,9 +140,14 @@ fun ApprovalRequestDto.toUiSummary(projectName: String = "Project"): ApprovalSum
         sourceAgentId = uiSourceAgentId,
         sourceAgentName = uiSourceAgentName,
         sourceSessionId = uiSourceSessionId,
+        sourceInvocationId = source_invocation_id,
         sourceTaskUrl = uiSourceTaskUrl,
+        expiresAt = expires_at,
         createdByUserId = uiCreatedByUserId,
-        verifiedSource = uiVerifiedSource
+        verifiedSource = uiVerifiedSource,
+        projectId = project_id,
+        riskReasons = risk.reasons,
+        reviewFingerprint = review_fingerprint
     )
 }
 
@@ -194,6 +200,7 @@ fun RuntimeReadinessDto.toUiSummary(): RuntimeReadinessSummary {
         generatedAt = generated_at,
         profile = profile,
         authEnabled = auth_enabled,
+        databaseBackend = database_backend,
         dbReachable = db_reachable,
         migrationsApplied = migrations_applied,
         expectedMigrationIds = expected_migration_ids,

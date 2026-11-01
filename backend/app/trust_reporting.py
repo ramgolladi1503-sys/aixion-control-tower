@@ -8,26 +8,30 @@ from .trust_models import (
     ExceptionQueueItem,
     PolicyDecisionType,
 )
+from .workspace_access import agent_run_scope_is_consistent, agent_run_workspace_id
 
 
-def _effective_decisions():
+def _effective_decisions(workspace_id: str | None = None):
     return [
         decision
         for action in store.proposed_actions.values()
+        if workspace_id is None or action.workspace_id == workspace_id
         if (decision := latest_policy_decision(action.id)) is not None
     ]
 
 
-def build_reliability_scorecards() -> list[AgentReliabilityScorecard]:
+def build_reliability_scorecards(workspace_id: str | None = None) -> list[AgentReliabilityScorecard]:
     keys = {
         (action.provider, action.agent_id)
         for action in store.proposed_actions.values()
+        if workspace_id is None or action.workspace_id == workspace_id
     }
     keys.update(
         (task.provider, task.external_agent_id)
         for task in store.agent_tasks.values()
+        if workspace_id is None or task.workspace_id == workspace_id
     )
-    effective = _effective_decisions()
+    effective = _effective_decisions(workspace_id)
 
     results: list[AgentReliabilityScorecard] = []
     for provider, agent_id in sorted(
@@ -37,6 +41,7 @@ def build_reliability_scorecards() -> list[AgentReliabilityScorecard]:
         actions = [
             action
             for action in store.proposed_actions.values()
+            if workspace_id is None or action.workspace_id == workspace_id
             if action.provider == provider and action.agent_id == agent_id
         ]
         action_ids = {action.id for action in actions}
@@ -61,6 +66,7 @@ def build_reliability_scorecards() -> list[AgentReliabilityScorecard]:
         tasks = [
             task
             for task in store.agent_tasks.values()
+            if workspace_id is None or task.workspace_id == workspace_id
             if task.provider == provider and task.external_agent_id == agent_id
         ]
         task_ids = {task.id for task in tasks}
@@ -149,9 +155,13 @@ def build_reliability_scorecards() -> list[AgentReliabilityScorecard]:
     return results
 
 
-def build_exception_queue() -> list[ExceptionQueueItem]:
+def build_exception_queue(workspace_id: str | None = None) -> list[ExceptionQueueItem]:
     items: list[ExceptionQueueItem] = []
     for run in store.agent_runs.values():
+        if not agent_run_scope_is_consistent(run):
+            continue
+        if workspace_id is not None and agent_run_workspace_id(run) != workspace_id:
+            continue
         if run.status.value not in {"NEEDS_HUMAN", "BLOCKED", "FAILED"}:
             continue
         severity = (
@@ -177,6 +187,8 @@ def build_exception_queue() -> list[ExceptionQueueItem]:
         )
 
     for action in store.proposed_actions.values():
+        if workspace_id is not None and action.workspace_id != workspace_id:
+            continue
         decision = latest_policy_decision(action.id)
         if decision is None or decision.decision == PolicyDecisionType.ALLOW:
             continue

@@ -25,7 +25,7 @@ local
 | `local` | enabled | `runtime/aixion_control_tower.sqlite3` | Normal local development with auth on by default. |
 | `demo` | disabled | `runtime/aixion_control_tower_demo.sqlite3` | Fast LAN/demo mode where approval proof is more important than login. |
 | `test` | disabled | `runtime/aixion_control_tower_test.sqlite3` | Script/test validation with isolated data. |
-| `production` | enabled | `runtime/aixion_control_tower.sqlite3` | Production-like behavior. Still not a full deployment story. |
+| `production` | enabled | PostgreSQL required; startup is blocked until the full PostgreSQL application store is active | Production configuration validation only; not currently deployable. |
 
 ## Override rules
 
@@ -35,7 +35,8 @@ Supported overrides:
 
 ```bash
 AIXION_AUTH_ENABLED=true|false
-AIXION_DB_PATH=runtime/custom.sqlite3
+AIXION_DB_PATH=runtime/custom.sqlite3  # local, demo, and test only
+AIXION_POSTGRES_DSN=<secret-managed PostgreSQL DSN>  # production prerequisite; not sufficient to enable production
 ```
 
 Example:
@@ -122,24 +123,18 @@ auth disabled by default
 isolated test database path unless AIXION_DB_PATH overrides it
 ```
 
-## Production-like mode
+## Production profile
 
-Use:
+Production requires `AIXION_POSTGRES_DSN` with `sslmode=verify-full`; inject it
+from the deployment secret manager. `AIXION_DB_PATH` is a SQLite-only local,
+demo, and test setting and is rejected when configured in production.
 
-```bash
-cd backend
-AIXION_PROFILE=production AIXION_DB_PATH=/safe/persistent/path/aixion.sqlite3 uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Expected behavior:
-
-```text
-auth enabled
-explicit persistent DB path strongly recommended
-no reload flag
-```
-
-Hard truth: this is still not a complete production deployment. It does not solve secrets, TLS, database migrations, monitoring, role-based permissions, backups, or infra hardening.
+**Production startup is intentionally blocked.** PostgreSQL repositories and a
+schema probe exist, but application routes and background workers still use the
+SQLite-backed store. Supplying a PostgreSQL DSN does not switch the application
+store. Do not deploy this profile or send production traffic until the full
+repository boundary, tenant isolation, migration, backup/restore, and
+multi-process gates pass.
 
 ## Android API URL profile
 
@@ -187,7 +182,7 @@ That is false until deployment, secrets, monitoring, TLS, backups, and role perm
 | Unknown profile | `AIXION_PROFILE` typo or unsupported value | Use `local`, `demo`, `test`, or `production`. |
 | Invalid auth value | `AIXION_AUTH_ENABLED` is not boolean-like | Use `true` or `false`. |
 | Auth required during demo | Profile/override enabled auth | Login through Android `Acct` or set auth false for fast demo. |
-| Data appears in wrong DB | Wrong profile or `AIXION_DB_PATH` override | Print env and verify DB path before demo. |
+| Data appears in wrong DB | Wrong profile or `AIXION_DB_PATH` override | Print env and verify the SQLite path before local/demo/test use. |
 | Phone cannot reach backend | Android URL/network issue, not profile issue | Prove `/health` from phone browser first. |
 
 ## Brutal truth

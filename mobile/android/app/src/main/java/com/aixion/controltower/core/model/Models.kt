@@ -5,7 +5,8 @@ enum class RiskLevel {
     MEDIUM,
     HIGH,
     CRITICAL,
-    BLOCKED
+    BLOCKED,
+    UNKNOWN
 }
 
 enum class ApprovalStatus {
@@ -26,7 +27,8 @@ enum class ApprovalStatus {
     APPLIED,
     TESTS_RUNNING,
     TESTS_PASSED,
-    TESTS_FAILED
+    TESTS_FAILED,
+    UNKNOWN
 }
 
 enum class ApprovalDashboardBucket {
@@ -76,7 +78,8 @@ data class FileChangeSummary(
     val path: String,
     val changeType: String,
     val diff: String,
-    val risk: RiskLevel
+    val risk: RiskLevel,
+    val newContent: String? = null
 )
 
 data class ApprovalSummary(
@@ -96,9 +99,14 @@ data class ApprovalSummary(
     val sourceAgentId: String? = null,
     val sourceAgentName: String? = null,
     val sourceSessionId: String? = null,
+    val sourceInvocationId: String? = null,
     val sourceTaskUrl: String? = null,
+    val expiresAt: String? = null,
     val createdByUserId: String? = null,
-    val verifiedSource: Boolean = false
+    val verifiedSource: Boolean = false,
+    val projectId: String = "",
+    val riskReasons: List<String> = emptyList(),
+    val reviewFingerprint: String? = null
 ) {
     val sourceLabel: String
         get() = sourceAgentName?.takeIf { it.isNotBlank() } ?: sourceProvider
@@ -107,7 +115,70 @@ data class ApprovalSummary(
         get() = files.any { file ->
             file.path.startsWith("mcp://") || file.changeType == "mcp_tool_call"
         }
+
+    /** True when this approval contains an exact agent/MCP tool invocation payload. */
+    val hasExactToolRequestPayload: Boolean
+        get() = files.any { file ->
+            file.changeType.equals("tool_call", ignoreCase = true) ||
+                file.changeType.equals("mcp_tool_call", ignoreCase = true) ||
+                file.path.startsWith("mcp://", ignoreCase = true) ||
+                file.path.startsWith("antigravity://tool/", ignoreCase = true) ||
+                file.path.startsWith("codex://tool/", ignoreCase = true)
+        }
 }
+
+/** An immutable reviewer decision event. It is intentionally separate from mutable approval status. */
+data class ApprovalHistoryEvent(
+    val eventId: String,
+    val approvalId: String,
+    val decision: String,
+    val reason: String?,
+    val decidedAt: String?,
+    val reviewerLabel: String,
+    val deliveryStatus: ApprovalDeliveryStatus = ApprovalDeliveryStatus.NOT_CONFIRMED,
+    val requestSnapshotVerified: Boolean,
+    val requestSnapshot: ApprovalHistoryRequestSnapshot?
+)
+
+enum class ApprovalDeliveryStatus {
+    NOT_CONFIRMED,
+    NOT_APPLICABLE,
+    AWAITING_DELIVERY,
+    EXPIRED,
+    CONSUMED,
+    DELIVERY_UNCONFIRMED
+}
+
+data class ApprovalHistoryPage(
+    val events: List<ApprovalHistoryEvent>,
+    val limit: Int,
+    val hasMore: Boolean,
+    val nextCursor: String? = null
+)
+
+data class ApprovalHistoryRequestSnapshot(
+    val projectId: String?,
+    val title: String?,
+    val summary: String?,
+    val agentName: String?,
+    val targetBranch: String?,
+    val files: List<ApprovalHistoryFile>,
+    val testPlan: List<String>,
+    val rollbackPlan: String?,
+    val sourceProvider: String?,
+    val sourceAgentName: String?,
+    val sourceSessionId: String?,
+    val sourceInvocationId: String?,
+    val sourceTaskUrl: String?,
+    val riskLevel: RiskLevel,
+    val riskReasons: List<String>,
+    val requiredActions: List<String>
+)
+
+data class ApprovalHistoryFile(
+    val path: String,
+    val changeType: String
+)
 
 val ApprovalStatus.canonical: ApprovalStatus
     get() = when (this) {
@@ -132,7 +203,8 @@ val ApprovalSummary.dashboardBucket: ApprovalDashboardBucket
         ApprovalStatus.MERGED -> ApprovalDashboardBucket.COMPLETED
         ApprovalStatus.DENIED,
         ApprovalStatus.EXPIRED,
-        ApprovalStatus.CANCELLED -> ApprovalDashboardBucket.HISTORY
+        ApprovalStatus.CANCELLED,
+        ApprovalStatus.UNKNOWN -> ApprovalDashboardBucket.HISTORY
         ApprovalStatus.PENDING_REVIEW,
         ApprovalStatus.REJECTED,
         ApprovalStatus.APPLIED,
@@ -142,7 +214,7 @@ val ApprovalSummary.dashboardBucket: ApprovalDashboardBucket
     }
 
 val ApprovalSummary.requiresHumanAction: Boolean
-    get() = dashboardBucket == ApprovalDashboardBucket.NEEDS_APPROVAL
+    get() = dashboardBucket == ApprovalDashboardBucket.NEEDS_APPROVAL && risk != RiskLevel.UNKNOWN
 
 val ApprovalSummary.isAwaitingGitHubExecution: Boolean
     get() = dashboardBucket == ApprovalDashboardBucket.APPROVED_WAITING
@@ -202,6 +274,7 @@ data class RuntimeReadinessSummary(
     val generatedAt: String?,
     val profile: String,
     val authEnabled: Boolean,
+    val databaseBackend: String,
     val dbReachable: Boolean,
     val migrationsApplied: Boolean,
     val expectedMigrationIds: List<String>,

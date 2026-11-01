@@ -3,8 +3,13 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
-from .models import AuditEvent, now_utc
-from .store import store
+from .models import (
+    ApprovalRequest,
+    ApprovalStatus,
+    AuditEvent,
+    Notification,
+    now_utc,
+)
 
 CANCELLABLE_STATUSES = {
     AgentTaskStatus.RECEIVED,
@@ -36,6 +41,16 @@ class AgentTaskCancelSummary(BaseModel):
 
 
 def cancel_summary(task: AgentTask) -> AgentTaskCancelSummary:
+    if any((task.worker_lease_owner, task.worker_lease_token, task.worker_lease_expires_at)):
+        return AgentTaskCancelSummary(
+            task_id=task.id,
+            current_status=task.status,
+            cancel_allowed=False,
+            reason=(
+                "Agent task has a recorded worker lease. Confirm the worker has stopped "
+                "and reconcile the lease before cancelling."
+            ),
+        )
     if task.status in CANCELLABLE_STATUSES:
         return AgentTaskCancelSummary(
             task_id=task.id,
@@ -65,7 +80,72 @@ def cancel_summary(task: AgentTask) -> AgentTaskCancelSummary:
     )
 
 
-def append_cancel_requested_event(task: AgentTask, *, actor: str, reason: str) -> AgentTaskEvent:
+def prepare_linked_approval_cancellation(
+    task: AgentTask,
+    approval: ApprovalRequest,
+    *,
+    actor: str,
+    reason: str,
+) -> tuple[ApprovalRequest | None, AuditEvent | None, Notification | None]:
+    if (
+        task.status != AgentTaskStatus.WAITING_FOR_APPROVAL
+        or not task.approval_request_id
+        or approval.id != task.approval_request_id
+        or approval.project_id != task.project_id
+        or approval.workspace_id != task.workspace_id
+    ):
+        raise ValueError("Linked approval identity or scope does not match the waiting AgentTask.")
+    if approval.status in {
+        ApprovalStatus.DENIED,
+        ApprovalStatus.EXPIRED,
+        ApprovalStatus.CANCELLED,
+    }:
+        return None, None, None
+    if approval.status not in {
+        ApprovalStatus.REQUESTED,
+        ApprovalStatus.PENDING_REVIEW,
+        ApprovalStatus.BLOCKED,
+    }:
+        raise ValueError("Linked approval is no longer pending; reconcile its decision before cancelling the task.")
+
+    cancelled = approval.model_copy(
+        update={"status": ApprovalStatus.CANCELLED, "updated_at": now_utc()}
+    )
+    audit = AuditEvent(
+        event_type="approval.cancelled",
+        entity_id=approval.id,
+        workspace_id=approval.workspace_id,
+        actor=actor,
+        created_at=cancelled.updated_at,
+        details={
+            "project_id": approval.project_id,
+            "source_task_id": task.id,
+            "previous_status": approval.status,
+            "new_status": ApprovalStatus.CANCELLED,
+            "approved_payload_hash": approval.approved_payload_hash,
+            "reason": reason,
+        },
+    )
+    notification = Notification(
+        title=f"Approval cancelled: {approval.title}",
+        body="The linked agent task was cancelled. This approval can no longer be acted on.",
+        entity_type="approval_request",
+        entity_id=approval.id,
+        approval_request_id=approval.id,
+        workspace_id=approval.workspace_id,
+        user_id=approval.created_by_user_id,
+        created_at=cancelled.updated_at,
+    )
+    return cancelled, audit, notification
+
+
+def append_cancel_requested_event(
+    task: AgentTask,
+    *,
+    actor: str,
+    reason: str,
+    approval_decision_changed: bool = False,
+) -> AgentTaskEvent:
     previous_status = task.status
     task.status = AgentTaskStatus.CANCELLED
     task.worker_lease_owner = None
@@ -84,11 +164,10 @@ def append_cancel_requested_event(task: AgentTask, *, actor: str, reason: str) -
             "new_status": task.status,
             "reason": reason,
             "worker_lease_cleared": True,
-            "approval_decision_changed": False,
+            "approval_decision_changed": approval_decision_changed,
             "worker_cleanup_performed": False,
         },
     )
-    store.agent_task_events[event.id] = event
     return event
 
 
@@ -96,6 +175,7 @@ def audit_cancel_requested(task: AgentTask, *, actor: str, event: AgentTaskEvent
     audit = AuditEvent(
         event_type="agent_task.cancelled",
         entity_id=task.id,
+        workspace_id=task.workspace_id,
         actor=actor,
         details={
             "event_id": event.id,
@@ -103,9 +183,8 @@ def audit_cancel_requested(task: AgentTask, *, actor: str, event: AgentTaskEvent
             "task_status": task.status,
             "previous_status": event.metadata.get("previous_status"),
             "worker_lease_cleared": True,
-            "approval_decision_changed": False,
+            "approval_decision_changed": event.metadata.get("approval_decision_changed") is True,
             "worker_cleanup_performed": False,
         },
     )
-    store.audit_events.append(audit)
     return audit

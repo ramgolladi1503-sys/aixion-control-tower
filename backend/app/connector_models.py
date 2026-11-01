@@ -123,6 +123,7 @@ class AgentConnector(BaseModel):
     failed_auth_count: int = 0
     last_error: str | None = None
     created_by_user_id: str | None = None
+    workspace_id: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)

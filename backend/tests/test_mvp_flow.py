@@ -1,8 +1,11 @@
 import os
+from datetime import datetime, timedelta
+
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.settings import get_settings
 from app.store import store
 
 client = TestClient(app)
@@ -70,6 +73,18 @@ def test_idea_to_approval_flow_allows_low_risk_docs_change() -> None:
     approval = approval_response.json()
     assert approval["status"] == "REQUESTED"
     assert approval["risk"]["level"] == "LOW"
+    assert approval["expires_at"] is not None
+    created_at = datetime.fromisoformat(approval["created_at"])
+    expires_at = datetime.fromisoformat(approval["expires_at"])
+    assert expires_at - created_at == timedelta(
+        seconds=get_settings().agent_approval_ttl_seconds
+    )
+    audit_events = client.get(
+        "/audit/events",
+        params={"event_type": "approval.created", "entity_id": approval["id"]},
+    ).json()
+    assert len(audit_events) == 1
+    assert audit_events[0]["details"]["expires_at"] == approval["expires_at"]
 
     grouped_response = client.get("/approvals/grouped")
     assert grouped_response.status_code == 200
@@ -121,6 +136,7 @@ def test_blocks_protected_branch_request() -> None:
     body = response.json()
     assert body["status"] == "BLOCKED"
     assert body["risk"]["level"] == "BLOCKED"
+    assert body["expires_at"] is None
 
     decision = client.post(
         f"/approvals/{body['id']}/decision",

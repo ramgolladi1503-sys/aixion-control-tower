@@ -7,11 +7,12 @@ from .notifications import create_notification
 
 def notify_agent_task_approval_created(task: AgentTask, approval: ApprovalRequest) -> Notification:
     return create_notification(
-        title=f"Agent task approval needed: {task.title}",
+        title=f"Approval needed: {task.title}",
         body=f"{approval.risk.level} risk approval is waiting for review from {task.provider}.",
         entity_type="agent_task",
         entity_id=task.id,
         user_id=task.created_by_user_id,
+        approval_request_id=approval.id,
     )
 
 
@@ -35,10 +36,29 @@ def notify_agent_task_approval_decision(task: AgentTask, approval: ApprovalReque
         entity_type="agent_task",
         entity_id=task.id,
         user_id=task.created_by_user_id,
+        approval_request_id=approval.id,
     )
 
 
 def notify_agent_task_worker_status(task: AgentTask) -> Notification | None:
+    notification = build_agent_task_worker_status_notification(task)
+    if notification is None:
+        return None
+    return create_notification(
+        title=notification.title,
+        body=notification.body,
+        entity_type=notification.entity_type,
+        entity_id=notification.entity_id,
+        user_id=notification.user_id,
+        workspace_id=notification.workspace_id,
+    )
+
+
+def build_agent_task_worker_status_notification(
+    task: AgentTask,
+    *,
+    workspace_id: str | None = None,
+) -> Notification | None:
     if task.status == AgentTaskStatus.EXECUTING:
         title = f"Agent task executing: {task.title}"
         body = "Worker has started processing the approved task."
@@ -54,10 +74,11 @@ def notify_agent_task_worker_status(task: AgentTask) -> Notification | None:
     else:
         return None
 
-    return create_notification(
+    return Notification(
         title=title,
         body=body,
         entity_type="agent_task",
         entity_id=task.id,
         user_id=task.created_by_user_id,
+        workspace_id=workspace_id if workspace_id is not None else task.workspace_id,
     )

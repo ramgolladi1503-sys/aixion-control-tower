@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
 
 os.environ.setdefault("AIXION_PROFILE", "test")
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
@@ -8,8 +13,11 @@ os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 from fastapi.testclient import TestClient
 
 from app.auth import require_user
-from app.main import app
+from app import ops_routes
+from app.main import _POSTGRES_APP_STATE_BINDINGS, app
 from app.models import AuthUser, UserRole
+from app.settings import get_settings
+from app.ops_routes import build_runtime_readiness
 from app.store import store
 
 client = TestClient(app)
@@ -40,6 +48,22 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     body = response.json()
     assert body["status"] == "ready"
     assert body["auth_enabled"] is False
+    assert body["database_backend"] == "sqlite"
+    assert body["application_store_mode"] == "sqlite_local"
+    assert body["application_store_ready"] is True
+    assert body["approval_recovery_status"] in {"not_started", "healthy", "degraded"}
+    assert body["approval_recovery_poll_seconds"] == 60
+    assert body["approval_expiry_status"] in {"not_started", "starting", "healthy", "failed"}
+    assert body["approval_expiry_failure_count"] >= 0
+    assert body["approval_expiry_last_changed_count"] >= 0
+    assert body["app_state_repository_bindings"]["approval_decisions"] == "sqlite"
+    assert body["app_state_repository_bindings"]["projects"] == "sqlite"
+    assert body["app_state_repository_bindings"]["notification_outbox"] == "unbound"
+    assert body["app_state_repository_bindings"]["mcp_pending_requests"] == "unbound"
+    assert body["postgres_probe_enabled"] is False
+    assert body["postgres_auth_rate_limits_enabled"] is False
+    assert body["postgres_probe_status"] == "disabled"
+    assert body["postgres_probe_schema_ready"] is None
     assert body["db_reachable"] is True
     assert body["migrations_applied"] is True
     assert "0001_baseline_kv_store" in body["expected_migration_ids"]
@@ -48,9 +72,622 @@ def test_readiness_reports_runtime_state_without_secret_values() -> None:
     assert body["recovery_format_version"] == "aixion-control-tower-recovery-v1"
     assert isinstance(body["github_token_configured"], bool)
     assert isinstance(body["fcm_server_key_configured"], bool)
+    assert body["email_dispatch_enabled"] is False
+    assert body["email_smtp_configured"] is False
+    assert body["email_outbox_key_configured"] is False
+    assert isinstance(body["auth_rate_limit_key_configured"], bool)
+    assert body["metrics_token_configured"] is False
+    assert body["metrics_workspace_configured"] is False
     assert "db_path" not in body
     assert "GITHUB_TOKEN" not in str(body)
     assert "FCM_SERVER_KEY" not in str(body)
+    assert "SMTP_PASSWORD" not in str(body)
+    assert "AIXION_EMAIL_OUTBOX_KEY" not in str(body)
+    assert "AIXION_AUTH_RATE_LIMIT_HMAC_KEY" not in str(body)
+    assert "AIXION_METRICS_TOKEN" not in str(body)
+
+
+def test_sqlite_readiness_verifies_the_local_flight_recorder(monkeypatch) -> None:
+    called = []
+    expected = ops_routes.FlightRecorderVerification(valid=True, event_count=3)
+    settings = replace(get_settings(), postgres_auth_enabled=False)
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        ops_routes,
+        "verify_flight_recorder",
+        lambda: called.append(True) or expected,
+    )
+
+    readiness = build_runtime_readiness(application_state=app.state)
+
+    assert called == [True]
+    assert readiness.flight_recorder_valid is True
+    assert readiness.flight_recorder_event_count == 3
+
+
+def test_production_readiness_never_reads_sqlite_trust_or_lease_state(monkeypatch) -> None:
+    settings = replace(
+        get_settings(),
+        profile="production",
+        postgres_auth_enabled=False,
+        postgres_runtime_probe_enabled=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+
+    def sqlite_authority_must_not_be_read(*_args, **_kwargs):
+        pytest.fail("Production readiness must not read process-local SQLite state")
+
+    class ForbiddenSQLiteLeaseMap(dict):
+        def values(self):
+            sqlite_authority_must_not_be_read()
+
+    monkeypatch.setattr(
+        ops_routes, "verify_flight_recorder", sqlite_authority_must_not_be_read
+    )
+    monkeypatch.setattr(store, "capability_leases", ForbiddenSQLiteLeaseMap())
+
+    readiness = build_runtime_readiness(
+        postgres_runtime=None,
+        application_state=SimpleNamespace(
+            postgres_runtime=None,
+            postgres_repositories=None,
+        ),
+    )
+
+    assert readiness.status == "not_ready"
+    assert readiness.database_backend == "mixed"
+    assert readiness.application_store_ready is False
+    assert readiness.flight_recorder_valid is False
+    assert readiness.active_capability_leases_available is False
+    assert any("PostgreSQL runtime is unavailable" in error for error in readiness.errors)
+
+
+def test_readiness_reports_metrics_configuration_without_secret_value(monkeypatch) -> None:
+    token = "test-only-prometheus-token-with-more-than-32-bytes"
+    monkeypatch.setenv("AIXION_METRICS_TOKEN", token)
+    monkeypatch.setenv("AIXION_METRICS_WORKSPACE_ID", "workspace-account-1")
+
+    response = client.get("/ops/readiness")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metrics_token_configured"] is True
+    assert body["metrics_workspace_configured"] is True
+    assert token not in response.text
+
+
+def test_readiness_reports_postgres_probe_without_claiming_it_is_active_store(
+    monkeypatch,
+) -> None:
+    class Runtime:
+        def probe(self):
+            expected_ids = tuple(
+                migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+            )
+            schema = type(
+                "Schema",
+                (),
+                {
+                    "ready": True,
+                    "applied_migration_ids": expected_ids,
+                    "missing_migration_ids": (),
+                    "unknown_migration_ids": (),
+                    "mismatched_migration_ids": (),
+                },
+            )()
+            return type(
+                "Probe",
+                (),
+                {
+                    "ready": True,
+                    "schema": schema,
+                    "pool_size": 3,
+                    "pool_available": 2,
+                    "pool_waiting": 1,
+                },
+            )()
+
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    monkeypatch.setenv("AIXION_POSTGRES_AUTH_RATE_LIMITS_ENABLED", "true")
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=app.state,
+    )
+
+    assert readiness.postgres_probe_enabled is True
+    assert readiness.postgres_probe_status == "ready"
+    assert readiness.postgres_probe_schema_ready is True
+    assert readiness.postgres_pool_size == 3
+    assert readiness.postgres_pool_available == 2
+    assert readiness.postgres_pool_waiting == 1
+    assert readiness.postgres_auth_rate_limits_enabled is True
+    assert readiness.database_backend == "sqlite"
+    assert readiness.application_store_mode == "postgres_probe_only"
+    assert readiness.application_store_ready is False
+    assert readiness.app_state_repository_bindings["approval_decisions"] == "sqlite"
+
+
+def test_readiness_reports_postgres_auth_as_mixed_and_not_ready(monkeypatch) -> None:
+    class Runtime:
+        def probe(self):
+            expected_ids = tuple(
+                migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+            )
+            schema = type(
+                "Schema",
+                (),
+                {
+                    "ready": True,
+                    "applied_migration_ids": expected_ids,
+                    "missing_migration_ids": (),
+                    "unknown_migration_ids": (),
+                    "mismatched_migration_ids": (),
+                },
+            )()
+            return type(
+                "Probe",
+                (),
+                {
+                    "ready": True,
+                    "schema": schema,
+                    "pool_size": 2,
+                    "pool_available": 2,
+                    "pool_waiting": 0,
+                },
+            )()
+
+    settings = replace(
+        get_settings(),
+        auth_enabled=True,
+        postgres_auth_enabled=True,
+        postgres_runtime_probe_enabled=True,
+        postgres_auth_rate_limits_enabled=True,
+        email_dispatch_enabled=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+
+    def sqlite_authority_must_not_be_read(*args, **kwargs):
+        pytest.fail("PostgreSQL readiness must not read SQLite recovery state")
+
+    monkeypatch.setattr(store, "applied_migrations", sqlite_authority_must_not_be_read)
+    monkeypatch.setattr(ops_routes, "export_recovery_snapshot", sqlite_authority_must_not_be_read)
+    monkeypatch.setitem(
+        store.capability_leases,
+        "stale-local-lease",
+        type(
+            "Lease",
+            (),
+            {
+                "status": "ACTIVE",
+                "expires_at": datetime.max.replace(tzinfo=timezone.utc),
+            },
+        )(),
+    )
+
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=app.state,
+    )
+
+    assert readiness.database_backend == "mixed"
+    assert readiness.application_store_mode == "postgres_auth_runtime"
+    assert readiness.application_store_ready is False
+    assert readiness.postgres_probe_status == "ready"
+    assert readiness.status == "not_ready"
+    assert readiness.db_reachable is True
+    assert readiness.migrations_applied is True
+    assert readiness.applied_migration_ids == sorted(
+        migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+    )
+    assert readiness.recovery_snapshot_available is False
+    assert readiness.active_capability_leases == 0
+    assert readiness.active_capability_leases_available is False
+    assert any("persistence is mixed" in error for error in readiness.errors)
+
+
+def test_postgres_recovery_readiness_uses_bound_snapshot_repository(monkeypatch) -> None:
+    recovery_calls: list[dict[str, object]] = []
+
+    class RecoveryRepository:
+        def read_snapshot(self, entity_types, **kwargs):
+            recovery_calls.append(kwargs)
+            return ({name: [] for name in entity_types}, [], [], {"user": [], "workspace": []})
+
+    recovery_repository = RecoveryRepository()
+    repositories = SimpleNamespace(recovery_snapshots=recovery_repository)
+
+    class Runtime:
+        def __init__(self) -> None:
+            self.repositories = repositories
+            self.recovery_snapshots = recovery_repository
+
+        def probe(self):
+            expected_ids = tuple(
+                migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+            )
+            schema = SimpleNamespace(
+                ready=True,
+                applied_migration_ids=expected_ids,
+                missing_migration_ids=(),
+                unknown_migration_ids=(),
+                mismatched_migration_ids=(),
+            )
+            return SimpleNamespace(
+                ready=True,
+                schema=schema,
+                pool_size=2,
+                pool_available=2,
+                pool_waiting=0,
+            )
+
+    settings = replace(
+        get_settings(),
+        auth_enabled=True,
+        postgres_auth_enabled=True,
+        postgres_runtime_probe_enabled=True,
+        postgres_auth_rate_limits_enabled=True,
+        email_dispatch_enabled=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        store,
+        "applied_migrations",
+        lambda: pytest.fail("PostgreSQL readiness read the SQLite migration ledger"),
+    )
+    monkeypatch.setattr(
+        ops_routes,
+        "export_recovery_snapshot",
+        lambda *args, **kwargs: pytest.fail("PostgreSQL readiness used the SQLite snapshot route"),
+    )
+    application_state = SimpleNamespace(postgres_repositories=repositories)
+
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=application_state,
+    )
+
+    assert readiness.db_reachable is True
+    assert readiness.migrations_applied is True
+    assert readiness.recovery_snapshot_available is True
+    assert recovery_calls == [
+        {
+            "scope_entity_type": "agent_task",
+            "workspace_id": "__ops_recovery_readiness_probe__",
+        }
+    ]
+
+
+def test_readiness_reports_bound_repository_identity_without_claiming_full_readiness(
+    monkeypatch,
+) -> None:
+    postgres_approval = object()
+    postgres_task = object()
+    runtime_repositories = type(
+        "Repositories",
+        (),
+        {"approval_decisions": postgres_approval, "agent_tasks": postgres_task},
+    )()
+
+    class Runtime:
+        repositories = runtime_repositories
+
+        def probe(self):
+            schema = type("Schema", (), {"ready": True})()
+            return type(
+                "Probe",
+                (),
+                {
+                    "ready": True,
+                    "schema": schema,
+                    "pool_size": 1,
+                    "pool_available": 1,
+                    "pool_waiting": 0,
+                },
+            )()
+
+    state = type(
+        "ApplicationState",
+        (),
+        {
+            "approval_decision_repository": postgres_approval,
+            "agent_task_repository": app.state.agent_task_repository,
+            "agent_run_repository": None,
+            "connector_repository": object(),
+        },
+    )()
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=state,
+    )
+
+    assert readiness.app_state_repository_bindings["approval_decisions"] == "postgresql"
+    assert readiness.app_state_repository_bindings["agent_tasks"] == "sqlite"
+    assert readiness.app_state_repository_bindings["agent_runs"] == "unbound"
+    assert readiness.app_state_repository_bindings["connectors"] == "other"
+    assert readiness.app_state_repository_bindings["projects"] == "unbound"
+    assert readiness.application_store_ready is False
+
+
+def test_readiness_recognizes_sqlite_repository_subclasses() -> None:
+    class InstrumentedApprovalRepository(type(app.state.approval_decision_repository)):
+        pass
+
+    repository = InstrumentedApprovalRepository(app.state.approval_decision_repository._connect)
+    state = type(
+        "ApplicationState",
+        (),
+        {"approval_decision_repository": repository},
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.app_state_repository_bindings["approval_decisions"] == "sqlite"
+
+
+def test_readiness_reports_all_high_risk_postgres_lifespan_bindings() -> None:
+    assert set(ops_routes._APP_STATE_REPOSITORIES.values()) == {
+        (state_name, repository_name)
+        for state_name, repository_name in _POSTGRES_APP_STATE_BINDINGS.items()
+    }
+
+    binding_fields = {
+        "agent_run_faults": (
+            "agent_run_fault_repository",
+            "agent_run_faults",
+        ),
+        "agent_run_branch_intents": (
+            "agent_run_branch_intent_repository",
+            "agent_run_branch_intents",
+        ),
+        "agent_run_apply_change_intents": (
+            "agent_run_apply_change_intent_repository",
+            "agent_run_apply_change_intents",
+        ),
+        "agent_run_validation_intents": (
+            "agent_run_validation_intent_repository",
+            "agent_run_validation_intents",
+        ),
+        "agent_run_pull_request_intents": (
+            "agent_run_pull_request_intent_repository",
+            "agent_run_pull_request_intents",
+        ),
+        "trust": ("trust_repository", "trust"),
+        "trust_events": ("trust_event_repository", "trust_events"),
+    }
+    runtime_repositories = SimpleNamespace()
+    application_state = SimpleNamespace()
+    for state_name, repository_name in binding_fields.values():
+        repository = object()
+        setattr(runtime_repositories, repository_name, repository)
+        setattr(application_state, state_name, repository)
+
+    bindings = ops_routes._application_repository_bindings(
+        application_state=application_state,
+        postgres_runtime=SimpleNamespace(repositories=runtime_repositories),
+    )
+
+    assert {name: bindings[name] for name in binding_fields} == {
+        name: "postgresql" for name in binding_fields
+    }
+
+    application_state.trust_event_repository = object()
+    bindings = ops_routes._application_repository_bindings(
+        application_state=application_state,
+        postgres_runtime=SimpleNamespace(repositories=runtime_repositories),
+    )
+    assert bindings["trust_events"] == "other"
+
+
+def test_readiness_reports_auth_and_outbox_bundle_bindings_by_identity() -> None:
+    repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=object(),
+        email_outbox=object(),
+    )
+    application_state = SimpleNamespace(postgres_repositories=repositories)
+    runtime = SimpleNamespace(repositories=repositories)
+
+    bindings = ops_routes._application_repository_bindings(
+        application_state=application_state,
+        postgres_runtime=runtime,
+    )
+
+    assert {
+        name: bindings[name]
+        for name in ("auth", "auth_rate_limits", "email_outbox")
+    } == {
+        "auth": "postgresql",
+        "auth_rate_limits": "postgresql",
+        "email_outbox": "postgresql",
+    }
+
+
+@pytest.mark.parametrize("repository_name", ["auth", "auth_rate_limits", "email_outbox"])
+def test_readiness_reports_missing_critical_bundle_repository_as_unbound(
+    repository_name: str,
+) -> None:
+    repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=object(),
+        email_outbox=object(),
+    )
+    setattr(repositories, repository_name, None)
+
+    bindings = ops_routes._application_repository_bindings(
+        application_state=SimpleNamespace(postgres_repositories=repositories),
+        postgres_runtime=SimpleNamespace(repositories=repositories),
+    )
+
+    assert bindings[repository_name] == "unbound"
+
+
+@pytest.mark.parametrize("repository_name", ["auth", "auth_rate_limits", "email_outbox"])
+def test_readiness_reports_mismatched_critical_bundle_as_other(
+    repository_name: str,
+) -> None:
+    application_repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=object(),
+        email_outbox=object(),
+    )
+    runtime_repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=object(),
+        email_outbox=object(),
+    )
+
+    bindings = ops_routes._application_repository_bindings(
+        application_state=SimpleNamespace(
+            postgres_repositories=application_repositories
+        ),
+        postgres_runtime=SimpleNamespace(repositories=runtime_repositories),
+    )
+
+    assert bindings[repository_name] == "other"
+
+
+def test_postgres_readiness_fails_closed_on_incomplete_critical_bundle(monkeypatch) -> None:
+    settings = replace(
+        get_settings(),
+        auth_enabled=True,
+        postgres_auth_enabled=True,
+        postgres_runtime_probe_enabled=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    repositories = SimpleNamespace(
+        auth=object(),
+        auth_rate_limits=None,
+        email_outbox=object(),
+    )
+
+    class Runtime:
+        def probe(self):
+            schema = SimpleNamespace(
+                ready=True,
+                applied_migration_ids=tuple(
+                    migration.migration_id for migration in ops_routes.POSTGRES_MIGRATIONS
+                ),
+                missing_migration_ids=(),
+                unknown_migration_ids=(),
+                mismatched_migration_ids=(),
+            )
+            return SimpleNamespace(
+                ready=True,
+                schema=schema,
+                pool_size=1,
+                pool_available=1,
+                pool_waiting=0,
+            )
+
+    Runtime.repositories = repositories
+    readiness = build_runtime_readiness(
+        postgres_runtime=Runtime(),
+        application_state=SimpleNamespace(postgres_repositories=repositories),
+    )
+
+    assert readiness.status == "not_ready"
+    assert readiness.application_store_ready is False
+    assert readiness.app_state_repository_bindings["auth"] == "postgresql"
+    assert readiness.app_state_repository_bindings["auth_rate_limits"] == "unbound"
+    assert readiness.app_state_repository_bindings["email_outbox"] == "postgresql"
+    assert any(
+        "critical repository bindings are incomplete or mismatched: auth_rate_limits"
+        in error
+        for error in readiness.errors
+    )
+
+
+def test_production_readiness_rejects_sqlite_application_store(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+
+    readiness = build_runtime_readiness()
+
+    assert readiness.status == "not_ready"
+    assert readiness.application_store_mode == "postgres_auth_runtime"
+    assert readiness.database_backend == "mixed"
+    assert readiness.application_store_ready is False
+    assert any("not bound to one complete PostgreSQL" in error for error in readiness.errors)
+
+
+def test_readiness_fails_closed_when_enabled_postgres_probe_is_unavailable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+
+    readiness = build_runtime_readiness()
+
+    assert readiness.status == "not_ready"
+    assert readiness.postgres_probe_status == "not_ready"
+    assert any("runtime is unavailable" in error for error in readiness.errors)
+
+
+def test_readiness_sanitizes_postgres_probe_failures(monkeypatch) -> None:
+    class Runtime:
+        def probe(self):
+            raise RuntimeError("postgres://user:secret@private-host/db")
+
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    readiness = build_runtime_readiness(postgres_runtime=Runtime())
+
+    assert readiness.status == "not_ready"
+    assert "secret" not in str(readiness.model_dump())
+    assert "PostgreSQL runtime probe failed." in readiness.errors
+
+
+def test_production_readiness_fails_closed_when_approval_recovery_is_degraded(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "true")
+    monkeypatch.setenv("AIXION_AUTH_ENABLED", "true")
+    monkeypatch.setenv("AIXION_TRUST_ENFORCEMENT", "true")
+    application_state = type(
+        "State",
+        (),
+        {
+            "approval_recovery_status": "degraded",
+            "approval_recovery_failure_count": 2,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=application_state)
+
+    assert readiness.approval_recovery_status == "degraded"
+    assert readiness.approval_recovery_failure_count == 2
+    assert readiness.status == "not_ready"
+    assert any("Approval recovery is not healthy" in error for error in readiness.errors)
+
+
+def test_readiness_reports_lifecycle_recovery_health() -> None:
+    state = type(
+        "State",
+        (),
+        {
+            "approval_recovery_status": "degraded",
+            "approval_recovery_failure_count": 3,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.approval_recovery_status == "degraded"
+    assert readiness.approval_recovery_failure_count == 3
+
+
+def test_readiness_does_not_claim_fcm_delivery_is_verified(monkeypatch) -> None:
+    monkeypatch.setenv("AIXION_FCM_PROJECT_ID", "aixion-control-tower-1")
+
+    response = client.get("/ops/readiness")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["fcm_server_key_configured"] is True
+    assert any(
+        "does not verify ADC credentials or send permission" in warning
+        for warning in body["warnings"]
+    )
 
 
 def test_readiness_allows_maintainer_role() -> None:
@@ -84,3 +721,272 @@ def test_readiness_reports_not_ready_when_database_check_fails(monkeypatch) -> N
     assert body["migrations_applied"] is False
     assert body["recovery_snapshot_available"] is False
     assert any(error.startswith("Database readiness check failed") for error in body["errors"])
+
+
+def test_readiness_defaults_approval_expiry_worker_to_not_started() -> None:
+    readiness = build_runtime_readiness(application_state=None)
+
+    assert readiness.approval_expiry_status == "not_started"
+    assert readiness.approval_expiry_failure_count == 0
+    assert readiness.approval_expiry_last_completed_at is None
+    assert readiness.approval_expiry_last_changed_count == 0
+
+
+def test_readiness_defaults_agent_run_lease_recovery_worker_to_not_started() -> None:
+    readiness = build_runtime_readiness(application_state=None)
+
+    assert readiness.agent_run_lease_recovery_status == "not_started"
+    assert readiness.agent_run_lease_recovery_failure_count == 0
+    assert readiness.agent_run_lease_recovery_last_completed_at is None
+    assert readiness.agent_run_lease_recovery_last_recovered_count == 0
+    assert readiness.agent_run_lease_recovery_task_present is False
+    assert readiness.agent_run_lease_recovery_task_running is False
+    assert readiness.agent_run_lease_recovery_last_completion_fresh is False
+
+
+class _AgentRunLeaseRecoveryTask:
+    def __init__(self, done: bool = False) -> None:
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+
+def _production_agent_run_recovery_readiness(monkeypatch, **state_values):
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+    settings = replace(
+        get_settings(),
+        profile="production",
+        trust_enforcement=True,
+        lease_signing_key_configured=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    base_state = {
+        "approval_recovery_status": "healthy",
+        "approval_expiry_status": "healthy",
+        "approval_expiry_last_completed_at": datetime.now(timezone.utc),
+        "approval_expiry_task": _ExpiryTask(),
+        "agent_run_lease_recovery_status": "healthy",
+        "agent_run_lease_recovery_failure_count": 0,
+        "agent_run_lease_recovery_last_completed_at": datetime.now(timezone.utc),
+        "agent_run_lease_recovery_last_recovered_count": 0,
+        "agent_run_lease_recovery_task": _AgentRunLeaseRecoveryTask(),
+    }
+    base_state.update(state_values)
+    return build_runtime_readiness(
+        application_state=SimpleNamespace(**base_state)
+    )
+
+
+def test_production_readiness_requires_live_agent_run_recovery_task(monkeypatch) -> None:
+    for task in (None, _AgentRunLeaseRecoveryTask(done=True)):
+        readiness = _production_agent_run_recovery_readiness(
+            monkeypatch,
+            agent_run_lease_recovery_task=task,
+        )
+
+        assert readiness.status == "not_ready"
+        assert readiness.agent_run_lease_recovery_task_running is False
+        assert "PostgreSQL AgentRun lease recovery worker task is not running" in (
+            readiness.errors
+        )
+
+
+@pytest.mark.parametrize(
+    "status,failure_count,completed_at,completion_fresh",
+    [
+        ("not_started", 0, datetime.now(timezone.utc), True),
+        ("failed", 1, datetime.now(timezone.utc), True),
+        ("healthy", 0, None, False),
+        ("healthy", 0, datetime(2020, 1, 1, tzinfo=timezone.utc), False),
+        ("healthy", 0, datetime(2026, 10, 23, 12, 0), False),
+    ],
+)
+def test_production_readiness_requires_healthy_fresh_agent_run_recovery(
+    monkeypatch, status, failure_count, completed_at, completion_fresh
+) -> None:
+    readiness = _production_agent_run_recovery_readiness(
+        monkeypatch,
+        agent_run_lease_recovery_status=status,
+        agent_run_lease_recovery_failure_count=failure_count,
+        agent_run_lease_recovery_last_completed_at=completed_at,
+    )
+
+    assert readiness.status == "not_ready"
+    assert readiness.agent_run_lease_recovery_status == status
+    assert readiness.agent_run_lease_recovery_failure_count == failure_count
+    assert (
+        readiness.agent_run_lease_recovery_last_completion_fresh
+        is completion_fresh
+    )
+    assert any(
+        error.startswith("PostgreSQL AgentRun lease recovery")
+        for error in readiness.errors
+    )
+
+
+def test_production_readiness_accepts_healthy_agent_run_recovery_worker(monkeypatch) -> None:
+    readiness = _production_agent_run_recovery_readiness(monkeypatch)
+
+    assert readiness.agent_run_lease_recovery_status == "healthy"
+    assert readiness.agent_run_lease_recovery_failure_count == 0
+    assert readiness.agent_run_lease_recovery_task_present is True
+    assert readiness.agent_run_lease_recovery_task_running is True
+    assert readiness.agent_run_lease_recovery_last_completion_fresh is True
+    assert readiness.agent_run_lease_recovery_max_completion_age_seconds == 180
+    assert not any(
+        error.startswith("PostgreSQL AgentRun lease recovery")
+        for error in readiness.errors
+    )
+
+
+def test_readiness_reports_healthy_approval_expiry_worker() -> None:
+    completed_at = datetime.now(timezone.utc)
+    state = type(
+        "State",
+        (),
+        {
+            "approval_expiry_status": "healthy",
+            "approval_expiry_failure_count": 0,
+            "approval_expiry_last_completed_at": completed_at,
+            "approval_expiry_last_changed_count": 2,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.approval_expiry_status == "healthy"
+    assert readiness.approval_expiry_failure_count == 0
+    assert readiness.approval_expiry_last_completed_at == completed_at
+    assert readiness.approval_expiry_last_changed_count == 2
+    assert readiness.approval_expiry_task_present is False
+    assert readiness.approval_expiry_task_running is False
+    assert readiness.approval_expiry_last_completion_fresh is True
+
+
+class _ExpiryTask:
+    def __init__(self, done: bool = False) -> None:
+        self._done = done
+
+    def done(self) -> bool:
+        return self._done
+
+
+def _production_expiry_readiness(monkeypatch, **state_values):
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+    settings = replace(
+        get_settings(),
+        profile="production",
+        trust_enforcement=True,
+        lease_signing_key_configured=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    base_state = {
+        "approval_recovery_status": "healthy",
+        "approval_expiry_status": "healthy",
+        "approval_expiry_failure_count": 0,
+        "approval_expiry_last_completed_at": datetime.now(timezone.utc),
+        "approval_expiry_task": _ExpiryTask(),
+    }
+    base_state.update(state_values)
+    state = type("State", (), base_state)()
+    return build_runtime_readiness(application_state=state)
+
+
+def test_production_readiness_requires_live_expiry_task(monkeypatch) -> None:
+    for task in (None, _ExpiryTask(done=True)):
+        readiness = _production_expiry_readiness(
+            monkeypatch,
+            approval_expiry_task=task,
+        )
+        assert readiness.status == "not_ready"
+        assert readiness.approval_expiry_task_running is False
+        assert "Approval expiry worker task is not running" in readiness.errors
+
+
+@pytest.mark.parametrize(
+    "completed_at",
+    [
+        datetime(2020, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 10, 23, 12, 0),  # Naive timestamps are not trusted.
+        None,
+    ],
+)
+def test_production_readiness_requires_fresh_aware_expiry_completion(
+    monkeypatch, completed_at
+) -> None:
+    readiness = _production_expiry_readiness(
+        monkeypatch,
+        approval_expiry_last_completed_at=completed_at,
+    )
+    assert readiness.status == "not_ready"
+    assert readiness.approval_expiry_last_completion_fresh is False
+    assert "Approval expiry worker completion is stale or unavailable" in readiness.errors
+
+
+def test_production_readiness_accepts_live_task_and_fresh_expiry_completion(monkeypatch) -> None:
+    readiness = _production_expiry_readiness(monkeypatch)
+
+    assert readiness.approval_expiry_task_present is True
+    assert readiness.approval_expiry_task_running is True
+    assert readiness.approval_expiry_last_completion_fresh is True
+    assert readiness.approval_expiry_max_completion_age_seconds == 180
+    assert not any(error.startswith("Approval expiry worker") for error in readiness.errors)
+
+
+def test_readiness_reports_failed_approval_expiry_worker_without_changing_readiness() -> None:
+    state = type(
+        "State",
+        (),
+        {
+            "approval_expiry_status": "failed",
+            "approval_expiry_failure_count": 3,
+            "approval_expiry_last_completed_at": None,
+            "approval_expiry_last_changed_count": 0,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.approval_expiry_status == "failed"
+    assert readiness.approval_expiry_failure_count == 3
+    assert readiness.approval_expiry_last_changed_count == 0
+    assert readiness.approval_expiry_task_present is False
+    assert readiness.approval_expiry_task_running is False
+    # This is additive diagnostics; existing local readiness semantics are unchanged.
+    assert readiness.status == "ready"
+
+
+@pytest.mark.parametrize("expiry_status", ["not_started", "failed"])
+def test_production_readiness_fails_closed_when_approval_expiry_is_unhealthy(
+    monkeypatch, expiry_status: str
+) -> None:
+    monkeypatch.setenv("AIXION_PROFILE", "production")
+    monkeypatch.setenv("AIXION_POSTGRES_RUNTIME_PROBE_ENABLED", "false")
+    settings = replace(
+        get_settings(),
+        profile="production",
+        trust_enforcement=True,
+        lease_signing_key_configured=True,
+    )
+    monkeypatch.setattr(ops_routes, "get_settings", lambda: settings)
+    state = type(
+        "State",
+        (),
+        {
+            "approval_recovery_status": "healthy",
+            "approval_expiry_status": expiry_status,
+            "approval_expiry_failure_count": 1 if expiry_status == "failed" else 0,
+        },
+    )()
+
+    readiness = build_runtime_readiness(application_state=state)
+
+    assert readiness.approval_expiry_status == expiry_status
+    assert readiness.status == "not_ready"
+    assert any(
+        f"Approval expiry worker is not healthy: status={expiry_status}" == error
+        for error in readiness.errors
+    )

@@ -65,6 +65,7 @@ def test_account_deletion_request_writes_audit_event(monkeypatch) -> None:
     assert event.event_type == "auth.account_deletion_requested"
     assert event.actor == "owner@example.com"
     assert event.entity_id == user.id
+    assert event.workspace_id == user.workspace_id
     assert event.details["target_email"] == "owner@example.com"
     assert event.details["status"] == "RECEIVED"
     assert event.details["reason_provided"] is True

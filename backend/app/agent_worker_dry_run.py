@@ -9,6 +9,7 @@ from typing import Any
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType, AgentTaskStatus
 from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
 from .models import AuditEvent
+from .settings import get_settings
 from .store import store
 
 
@@ -94,6 +95,18 @@ def run_agent_worker_dry_run(
     worker_id: str = "agent-worker-dry-run",
     lease_seconds: int = 300,
 ) -> AgentWorkerDryRunResult:
+    settings = get_settings()
+    if settings.is_production or settings.postgres_auth_enabled:
+        return AgentWorkerDryRunResult(
+            success=False,
+            worker_id=worker_id,
+            task_id=task_id,
+            reason=(
+                "Dry-run worker is unavailable in production or PostgreSQL auth mode; "
+                "use a durable PostgreSQL worker path."
+            ),
+        )
+
     if not task_id and not first_approved:
         return AgentWorkerDryRunResult(
             success=False,

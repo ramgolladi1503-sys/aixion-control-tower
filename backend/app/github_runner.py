@@ -4,12 +4,18 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+import psycopg
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .application_repository_access import (
+    approval_decision_repository_for_request,
+    workspace_id_for_request,
+)
 from .approval_integrity import compute_approval_payload_hash
 from .auth import require_maintainer
-from .models import ApprovalStatus, AuthUser, TestRun, now_utc
+from .models import ApprovalRequest, ApprovalStatus, AuthUser, TestRun, now_utc
+from .settings import get_settings
 from .store import store
 
 router = APIRouter(prefix="/github-runner", tags=["github-runner"])
@@ -64,8 +70,12 @@ def _github_headers() -> dict[str, str]:
     }
 
 
-def _validate_execution(payload: PatchPlanRequest) -> PatchPlanResponse:
-    approval = store.approval_requests.get(payload.approval_request_id)
+def _patch_plan_for_approval(
+    payload: PatchPlanRequest,
+    approval: ApprovalRequest | None,
+    *,
+    postgres_repository_binding_missing: bool = False,
+) -> PatchPlanResponse:
     if not approval:
         raise HTTPException(status_code=404, detail="Approval request not found")
 
@@ -90,6 +100,11 @@ def _validate_execution(payload: PatchPlanRequest) -> PatchPlanResponse:
         blockers.append("Approval request has no file changes.")
     if any(not file.new_content for file in approval.files):
         blockers.append("Every file change must include new_content for deterministic GitHub execution.")
+    if postgres_repository_binding_missing:
+        blockers.append(
+            "The PostgreSQL project record does not persist a GitHub repository binding; "
+            "GitHub execution planning is unavailable."
+        )
 
     return PatchPlanResponse(
         ready=not blockers,
@@ -109,6 +124,68 @@ def _validate_execution(payload: PatchPlanRequest) -> PatchPlanResponse:
     )
 
 
+def _validate_execution(payload: PatchPlanRequest) -> PatchPlanResponse:
+    settings = get_settings()
+    if settings.is_production or getattr(settings, "postgres_auth_enabled", False):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Legacy GitHub execution is unavailable without a request-bound "
+                "PostgreSQL approval and execution transaction."
+            ),
+            headers={"Retry-After": "1"},
+        )
+    approval = store.approval_requests.get(payload.approval_request_id)
+    return _patch_plan_for_approval(payload, approval)
+
+
+def _postgres_patch_plan(
+    payload: PatchPlanRequest,
+    *,
+    user: AuthUser,
+    request: Request | None,
+) -> PatchPlanResponse:
+    # Production cannot use the process-local membership adapter. Even though
+    # this endpoint is read-only, it must never let a production-configured app
+    # silently inspect the SQLite compatibility store when PostgreSQL auth was
+    # not selected.
+    if not getattr(get_settings(), "postgres_auth_enabled", False):
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL patch planning requires PostgreSQL-backed authentication",
+            headers={"Retry-After": "1"},
+        )
+    if request is None:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL patch planning requires an app-bound request",
+            headers={"Retry-After": "1"},
+        )
+    try:
+        repository = approval_decision_repository_for_request(request)
+        workspace_id = workspace_id_for_request(user, request)
+        approval = repository.get(payload.approval_request_id)
+    except HTTPException:
+        raise
+    except (RuntimeError, psycopg.Error) as error:
+        raise HTTPException(
+            status_code=503,
+            detail="PostgreSQL patch-plan approval data is unavailable",
+            headers={"Retry-After": "1"},
+        ) from error
+    if (
+        approval is None
+        or workspace_id is None
+        or approval.workspace_id != workspace_id
+    ):
+        raise HTTPException(status_code=404, detail="Approval request not found")
+    return _patch_plan_for_approval(
+        payload,
+        approval,
+        postgres_repository_binding_missing=True,
+    )
+
+
 async def _github(client: httpx.AsyncClient, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
     response = await client.request(method, f"{GITHUB_API_URL}{path}", headers=_github_headers(), **kwargs)
     if response.status_code >= 400:
@@ -119,12 +196,36 @@ async def _github(client: httpx.AsyncClient, method: str, path: str, **kwargs: A
 
 
 @router.post("/patch-plan", response_model=PatchPlanResponse)
-def create_patch_plan(payload: PatchPlanRequest, _: AuthUser = MaintainerDependency) -> PatchPlanResponse:
+def create_patch_plan(
+    payload: PatchPlanRequest,
+    user: AuthUser = MaintainerDependency,
+    request: Request = None,  # type: ignore[assignment]
+) -> PatchPlanResponse:
+    settings = get_settings()
+    if settings.is_production or getattr(settings, "postgres_auth_enabled", False):
+        return _postgres_patch_plan(payload, user=user, request=request)
     return _validate_execution(payload)
 
 
 @router.post("/execute", response_model=ExecuteGitHubResponse)
-async def execute_github_change(payload: ExecuteGitHubRequest, _: AuthUser = MaintainerDependency) -> ExecuteGitHubResponse:
+async def execute_github_change(
+    payload: ExecuteGitHubRequest,
+    request: Request,
+    _: AuthUser = MaintainerDependency,
+) -> ExecuteGitHubResponse:
+    settings = get_settings()
+    if settings.is_production or getattr(settings, "postgres_auth_enabled", False):
+        # The legacy execution sequence has no PostgreSQL transaction spanning
+        # approval state, TestRun, audit, and GitHub side effects. Keep the
+        # external write unavailable until that durable workflow exists.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "GitHub execution is unavailable until approval state, execution "
+                "status, and external side effects share a durable workflow."
+            ),
+            headers={"Retry-After": "1"},
+        )
     plan = _validate_execution(payload)
     if not plan.ready:
         raise HTTPException(status_code=409, detail={"blockers": plan.blockers})

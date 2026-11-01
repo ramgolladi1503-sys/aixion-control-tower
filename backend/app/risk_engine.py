@@ -38,10 +38,6 @@ LOW_PATH_MARKERS = (
 
 
 def assess_approval_request(payload: ApprovalRequestCreate) -> RiskAssessment:
-    reasons: list[str] = []
-    required_actions: list[str] = []
-    highest = RiskLevel.LOW
-
     branch = payload.target_branch.lower().strip()
     if branch in BLOCKED_BRANCHES:
         return RiskAssessment(
@@ -68,7 +64,6 @@ def assess_approval_request(payload: ApprovalRequestCreate) -> RiskAssessment:
                 reasons=[f"Sensitive file path is blocked: {file_change.path}"],
                 required_actions=["Remove secrets or credential files from the request."],
             )
-
         if not file_change.diff.strip():
             return RiskAssessment(
                 level=RiskLevel.BLOCKED,
@@ -76,6 +71,42 @@ def assess_approval_request(payload: ApprovalRequestCreate) -> RiskAssessment:
                 reasons=[f"Missing diff for file: {file_change.path}"],
                 required_actions=["Provide a visible diff before approval."],
             )
+
+    tool_calls = [
+        change for change in payload.files
+        if change.change_type == "tool_call" and change.path.startswith("antigravity://tool/")
+    ]
+    if tool_calls:
+        # Do not let a tool-call marker short-circuit ordinary file/path controls.
+        if len(tool_calls) != len(payload.files):
+            return RiskAssessment(
+                level=RiskLevel.CRITICAL,
+                reasons=["Mixed Antigravity tool and file payload requires separate review."],
+                required_actions=["Submit tool calls and file changes as separate approval requests."],
+            )
+        tool_names = [change.path.removeprefix("antigravity://tool/") for change in tool_calls]
+        file_edit_tools = {"write_to_file", "replace_file_content", "multi_replace_file_content"}
+        level = (
+            RiskLevel.HIGH
+            if all(name in file_edit_tools for name in tool_names)
+            else RiskLevel.CRITICAL
+        )
+        return RiskAssessment(
+            level=level,
+            reasons=[
+                "Antigravity file modification requires human review."
+                if level == RiskLevel.HIGH
+                else "Antigravity command or unclassified tool can cause broad side effects; review exact arguments."
+            ],
+            required_actions=[],
+        )
+
+    reasons: list[str] = []
+    required_actions: list[str] = []
+    highest = RiskLevel.LOW
+
+    for file_change in payload.files:
+        path = file_change.path.lower()
 
         if any(marker in path for marker in CRITICAL_PATH_MARKERS):
             highest = RiskLevel.CRITICAL

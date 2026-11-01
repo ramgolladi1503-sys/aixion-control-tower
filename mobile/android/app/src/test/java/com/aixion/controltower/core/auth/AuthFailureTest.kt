@@ -23,6 +23,21 @@ class AuthFailureTest {
     }
 
     @Test
+    fun unauthorizedLoginUsesCredentialNeutralGuidance() {
+        assertEquals(
+            "Email or password was not recognized. Check your details and try again.",
+            AuthFailure.loginMessage(httpError(401))
+        )
+    }
+
+    @Test
+    fun nonUnauthorizedLoginUsesTheExistingBackendFailureMessage() {
+        val error = IllegalStateException("backend unavailable")
+
+        assertEquals("backend unavailable", AuthFailure.loginMessage(error))
+    }
+
+    @Test
     fun nonAuthHttpFailureDoesNotClearSavedSession() {
         val error = httpError(500)
 

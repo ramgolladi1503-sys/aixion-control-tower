@@ -5,12 +5,18 @@ import hmac
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.approval_decisions import agent_task_repository
+from app.connector_models import AgentConnector
+from app.connector_webhook import _audit
 from app.models import Project
 from app.store import store
 
@@ -72,6 +78,15 @@ def _bearer(secret: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {secret}"}
 
 
+def test_connector_webhook_audit_uses_persisted_connector_workspace_scope() -> None:
+    connector = AgentConnector(name="Scoped webhook", workspace_id="workspace_webhook")
+    store.agent_connectors[connector.id] = connector
+
+    event = _audit("connector.webhook_refused", connector.id, {"reason": "invalid payload"}, actor="connector")
+
+    assert event.workspace_id == connector.workspace_id
+
+
 def _compact_json(payload: dict) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
@@ -109,6 +124,10 @@ def test_bearer_connector_webhook_creates_agent_task() -> None:
     assert task.repository == REPOSITORY
     assert any(event.event_type == "connector.webhook_task_created" for event in store.audit_events)
     assert store.agent_connectors[connector["id"]].last_used_at is not None
+    store.agent_tasks.clear()
+    store.agent_task_events.clear()
+    assert agent_task_repository.get(body["task_id"]) is not None
+    assert agent_task_repository.list_events(body["task_id"])
 
 
 def test_hmac_connector_webhook_creates_agent_task_with_v1_signature() -> None:
@@ -127,7 +146,7 @@ def test_hmac_connector_webhook_creates_agent_task_with_v1_signature() -> None:
     assert response.json()["task_id"] in store.agent_tasks
 
 
-def test_hmac_connector_webhook_rejects_replayed_nonce() -> None:
+def test_hmac_connector_webhook_returns_saved_response_for_exact_retry() -> None:
     project = _project()
     connector, secret = _connector(project.id, auth_type="HMAC")
     payload = _task_payload(project.id)
@@ -135,11 +154,99 @@ def test_hmac_connector_webhook_rejects_replayed_nonce() -> None:
     headers = {**_hmac_v1_headers(secret, body, nonce="replay_nonce"), "Content-Type": "application/json"}
 
     first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    audit_count_after_first = len(store.audit_events)
+    attempt_internal_config_write = client.patch(
+        f"/connectors/{connector['id']}",
+        json={"config": {"hmac_nonce_results": {"replay_nonce": {"response": {}}}}},
+    )
     second = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
 
     assert first.status_code == 200
-    assert second.status_code == 401
-    assert second.json()["detail"] == "Connector HMAC nonce has already been used"
+    assert attempt_internal_config_write.status_code == 422
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert len(store.agent_tasks) == 1
+    assert len(store.audit_events) == audit_count_after_first
+    stored_connector = store.agent_connectors[connector["id"]]
+    assert stored_connector.config["rate_limit_request_count"] == 1
+    public_connector = client.get(f"/connectors/{connector['id']}").json()
+    assert "hmac_nonce_history" not in public_connector["config"]
+    assert "hmac_nonce_results" not in public_connector["config"]
+
+
+def test_hmac_connector_webhook_rejects_changed_body_for_consumed_nonce() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    body = _compact_json(_task_payload(project.id))
+    nonce = "changed_body_nonce"
+    first_headers = {**_hmac_v1_headers(secret, body, nonce=nonce), "Content-Type": "application/json"}
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=first_headers)
+    changed_body = _compact_json({**_task_payload(project.id), "title": "Changed after commit"})
+    changed_headers = {
+        **_hmac_v1_headers(secret, changed_body, nonce=nonce, timestamp=int(first_headers["X-Aixion-Timestamp"])),
+        "Content-Type": "application/json",
+    }
+
+    changed = client.post(
+        f"/connectors/{connector['id']}/webhook", content=changed_body, headers=changed_headers
+    )
+
+    assert first.status_code == 200
+    assert changed.status_code == 401
+    assert len(store.agent_tasks) == 1
+
+
+def test_hmac_connector_webhook_rejects_legacy_nonce_without_receipt() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    body = _compact_json(_task_payload(project.id))
+    nonce = "legacy_receipt_nonce"
+    stored = store.agent_connectors[connector["id"]]
+    stored.config["hmac_nonce_history"] = {nonce: int(time.time())}
+    store.persist()
+
+    response = client.post(
+        f"/connectors/{connector['id']}/webhook",
+        content=body,
+        headers={**_hmac_v1_headers(secret, body, nonce=nonce), "Content-Type": "application/json"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Connector HMAC nonce has already been used"
+    assert store.agent_tasks == {}
+
+
+def test_hmac_connector_webhook_rejects_expired_receipt_without_reexecution() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    body = _compact_json(_task_payload(project.id))
+    headers = {**_hmac_v1_headers(secret, body, nonce="expired_receipt_nonce"), "Content-Type": "application/json"}
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    stored = store.agent_connectors[connector["id"]]
+    stored.config["hmac_nonce_results"]["expired_receipt_nonce"]["expires_at"] = int(time.time()) - 1
+    store.persist()
+
+    retry = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert retry.status_code == 401
+    assert len(store.agent_tasks) == 1
+
+
+def test_hmac_connector_webhook_revocation_invalidates_saved_retry_receipt() -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    body = _compact_json(_task_payload(project.id))
+    headers = {**_hmac_v1_headers(secret, body, nonce="revoked_receipt_nonce"), "Content-Type": "application/json"}
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    revoked = client.post(f"/connectors/{connector['id']}/secret/revoke")
+
+    retry = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert revoked.status_code == 200
+    assert retry.status_code == 401
+    assert len(store.agent_tasks) == 1
 
 
 def test_hmac_connector_webhook_rejects_stale_timestamp() -> None:
@@ -157,6 +264,58 @@ def test_hmac_connector_webhook_rejects_stale_timestamp() -> None:
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Connector HMAC timestamp is stale"
+
+
+def test_hmac_connector_webhook_rejects_past_skew_boundary_without_consuming_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    payload = _task_payload(project.id)
+    body = _compact_json(payload)
+    now_epoch = 2_000_000_000
+    monkeypatch.setattr("app.connector_webhook.time.time", lambda: now_epoch)
+    boundary_timestamp = now_epoch - 300
+    nonce = "zero_receipt_lifetime"
+
+    response = client.post(
+        f"/connectors/{connector['id']}/webhook",
+        content=body,
+        headers={
+            **_hmac_v1_headers(secret, body, nonce=nonce, timestamp=boundary_timestamp),
+            "Content-Type": "application/json",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Connector HMAC timestamp is stale"
+    assert store.agent_tasks == {}
+    assert nonce not in store.agent_connectors[connector["id"]].config.get("hmac_nonce_history", {})
+
+
+def test_hmac_connector_webhook_keeps_future_skew_boundary_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _project()
+    connector, secret = _connector(project.id, auth_type="HMAC")
+    payload = _task_payload(project.id)
+    body = _compact_json(payload)
+    now_epoch = 2_000_000_000
+    monkeypatch.setattr("app.connector_webhook.time.time", lambda: now_epoch)
+    boundary_timestamp = now_epoch + 300
+    nonce = "future_skew_boundary"
+    headers = {
+        **_hmac_v1_headers(secret, body, nonce=nonce, timestamp=boundary_timestamp),
+        "Content-Type": "application/json",
+    }
+
+    first = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+    retry = client.post(f"/connectors/{connector['id']}/webhook", content=body, headers=headers)
+
+    assert first.status_code == 200
+    assert retry.status_code == 200
+    assert retry.json() == first.json()
+    assert len(store.agent_tasks) == 1
 
 
 def test_hmac_connector_webhook_rejects_missing_signature_version() -> None:
@@ -203,6 +362,10 @@ def test_connector_webhook_appends_event_to_owned_task() -> None:
     assert event.message == "Connector produced a plan."
     assert event.metadata["connector_webhook"] is True
     assert any(event.event_type == "connector.webhook_task_event_appended" for event in store.audit_events)
+    store.agent_tasks.clear()
+    store.agent_task_events.clear()
+    assert agent_task_repository.get(created["task_id"]).status == "PLANNING"
+    assert agent_task_repository.list_events(created["task_id"])[-1].id == body["event_id"]
 
 
 def test_connector_webhook_rejects_missing_secret() -> None:
@@ -264,3 +427,95 @@ def test_connector_webhook_rate_limit_blocks_excess_requests() -> None:
     assert second.status_code == 429
     assert second.json()["detail"] == "Connector webhook rate limit exceeded"
     assert any(event.event_type == "connector.webhook_rate_limited" for event in store.audit_events)
+
+
+def test_hmac_webhook_rate_limit_does_not_consume_nonce_for_same_request_retry() -> None:
+    project = _project()
+    connector_json, secret = _connector(project.id, auth_type="HMAC", rate_limit=1)
+    connector_id = connector_json["id"]
+    first_body = _compact_json(_task_payload(project.id))
+    first_headers = {
+        **_hmac_v1_headers(secret, first_body, nonce="accepted_before_limit"),
+        "Content-Type": "application/json",
+    }
+    assert client.post(
+        f"/connectors/{connector_id}/webhook", content=first_body, headers=first_headers
+    ).status_code == 200
+
+    retry_body = _compact_json(
+        {**_task_payload(project.id), "title": "Retry after rate limit"}
+    )
+    retry_headers = {
+        **_hmac_v1_headers(secret, retry_body, nonce="retry_after_limit"),
+        "Content-Type": "application/json",
+    }
+    rejected = client.post(
+        f"/connectors/{connector_id}/webhook", content=retry_body, headers=retry_headers
+    )
+
+    connector = store.agent_connectors[connector_id]
+    assert rejected.status_code == 429
+    assert "retry_after_limit" not in connector.config["hmac_nonce_history"]
+    assert "retry_after_limit" not in connector.config["hmac_nonce_results"]
+    assert len(store.agent_tasks) == 1
+    assert sum(
+        event.event_type == "connector.webhook_task_created"
+        for event in store.audit_events
+    ) == 1
+    connector.config = {
+        **connector.config,
+        "rate_limit_window_started_at": (
+            datetime.now(timezone.utc) - timedelta(minutes=2)
+        ).isoformat(),
+    }
+    store.persist()
+
+    retried = client.post(
+        f"/connectors/{connector_id}/webhook", content=retry_body, headers=retry_headers
+    )
+
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["accepted"] is True
+    assert retried.json()["task_id"] in store.agent_tasks
+    assert len(store.agent_tasks) == 2
+    connector = store.agent_connectors[connector_id]
+    assert "retry_after_limit" in connector.config["hmac_nonce_history"]
+    assert connector.config["hmac_nonce_results"]["retry_after_limit"]["response"] == retried.json()
+    assert sum(event.event_type == "connector.webhook_rate_limited" for event in store.audit_events) == 1
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+def test_oversized_connector_webhook_is_rejected_before_auth_state_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    chunked: bool,
+) -> None:
+    monkeypatch.setenv("AIXION_CONNECTOR_WEBHOOK_MAX_BODY_BYTES", "1024")
+    project = _project()
+    connector_json, secret = _connector(project.id, auth_type="HMAC")
+    connector = store.agent_connectors[connector_json["id"]]
+    initial_config = dict(connector.config)
+    initial_failure_count = connector.failed_auth_count
+    initial_audit_count = len(store.audit_events)
+    initial_task_ids = set(store.agent_tasks)
+
+    body = "x" * 1025
+    body_bytes = body.encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    headers.update(_hmac_v1_headers(secret, body, nonce="oversized-body-nonce"))
+    response = client.post(
+        f"/connectors/{connector.id}/webhook",
+        content=(
+            iter((body_bytes[:512], body_bytes[512:1024], body_bytes[1024:]))
+            if chunked
+            else body_bytes
+        ),
+        headers=headers,
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Connector webhook payload is too large"
+    assert connector.config == initial_config
+    assert connector.failed_auth_count == initial_failure_count
+    assert len(store.audit_events) == initial_audit_count
+    assert set(store.agent_tasks) == initial_task_ids
+    assert "oversized-body-nonce" not in connector.config.get("hmac_nonce_history", {})

@@ -10,13 +10,48 @@ from typing import Any, Protocol
 import httpx
 
 from .agent_task_models import AgentTask, AgentTaskEvent, AgentTaskEventType
+from .agent_task_repository import AgentTaskRepository
+from .agent_worker_claims import (
+    claim_agent_task_for_worker,
+    claim_first_approved_agent_task_for_worker,
+    commit_agent_task_worker_outcome,
+)
+from .approval_decisions import agent_task_repository
 from .agent_worker_branch_plan import _planned_branch_for_task, validate_branch_plan
-from .agent_worker_claims import claim_agent_task_for_worker, claim_first_approved_agent_task_for_worker
-from .models import AuditEvent
-from .store import store
 
 GITHUB_API_BASE_URL = "https://api.github.com"
 DEFAULT_SOURCE_BRANCH = "main"
+
+
+class GitHubBranchObservationError(RuntimeError):
+    """Base class for failures while observing a GitHub branch."""
+
+
+class GitHubBranchPermissionError(GitHubBranchObservationError):
+    """GitHub rejected the request because credentials or permissions are insufficient."""
+
+
+class GitHubBranchTransportError(GitHubBranchObservationError):
+    """The GitHub API could not be reached or the request timed out."""
+
+
+class GitHubBranchProviderError(GitHubBranchObservationError):
+    """GitHub returned an unexpected response or a provider-side failure."""
+
+
+@dataclass(frozen=True)
+class GitHubBranchObservation:
+    repository: str
+    branch: str
+    found: bool
+    sha: str | None = None
+    html_url: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.found and (not self.sha or not self.html_url):
+            raise ValueError("A found branch observation requires both sha and html_url")
+        if not self.found and (self.sha is not None or self.html_url is not None):
+            raise ValueError("A not-found branch observation cannot contain sha or html_url")
 
 
 @dataclass
@@ -37,6 +72,12 @@ class GitHubBranchClient(Protocol):
     def create_branch(self, repository: str, branch: str, source_sha: str) -> GitHubBranchCreateResult: ...
 
 
+class GitHubBranchObservationClient(Protocol):
+    """Optional read-only observation capability, separate for legacy client compatibility."""
+
+    def observe_branch(self, repository: str, branch: str) -> GitHubBranchObservation: ...
+
+
 class GitHubRestBranchClient:
     def __init__(self, token: str, *, base_url: str = GITHUB_API_BASE_URL, timeout_seconds: float = 20.0) -> None:
         self.token = token
@@ -52,6 +93,42 @@ class GitHubRestBranchClient:
 
     def _ref_url(self, repository: str, branch: str) -> str:
         return f"{self.base_url}/repos/{repository}/git/ref/heads/{branch}"
+
+    def observe_branch(self, repository: str, branch: str) -> GitHubBranchObservation:
+        """Observe a target ref without mutation; distinguish absence from API failures."""
+        try:
+            response = httpx.get(
+                self._ref_url(repository, branch), headers=self._headers(), timeout=self.timeout_seconds
+            )
+        except httpx.TimeoutException as error:
+            raise GitHubBranchTransportError("GitHub branch observation timed out") from error
+        except httpx.TransportError as error:
+            raise GitHubBranchTransportError(f"GitHub branch observation transport failed: {error}") from error
+
+        if response.status_code == 404:
+            return GitHubBranchObservation(repository=repository, branch=branch, found=False)
+        if response.status_code in {401, 403}:
+            raise GitHubBranchPermissionError(
+                f"GitHub branch observation permission denied: {response.status_code} {response.text[:300]}"
+            )
+        if response.status_code != 200:
+            raise GitHubBranchProviderError(
+                f"GitHub branch observation failed: {response.status_code} {response.text[:300]}"
+            )
+
+        try:
+            payload = response.json()
+        except (ValueError, json.JSONDecodeError) as error:
+            raise GitHubBranchProviderError("GitHub branch response was not valid JSON") from error
+        sha = payload.get("object", {}).get("sha") if isinstance(payload, dict) else None
+        if not isinstance(sha, str) or not sha.strip():
+            raise GitHubBranchProviderError("GitHub branch response did not include object.sha")
+        html_url = payload.get("_links", {}).get("html") if isinstance(payload, dict) else None
+        if not isinstance(html_url, str) or not html_url.startswith("https://github.com/"):
+            raise GitHubBranchProviderError("GitHub branch response did not include a valid GitHub HTML URL")
+        return GitHubBranchObservation(
+            repository=repository, branch=branch, found=True, sha=sha, html_url=html_url
+        )
 
     def branch_exists(self, repository: str, branch: str) -> bool:
         response = httpx.get(self._ref_url(repository, branch), headers=self._headers(), timeout=self.timeout_seconds)
@@ -118,28 +195,6 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _audit(event_type: str, entity_id: str, details: dict[str, Any], actor: str) -> AuditEvent:
-    event = AuditEvent(event_type=event_type, entity_id=entity_id, details=details, actor=actor)
-    store.audit_events.append(event)
-    return event
-
-
-def _release_task(task: AgentTask, lease_token: str | None, worker_id: str) -> None:
-    if lease_token and task.worker_lease_token != lease_token:
-        _audit(
-            "agent_worker.lease_release_skipped",
-            task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "current_lease_token": task.worker_lease_token},
-            actor=worker_id,
-        )
-        return
-    task.worker_lease_owner = None
-    task.worker_lease_expires_at = None
-    task.worker_lease_token = None
-    task.updated_at = _now()
-    _audit("agent_worker.task_released", task.id, {"worker_id": worker_id, "lease_token": lease_token}, actor=worker_id)
-
-
 def _default_client() -> GitHubRestBranchClient:
     token = os.getenv("GITHUB_" + "TOKEN", "").strip()
     if not token:
@@ -161,7 +216,6 @@ def _append_branch_created_event(
         actor=worker_id,
         metadata={
             "worker_id": worker_id,
-            "lease_token": lease_token,
             "repository": result.repository,
             "branch": result.branch,
             "source_branch": result.source_branch,
@@ -175,7 +229,6 @@ def _append_branch_created_event(
             "operation_type": "github_branch_creation",
         },
     )
-    store.agent_task_events[event.id] = event
     return event
 
 
@@ -187,6 +240,7 @@ def run_agent_worker_github_branch_creation(
     lease_seconds: int = 300,
     source_branch: str = DEFAULT_SOURCE_BRANCH,
     client: GitHubBranchClient | None = None,
+    task_repository: AgentTaskRepository | None = None,
 ) -> AgentWorkerGitHubBranchResult:
     if not task_id and not first_approved:
         return AgentWorkerGitHubBranchResult(
@@ -196,10 +250,16 @@ def run_agent_worker_github_branch_creation(
             reason="Provide task_id or set first_approved=true.",
         )
 
+    repository = task_repository or agent_task_repository
     claim = (
-        claim_first_approved_agent_task_for_worker(worker_id=worker_id, lease_seconds=lease_seconds)
+        claim_first_approved_agent_task_for_worker(
+            worker_id=worker_id, lease_seconds=lease_seconds, repository=repository
+        )
         if first_approved and not task_id
-        else claim_agent_task_for_worker(task_id=str(task_id), worker_id=worker_id, lease_seconds=lease_seconds)
+        else claim_agent_task_for_worker(
+            task_id=str(task_id), worker_id=worker_id, lease_seconds=lease_seconds,
+            repository=repository,
+        )
     )
     if not claim.success or claim.task is None:
         return AgentWorkerGitHubBranchResult(
@@ -217,14 +277,14 @@ def run_agent_worker_github_branch_creation(
     branch = _planned_branch_for_task(task)
     validation_error = validate_branch_plan(task)
     if validation_error:
-        _audit(
-            "agent_worker.github_branch_refused",
-            task.id,
-            {"worker_id": worker_id, "lease_token": lease_token, "reason": validation_error},
-            actor=worker_id,
-        )
-        _release_task(task, lease_token, worker_id)
-        store.persist()
+        try:
+            commit_agent_task_worker_outcome(
+                task, worker_id=worker_id, repository=repository,
+                audit_type="agent_worker.github_branch_refused",
+                details={"reason": validation_error},
+            )
+        except Exception as error:  # noqa: BLE001 - a failed durable release must remain visible.
+            validation_error = f"{validation_error} Durable worker outcome could not be committed: {error}"
         return AgentWorkerGitHubBranchResult(
             success=False,
             task_id=task.id,
@@ -238,29 +298,28 @@ def run_agent_worker_github_branch_creation(
         )
 
     assert task.repository is not None
-    github = client or _default_client()
     try:
+        github = client or _default_client()
         if github.branch_exists(task.repository, branch):
             raise RuntimeError(f"Target branch already exists: {branch}")
         source_sha = github.get_branch_sha(task.repository, source_branch)
         created = github.create_branch(task.repository, branch, source_sha)
         created.source_branch = source_branch
     except Exception as error:  # noqa: BLE001 - return clean worker failure instead of crashing CLI/API callers.
-        _audit(
-            "agent_worker.github_branch_failed",
-            task.id,
-            {
-                "worker_id": worker_id,
-                "lease_token": lease_token,
-                "repository": task.repository,
-                "branch": branch,
-                "source_branch": source_branch,
-                "reason": str(error),
-            },
-            actor=worker_id,
-        )
-        _release_task(task, lease_token, worker_id)
-        store.persist()
+        failure_reason = str(error)
+        try:
+            commit_agent_task_worker_outcome(
+                task, worker_id=worker_id, repository=repository,
+                audit_type="agent_worker.github_branch_failed",
+                details={
+                    "repository": task.repository,
+                    "branch": branch,
+                    "source_branch": source_branch,
+                    "reason": failure_reason,
+                },
+            )
+        except Exception as commit_error:  # noqa: BLE001 - keep the external failure and persistence gap visible.
+            failure_reason = f"{failure_reason} Durable worker outcome could not be committed: {commit_error}"
         return AgentWorkerGitHubBranchResult(
             success=False,
             task_id=task.id,
@@ -270,26 +329,38 @@ def run_agent_worker_github_branch_creation(
             branch=branch,
             source_branch=source_branch,
             final_status=task.status,
-            reason=str(error),
+            reason=failure_reason,
         )
 
     event = _append_branch_created_event(task, worker_id, lease_token, created)
-    _audit(
-        "agent_worker.github_branch_created",
-        task.id,
-        {
-            "worker_id": worker_id,
-            "lease_token": lease_token,
-            "repository": created.repository,
-            "branch": created.branch,
-            "source_branch": created.source_branch,
-            "source_sha": created.source_sha,
-            "branch_url": created.html_url,
-        },
-        actor=worker_id,
-    )
-    _release_task(task, lease_token, worker_id)
-    store.persist()
+    try:
+        commit_agent_task_worker_outcome(
+            task, worker_id=worker_id, repository=repository,
+            audit_type="agent_worker.github_branch_created",
+            details={
+                "repository": created.repository,
+                "branch": created.branch,
+                "source_branch": created.source_branch,
+                "source_sha": created.source_sha,
+                "branch_url": created.html_url,
+            },
+            event=event,
+        )
+    except Exception as error:  # noqa: BLE001 - external mutation may have happened; never report a durable success.
+        return AgentWorkerGitHubBranchResult(
+            success=False,
+            task_id=task.id,
+            worker_id=worker_id,
+            lease_token=lease_token,
+            repository=created.repository,
+            branch=created.branch,
+            source_branch=created.source_branch,
+            source_sha=created.source_sha,
+            branch_created=True,
+            branch_url=created.html_url,
+            final_status=task.status,
+            reason=f"Branch creation may have succeeded, but its durable outcome could not be committed: {error}",
+        )
 
     return AgentWorkerGitHubBranchResult(
         success=True,

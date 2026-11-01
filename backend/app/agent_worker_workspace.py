@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any, Protocol
 
 from .agent_task_models import AgentTask
 from .models import AuditEvent
+from .settings import get_settings
 from .store import store
 
 
@@ -69,9 +71,26 @@ class AgentWorkerWorkspaceResult:
         return payload
 
 
-def _audit(event_type: str, entity_id: str, details: dict[str, Any], actor: str) -> AuditEvent:
-    event = AuditEvent(event_type=event_type, entity_id=entity_id, details=details, actor=actor)
-    store.audit_events.append(event)
+def _audit(
+    event_type: str,
+    entity_id: str,
+    details: dict[str, Any],
+    actor: str,
+    *,
+    workspace_id: str | None,
+    audit_writer: Callable[[AuditEvent], None] | None,
+) -> AuditEvent:
+    event = AuditEvent(
+        event_type=event_type,
+        entity_id=entity_id,
+        workspace_id=workspace_id,
+        details=details,
+        actor=actor,
+    )
+    if audit_writer is not None:
+        audit_writer(event)
+    else:
+        store.audit_events.append(event)
     return event
 
 
@@ -109,7 +128,13 @@ def prepare_agent_worker_workspace(
     workspace_parent: Path | None = None,
     runner: WorkspaceCommandRunner | None = None,
     cleanup_on_failure: bool = True,
+    audit_writer: Callable[[AuditEvent], None] | None = None,
 ) -> AgentWorkerWorkspaceResult:
+    settings = get_settings()
+    if audit_writer is None and (settings.is_production or settings.postgres_auth_enabled):
+        raise RuntimeError(
+            "AgentTask workspace preparation requires a durable audit writer in PostgreSQL or production mode"
+        )
     if not task.repository:
         return AgentWorkerWorkspaceResult(
             success=False,
@@ -137,6 +162,21 @@ def prepare_agent_worker_workspace(
         repository_path=repository_path,
     )
 
+    def record_workspace_audit(event_type: str, details: dict[str, Any]) -> None:
+        try:
+            _audit(
+                event_type,
+                task.id,
+                details,
+                worker_id,
+                workspace_id=task.workspace_id,
+                audit_writer=audit_writer,
+            )
+        except Exception:
+            if cleanup_on_failure:
+                cleanup_agent_worker_workspace(result)
+            raise
+
     clone_url = f"https://github.com/{task.repository}.git"
     commands = [
         ["git", "clone", "--depth", "1", "--branch", branch, clone_url, str(repository_path)],
@@ -148,11 +188,9 @@ def prepare_agent_worker_workspace(
         result.commands.append(clone_result)
         if not clone_result.passed:
             result.reason = f"Workspace clone failed for branch {branch}."
-            _audit(
+            record_workspace_audit(
                 "agent_worker.workspace_prepare_failed",
-                task.id,
                 {**_redacted_workspace_metadata(result), "reason": result.reason},
-                actor=worker_id,
             )
             if cleanup_on_failure:
                 cleanup_agent_worker_workspace(result)
@@ -162,22 +200,18 @@ def prepare_agent_worker_workspace(
         result.commands.append(checkout_result)
         if not checkout_result.passed:
             result.reason = f"Workspace checkout failed for branch {branch}."
-            _audit(
+            record_workspace_audit(
                 "agent_worker.workspace_prepare_failed",
-                task.id,
                 {**_redacted_workspace_metadata(result), "reason": result.reason},
-                actor=worker_id,
             )
             if cleanup_on_failure:
                 cleanup_agent_worker_workspace(result)
             return result
     except Exception as error:  # noqa: BLE001 - return controlled worker failure.
         result.reason = str(error)
-        _audit(
+        record_workspace_audit(
             "agent_worker.workspace_prepare_failed",
-            task.id,
             {**_redacted_workspace_metadata(result), "reason": result.reason},
-            actor=worker_id,
         )
         if cleanup_on_failure:
             cleanup_agent_worker_workspace(result)
@@ -185,10 +219,8 @@ def prepare_agent_worker_workspace(
 
     result.success = True
     result.reason = "Isolated workspace prepared and target branch checked out."
-    _audit(
+    record_workspace_audit(
         "agent_worker.workspace_prepared",
-        task.id,
         _redacted_workspace_metadata(result),
-        actor=worker_id,
     )
     return result

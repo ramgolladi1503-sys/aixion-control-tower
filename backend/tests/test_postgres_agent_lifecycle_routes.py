@@ -1,0 +1,464 @@
+from __future__ import annotations
+
+import os
+import uuid
+from collections.abc import Callable, Iterator
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+
+import psycopg
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from psycopg import Connection, sql
+from psycopg.types.json import Jsonb
+
+from app import main
+from app import application_repository_access
+from app import agent_routes
+from app.application_repositories import ApplicationRepositories
+from app.agent_routes import APPROVAL_CONNECTOR_ACTIONS
+from app.auth import require_owner
+from app.models import AuthUser, Project, User, UserRole, Workspace, now_utc
+from app.postgres_database import run_postgres_migrations
+from app.settings import get_settings
+from app.store import store
+
+
+def _unexpected_connection() -> Connection:
+    raise AssertionError("repository selection tests must not open a database connection")
+
+
+def test_external_agent_repository_requires_active_postgres_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = ApplicationRepositories.from_connector(_unexpected_connection)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(repositories=repositories),
+        postgres_repositories=repositories,
+        external_agent_auth_repository=object(),
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    monkeypatch.setattr(
+        application_repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    assert (
+        application_repository_access.external_agent_auth_repository_for_request(request)
+        is repositories.external_agent_auth
+    )
+
+    state.postgres_runtime = None
+    with pytest.raises(RuntimeError, match="runtime is unavailable or mismatched"):
+        application_repository_access.external_agent_auth_repository_for_request(request)
+
+
+def test_external_agent_repository_rejects_mixed_postgres_runtime_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repositories = ApplicationRepositories.from_connector(_unexpected_connection)
+    state = SimpleNamespace(
+        postgres_runtime=SimpleNamespace(
+            repositories=ApplicationRepositories.from_connector(_unexpected_connection)
+        ),
+        postgres_repositories=repositories,
+        external_agent_auth_repository=repositories.external_agent_auth,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    monkeypatch.setattr(
+        application_repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=True),
+    )
+
+    with pytest.raises(RuntimeError, match="runtime is unavailable or mismatched"):
+        application_repository_access.external_agent_auth_repository_for_request(request)
+
+
+def test_external_agent_repository_keeps_explicit_local_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_repository = object()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        external_agent_auth_repository=local_repository
+    )))
+    monkeypatch.setattr(
+        application_repository_access,
+        "get_settings",
+        lambda: SimpleNamespace(postgres_auth_enabled=False),
+    )
+
+    assert (
+        application_repository_access.external_agent_auth_repository_for_request(request)
+        is local_repository
+    )
+
+
+def test_postgres_agent_detail_requires_workspace_before_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PostgresRepositoryStub:
+        def get_for_workspace(self, agent_id: str, *, workspace_id: str):
+            raise AssertionError("unscoped requests must not query agent records")
+
+    user = AuthUser(
+        id="owner-without-membership", email="owner@example.test", display_name="Owner",
+        role=UserRole.OWNER, workspace_id=None,
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    monkeypatch.setattr(
+        agent_routes, "external_agent_auth_repository_for_request",
+        lambda _request: PostgresRepositoryStub(),
+    )
+    monkeypatch.setattr(agent_routes, "workspace_id_for_request", lambda _user, _request: None)
+
+    with pytest.raises(agent_routes.HTTPException) as error:
+        agent_routes._get_agent_or_404("known-agent-id", user, request)
+
+    assert error.value.status_code == 403
+    assert error.value.detail == "Workspace membership is required"
+
+
+@pytest.fixture
+def postgres_agent_route_runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[
+    Callable[[], Connection], Workspace, Project, AuthUser, ApplicationRepositories
+]]:
+    dsn = os.getenv("AIXION_TEST_POSTGRES_DSN", "").strip()
+    if not dsn:
+        pytest.skip("AIXION_TEST_POSTGRES_DSN is required for PostgreSQL agent route tests")
+    schema = f"ct_agent_routes_{uuid.uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    def connect() -> Connection:
+        connection = psycopg.connect(dsn)
+        connection.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        return connection
+
+    try:
+        run_postgres_migrations(connect)
+        owner = User(
+            id=f"user_{uuid.uuid4().hex}", email=f"owner-{uuid.uuid4().hex}@example.test",
+            display_name="Owner", role=UserRole.OWNER, password_hash="hash",
+            password_salt="salt", workspace_id=f"workspace_{uuid.uuid4().hex}",
+        )
+        workspace = Workspace(id=owner.workspace_id, name="Agent lifecycle", owner_user_id=owner.id)
+        owner = owner.model_copy(update={"email_verified": True})
+        project = Project(
+            id=f"project_{uuid.uuid4().hex}", name="Connector project", workspace_id=workspace.id
+        )
+        with connect() as conn:
+            conn.execute("INSERT INTO workspaces(workspace_id,payload) VALUES(%s,%s)",
+                         (workspace.id, Jsonb(workspace.model_dump(mode="json"))))
+            conn.execute(
+                "INSERT INTO users(user_id,workspace_id,email,normalized_email,role,disabled,email_verified,payload) "
+                "VALUES(%s,%s,%s,%s,%s,FALSE,TRUE,%s)",
+                (owner.id, workspace.id, owner.email, owner.email.lower(), owner.role.value,
+                 Jsonb(owner.model_dump(mode="json"))),
+            )
+            conn.execute("INSERT INTO projects(project_id,workspace_id,payload) VALUES(%s,%s,%s)",
+                         (project.id, workspace.id, Jsonb(project.model_dump(mode="json"))))
+
+        repositories = ApplicationRepositories.from_connector(connect)
+        for name, value in {
+            "external_agent_auth_repository": repositories.external_agent_auth,
+            "project_repository": repositories.projects,
+            "workspace_membership_repository": repositories.workspace_membership,
+        }.items():
+            monkeypatch.setattr(main.app.state, name, value, raising=False)
+        user = AuthUser(
+            id=owner.id, email=owner.email, display_name=owner.display_name,
+            role=owner.role, workspace_id=workspace.id,
+        )
+        monkeypatch.setitem(main.app.dependency_overrides, require_owner, lambda: user)
+        yield connect, workspace, project, user, repositories
+    finally:
+        main.app.dependency_overrides.pop(require_owner, None)
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_postgres_agent_owner_lifecycle_is_scoped_audited_and_does_not_project_to_sqlite(
+    postgres_agent_route_runtime,
+) -> None:
+    connect, workspace, project, _user, repositories = postgres_agent_route_runtime
+    client = TestClient(main.app)
+    initial_sqlite_ids = set(store.external_agents)
+    registered_started = now_utc()
+    create = client.post("/agents", json={
+        "provider": "ANTIGRAVITY", "display_name": "Local Antigravity",
+        "auth_type": "API_KEY", "allowed_project_ids": [project.id],
+        "allowed_actions": sorted(action.value for action in APPROVAL_CONNECTOR_ACTIONS), "enabled": True,
+    })
+    assert create.status_code == 200, create.text
+    created = create.json()
+    agent_id, first_token = created["agent"]["id"], created["agent_token"]
+    assert first_token and agent_id not in store.external_agents
+    assert [item["id"] for item in client.get("/agents").json()] == [agent_id]
+    assert client.get(f"/agents/{agent_id}").status_code == 200
+    ttl_seconds = get_settings().external_agent_token_ttl_seconds
+    status = client.get(f"/agents/{agent_id}/credentials")
+    registered_finished = now_utc()
+    assert status.status_code == 200 and status.json()["credential_state"] == "ACTIVE"
+    registered_expiry = datetime.fromisoformat(status.json()["token_expires_at"])
+    assert registered_expiry >= registered_started + timedelta(seconds=ttl_seconds - 2)
+    assert registered_expiry <= registered_finished + timedelta(seconds=ttl_seconds + 2)
+
+    rotated_started = now_utc()
+    rotated = client.post(f"/agents/{agent_id}/token/rotate", json={"rate_limit_per_minute": 37})
+    assert rotated.status_code == 200, rotated.text
+    second_token = rotated.json()["agent_token"]
+    assert second_token and second_token != first_token
+    rotated_status = client.get(f"/agents/{agent_id}/credentials")
+    rotated_finished = now_utc()
+    assert rotated_status.status_code == 200
+    rotated_expiry = datetime.fromisoformat(rotated_status.json()["token_expires_at"])
+    assert rotated_expiry >= rotated_started + timedelta(seconds=ttl_seconds - 2)
+    assert rotated_expiry <= rotated_finished + timedelta(seconds=ttl_seconds + 2)
+    assert rotated_status.json()["credential_state"] == "ACTIVE"
+    assert client.get("/agents/identity", params={"provider": "ANTIGRAVITY", "project_id": project.id},
+                      headers={"X-Aixion-Agent-Id": agent_id,
+                               "X-Aixion-Agent-Token": first_token}).status_code == 401
+    assert client.get("/agents/identity", params={"provider": "ANTIGRAVITY", "project_id": project.id},
+                      headers={"X-Aixion-Agent-Id": agent_id,
+                               "X-Aixion-Agent-Token": second_token}).status_code == 200
+
+    revoked = client.post(f"/agents/{agent_id}/token/revoke")
+    assert revoked.status_code == 200, revoked.text
+    assert client.get("/agents/identity", params={"provider": "ANTIGRAVITY", "project_id": project.id},
+                      headers={"X-Aixion-Agent-Id": agent_id,
+                               "X-Aixion-Agent-Token": second_token}).status_code == 401
+    record = repositories.external_agent_auth.get(agent_id)
+    assert record is not None and record[1].token_revoked_at is not None
+    assert record[1].rate_limit_per_minute == 37
+    with connect() as conn:
+        events = conn.execute(
+            "SELECT event_type FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "ORDER BY created_at,event_id", (workspace.id, agent_id),
+        ).fetchall()
+    assert [row[0] for row in events] == [
+        "agent.registered", "agent.token_rotated", "agent.auth_failed",
+        "agent.token_revoked", "agent.auth_failed",
+    ]
+    assert set(store.external_agents) == initial_sqlite_ids
+
+
+def test_postgres_external_agent_token_authenticates_across_independent_app_instances(
+    postgres_agent_route_runtime,
+) -> None:
+    connect, workspace, project, _user, _first_repositories = postgres_agent_route_runtime
+    first_client = TestClient(main.app)
+    created = first_client.post(
+        "/agents",
+        json={
+            "provider": "ANTIGRAVITY",
+            "display_name": "Cross-instance Antigravity",
+            "auth_type": "API_KEY",
+            "allowed_project_ids": [project.id],
+            "allowed_actions": sorted(action.value for action in APPROVAL_CONNECTOR_ACTIONS),
+            "enabled": True,
+        },
+    )
+    assert created.status_code == 200, created.text
+    agent_id = created.json()["agent"]["id"]
+    original_token = created.json()["agent_token"]
+    initial_sqlite_ids = set(store.external_agents)
+
+    # Build a separate FastAPI app and repository adapters over the same schema,
+    # matching a second API process without sharing its in-memory route bindings.
+    second_repositories = ApplicationRepositories.from_connector(connect)
+    second_app = FastAPI()
+    second_app.include_router(agent_routes.router)
+    second_app.state.external_agent_auth_repository = second_repositories.external_agent_auth
+    second_app.state.project_repository = second_repositories.projects
+    second_app.state.workspace_membership_repository = second_repositories.workspace_membership
+    second_client = TestClient(second_app)
+    headers = {
+        "X-Aixion-Agent-Id": agent_id,
+        "X-Aixion-Agent-Token": original_token,
+    }
+    identity = second_client.get(
+        "/agents/identity",
+        params={"provider": "ANTIGRAVITY", "project_id": project.id},
+        headers=headers,
+    )
+    assert identity.status_code == 200, identity.text
+    assert identity.json() == {
+        "agent_id": agent_id,
+        "provider": "ANTIGRAVITY",
+        "workspace_id": workspace.id,
+        "project_id": project.id,
+    }
+
+    # Rotate in the first app process, then verify the second process observes
+    # the durable credential change without sharing repository instances.
+    rotated = first_client.post(
+        f"/agents/{agent_id}/token/rotate",
+        json={"rate_limit_per_minute": 29},
+    )
+    assert rotated.status_code == 200, rotated.text
+    replacement_token = rotated.json()["agent_token"]
+    assert replacement_token and replacement_token != original_token
+
+    old_token_identity = second_client.get(
+        "/agents/identity",
+        params={"provider": "ANTIGRAVITY", "project_id": project.id},
+        headers=headers,
+    )
+    assert old_token_identity.status_code == 401
+    replacement_headers = {
+        "X-Aixion-Agent-Id": agent_id,
+        "X-Aixion-Agent-Token": replacement_token,
+    }
+    replacement_identity = second_client.get(
+        "/agents/identity",
+        params={"provider": "ANTIGRAVITY", "project_id": project.id},
+        headers=replacement_headers,
+    )
+    assert replacement_identity.status_code == 200, replacement_identity.text
+    assert replacement_identity.json() == identity.json()
+
+    revoked = first_client.post(f"/agents/{agent_id}/token/revoke")
+    assert revoked.status_code == 200, revoked.text
+    revoked_token_identity = second_client.get(
+        "/agents/identity",
+        params={"provider": "ANTIGRAVITY", "project_id": project.id},
+        headers=replacement_headers,
+    )
+    assert revoked_token_identity.status_code == 401
+
+    with connect() as conn:
+        credential = conn.execute(
+            "SELECT payload FROM external_agent_credentials WHERE agent_id=%s",
+            (agent_id,),
+        ).fetchone()
+        assert credential is not None
+        audit_events = conn.execute(
+            "SELECT event_type FROM audit_events WHERE workspace_id=%s AND entity_id=%s "
+            "ORDER BY created_at,event_id",
+            (workspace.id, agent_id),
+        ).fetchall()
+    assert credential[0]["last_used_at"] is not None
+    assert [row[0] for row in audit_events] == [
+        "agent.registered",
+        "agent.token_rotated",
+        "agent.auth_failed",
+        "agent.token_revoked",
+        "agent.auth_failed",
+    ]
+    assert set(store.external_agents) == initial_sqlite_ids
+
+
+def test_postgres_external_gateway_action_is_durable_and_partial_runtime_fails_closed(
+    postgres_agent_route_runtime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connect, workspace, project, _user, repositories = postgres_agent_route_runtime
+    runtime = SimpleNamespace(connect=connect, repositories=repositories)
+    for name, value in {
+        "postgres_runtime": runtime,
+        "postgres_repositories": repositories,
+        "approval_decision_repository": repositories.approval_decisions,
+        "workspace_membership_repository": repositories.workspace_membership,
+        "trust_repository": repositories.trust,
+        "trust_event_repository": repositories.trust_events,
+        "external_agent_auth_repository": repositories.external_agent_auth,
+        "project_repository": repositories.projects,
+    }.items():
+        monkeypatch.setattr(main.app.state, name, value, raising=False)
+
+    client = TestClient(main.app)
+    agent_response = client.post(
+        "/agents",
+        json={
+            "provider": "CODEX",
+            "display_name": "PostgreSQL gateway agent",
+            "auth_type": "API_KEY",
+            "allowed_project_ids": [project.id],
+            "allowed_repositories": ["owner/repo"],
+            "allowed_actions": ["EXECUTE_GITHUB"],
+            "enabled": True,
+        },
+    )
+    assert agent_response.status_code == 200, agent_response.text
+    agent_id = agent_response.json()["agent"]["id"]
+    token = agent_response.json()["agent_token"]
+    headers = {
+        "X-Aixion-Agent-Id": agent_id,
+        "X-Aixion-Agent-Token": token,
+    }
+    sqlite_actions_before = dict(store.proposed_actions)
+    sqlite_decisions_before = dict(store.policy_decisions)
+    sqlite_events_before = dict(store.trust_events)
+
+    evaluated = client.post(
+        "/trust/gateway/actions",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "action_type": "RUN_COMMAND",
+            "repository": "owner/repo",
+            "branch": "feature/durable-gateway",
+            "command": "python -m compileall",
+        },
+    )
+    assert evaluated.status_code == 200, evaluated.text
+    action_id = evaluated.json()["action"]["id"]
+    with connect() as conn:
+        action = repositories.trust.get_proposed_action(conn, action_id, workspace.id)
+        assert action is not None
+        decision = repositories.trust.get_latest_policy_decision_for_action(
+            conn, action_id, workspace.id
+        )
+        assert decision is not None
+        assert decision.decision.value == evaluated.json()["decision"]["decision"]
+        event_types = conn.execute(
+            "SELECT event_type FROM trust_events WHERE entity_id=%s ORDER BY sequence",
+            (action_id,),
+        ).fetchall()
+        assert len(event_types) == 2
+        assert event_types[0][0] == "ACTION_RECEIVED"
+        assert event_types[1][0] in {
+            "ACTION_ALLOWED",
+            "ACTION_REQUIRES_APPROVAL",
+            "ACTION_BLOCKED",
+        }
+    assert action.agent_id == agent_id
+    assert action.workspace_id == workspace.id
+    assert store.proposed_actions == sqlite_actions_before
+    assert store.policy_decisions == sqlite_decisions_before
+    assert store.trust_events == sqlite_events_before
+
+    run_linked = client.post(
+        "/trust/gateway/actions",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "action_type": "RUN_COMMAND",
+            "repository": "owner/repo",
+            "branch": "feature/durable-gateway",
+            "command": "python -m compileall",
+            "run_id": "run_not_yet_durable",
+        },
+    )
+    assert run_linked.status_code == 409
+
+    monkeypatch.setattr(main.app.state, "postgres_runtime", None)
+    mixed_runtime = client.post(
+        "/trust/gateway/actions",
+        headers=headers,
+        json={
+            "project_id": project.id,
+            "action_type": "RUN_COMMAND",
+            "repository": "owner/repo",
+            "branch": "feature/durable-gateway",
+            "command": "python -m compileall",
+        },
+    )
+    assert mixed_runtime.status_code == 409
+    with connect() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM proposed_actions WHERE workspace_id=%s",
+            (workspace.id,),
+        ).fetchone()[0] == 1

@@ -8,11 +8,8 @@ services:
       AIXION_PROFILE: production
       AIXION_AUTH_ENABLED: "true"
       AIXION_TRUST_ENFORCEMENT: "true"
-      AIXION_DB_PATH: /app/runtime/aixion_control_tower.sqlite3
     ports:
       - "127.0.0.1:8000:8000"
-    volumes:
-      - aixion-runtime:/app/runtime
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
@@ -35,10 +32,9 @@ services:
       - mission-control-production-scheduler
       - --poll-seconds
       - "2"
-    env_file:
-      - .env.production
     environment:
       AIXION_API_BASE_URL: http://api:8000
+      AIXION_OWNER_TOKEN: ${AIXION_OWNER_TOKEN:?set AIXION_OWNER_TOKEN}
     read_only: true
     tmpfs:
       - /tmp:size=128m,mode=1777
@@ -78,8 +74,6 @@ services:
 
   grafana:
     image: grafana/grafana:11.3.0
-    env_file:
-      - .env.production
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}
@@ -103,6 +97,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  aixion-runtime:
   prometheus-data:
   grafana-data:

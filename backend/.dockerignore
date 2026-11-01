@@ -1,0 +1,14 @@
+# Send only runtime source and package metadata to the Docker builder.
+# Docker always provides the Dockerfile and this ignore file separately.
+**
+!pyproject.toml
+!app/
+!app/**
+!scripts/
+!scripts/**
+**/__pycache__/
+**/*.py[cod]
+**/.env*
+**/*.env
+**/*.env.*
+**/*.sqlite*

@@ -27,7 +27,7 @@ class AuthUxCopyTest {
 
         assertEquals("Check your email", AuthUxCopy.heroTitle(state))
         assertEquals("Verification required", AuthUxCopy.sessionLabel(state))
-        assertEquals("Verify first", AuthUxCopy.primaryLoginLabel(state))
+        assertEquals("Verify email first", AuthUxCopy.primaryLoginLabel(state))
         assertFalse(AuthUxCopy.canAttemptLogin(state))
         assertTrue(AuthUxCopy.canAttemptResend(state))
         assertTrue(AuthUxCopy.verificationGuidance(state).contains("owner@example.com"))
@@ -44,12 +44,17 @@ class AuthUxCopyTest {
 
         assertEquals("Email verified", AuthUxCopy.heroTitle(state))
         assertEquals("Ready to log in", AuthUxCopy.sessionLabel(state))
-        assertEquals("Login now", AuthUxCopy.primaryLoginLabel(state))
+        assertEquals("Log in", AuthUxCopy.primaryLoginLabel(state))
         assertTrue(AuthUxCopy.canAttemptLogin(state))
     }
 
     @Test
-    fun authenticatedStateShowsConnectedCopy() {
+    fun normalLoginUsesShortLabel() {
+        assertEquals("Log in", AuthUxCopy.primaryLoginLabel(AuthUiState()))
+    }
+
+    @Test
+    fun authenticatedStateLabelsTheAccountWithoutImplyingAnAgentConnection() {
         val state = AuthUiState(
             email = "owner@example.com",
             authenticated = true,
@@ -57,8 +62,12 @@ class AuthUxCopyTest {
             userLabel = "Owner • owner@example.com • OWNER"
         )
 
-        assertEquals("You are connected", AuthUxCopy.heroTitle(state))
+        assertEquals("Your account", AuthUxCopy.heroTitle(state))
         assertEquals("Session active", AuthUxCopy.sessionLabel(state))
+        assertEquals(
+            "You are signed in and can review approval requests on this phone.",
+            AuthUxCopy.heroSubtitle(state)
+        )
     }
 
     @Test
@@ -66,5 +75,13 @@ class AuthUxCopyTest {
         assertFalse(AuthUxCopy.canAttemptVerify(AuthUiState(email = "owner@example.com")))
         assertFalse(AuthUxCopy.canAttemptVerify(AuthUiState(verificationCode = "123456")))
         assertTrue(AuthUxCopy.canAttemptVerify(AuthUiState(email = "owner@example.com", verificationCode = "123456")))
+    }
+
+    @Test
+    fun developmentVerificationCodeIsOnlyVisibleInDebugBuilds() {
+        assertEquals("123456", developmentVerificationCodeForDisplay("123456", isDebugBuild = true))
+        assertEquals(null, developmentVerificationCodeForDisplay("123456", isDebugBuild = false))
+        assertEquals(null, developmentVerificationCodeForDisplay("  ", isDebugBuild = true))
+        assertEquals(null, developmentVerificationCodeForDisplay(null, isDebugBuild = true))
     }
 }

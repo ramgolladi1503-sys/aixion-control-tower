@@ -108,10 +108,19 @@ That gives this MVP a stronger single-writer claim boundary:
 ```text
 worker opens SQLite writer transaction
 worker reads latest AgentTask payload
-worker validates APPROVED + linked approval + lease availability
+worker validates APPROVED task + durable APPROVED approval + existing project + required workspace ownership + matching task/approval/project scope + lease availability
 worker writes lease owner/token/expiry in the same transaction
 in-memory store copy is refreshed for current process use
 ```
+
+The worker fails closed when the linked approval row is missing, is not
+APPROVED, the task has no project, the project row or its workspace is missing,
+or task/approval ownership conflicts with the project. The check reads the
+approval and project from the same SQLite transaction as the lease claim; it
+does not trust the process-local approval map. A refused explicit claim writes
+an `agent_worker.task_claim_refused` audit event in that transaction. Legacy
+unowned tasks must receive an operator-reviewed workspace mapping before
+worker execution; this guard is not a data migration.
 
 Hard limit:
 

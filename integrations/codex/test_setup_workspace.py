@@ -1,0 +1,353 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+
+import pytest
+
+SETUP_PATH = Path(__file__).with_name("setup_workspace.py")
+SPEC = importlib.util.spec_from_file_location("aixion_codex_workspace_setup", SETUP_PATH)
+assert SPEC and SPEC.loader
+setup = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(setup)
+
+
+def _hooks(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _install(workspace: Path, home: Path) -> tuple[Path, Path]:
+    return setup.install_workspace(
+        workspace,
+        api_base_url="http://127.0.0.1:8004",
+        agent_id="agent_test_codex",
+        project_id="project_test_codex",
+        home=home,
+    )
+
+
+def test_windows_command_uses_argument_quoting_for_paths_with_spaces(tmp_path: Path) -> None:
+    config = tmp_path / "A User" / "AppData" / "codex config.json"
+    script = tmp_path / "Aixion Control Tower" / "approval hook.py"
+    python = r"C:\Program Files\Python\python.exe"
+    command = setup._windows_hook_command(config, script, python)
+
+    expected = subprocess.list2cmdline((python, str(script.resolve()), "--config", str(config)))
+    assert command == expected
+    assert '"C:\\Program Files\\Python\\python.exe"' in command
+    assert "Aixion Control Tower" in command
+    assert "approval hook.py" in command
+    assert "A User" in command
+
+
+def test_install_is_workspace_scoped_idempotent_and_preserves_unrelated_hooks(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    codex_dir = workspace / ".codex"
+    codex_dir.mkdir(parents=True)
+    hooks_path = codex_dir / "hooks.json"
+    unrelated = {"matcher": "shell", "hooks": [{"type": "command", "command": "reviewer"}]}
+    hooks_path.write_text(
+        json.dumps({"hooks": {"PermissionRequest": [unrelated], "Stop": [{"hooks": []}]}}),
+        encoding="utf-8",
+    )
+    hooks_path.chmod(0o600)
+
+    config_path, installed_hooks_path = _install(workspace, home)
+    first_result = _hooks(installed_hooks_path)
+    first_bytes = installed_hooks_path.read_bytes()
+    second_config_path, second_hooks_path = _install(workspace, home)
+
+    assert second_config_path == config_path
+    assert second_hooks_path == hooks_path
+    assert installed_hooks_path.read_bytes() == first_bytes
+    assert first_result["hooks"]["PermissionRequest"][0] == unrelated
+    assert first_result["hooks"]["Stop"] == [{"hooks": []}]
+    assert len(first_result["hooks"]["PermissionRequest"]) == 2
+    assert config_path.parent == home / ".config" / "aixion" / "workspaces"
+    assert os.stat(config_path).st_mode & 0o777 == 0o600
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "api_base_url": "http://127.0.0.1:8004",
+        "agent_id": "agent_test_codex",
+        "project_id": "project_test_codex",
+        "workspace_path": str(workspace.resolve()),
+    }
+
+
+def test_install_records_canonical_workspace_when_parent_uses_symlink(tmp_path: Path) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    real_parent = tmp_path / "real-parent"
+    workspace = real_parent / "project"
+    workspace.mkdir(parents=True)
+    parent_alias = tmp_path / "parent-alias"
+    parent_alias.symlink_to(real_parent, target_is_directory=True)
+
+    config_path, _ = _install(parent_alias / "project", home)
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["workspace_path"] == str(workspace.resolve())
+
+
+def test_install_rejects_workspace_path_that_is_itself_a_symlink(tmp_path: Path) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    workspace_alias = tmp_path / "project-alias"
+    workspace_alias.symlink_to(workspace, target_is_directory=True)
+
+    with pytest.raises(setup.SetupError, match="not a symlink"):
+        _install(workspace_alias, home)
+
+    assert not (home / ".config").exists()
+
+
+def test_install_refuses_shared_writable_hooks_without_partial_config_or_mutation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    codex_dir = workspace / ".codex"
+    codex_dir.mkdir(parents=True)
+    hooks_path = codex_dir / "hooks.json"
+    original = json.dumps({"hooks": {"PermissionRequest": []}}).encode()
+    hooks_path.write_bytes(original)
+    hooks_path.chmod(0o620)
+
+    with pytest.raises(setup.SetupError, match="must not be group- or other-writable"):
+        _install(workspace, home)
+
+    assert hooks_path.read_bytes() == original
+    assert not (home / ".config").exists()
+
+
+def test_install_refuses_output_hooks_file_over_size_limit_without_mutation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    _, config_path, hooks_path = setup._managed_paths(
+        workspace,
+        home,
+        Path(__file__).with_name("aixion_permission_request_hook.py"),
+    )
+    config_path.parent.mkdir(mode=0o700, parents=True)
+    config_bytes = (
+        json.dumps(
+            {
+                "api_base_url": "http://127.0.0.1:8004",
+                "agent_id": "agent_test_codex",
+                "project_id": "project_test_codex",
+                "workspace_path": str(workspace.resolve()),
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    config_path.write_bytes(config_bytes)
+    config_path.chmod(0o600)
+
+    original = json.dumps(
+        {"hooks": {"Stop": [{"command": "x" * (setup.MAX_JSON_BYTES - 256)}]}},
+        separators=(",", ":"),
+    ).encode()
+    assert len(original) <= setup.MAX_JSON_BYTES
+    hooks_path.parent.mkdir(mode=0o700, parents=True)
+    hooks_path.write_bytes(original)
+    hooks_path.chmod(0o600)
+
+    with pytest.raises(setup.SetupError, match="Updated Codex hooks file exceeds"):
+        _install(workspace, home)
+
+    assert hooks_path.read_bytes() == original
+    assert config_path.read_bytes() == config_bytes
+
+
+def test_remove_refuses_pretty_print_expansion_without_mutation(tmp_path: Path) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+
+    hooks_file = _hooks(hooks_path)
+    # Compact JSON is well below the input limit, but pretty-printing this
+    # many small values during removal expands it beyond the hook's read cap.
+    hooks_file["hooks"]["Stop"] = [{} for _ in range(10_000)]
+    original = json.dumps(hooks_file, separators=(",", ":")).encode()
+    assert len(original) <= setup.MAX_JSON_BYTES
+    hooks_path.write_bytes(original)
+    hooks_path.chmod(0o640)
+    original_config = config_path.read_bytes()
+    original_config_mode = os.stat(config_path).st_mode & 0o777
+
+    with pytest.raises(setup.SetupError, match="Updated Codex hooks file exceeds"):
+        setup.remove_workspace(workspace, home=home)
+
+    assert hooks_path.read_bytes() == original
+    assert os.stat(hooks_path).st_mode & 0o777 == 0o640
+    assert config_path.read_bytes() == original_config
+    assert os.stat(config_path).st_mode & 0o777 == original_config_mode
+
+
+def test_install_restores_legacy_config_bytes_and_mode_if_hook_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+
+    # Recreate the exact pre-workspace-binding config supported by the
+    # installer's one-time upgrade path, using a restrictive operator mode.
+    legacy_config = {
+        "api_base_url": "http://127.0.0.1:8004",
+        "agent_id": "agent_test_codex",
+        "project_id": "project_test_codex",
+    }
+    legacy_bytes = (json.dumps(legacy_config, indent=2) + "\n").encode()
+    config_path.write_bytes(legacy_bytes)
+    config_path.chmod(0o400)
+    original_hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+    original_hooks["hooks"]["PermissionRequest"] = []
+    hooks_path.write_text(json.dumps(original_hooks), encoding="utf-8")
+    hooks_path.chmod(0o600)
+
+    atomic_write = setup._atomic_write
+
+    def fail_hook_write(path: Path, data: bytes, mode: int) -> None:
+        if path == hooks_path:
+            raise OSError("simulated Codex hooks write failure")
+        atomic_write(path, data, mode)
+
+    monkeypatch.setattr(setup, "_atomic_write", fail_hook_write)
+
+    with pytest.raises(OSError, match="simulated Codex hooks write failure"):
+        _install(workspace, home)
+
+    assert config_path.read_bytes() == legacy_bytes
+    assert config_path.stat().st_mode & 0o777 == 0o400
+    assert json.loads(hooks_path.read_text(encoding="utf-8")) == original_hooks
+
+
+@pytest.mark.parametrize("mode", [0o770, 0o707])
+def test_install_refuses_shared_writable_codex_directory_without_partial_mutation(
+    tmp_path: Path, mode: int,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    codex_dir = workspace / ".codex"
+    codex_dir.mkdir(parents=True)
+    codex_dir.chmod(mode)
+    hooks_path = codex_dir / "hooks.json"
+    original = json.dumps({"hooks": {"PermissionRequest": []}}).encode()
+    hooks_path.write_bytes(original)
+    hooks_path.chmod(0o600)
+
+    with pytest.raises(setup.SetupError, match=r"\.codex directory must not be group- or other-writable"):
+        _install(workspace, home)
+
+    assert hooks_path.read_bytes() == original
+    assert not (home / ".config").exists()
+
+
+def test_install_rejects_codex_directory_owned_by_another_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    (workspace / ".codex").mkdir(parents=True)
+    current_uid = os.getuid()
+    monkeypatch.setattr(setup.os, "getuid", lambda: current_uid + 1)
+
+    with pytest.raises(setup.SetupError, match=r"\.codex path must be a real directory owned by this user"):
+        _install(workspace, home)
+
+    assert not (home / ".config").exists()
+
+
+def test_remove_refuses_shared_writable_codex_directory_without_mutation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+    hooks_before = hooks_path.read_bytes()
+    config_before = config_path.read_bytes()
+    hooks_path.parent.chmod(0o770)
+
+    with pytest.raises(setup.SetupError, match=r"\.codex directory must not be group- or other-writable"):
+        setup.remove_workspace(workspace, home=home)
+
+    assert hooks_path.read_bytes() == hooks_before
+    assert config_path.read_bytes() == config_before
+
+
+def test_remove_deletes_only_managed_codex_hook_and_config(tmp_path: Path) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+    data = _hooks(hooks_path)
+    unrelated = {"matcher": "shell", "hooks": [{"type": "command", "command": "reviewer"}]}
+    data["hooks"]["PermissionRequest"].append(unrelated)
+    data["hooks"]["Stop"] = [{"hooks": []}]
+    hooks_path.write_text(json.dumps(data), encoding="utf-8")
+    hooks_path.chmod(0o600)
+
+    assert setup.remove_workspace(workspace, home=home) == (True, True)
+
+    remaining = _hooks(hooks_path)
+    assert remaining == {
+        "hooks": {
+            "PermissionRequest": [unrelated],
+            "Stop": [{"hooks": []}],
+        }
+    }
+    assert not config_path.exists()
+
+
+def test_remove_restores_hook_if_config_deletion_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "config-home"
+    home.mkdir(mode=0o700)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    config_path, hooks_path = _install(workspace, home)
+    hooks_before = hooks_path.read_bytes()
+    hooks_mode_before = hooks_path.stat().st_mode & 0o777
+    config_before = config_path.read_bytes()
+    original_unlink = Path.unlink
+
+    def fail_config_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path == config_path:
+            raise OSError("simulated config removal failure")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_config_unlink)
+
+    with pytest.raises(OSError, match="simulated config removal failure"):
+        setup.remove_workspace(workspace, home=home)
+
+    assert hooks_path.read_bytes() == hooks_before
+    assert hooks_path.stat().st_mode & 0o777 == hooks_mode_before
+    assert config_path.read_bytes() == config_before

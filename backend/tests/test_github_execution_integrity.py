@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+
 from app.approval_integrity import compute_approval_payload_hash
+from app import github_runner
 from app.github_runner import PatchPlanRequest, _validate_execution
 from app.models import ApprovalRequest, ApprovalStatus, FileChange, RiskAssessment, RiskLevel
 from app.store import store
@@ -81,3 +87,40 @@ def test_patch_plan_blocks_denied_and_expired_statuses() -> None:
 
         assert plan.ready is False
         assert "Approval request must be APPROVED before GitHub execution." in plan.blockers
+
+
+@pytest.mark.parametrize(
+    ("is_production", "postgres_auth_enabled"),
+    [(True, False), (False, True)],
+    ids=["production", "postgres-auth"],
+)
+def test_legacy_github_runner_fails_closed_before_local_approval_lookup(
+    monkeypatch,
+    is_production: bool,
+    postgres_auth_enabled: bool,
+) -> None:
+    class ReadTrap(dict):
+        def get(self, *_args, **_kwargs):
+            pytest.fail("Authoritative mode must not read SQLite approval state")
+
+    monkeypatch.setattr(store, "approval_requests", ReadTrap())
+    monkeypatch.setattr(
+        github_runner,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=is_production,
+            postgres_auth_enabled=postgres_auth_enabled,
+        ),
+    )
+    payload = PatchPlanRequest(
+        approval_request_id="sqlite-only-approval",
+        repository_full_name="owner/repository",
+        base_branch="main",
+        feature_branch="feature/change",
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        _validate_execution(payload)
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers["Retry-After"] == "1"

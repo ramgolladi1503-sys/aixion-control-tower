@@ -7,6 +7,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from .approval_repository import ApprovalInvocationLease
 from .connector_models import AgentConnector, ConnectorAuthType, ConnectorHealthStatus, ConnectorPublic, ConnectorStatus
 from .models import new_id, now_utc
 
@@ -33,6 +34,10 @@ class ConnectorCredentialStatus(BaseModel):
     last_error: str | None = None
     health_status: ConnectorHealthStatus
     status: ConnectorStatus
+    source_invocation_id: str | None = None
+    invocation_live: bool = False
+    invocation_heartbeat_at: datetime | None = None
+    invocation_expires_at: datetime | None = None
 
 
 def hash_connector_secret(secret: str) -> str:
@@ -96,7 +101,12 @@ def mark_connector_health_check(connector: AgentConnector, *, healthy: bool, rea
     connector.updated_at = now_utc()
 
 
-def connector_credential_status(connector: AgentConnector) -> ConnectorCredentialStatus:
+def connector_credential_status(
+    connector: AgentConnector,
+    *,
+    invocation_lease: ApprovalInvocationLease | None = None,
+    source_invocation_id: str | None = None,
+) -> ConnectorCredentialStatus:
     return ConnectorCredentialStatus(
         connector_id=connector.id,
         auth_type=connector.auth_type,
@@ -109,6 +119,14 @@ def connector_credential_status(connector: AgentConnector) -> ConnectorCredentia
         last_error=connector.last_error,
         health_status=connector.health_status,
         status=connector.status,
+        source_invocation_id=source_invocation_id,
+        invocation_live=invocation_lease is not None,
+        invocation_heartbeat_at=(
+            invocation_lease.heartbeat_at if invocation_lease is not None else None
+        ),
+        invocation_expires_at=(
+            invocation_lease.expires_at if invocation_lease is not None else None
+        ),
     )
 
 

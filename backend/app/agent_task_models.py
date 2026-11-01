@@ -68,6 +68,7 @@ class AgentTaskCreate(BaseModel):
 
 class AgentTask(AgentTaskCreate):
     id: str = Field(default_factory=lambda: new_id("agent_task"))
+    workspace_id: str | None = None
     status: AgentTaskStatus = AgentTaskStatus.RECEIVED
     external_agent_id: str | None = None
     external_agent_name: str | None = None

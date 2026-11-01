@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from .agent_run_models import AgentRunFaultConfig, AgentRunFaultKind, AgentRunStepType
+from .postgres_agent_run_fault_repository import PostgresAgentRunFaultRepository
+from .settings import get_settings
 from .store import store
 
 
@@ -12,6 +14,12 @@ class InjectedAgentRunFault(RuntimeError):
 
 
 def matching_fault(run_id: str, step_type: AgentRunStepType) -> AgentRunFaultConfig | None:
+    # Fault injection is a local/test diagnostic facility. Never let stale or
+    # accidentally persisted SQLite test configuration alter a run when either
+    # production mode or PostgreSQL-backed application auth is selected.
+    settings = get_settings()
+    if settings.is_production or getattr(settings, "postgres_auth_enabled", False):
+        return None
     candidates = [
         fault
         for fault in store.agent_run_faults.values()
@@ -23,7 +31,19 @@ def matching_fault(run_id: str, step_type: AgentRunStepType) -> AgentRunFaultCon
     return sorted(candidates, key=lambda fault: fault.created_at)[0] if candidates else None
 
 
-def consume_fault(run_id: str, step_type: AgentRunStepType) -> AgentRunFaultConfig | None:
+def consume_fault(
+    run_id: str,
+    step_type: AgentRunStepType,
+    *,
+    repository: PostgresAgentRunFaultRepository | None = None,
+) -> AgentRunFaultConfig | None:
+    settings = get_settings()
+    if getattr(settings, "is_production", False):
+        return None
+    if getattr(settings, "postgres_auth_enabled", False):
+        if not isinstance(repository, PostgresAgentRunFaultRepository):
+            raise RuntimeError("PostgreSQL AgentRun fault repository is required")
+        return repository.consume(run_id, step_type)
     fault = matching_fault(run_id, step_type)
     if fault is None:
         return None
@@ -34,8 +54,13 @@ def consume_fault(run_id: str, step_type: AgentRunStepType) -> AgentRunFaultConf
     return fault
 
 
-def raise_if_fault_configured(run_id: str, step_type: AgentRunStepType) -> None:
-    fault = consume_fault(run_id, step_type)
+def raise_if_fault_configured(
+    run_id: str,
+    step_type: AgentRunStepType,
+    *,
+    repository: PostgresAgentRunFaultRepository | None = None,
+) -> None:
+    fault = consume_fault(run_id, step_type, repository=repository)
     if fault is None:
         return
     raise InjectedAgentRunFault(fault)

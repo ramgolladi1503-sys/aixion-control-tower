@@ -5,7 +5,9 @@ import os
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
-from app.agent_task_routes import propagate_approval_decision_to_agent_task
+from app.approval_integrity import compute_approval_payload_hash
+from app.agent_run_models import AgentRunCreate
+from app.agent_run_supervisor import create_agent_run
 from app.models import (
     AgentProvider,
     ApprovalRequest,
@@ -44,6 +46,7 @@ def test_mobile_approval_schedules_exactly_one_durable_run() -> None:
         risk=RiskAssessment(level=RiskLevel.LOW),
         status=ApprovalStatus.APPROVED,
     )
+    approval.approved_payload_hash = compute_approval_payload_hash(approval)
     store.approval_requests[approval.id] = approval
     task = AgentTask(
         provider=AgentProvider.CODEX,
@@ -53,34 +56,24 @@ def test_mobile_approval_schedules_exactly_one_durable_run() -> None:
         repository="ramgolladi1503-sys/aixion-control-tower",
         branch_preference="feature/approved-run",
         approval_request_id=approval.id,
-        status=AgentTaskStatus.WAITING_FOR_APPROVAL,
+        status=AgentTaskStatus.APPROVED,
     )
     store.agent_tasks[task.id] = task
+    store.persist()
 
-    propagated = propagate_approval_decision_to_agent_task(
-        approval,
-        ApprovalStatus.REQUESTED,
-        "owner@example.com",
+    first = create_agent_run(
+        AgentRunCreate(
+            task_id=task.id,
+            metadata={"scheduled_from": "approval_decision"},
+        ),
+        actor="owner@example.com",
     )
-    assert propagated is task
-    assert task.status == AgentTaskStatus.APPROVED
 
     runs = [run for run in store.agent_runs.values() if run.task_id == task.id]
     assert len(runs) == 1
     assert runs[0].metadata["scheduled_from"] == "approval_decision"
 
-    propagate_approval_decision_to_agent_task(
-        approval,
-        ApprovalStatus.APPROVED,
-        "owner@example.com",
-    )
+    second = create_agent_run(AgentRunCreate(task_id=task.id), actor="owner@example.com")
     runs = [run for run in store.agent_runs.values() if run.task_id == task.id]
     assert len(runs) == 1
-
-    decision_events = [
-        event
-        for event in store.agent_task_events.values()
-        if event.task_id == task.id and event.event_type.value == "APPROVED"
-    ]
-    assert decision_events
-    assert decision_events[-1].metadata["agent_run_id"] == runs[0].id
+    assert first.id == second.id == runs[0].id

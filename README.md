@@ -1,10 +1,14 @@
 # Aixion Control Tower
 
-Aixion Control Tower is a mobile-first approval and execution control plane for AI-assisted software work.
+Aixion Control Tower is an approval console for AI agents working on a user's
+Mac. The first product flow connects an Antigravity session to the Android app:
+the Mac pauses a sensitive tool call, the phone presents the exact request, and
+the same Mac session resumes only after the authenticated approval is recorded
+and verified.
 
-It lets builders capture ideas, turn them into structured work, route AI-generated changes through mobile approval, gate risky execution, validate approved work, and open GitHub pull requests without giving agents uncontrolled access to critical systems.
-
-> Think from your phone. Let agents work. Approve with evidence. Ship with control.
+The first release is focused on that approval loop. GitHub workers, MCP requests,
+connectors, and other control-plane capabilities remain separate product paths;
+their presence in this repository does not certify them for production use.
 
 ## What It Is
 
@@ -50,20 +54,15 @@ audit-first execution model
 runtime readiness checks
 ```
 
-## End-to-End Flow
+## Target Approval Flow
 
 ```text
-idea / external agent / MCP request
--> structured task or approval request
--> risk and scope controls
--> mobile review
--> approve / reject / revise
--> branch creation
--> file application
--> isolated workspace
--> containerized validation
--> pull request opened for human review
--> audit trail retained
+Mac Antigravity tool call
+-> authenticated approval request bound to the exact invocation
+-> Android inbox and detail review
+-> one durable, audited approve or deny decision
+-> Mac hook verifies that same decision and payload
+-> resume only on verified approval; deny on timeout or failure
 ```
 
 ## Non-Negotiable Rules
@@ -124,17 +123,21 @@ docs/ELITE_ROADMAP.md
 
 ## Release Status
 
-```text
-Status: release-candidate / demo-ready control tower
-Backend P0: effectively complete
-Android MVP control flow: effectively complete
-Configurable external-agent platform: effectively complete
-Remaining work: release validation, deployment rehearsal, real-device testing, packaging, Play Store readiness, and UX polish
-```
+The Antigravity approval flow has completed one controlled physical-device
+approve round trip using a local backend and USB reverse. The hook and Android
+app have focused tests, but this is not production certification.
+
+Production remains blocked on transactional PostgreSQL persistence and
+multi-process safety, a durable notification outbox and FCM HTTP v1, hosted HTTPS
+deployment and recovery drills, and real-device denial and failure-path
+certification. Android packaging and release validation are also incomplete.
+See [the production readiness plan](docs/PRODUCTION_READINESS_PLAN.md) for the
+current evidence and release gates. Do not use this build as a public production
+approval service.
 
 ## What Not To Overclaim
 
-Aixion Control Tower is strong release-candidate software, but it is not magic.
+The controlled local pilot demonstrates the approval loop, but production readiness is still blocked by the items above.
 
 ```text
 It is not a high-assurance sandbox for arbitrary untrusted code.
@@ -146,8 +149,8 @@ It is not Play Store-ready until packaging, privacy, policy, signing, and backen
 
 ## Demo Positioning
 
-Use this line:
+For a controlled pilot, use this line:
 
 ```text
-Aixion lets agents move fast, but only inside a controlled approval, validation, and audit boundary.
+Aixion routes a Mac agent's sensitive actions to your phone for explicit review.
 ```

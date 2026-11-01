@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import pytest
 
 os.environ.setdefault("AIXION_AUTH_ENABLED", "false")
 
 from app.agent_task_models import AgentTask, AgentTaskStatus
 from app.agent_worker_validation_plan import run_agent_worker_validation_plan_dry_run, validate_validation_plan
+from app import agent_worker_validation_plan as validation_plan_module
 from app.models import AgentProvider, ApprovalRequest, FileChange, Project, RiskAssessment, RiskLevel
 from app.store import store
 
@@ -15,7 +17,7 @@ def setup_function() -> None:
 
 
 def _project() -> Project:
-    project = Project(name="Validation Planner", description="demo")
+    project = Project(name="Validation Planner", description="demo", workspace_id="workspace-worker-test")
     store.projects[project.id] = project
     return project
 
@@ -31,6 +33,7 @@ def _approval(project: Project, test_plan: list[str] | None = None) -> ApprovalR
         test_plan=test_plan if test_plan is not None else ["python -m pytest", "ruff check backend"],
         rollback_plan="Revert generated branch.",
         risk=RiskAssessment(level=RiskLevel.LOW),
+        status="APPROVED",
     )
     store.approval_requests[approval.id] = approval
     return approval
@@ -76,6 +79,37 @@ def test_validation_plan_records_allowed_commands_without_execution() -> None:
     assert any(audit.event_type == "agent_worker.validation_plan_dry_run_completed" for audit in store.audit_events)
 
 
+@pytest.mark.parametrize("settings_values", [{"is_production": True}, {"postgres_auth_enabled": True}])
+def test_validation_plan_fails_closed_before_claim_or_mutation(monkeypatch, settings_values) -> None:
+    from types import SimpleNamespace
+
+    project = _project()
+    approval = _approval(project)
+    task = _approved_task(approval)
+    before_events = dict(store.agent_task_events)
+    before_audits = list(store.audit_events)
+    before_task = task.model_copy(deep=True)
+    monkeypatch.setattr(
+        validation_plan_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            is_production=settings_values.get("is_production", False),
+            postgres_auth_enabled=settings_values.get("postgres_auth_enabled", False),
+        ),
+    )
+    monkeypatch.setattr(validation_plan_module, "claim_agent_task_for_worker", lambda **_: pytest.fail("claim must not run"))
+    monkeypatch.setattr(validation_plan_module, "claim_first_approved_agent_task_for_worker", lambda **_: pytest.fail("claim must not run"))
+    monkeypatch.setattr(store, "persist", lambda: pytest.fail("persist must not run"))
+
+    result = run_agent_worker_validation_plan_dry_run(task_id=task.id)
+
+    assert not result.success
+    assert "unavailable in production or PostgreSQL auth mode" in result.reason
+    assert store.agent_tasks[task.id] == before_task
+    assert store.agent_task_events == before_events
+    assert store.audit_events == before_audits
+
+
 def test_validation_plan_refuses_missing_approval() -> None:
     project = _project()
     approval = _approval(project)
@@ -88,7 +122,7 @@ def test_validation_plan_refuses_missing_approval() -> None:
     assert result.success is False
     assert result.reason == "Linked approval request not found."
     assert store.agent_task_events == {}
-    assert any(audit.event_type == "agent_worker.validation_plan_refused" for audit in store.audit_events)
+    assert any(audit.event_type == "agent_worker.task_claim_refused" for audit in store.audit_events)
 
 
 def test_validation_plan_refuses_empty_test_plan() -> None:

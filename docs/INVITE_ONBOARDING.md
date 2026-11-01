@@ -1,6 +1,6 @@
 # Invite Onboarding
 
-Invite onboarding closes the biggest remaining auth hole after owner-only role management: unrestricted self-registration is not a serious production posture.
+Invite onboarding lets an owner add reviewers and maintainers to that owner's account workspace. A person without an invite can create a separate owner account and workspace.
 
 ## Current scope
 
@@ -32,8 +32,8 @@ owner revoke pending invite
 Registration rule:
 
 ```text
-first registered user -> OWNER without invite
-all later registrations -> require a valid pending invite token
+registration without invite -> new OWNER account and isolated workspace
+registration with invite -> invited role in the invite owner's workspace
 ```
 
 ## Invite model
@@ -129,9 +129,7 @@ The invite code is intentionally shown only immediately after creation. The list
 
 ## Register with invite
 
-The first user can bootstrap without an invite and becomes OWNER.
-
-Every later user must register with the invite code issued by an owner.
+An account owner can register without an invite at any time. This creates a new workspace owned by that account. A user who wants to join an existing account must register with a matching invite code from that workspace's owner.
 
 ```http
 POST /auth/register
@@ -152,7 +150,7 @@ Body:
 Behavior:
 
 ```text
-missing invite after bootstrap returns 403
+missing invite creates a separate OWNER account and workspace
 unknown invite returns 404
 revoked, expired, or accepted invite returns 409
 email must match the invite email
@@ -167,8 +165,8 @@ auth.invite_accepted audit event is written
 Android Account registration includes an invite code field.
 
 ```text
-first owner: leave invite code blank
-later users: paste owner-issued invite code
+create a new account: leave invite code blank
+join an existing account: paste that account owner's invite code
 ```
 
 ## List invites

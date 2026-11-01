@@ -1,0 +1,55 @@
+name: Codex Windows validation
+
+on:
+  pull_request:
+    paths:
+      - "integrations/codex/**"
+      - "integrations/antigravity/aixion_pre_tool_hook.py"
+      - "integrations/antigravity/test_antigravity_host_security.py"
+      - ".github/workflows/codex-windows.yml"
+  push:
+    paths:
+      - "integrations/codex/**"
+      - "integrations/antigravity/aixion_pre_tool_hook.py"
+      - "integrations/antigravity/test_antigravity_host_security.py"
+      - ".github/workflows/codex-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  codex-windows-validation:
+    name: Codex Windows validation
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test runner
+        run: python -m pip install --disable-pip-version-check pytest
+
+      - name: Compile Codex integration
+        run: >-
+          python -m py_compile
+          integrations/codex/host_security.py
+          integrations/codex/setup_workspace.py
+          integrations/codex/aixion_permission_request_hook.py
+          integrations/antigravity/aixion_pre_tool_hook.py
+
+      - name: Run Windows ACL, reparse-point, credential, and install tests
+        run: python -m pytest -q integrations/codex/test_codex_windows_security.py
+
+      - name: Run Antigravity protected-file and Windows ACL tests
+        run: python -m pytest -q integrations/antigravity/test_antigravity_host_security.py
+
+      - name: Run portable Windows quoting and fail-closed credential tests
+        run: >-
+          python -m pytest -q
+          integrations/codex/test_setup_workspace.py::test_windows_command_uses_argument_quoting_for_paths_with_spaces
+          integrations/codex/test_codex_hook_cli.py::test_windows_credential_missing_or_revoked_denies_without_fallback

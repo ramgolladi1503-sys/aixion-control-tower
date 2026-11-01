@@ -75,7 +75,11 @@ If more events match than the limit allows, `truncated` is true.
 
 ## Redaction behavior
 
-Export redacts sensitive detail keys before returning audit events.
+Audit list, single-event, and audit export endpoints redact sensitive detail
+keys before returning audit events. Audit filters are evaluated against
+stored values before the response is redacted. Recovery snapshots are a
+separate, owner-only backup format and may contain sensitive audit details;
+store them privately.
 
 Sensitive key markers include:
 

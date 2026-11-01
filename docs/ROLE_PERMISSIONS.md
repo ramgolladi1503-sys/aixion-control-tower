@@ -17,13 +17,13 @@ This is not enterprise RBAC yet. It is the minimum serious permission boundary n
 Registration now follows this rule:
 
 ```text
-first registered user -> OWNER without invite
-later registered users -> require valid pending invite token
+registration without invite -> new OWNER account and isolated workspace
+registration with invite -> invited role in the invite owner's workspace
 ```
 
-Later users receive the role attached to the invite.
+Invited users receive the role attached to the invite. Each self-registering owner has a separate workspace; a public signup does not join or expose another account's data.
 
-This closes the open self-registration hole after bootstrap. It is still not enterprise onboarding because invite delivery, resend/rotate, project-scoped invites, and polished admin UX are not done.
+This preserves owner-controlled membership within each account while allowing independent account creation. It is still not enterprise onboarding because invite delivery, resend/rotate, project-scoped invites, and polished admin UX are not done.
 
 ## Owner role management
 
@@ -64,7 +64,7 @@ The backend exposes invite administration and invite-token registration acceptan
 | `POST /auth/invites` | `OWNER` only | Create an invite for an email and role. |
 | `GET /auth/invites` | `OWNER` only | List invite metadata without exposing invite codes. |
 | `POST /auth/invites/{invite_id}/revoke` | `OWNER` only | Revoke a pending invite. |
-| `POST /auth/register` | Public bootstrap or invite holder | Bootstrap first owner or accept a valid invite. |
+| `POST /auth/register` | Public account creator or invite holder | Create a separate owner workspace or accept a valid invite into its owner's workspace. |
 
 Invite statuses:
 
@@ -83,7 +83,8 @@ role must be OWNER, MAINTAINER, or REVIEWER
 invite code is returned only at creation time
 the store persists only the invite token hash
 accepted invites cannot be revoked
-later registrations require a matching pending invite token
+no-invite registration creates a separate OWNER workspace
+invite registration requires a matching pending token and joins only that invite's workspace
 accepted invite is marked ACCEPTED and linked to accepted_by_user_id
 successful create/revoke/accept actions write audit events
 ```
@@ -142,7 +143,7 @@ This is not full enterprise session governance yet. It does not include device f
 
 | Area | OWNER | MAINTAINER | REVIEWER |
 | --- | --- | --- | --- |
-| Bootstrap first user | Yes | N/A | N/A |
+| Create account without invite | Yes | N/A | N/A |
 | Register with valid invite | Yes | Yes | Yes |
 | Login/self session | Yes | Yes | Yes |
 | Read supported role choices | Yes | Yes | Yes |
@@ -274,7 +275,7 @@ production deployment/secrets/monitoring
 After this layer passes CI, it is safe to claim:
 
 ```text
-The backend now enforces first-pass role boundaries, owner-only role management, owner-only invite administration, invite-token registration after bootstrap, and owner-only session revocation for force logout. Android Account now exposes owner controls for roles, invites, and session access.
+The backend now enforces first-pass role boundaries, one isolated workspace per self-registering owner account, invite-scoped team registration, owner-only role/invite administration, and owner-only session revocation. Android Account exposes owner controls for roles, invites, and session access.
 ```
 
 ## Unsafe claim

@@ -24,6 +24,7 @@ def test_build_backend_release_validation_summary_includes_operational_gates() -
 
     assert summary.decision == "PASS"
     assert summary.profile in {"local", "demo", "test", "production"}
+    assert summary.database_backend == "sqlite"
     assert summary.db_reachable is True
     assert summary.migrations_applied is True
     assert summary.recovery_snapshot_available is True
@@ -57,6 +58,7 @@ def test_render_backend_release_validation_markdown_contains_core_sections() -> 
     assert "# Backend Release Validation Summary" in markdown
     assert "Release decision: **PASS**" in markdown
     assert "## Runtime readiness" in markdown
+    assert "Database backend: `sqlite`" in markdown
     assert "## Database migrations" in markdown
     assert "## Recovery snapshot validation" in markdown
     assert "## Audit export and retention" in markdown

@@ -2,6 +2,8 @@
 
 This runbook proves the Mobile Approval Console / Aixion Control Tower MCP wait-mode path end to end.
 
+The gateway accepts at most 48 KiB of compact, sorted JSON-serialized tool arguments, matching the provider hook display limit. The exact arguments are retained in the approval so the reviewer can make an informed decision. Treat them as sensitive, workspace-scoped approval data; do not copy them into notifications, audit details, or logs.
+
 The goal is not to add another feature. The goal is to prove the product promise:
 
 ```text

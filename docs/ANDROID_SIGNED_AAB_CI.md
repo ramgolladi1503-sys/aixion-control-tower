@@ -14,23 +14,32 @@ The workflow:
 
 ```text
 validates signing secrets exist
+requires an explicit version code and version name
 decodes the release keystore into a temporary file
-runs ./gradlew bundleRelease with the requested API base URL
+runs ./gradlew bundleRelease with the requested HTTPS API URL and versions
 uploads the generated .aab artifact
 removes the decoded keystore at the end
 ```
 
 It is intentionally manual through `workflow_dispatch`. It does not run on every PR because missing signing secrets would make normal CI fail.
 
-## Required GitHub secrets
+## Required GitHub Environment settings
 
-Configure these repository secrets before running the workflow:
+Create the protected `android-release` GitHub Environment and configure these
+secrets there before running the workflow:
 
 ```text
 ANDROID_KEYSTORE_BASE64
 ANDROID_KEYSTORE_PASSWORD
 ANDROID_KEY_ALIAS
 ANDROID_KEY_PASSWORD
+ANDROID_GOOGLE_SERVICES_JSON_BASE64
+```
+
+Also configure this environment variable (it is not a secret):
+
+```text
+AIXION_FCM_PROJECT_ID
 ```
 
 ## How to create ANDROID_KEYSTORE_BASE64 locally
@@ -62,8 +71,14 @@ Do not paste this value into chat, docs, issues, PRs, logs, or source files.
 3. Click `Run workflow`.
 4. Enter the release/review backend URL.
 5. Ensure the URL ends with `/`.
-6. Run the workflow.
-7. Download the uploaded AAB artifact after success.
+6. Enter a version code greater than every code already uploaded to any Play track.
+7. Enter a `MAJOR.MINOR.PATCH` version name (optional prerelease/build suffix is accepted).
+8. Run the workflow.
+9. Download the uploaded AAB artifact after success.
+
+The workflow validates the code range (1–2,100,000,000) and version-name
+format. It does not query Play Console, so the release operator must confirm the
+chosen code is unused and higher than prior uploads before dispatch.
 
 Example backend URL:
 
@@ -122,6 +137,7 @@ store listing metadata is ready
 | --- | --- | --- |
 | Missing required GitHub secret | Signing secrets are not configured | Add all four required secrets. |
 | base64 decode fails | Keystore secret is malformed | Recreate `ANDROID_KEYSTORE_BASE64`. |
+| Missing or invalid release version | Version inputs do not meet the Android/Play version policy | Choose an unused increasing code and a valid version name. |
 | Gradle signing fails | Wrong password, alias, key password, or keystore file | Verify keystore details locally. |
 | Bundle task fails | Android release build issue | Fix Android build/config. |
 | No AAB uploaded | Bundle was not generated where expected | Inspect Gradle output path. |

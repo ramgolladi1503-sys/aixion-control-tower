@@ -54,6 +54,30 @@ class ModelsTest {
     }
 
     @Test
+    fun exactToolRequestDetectionIsCaseInsensitiveAndDoesNotMatchOrdinaryFiles() {
+        val exactToolPayloads = listOf(
+            FileChangeSummary("virtual/request.json", "TOOL_CALL", "{}", RiskLevel.LOW),
+            FileChangeSummary("virtual/request.json", "MCP_TOOL_CALL", "{}", RiskLevel.LOW),
+            FileChangeSummary("MCP://server/tool", "modify", "{}", RiskLevel.LOW),
+            FileChangeSummary("ANTIGRAVITY://TOOL/run_command", "modify", "{}", RiskLevel.LOW),
+            FileChangeSummary("CODEX://TOOL/shell", "modify", "{}", RiskLevel.LOW)
+        )
+
+        exactToolPayloads.forEach { payload ->
+            assertTrue(
+                "Expected tool payload to be recognized: ${payload.changeType} ${payload.path}",
+                approvalWithFiles(listOf(payload)).hasExactToolRequestPayload
+            )
+        }
+
+        val ordinaryFile = approvalWithFiles(
+            listOf(FileChangeSummary("README.md", "modify", "ordinary diff", RiskLevel.LOW))
+        )
+        assertFalse(ordinaryFile.hasExactToolRequestPayload)
+        assertFalse("Exact tool classification must not broaden MCP-only semantics", ordinaryFile.isMCPToolApproval)
+    }
+
+    @Test
     fun mcpPendingHealthIsUnhealthyWhenAttentionIsRequired() {
         val health = mcpHealth(attentionRequired = 1)
 

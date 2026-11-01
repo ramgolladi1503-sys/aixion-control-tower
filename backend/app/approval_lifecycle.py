@@ -19,6 +19,7 @@ VALID_TRANSITIONS: dict[ApprovalStatus, set[ApprovalStatus]] = {
     ApprovalStatus.REQUESTED: {
         ApprovalStatus.APPROVED,
         ApprovalStatus.DENIED,
+        ApprovalStatus.REVISION_REQUESTED,
         ApprovalStatus.EXPIRED,
         ApprovalStatus.CANCELLED,
     },

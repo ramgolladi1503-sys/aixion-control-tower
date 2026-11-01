@@ -12,31 +12,38 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import com.aixion.controltower.core.model.ApprovalSummary
 import com.aixion.controltower.core.model.RiskLevel
-import com.aixion.controltower.core.ui.theme.RiskBlocked
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskHigh
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 
 @Composable
-fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier) {
+fun RiskBadge(risk: RiskLevel, modifier: Modifier = Modifier, readable: Boolean = true) {
+    val palette = LocalTowerPalette.current
     val color = when (risk) {
-        RiskLevel.LOW -> RiskLow
-        RiskLevel.MEDIUM -> RiskMedium
-        RiskLevel.HIGH -> RiskHigh
-        RiskLevel.CRITICAL -> RiskCritical
-        RiskLevel.BLOCKED -> RiskBlocked
+        RiskLevel.LOW -> palette.positive
+        RiskLevel.MEDIUM -> palette.caution
+        RiskLevel.HIGH, RiskLevel.CRITICAL, RiskLevel.BLOCKED, RiskLevel.UNKNOWN -> palette.danger
     }
 
-    StatusBadge(label = risk.name, color = color, modifier = modifier)
+    StatusBadge(
+        label = if (readable) risk.name.toSentenceCase() else risk.name,
+        color = color,
+        modifier = modifier,
+        fontSize = 13.sp,
+        uppercase = !readable
+    )
 }
 
 @Composable
-fun StatusBadge(label: String, color: Color, modifier: Modifier = Modifier) {
+fun StatusBadge(
+    label: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    fontSize: TextUnit = 13.sp,
+    uppercase: Boolean = true
+) {
     Box(
         modifier = modifier
             .background(color.copy(alpha = 0.11f), RoundedCornerShape(999.dp))
@@ -44,26 +51,31 @@ fun StatusBadge(label: String, color: Color, modifier: Modifier = Modifier) {
             .padding(horizontal = 10.dp, vertical = 5.dp)
     ) {
         Text(
-            text = label.uppercase(),
+            text = if (uppercase) label.uppercase() else label,
             color = color,
-            fontSize = 10.sp,
+            fontSize = fontSize,
             fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.8.sp
+            letterSpacing = if (uppercase) 0.8.sp else 0.sp,
+        lineHeight = (fontSize.value * 1.4f).sp
         )
     }
 }
 
+private fun String.toSentenceCase(): String =
+    lowercase().replace('_', ' ').replaceFirstChar { char -> char.titlecase() }
+
 @Composable
 fun SourceBadge(approval: ApprovalSummary, modifier: Modifier = Modifier) {
+    val palette = LocalTowerPalette.current
     val color = when {
-        approval.verifiedSource -> RiskLow
-        approval.sourceProvider == "MANUAL" -> TowerTextMuted
-        else -> RiskMedium
+        approval.verifiedSource -> palette.positive
+        approval.sourceProvider == "MANUAL" -> palette.inkMuted
+        else -> palette.caution
     }
     val label = when {
         approval.verifiedSource -> "Verified: ${approval.sourceLabel}"
         approval.sourceProvider == "MANUAL" -> "Manual source"
         else -> "Unverified: ${approval.sourceLabel}"
     }
-    StatusBadge(label = label, color = color, modifier = modifier)
+    StatusBadge(label = label, color = color, modifier = modifier, fontSize = 13.sp, uppercase = false)
 }
