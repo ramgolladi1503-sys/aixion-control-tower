@@ -1,14 +1,27 @@
 package com.aixion.controltower.feature.connectors
 
-import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performClick
-import com.aixion.controltower.core.api.dto.ConnectorCreateDto
-import com.aixion.controltower.core.api.dto.ConnectorDto
-import com.aixion.controltower.core.api.dto.ConnectorSchemaMapperDto
-import com.aixion.controltower.core.api.dto.ConnectorTemplateDto
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import com.aixion.controltower.core.ui.theme.ControlTowerTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -17,135 +30,125 @@ class ConnectorsScreenTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun rendersConnectorConsoleTemplateCredentialAndActions() {
+    fun connectorHeroPreservesFullWidthAtLargeTextScale() {
         composeRule.setContent {
-            ConnectorsContent(
-                state = ConnectorsUiState(
-                    loading = false,
-                    connectors = listOf(connector(secretConfigured = true)),
-                    templates = listOf(template()),
-                    selectedTemplateId = "openclaw",
-                    apiBaseUrl = "https://aixion.example.com",
-                    lastSecret = "aixion-secret-once",
-                    preview = "accepted=true, auth=true, scope=true"
-                )
-            )
+            ControlTowerTheme {
+                CompositionLocalProvider(LocalDensity provides Density(density = 1f, fontScale = 2f)) {
+                    Box(modifier = Modifier.width(320.dp).height(700.dp).testTag("connect-viewport")) {
+                        ConnectorsContent()
+                    }
+                }
+            }
         }
 
-        composeRule.onNodeWithText("Connectors").assertExists()
-        composeRule.onNodeWithText("Bring-your-own-agent control from phone.").assertExists()
-        composeRule.onNodeWithText("Templates").assertExists()
-        composeRule.onNodeWithText("✓ OpenClaw").assertExists()
-        composeRule.onNodeWithText("OpenClaw connector").assertExists()
-        composeRule.onNodeWithText("Credential set").assertExists()
-        composeRule.onNodeWithText("https://aixion.example.com/connectors/connector_1/webhook").assertExists()
-        composeRule.onNodeWithText("One-time connector credential").assertExists()
-        composeRule.onNodeWithText("aixion-secret-once").assertExists()
-        composeRule.onNodeWithText("accepted=true, auth=true, scope=true").assertExists()
+        val viewport = composeRule.onNodeWithTag("connect-viewport").fetchSemanticsNode().boundsInRoot
+        val heading = composeRule.onNodeWithText("Approve desktop work from your phone")
+            .assertIsDisplayed()
+            .fetchSemanticsNode()
+        assertTrue("Large connector heading should wrap within the compact screen", heading.boundsInRoot.left >= viewport.left && heading.boundsInRoot.right <= viewport.right)
+        assertTrue("Large connector heading should use a multi-line layout", heading.boundsInRoot.height > 48f)
+        composeRule.onNodeWithTag("connect-hero-logo").assertDoesNotExist()
     }
 
     @Test
-    fun connectorActionsCallExpectedCallbacks() {
-        val calls = mutableListOf<String>()
-        val connector = connector(secretConfigured = true)
-
+    fun showsOnlyNativeProviderSetupAndDoesNotExposeWebhookTaskIntake() {
         composeRule.setContent {
-            ConnectorsContent(
-                state = ConnectorsUiState(
-                    loading = false,
-                    connectors = listOf(connector),
-                    templates = listOf(template()),
-                    selectedTemplateId = "openclaw",
-                    apiBaseUrl = "https://aixion.example.com"
-                ),
-                onCopy = { label, _ -> calls.add("copy:$label") },
-                onToggle = { calls.add("toggle:${it.id}") },
-                onIssueSecret = { calls.add("secret:${it.id}") },
-                onRevokeSecret = { calls.add("revoke:${it.id}") },
-                onApplyMapper = { calls.add("mapper:${it.id}") },
-                onPreviewMapper = { calls.add("preview:${it.id}") }
+            ConnectorsContent()
+        }
+
+        composeRule.onNodeWithText("Approve desktop work from your phone").assertExists()
+        composeRule.onNodeWithText(
+            "Connect the coding agent on your computer. Keep that computer and the same agent session running while an approval is waiting."
+        ).assertExists()
+        composeRule.onNodeWithText("How phone approvals work").assertExists()
+        composeRule.onNodeWithText("Set up the agent").assertExists()
+        composeRule.onNodeWithText("Keep the session running").assertExists()
+        composeRule.onNodeWithText("Decide from your phone").assertExists()
+        composeRule.onAllNodesWithText("Phone flow not verified").assertCountEquals(2)
+        composeRule.onNodeWithText("Antigravity").assertExists()
+        composeRule.onNodeWithText(
+            "Hook and connector setup is available, but returning a phone decision to the same Antigravity task has not been verified."
+        ).assertExists()
+        composeRule.onNodeWithText("Set up Antigravity").assertExists()
+        composeRule.onNodeWithText("Codex").assertExists()
+        composeRule.onNodeWithText("View Codex setup").assertExists()
+
+        listOf(
+            "Approve desktop work from your phone",
+            "How phone approvals work",
+            "Antigravity",
+            "Codex"
+        ).forEach { label ->
+            val heading = composeRule.onNodeWithText(label)
+            assertTrue(
+                "Connect screen section '$label' should be exposed as an accessibility heading",
+                heading.fetchSemanticsNode().config.contains(SemanticsProperties.Heading)
             )
         }
 
-        composeRule.onNodeWithText("Copy webhook").performClick()
-        composeRule.onNodeWithText("Disable").performClick()
-        composeRule.onNodeWithText("Rotate credential").performClick()
-        composeRule.onNodeWithText("Revoke credential").assertIsEnabled().performClick()
-        composeRule.onNodeWithText("Apply mapper").assertIsEnabled().performClick()
-        composeRule.onNodeWithText("Test selected template payload").assertIsEnabled().performClick()
+        composeRule.onAllNodesWithText("Other integrations and webhooks").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Webhook task intake").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Choose a webhook integration").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Create connection").assertCountEquals(0)
+    }
 
-        assertEquals(
-            listOf(
-                "copy:Webhook URL",
-                "toggle:connector_1",
-                "secret:connector_1",
-                "revoke:connector_1",
-                "mapper:connector_1",
-                "preview:connector_1"
-            ),
-            calls
+    @Test
+    fun setupStepSupportingCopyIsExposedAsReadableSemanticText() {
+        val details = listOf(
+            "Install its Control Tower hook on the computer running your project.",
+            "The computer must stay online so the same agent task can resume.",
+            "Review the exact request, then approve or deny it in the app."
         )
+        composeRule.setContent { ConnectorsContent() }
+
+        details.forEach { detail ->
+            composeRule.onNodeWithText(detail, useUnmergedTree = true)
+                .performScrollTo()
+                .assertExists()
+                .assertTextEquals(detail)
+                .assertIsDisplayed()
+        }
     }
 
     @Test
-    fun rendersErrorAndLoadingStates() {
+    fun bothProviderSetupActionsNavigateToPlatformSetup() {
+        val navigationRequests = mutableListOf<String>()
         composeRule.setContent {
-            ConnectorsContent(
-                state = ConnectorsUiState(
-                    loading = true,
-                    error = "Failed to load connectors"
-                )
-            )
+            ConnectorsContent(onOpenAgentAccess = { navigationRequests += it })
         }
 
-        composeRule.onNodeWithText("Loading connector console...").assertExists()
-        composeRule.onNodeWithText("Failed to load connectors").assertExists()
-        composeRule.onNodeWithText("Create connector from selected template").assertExists()
+        composeRule.onNodeWithText("Set up Antigravity").performClick()
+        composeRule.onNodeWithText("View Codex setup").performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(listOf("ANTIGRAVITY", "CODEX"), navigationRequests)
+        }
     }
-}
 
-private fun connector(secretConfigured: Boolean): ConnectorDto {
-    return ConnectorDto(
-        id = "connector_1",
-        name = "OpenClaw connector",
-        connector_type = "WEBHOOK",
-        provider_label = "OPENCLAW",
-        auth_type = "HMAC",
-        status = "ENABLED",
-        health_status = "HEALTHY",
-        allowed_project_ids = listOf("project_1"),
-        allowed_repositories = listOf("ramgolladi1503-sys/aixion-control-tower"),
-        allowed_actions = listOf("CREATE_AGENT_TASK"),
-        secret_configured = secretConfigured,
-        failed_auth_count = 0,
-    )
-}
+    @Test
+    fun codexStatusDoesNotClaimVerifiedPhoneApproval() {
+        composeRule.setContent {
+            ConnectorsContent()
+        }
 
-private fun template(): ConnectorTemplateDto {
-    return ConnectorTemplateDto(
-        id = "openclaw",
-        display_name = "OpenClaw",
-        description = "OpenClaw task webhook preset",
-        provider_label = "OPENCLAW",
-        connector_type = "WEBHOOK",
-        auth_type = "HMAC",
-        connector_defaults = ConnectorCreateDto(
-            name = "OpenClaw connector",
-            connector_type = "WEBHOOK",
-            provider_label = "OPENCLAW",
-            auth_type = "HMAC",
-            allowed_project_ids = listOf("project_1"),
-            allowed_repositories = listOf("ramgolladi1503-sys/aixion-control-tower"),
-            allowed_actions = listOf("CREATE_AGENT_TASK")
-        ),
-        mapper = ConnectorSchemaMapperDto(
-            enabled = true,
-            default_action = "CREATE_AGENT_TASK",
-            field_paths = mapOf("title" to "task.title"),
-            defaults = mapOf("requested_action" to "CREATE_APPROVAL")
-        ),
-        sample_payload = mapOf("task" to mapOf("title" to "Fix tests")),
-        setup_notes = listOf("Paste webhook URL into OpenClaw."),
-        tags = listOf("webhook")
-    )
+        composeRule.onAllNodesWithText("Phone flow not verified").assertCountEquals(2)
+        composeRule.onNodeWithText(
+            "Setup is available, but returning a phone decision to the same Codex task has not been verified."
+        ).assertExists()
+        composeRule.onAllNodesWithText("Codex connected").assertCountEquals(0)
+    }
+
+    @Test
+    fun antigravityStatusDoesNotClaimVerifiedPhoneApproval() {
+        composeRule.setContent {
+            ConnectorsContent()
+        }
+
+        composeRule.onAllNodesWithText("Phone flow not verified").assertCountEquals(2)
+        composeRule.onNodeWithText(
+            "Hook and connector setup is available, but returning a phone decision to the same Antigravity task has not been verified."
+        ).assertExists()
+        composeRule.onAllNodesWithText("FIRST SUPPORTED").assertCountEquals(0)
+        composeRule.onAllNodesWithText("Antigravity connected").assertCountEquals(0)
+    }
 }

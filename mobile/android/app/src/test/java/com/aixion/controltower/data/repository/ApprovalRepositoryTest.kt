@@ -1,6 +1,11 @@
 package com.aixion.controltower.data.repository
 
 import com.aixion.controltower.core.api.dto.ApprovalRequestDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryEventDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryFileDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryRequestSnapshotDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryResponseDto
+import com.aixion.controltower.core.api.dto.ApprovalHistoryRiskDto
 import com.aixion.controltower.core.api.dto.AuthResponseDto
 import com.aixion.controltower.core.api.dto.AuthUserDto
 import com.aixion.controltower.core.api.dto.DecisionRequestDto
@@ -9,10 +14,97 @@ import com.aixion.controltower.core.api.dto.MCPGatewayDecisionDto
 import com.aixion.controltower.core.api.dto.RegisterRequestDto
 import com.aixion.controltower.core.api.dto.RegistrationResponseDto
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
 import org.junit.Test
 
 class ApprovalRepositoryTest {
+    @Test
+    fun listApprovalHistoryMapsOnlyVerifiedImmutableRequestSnapshot() = runTest {
+        val api = HistoryApprovalApi(
+            ApprovalHistoryResponseDto(
+                events = listOf(
+                    ApprovalHistoryEventDto(
+                        auditEventId = "audit-1",
+                        approvalId = "approval-1",
+                        decision = "reject",
+                        reason = "The command exceeds scope.",
+                        decidedAt = "2026-10-22T10:00:00Z",
+                        reviewerLabel = "You",
+                        requestSnapshotVerified = true,
+                        requestSnapshot = ApprovalHistoryRequestSnapshotDto(
+                            projectId = "project-internal-id",
+                            title = "Remove production data",
+                            summary = "Delete the generated data directory.",
+                            agentName = "Antigravity",
+                            targetBranch = "main",
+                            files = listOf(ApprovalHistoryFileDto("data/output.db", "delete")),
+                            testPlan = listOf("Check the database backup."),
+                            rollbackPlan = "Restore the backup.",
+                            sourceProvider = "ANTIGRAVITY",
+                            sourceAgentName = "Antigravity on Mac",
+                            sourceSessionId = "private-session-id",
+                            sourceInvocationId = "private-invocation-id",
+                            sourceTaskUrl = "https://example.invalid/task",
+                            risk = ApprovalHistoryRiskDto(level = "HIGH", reasons = listOf("Data loss"))
+                        )
+                    )
+                ),
+                limit = 50,
+                hasMore = true
+            )
+        )
+
+        val page = ApprovalRepository(api).listApprovalHistory()
+        val event = page.events.single()
+
+        assertEquals(50, api.requestedLimit)
+        assertEquals(50, page.limit)
+        assertEquals(true, page.hasMore)
+        assertEquals("reject", event.decision)
+        assertEquals("You", event.reviewerLabel)
+        assertEquals(true, event.requestSnapshotVerified)
+        assertEquals("Remove production data", event.requestSnapshot?.title)
+        assertEquals("data/output.db", event.requestSnapshot?.files?.single()?.path)
+        assertEquals("HIGH", event.requestSnapshot?.riskLevel?.name)
+    }
+
+    @Test
+    fun unverifiedHistorySnapshotIsDiscardedAndReviewerEmailIsNeverExposed() = runTest {
+        val api = HistoryApprovalApi(
+            ApprovalHistoryResponseDto(
+                events = listOf(
+                    ApprovalHistoryEventDto(
+                        auditEventId = "audit-legacy",
+                        approvalId = "approval-legacy",
+                        decision = "approve",
+                        reviewerLabel = "reviewer@example.com",
+                        requestSnapshotVerified = false,
+                        requestSnapshot = ApprovalHistoryRequestSnapshotDto(title = "Do not display this")
+                    )
+                )
+            )
+        )
+
+        val event = ApprovalRepository(api).listApprovalHistory().events.single()
+
+        assertEquals("Workspace reviewer", event.reviewerLabel)
+        assertEquals(false, event.requestSnapshotVerified)
+        assertEquals(null, event.requestSnapshot)
+    }
+
+    @Test
+    fun listApprovalHistoryRejectsOutOfRangeLimit() = runTest {
+        val repository = ApprovalRepository(HistoryApprovalApi(ApprovalHistoryResponseDto()))
+
+        try {
+            repository.listApprovalHistory(limit = 51)
+            fail("Expected an invalid history limit to be rejected")
+        } catch (_: IllegalArgumentException) {
+            // Expected: clients cannot fetch an unbounded history page.
+        }
+    }
+
     @Test
     fun listApprovalsThrowsWhenBackendListFails() = runTest {
         val repository = ApprovalRepository(FailingApprovalApi())
@@ -47,6 +139,17 @@ class ApprovalRepositoryTest {
         assertIllegalStateFailure {
             repository.resolveMCPApproval("approval_missing")
         }
+    }
+}
+
+private class HistoryApprovalApi(
+    private val response: ApprovalHistoryResponseDto
+) : BaseFakeControlTowerApi() {
+    var requestedLimit: Int? = null
+
+    override suspend fun listApprovalHistory(limit: Int): ApprovalHistoryResponseDto {
+        requestedLimit = limit
+        return response
     }
 }
 

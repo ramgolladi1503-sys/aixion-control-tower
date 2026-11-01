@@ -27,7 +27,7 @@ class AuthUxCopyTest {
 
         assertEquals("Check your email", AuthUxCopy.heroTitle(state))
         assertEquals("Verification required", AuthUxCopy.sessionLabel(state))
-        assertEquals("Verify first", AuthUxCopy.primaryLoginLabel(state))
+        assertEquals("Verify email first", AuthUxCopy.primaryLoginLabel(state))
         assertFalse(AuthUxCopy.canAttemptLogin(state))
         assertTrue(AuthUxCopy.canAttemptResend(state))
         assertTrue(AuthUxCopy.verificationGuidance(state).contains("owner@example.com"))
@@ -44,8 +44,13 @@ class AuthUxCopyTest {
 
         assertEquals("Email verified", AuthUxCopy.heroTitle(state))
         assertEquals("Ready to log in", AuthUxCopy.sessionLabel(state))
-        assertEquals("Login now", AuthUxCopy.primaryLoginLabel(state))
+        assertEquals("Log in", AuthUxCopy.primaryLoginLabel(state))
         assertTrue(AuthUxCopy.canAttemptLogin(state))
+    }
+
+    @Test
+    fun normalLoginUsesShortLabel() {
+        assertEquals("Log in", AuthUxCopy.primaryLoginLabel(AuthUiState()))
     }
 
     @Test
@@ -59,6 +64,10 @@ class AuthUxCopyTest {
 
         assertEquals("You are connected", AuthUxCopy.heroTitle(state))
         assertEquals("Session active", AuthUxCopy.sessionLabel(state))
+        assertEquals(
+            "This phone can now review and respond to approval requests.",
+            AuthUxCopy.heroSubtitle(state)
+        )
     }
 
     @Test
@@ -67,4 +76,5 @@ class AuthUxCopyTest {
         assertFalse(AuthUxCopy.canAttemptVerify(AuthUiState(verificationCode = "123456")))
         assertTrue(AuthUxCopy.canAttemptVerify(AuthUiState(email = "owner@example.com", verificationCode = "123456")))
     }
+
 }

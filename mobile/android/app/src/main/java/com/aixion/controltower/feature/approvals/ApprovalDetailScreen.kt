@@ -3,48 +3,75 @@ package com.aixion.controltower.feature.approvals
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.delay
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+import java.util.Locale
 import com.aixion.controltower.core.model.ApprovalStatus
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.model.RiskLevel
 import com.aixion.controltower.core.ui.components.DiffBlock
-import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.RiskBadge
 import com.aixion.controltower.core.ui.components.SourceBadge
 import com.aixion.controltower.core.ui.components.StatusBadge
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
-import com.aixion.controltower.core.ui.theme.RiskBlocked
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerAccent
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
 
 @Composable
 fun ApprovalDetailScreen(
@@ -53,16 +80,29 @@ fun ApprovalDetailScreen(
     onDecisionSubmitted: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
-    val approval = state.selectedApproval ?: state.approvals.firstOrNull()
+    val approval = state.selectedApproval
 
     if (approval == null) {
-        EmptyApprovalDetail()
+        val detailMessage = state.lastActionMessage?.takeIf {
+            it.startsWith("Failed to open approval") &&
+                (state.lastActionApprovalId == state.detailTargetApprovalId || state.detailTargetApprovalId == null)
+        } ?: state.errorMessage
+        val retryTarget = state.detailTargetApprovalId?.takeIf { state.openingApprovalId == null }
+        ApprovalDetailEmptyContent(
+            loading = state.openingApprovalId != null,
+            message = detailMessage,
+            onRetry = retryTarget?.let { targetId -> { viewModel.openApprovalById(targetId) } }
+        )
         return
     }
 
     ApprovalDetailContent(
         approval = approval,
         lastActionMessage = state.lastActionMessage,
+        lastActionApprovalId = state.lastActionApprovalId,
+        decisionInFlight = state.decisionInFlight,
+        decisionNeedsReconciliation = state.decisionNeedsReconciliation,
+        onReconcileDecision = viewModel::reconcileDecisionStatus,
         onOpenDiff = onOpenDiff,
         onApprove = {
             viewModel.decide(
@@ -78,268 +118,905 @@ fun ApprovalDetailScreen(
                 onCompleted = onDecisionSubmitted
             )
         },
-        onRevise = {
-            viewModel.decide(
-                decision = "revise",
-                reason = "Revision requested from mobile detail review.",
-                onCompleted = onDecisionSubmitted
-            )
-        }
     )
 }
 
 @Composable
-private fun EmptyApprovalDetail() {
+internal fun ApprovalDetailEmptyContent(
+    loading: Boolean,
+    message: String?,
+    onRetry: (() -> Unit)?
+) {
+    val palette = LocalTowerPalette.current
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
-            .padding(18.dp),
+            .background(palette.canvas)
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.Center
     ) {
         TowerPanel(elevated = true) {
-            Text("No approval selected", color = TowerTextPrimary, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(modifier = Modifier.height(TowerSpacing.sm))
-            Text("Open the inbox and select a request to review.", color = TowerTextMuted, fontSize = 14.sp)
+            when {
+                loading -> {
+                    Text(
+                        "Loading requested approval…",
+                        modifier = Modifier.testTag("approval-detail-loading"),
+                        color = palette.ink,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text("The app is fetching this approval from the authenticated backend.", color = palette.inkMuted, fontSize = 14.sp)
+                }
+                message != null -> {
+                    Text("Approval unavailable", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text(message, modifier = Modifier.testTag("approval-detail-open-error"), color = palette.inkMuted, fontSize = 14.sp)
+                    onRetry?.let { retry ->
+                        Spacer(modifier = Modifier.height(TowerSpacing.md))
+                        OutlinedButton(onClick = retry, modifier = Modifier.fillMaxWidth()) {
+                            Text("Retry approval load")
+                        }
+                    }
+                }
+                else -> {
+                    Text("No approval selected", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                    Text("Open the inbox and select a request to review.", color = palette.inkMuted, fontSize = 14.sp)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun ApprovalDetailContent(
+fun ApprovalDetailContent(
     approval: ApprovalSummary,
     lastActionMessage: String?,
     onOpenDiff: () -> Unit,
     onApprove: () -> Unit,
     onReject: () -> Unit,
-    onRevise: () -> Unit
+    lastActionApprovalId: String? = null,
+    decisionInFlight: Boolean = false,
+    decisionNeedsReconciliation: Boolean = false,
+    onReconcileDecision: () -> Unit = {}
 ) {
-    val isBlocked = approval.status == ApprovalStatus.BLOCKED || approval.risk.name == "BLOCKED"
+    val palette = LocalTowerPalette.current
+    var decisionClock by remember(approval.id) { mutableStateOf(Instant.now()) }
+    val expiryInstant = remember(approval.expiresAt) {
+        ApprovalDecisionPolicy.expiryInstant(approval.expiresAt)
+    }
+    LaunchedEffect(approval.id, approval.expiresAt) {
+        while (true) {
+            val now = Instant.now()
+            decisionClock = now
+            val expiry = expiryInstant ?: break
+            val remainingMillis = Duration.between(now, expiry).toMillis()
+            if (remainingMillis <= 0) break
+            delay(minOf(remainingMillis, 1_000L))
+        }
+    }
+    val decisionBlockReason = ApprovalDecisionPolicy.blockReason(approval, decisionClock)
+    val hasUnsupportedData = approval.status == ApprovalStatus.UNKNOWN || approval.risk == RiskLevel.UNKNOWN
+    val isBlocked = approval.status == ApprovalStatus.BLOCKED || approval.risk == RiskLevel.BLOCKED
+    val canDecide = !decisionInFlight && !decisionNeedsReconciliation &&
+        approval.status in setOf(ApprovalStatus.REQUESTED, ApprovalStatus.PENDING_REVIEW) &&
+        !isBlocked && !hasUnsupportedData && decisionBlockReason == null
     val hasRequiredActions = approval.requiredActions.isNotEmpty()
-    val canApprove = !isBlocked && !hasRequiredActions
+    val hasExactToolRequest = approval.hasExactToolRequestPayload()
+    // Acknowledgement applies to the entire reviewed snapshot, including provider and
+    // invocation identity. If the backend rebinds an approval to another invocation,
+    // the reviewer must inspect the request context again before approving.
+    var exactToolRequestReviewed by remember(approval) {
+        mutableStateOf(false)
+    }
+    val requiresFullDiffReview = requiresExplicitRiskConfirmation(approval.risk) &&
+        !hasExactToolRequest && approval.files.isNotEmpty()
+    var fullDiffOpened by rememberSaveable(approval.id, approval.files, approval.risk, approval.status) {
+        mutableStateOf(false)
+    }
+    var fullDiffReviewed by rememberSaveable(approval.id, approval.files, approval.risk, approval.status) {
+        mutableStateOf(false)
+    }
+    val canApprove = canDecide && !hasRequiredActions &&
+        (!hasExactToolRequest || exactToolRequestReviewed) &&
+        (!requiresFullDiffReview || (fullDiffOpened && fullDiffReviewed))
+    val requiresRiskConfirmation = requiresExplicitRiskConfirmation(approval.risk)
+    var showRiskConfirmation by remember(approval.id) { mutableStateOf(false) }
+    var showTechnicalDetails by remember(approval.id) { mutableStateOf(false) }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(TowerBackground)
-            .padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
-    ) {
-        item {
-            ApprovalHeroPanel(
-                approval = approval,
-                canApprove = canApprove,
-                isBlocked = isBlocked,
-                hasRequiredActions = hasRequiredActions
-            )
-        }
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val compactHeight = maxHeight < 500.dp
+        val compactDecisionPanelMaxHeight = maxHeight * 0.72f
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(palette.canvas)
+        ) {
+            LazyColumn(
+                modifier = Modifier
+                    .testTag("approval-detail-list")
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
+            ) {
+                item {
+                    ApprovalHeroPanel(
+                        approval = approval,
+                        canApprove = canApprove,
+                        canDecide = canDecide,
+                        isBlocked = isBlocked,
+                        hasUnsupportedData = hasUnsupportedData,
+                        hasRequiredActions = hasRequiredActions,
+                        modifier = Modifier.testTag("approval-detail-hero"),
+                        showDecisionContext = !hasExactToolRequest
+                    )
+                }
 
-        if (lastActionMessage != null) {
-            item { DetailPanel(title = "Last Action", body = lastActionMessage) }
-        }
+                if (hasExactToolRequest) {
+                    item {
+                        ExactToolDecisionContext(
+                            approval = approval,
+                            modifier = Modifier.testTag("approval-exact-tool-decision-context")
+                        )
+                    }
+                    item { ExactToolRequestHeader() }
+                    items(approval.files) { file -> DiffBlock(file = file) }
+                    item {
+                        ExactToolRequestReviewAcknowledgement(
+                            checked = exactToolRequestReviewed,
+                            onCheckedChange = { exactToolRequestReviewed = it }
+                        )
+                    }
+                }
 
-        if (isBlocked) {
-            item {
-                WarningPanel(
-                    title = "Approval blocked",
-                    body = "This request violates a hard safety rule. It cannot be approved from mobile."
+                if (lastActionMessage != null && lastActionApprovalId == approval.id) {
+                    item { DetailPanel(title = "Last Action", body = lastActionMessage) }
+                }
+
+                if (hasUnsupportedData) {
+                    item {
+                        WarningPanel(
+                            title = "Unsupported approval data",
+                            body = "The backend returned a status or risk value this app does not recognize. Decisions are disabled until the app and backend versions are compatible."
+                        )
+                    }
+                } else if (isBlocked) {
+                    item {
+                        WarningPanel(
+                            title = "Approval blocked",
+                            body = "This request violates a hard safety rule. It cannot be approved from mobile."
+                        )
+                    }
+                } else if (decisionBlockReason != null) {
+                    item {
+                        WarningPanel(
+                            title = "Decision blocked",
+                            body = decisionBlockReason
+                        )
+                    }
+                } else if (!canDecide && !decisionNeedsReconciliation && !decisionInFlight) {
+                    item {
+                        WarningPanel(
+                            title = "Decision closed",
+                            body = "This approval is ${approval.status.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}. Decisions are available only while it is pending."
+                        )
+                    }
+                }
+
+                if (hasRequiredActions) {
+                    item { RequiredActionsPanel(actions = approval.requiredActions) }
+                }
+
+                item {
+                    TowerSectionHeader(
+                        title = "Safety Context",
+                        subtitle = "Review source, branch, test plan, and rollback before making a decision."
+                    )
+                }
+
+                item {
+                    TechnicalDetailsDisclosure(
+                        approval = approval,
+                        expanded = showTechnicalDetails,
+                        onToggle = { showTechnicalDetails = !showTechnicalDetails }
+                    )
+                }
+                item {
+                    DetailPanel(
+                        title = "Risk Rationale",
+                        body = approval.riskReasons.ifEmpty {
+                            listOf("No risk rationale was supplied by the backend.")
+                        }.joinToString("\n")
+                    )
+                }
+                item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
+                item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
+
+                item {
+                    Button(
+                        onClick = {
+                            if (requiresFullDiffReview) {
+                                fullDiffOpened = true
+                                fullDiffReviewed = false
+                            }
+                            onOpenDiff()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.canvas),
+                        modifier = Modifier.fillMaxWidth().testTag("approval-full-diff-review")
+                    ) { Text("Review Full Diff") }
+                }
+
+                if (!hasExactToolRequest) {
+                    item {
+                        TowerSectionHeader(
+                            title = "File Changes",
+                            subtitle = "Inline preview only. Open the full diff before approving risky changes.",
+                            modifier = Modifier.testTag("approval-file-changes")
+                        )
+                    }
+
+                    items(approval.files) { file -> DiffBlock(file = file) }
+                }
+
+                if (requiresFullDiffReview) {
+                    item {
+                        FullDiffReviewAcknowledgement(
+                            opened = fullDiffOpened,
+                            checked = fullDiffReviewed,
+                            onCheckedChange = { fullDiffReviewed = it }
+                        )
+                    }
+                }
+
+            }
+
+            if (canDecide || decisionInFlight || decisionNeedsReconciliation) {
+                DecisionPanel(
+                    canApprove = canApprove,
+                    exactToolRequestNeedsReview = hasExactToolRequest && !exactToolRequestReviewed,
+                    fullDiffReviewNeedsReview = requiresFullDiffReview && (!fullDiffOpened || !fullDiffReviewed),
+                    fullDiffOpened = fullDiffOpened,
+                    canDecide = canDecide,
+                    providerLabel = approval.sourceLabel,
+                    approvalTitle = approval.title,
+                    riskLabel = approval.risk.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() },
+                    isBlocked = isBlocked,
+                    hasUnsupportedData = hasUnsupportedData,
+                    decisionInFlight = decisionInFlight,
+                    decisionNeedsReconciliation = decisionNeedsReconciliation,
+                    onReconcileDecision = onReconcileDecision,
+                    compactHeight = compactHeight,
+                    expiresAt = approval.expiresAt,
+                    now = decisionClock,
+                    onApprove = {
+                        if (requiresRiskConfirmation) {
+                            showRiskConfirmation = true
+                        } else {
+                            onApprove()
+                        }
+                    },
+                    onReject = onReject,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // Keep the persistent decision gate usable when large system text
+                        // meets a short landscape/split-screen viewport. Without a bounded
+                        // scroll region, its wrapped provider/risk/status copy can push the
+                        // actual decision controls below the screen.
+                        .then(
+                            if (compactHeight) {
+                                Modifier
+                                    .heightIn(max = compactDecisionPanelMaxHeight)
+                                    .verticalScroll(rememberScrollState())
+                            } else {
+                                Modifier
+                            }
+                        )
+                        .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.sm)
                 )
             }
         }
+    }
 
-        if (hasRequiredActions) {
-            item { RequiredActionsPanel(actions = approval.requiredActions) }
+    if (showRiskConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showRiskConfirmation = false },
+            title = { Text("Confirm high-risk approval") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .testTag("approval-high-risk-confirmation")
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text("Action: ${approval.title}\n${approval.summary}", style = MaterialTheme.typography.bodyLarge)
+                    if (hasExactToolRequest) {
+                        Spacer(modifier = Modifier.height(TowerSpacing.md))
+                        Text("Exact requested tool action", fontWeight = FontWeight.SemiBold)
+                        approval.files.forEach { file ->
+                            Spacer(modifier = Modifier.height(TowerSpacing.xs))
+                            Text(
+                                file.path,
+                                modifier = Modifier.testTag("approval-confirmation-tool-path"),
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                file.diff,
+                                modifier = Modifier.testTag("approval-confirmation-tool-arguments"),
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(TowerSpacing.md))
+                    Text(
+                        "Target: ${approval.projectName} · ${approval.targetBranch.ifBlank { "Not provided" }}\n" +
+                            "Risk: ${approval.risk.name.lowercase().replace('_', ' ').replaceFirstChar { it.titlecase() }}"
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showRiskConfirmation = false
+                        onApprove()
+                    },
+                    enabled = canApprove && !decisionInFlight,
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) { Text("Approve this request") }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showRiskConfirmation = false },
+                    modifier = Modifier.heightIn(min = 48.dp)
+                ) { Text("Go back") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun ExactToolRequestHeader() {
+    val palette = LocalTowerPalette.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("approval-exact-tool-request"),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+    ) {
+        Text(
+            text = "Exact requested tool action",
+            color = palette.ink,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            lineHeight = 24.sp,
+            modifier = Modifier.testTag("approval-exact-tool-request-header")
+        )
+        Text(
+            text = "Review the tool name and arguments below before deciding.",
+            color = palette.inkMuted,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
+    }
+}
+
+@Composable
+private fun ExactToolDecisionContext(
+    approval: ApprovalSummary,
+    modifier: Modifier = Modifier
+) {
+    val palette = LocalTowerPalette.current
+    val riskReasons = approval.riskReasons.map(String::trim).filter(String::isNotEmpty)
+    TowerPanel(modifier = modifier, elevated = true) {
+        Text("Decision context", color = palette.ink, style = MaterialTheme.typography.titleMedium)
+        DecisionContextLine(
+            "Provider",
+            "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}"
+        )
+        DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Risk", color = palette.inkMuted, style = MaterialTheme.typography.bodyMedium)
+            RiskBadge(approval.risk, readable = true)
         }
-
-        item {
-            TowerSectionHeader(
-                title = "Safety Context",
-                subtitle = "Review source, branch, test plan, and rollback before making a decision."
+        DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
+        Text(
+            text = "Risk rationale",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium
+        )
+        if (riskReasons.isEmpty()) {
+            Text(
+                text = "No risk rationale was supplied by the backend.",
+                color = palette.ink,
+                style = MaterialTheme.typography.bodyMedium
             )
-        }
-
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                DetailPanel(title = "Agent", body = approval.agentName, modifier = Modifier.weight(1f))
-                DetailPanel(title = "Source", body = approval.sourceLabel, modifier = Modifier.weight(1f))
+        } else {
+            riskReasons.forEach { reason ->
+                Text(reason, color = palette.ink, style = MaterialTheme.typography.bodyMedium)
             }
         }
-        item { DetailPanel(title = "Test Plan", body = approval.testPlan.ifEmpty { listOf("No tests listed") }.joinToString("\n")) }
-        item { DetailPanel(title = "Rollback Plan", body = approval.rollbackPlan.ifBlank { "No rollback plan provided" }) }
-
-        item {
-            Button(
-                onClick = onOpenDiff,
-                colors = ButtonDefaults.buttonColors(containerColor = TowerAccent, contentColor = TowerBackground),
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Review Full Diff") }
+        DecisionContextLine("Expires", formatLocalizedApprovalExpiry(approval.expiresAt))
+        approval.sourceInvocationId?.takeIf { it.isNotBlank() }?.let { invocationId ->
+            DecisionContextLine("Invocation", invocationId)
         }
+    }
+}
 
-        item {
-            TowerSectionHeader(
-                title = "File Changes",
-                subtitle = "Inline preview only. Open the full diff before approving risky changes."
+@Composable
+private fun ExactToolRequestReviewAcknowledgement(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val palette = LocalTowerPalette.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("approval-exact-tool-review-acknowledgement")
+            .toggleable(
+                value = checked,
+                role = Role.Checkbox,
+                onValueChange = onCheckedChange
             )
+            .padding(vertical = TowerSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = null,
+            modifier = Modifier.testTag("approval-exact-tool-reviewed")
+        )
+        Text(
+            text = "I reviewed the exact tool name and arguments above.",
+            color = palette.ink,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
+    }
+}
+
+@Composable
+private fun FullDiffReviewAcknowledgement(
+    opened: Boolean,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val palette = LocalTowerPalette.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("approval-full-diff-review-acknowledgement")
+            .toggleable(
+                value = checked,
+                enabled = opened,
+                role = Role.Checkbox,
+                onValueChange = onCheckedChange
+            )
+            .padding(vertical = TowerSpacing.sm),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = null,
+            enabled = opened,
+            modifier = Modifier.testTag("approval-full-diff-reviewed")
+        )
+        Text(
+            text = if (opened) "I reviewed the full file diff above." else "Open the full diff before acknowledging review.",
+            color = palette.ink,
+            fontSize = 14.sp,
+            lineHeight = 20.sp
+        )
+    }
+}
+
+internal fun ApprovalSummary.hasExactToolRequestPayload(): Boolean = files.any { file ->
+    file.changeType.equals("tool_call", ignoreCase = true) ||
+        file.changeType.equals("mcp_tool_call", ignoreCase = true) ||
+        file.path.startsWith("mcp://", ignoreCase = true) ||
+        file.path.startsWith("antigravity://tool/", ignoreCase = true) ||
+        file.path.startsWith("codex://tool/", ignoreCase = true)
+}
+
+internal fun requiresExplicitRiskConfirmation(risk: RiskLevel): Boolean =
+    risk == RiskLevel.HIGH || risk == RiskLevel.CRITICAL
+
+@Composable
+private fun TechnicalDetailsDisclosure(
+    approval: ApprovalSummary,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(elevated = true) {
+        TextButton(onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
+            Text(if (expanded) "Hide technical details" else "Show technical details")
         }
-
-        items(approval.files) { file -> DiffBlock(file = file) }
-
-        item {
-            DecisionPanel(
-                canApprove = canApprove,
-                isBlocked = isBlocked,
-                onApprove = onApprove,
-                onReject = onReject,
-                onRevise = onRevise
+        if (expanded) {
+            Text("Request and connector identifiers", color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                buildList {
+                    add("Approval ID: ${approval.id}")
+                    add("Project: ${approval.projectName}")
+                    if (approval.projectId.isNotBlank()) add("Project ID: ${approval.projectId}")
+                    add("Agent: ${approval.agentName}")
+                    add("Provider: ${approval.sourceProvider}")
+                    add("Source agent ID: ${approval.sourceAgentId ?: "Not provided"}")
+                    add("Session ID: ${approval.sourceSessionId ?: "Not provided"}")
+                    add("Source invocation ID: ${approval.sourceInvocationId ?: "Not provided"}")
+                    add("Expires at: ${formatLocalizedApprovalExpiry(approval.expiresAt)}")
+                    add("Source verified: ${if (approval.verifiedSource) "Yes" else "No"}")
+                }.joinToString("\n"),
+                color = palette.inkMuted,
+                fontSize = 14.sp,
+                lineHeight = 20.sp
             )
         }
     }
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun ApprovalHeroPanel(
     approval: ApprovalSummary,
     canApprove: Boolean,
+    canDecide: Boolean,
     isBlocked: Boolean,
-    hasRequiredActions: Boolean
+    hasUnsupportedData: Boolean,
+    hasRequiredActions: Boolean,
+    modifier: Modifier = Modifier,
+    showDecisionContext: Boolean = true
 ) {
-    TowerHeroPanel {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Top
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
+    val palette = LocalTowerPalette.current
+    TowerHeroPanel(modifier = modifier) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 StatusBadge(
                     label = when {
-                        isBlocked -> "BLOCKED"
-                        canApprove -> "READY FOR DECISION"
-                        hasRequiredActions -> "SAFETY GATE"
-                        else -> "REVIEW REQUIRED"
+                        hasUnsupportedData -> "Unsupported data"
+                        isBlocked -> "Blocked"
+                        !canDecide -> "Closed"
+                        canApprove -> "Ready for decision"
+                        hasRequiredActions -> "Safety gate"
+                        else -> "Review required"
                     },
                     color = when {
-                        isBlocked -> RiskBlocked
-                        canApprove -> RiskLow
-                        else -> RiskMedium
-                    }
+                        isBlocked || hasUnsupportedData -> palette.danger
+                        canApprove -> palette.positive
+                        else -> palette.caution
+                    },
+                    fontSize = 14.sp,
+                    uppercase = false
                 )
-                Spacer(modifier = Modifier.height(TowerSpacing.md))
-                Text(
-                    text = approval.title,
-                    color = TowerTextPrimary,
-                    fontSize = 25.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    lineHeight = 30.sp
-                )
-                Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                Text(text = approval.summary, color = TowerTextMuted, fontSize = 14.sp, lineHeight = 20.sp)
+                if (showDecisionContext) {
+                    RiskBadge(approval.risk, readable = true)
+                }
             }
-            ForgedLogoMark(size = 50.dp, color = TowerTextPrimary.copy(alpha = 0.78f))
+            Spacer(modifier = Modifier.height(TowerSpacing.md))
+            Text(
+                text = approval.title,
+                color = palette.ink,
+                fontSize = 25.sp,
+                fontWeight = FontWeight.SemiBold,
+                lineHeight = 30.sp
+            )
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+            Text(text = approval.summary, color = palette.inkMuted, style = MaterialTheme.typography.bodyLarge)
         }
 
-        Spacer(modifier = Modifier.height(TowerSpacing.lg))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            RiskBadge(approval.risk)
-            StatusBadge(approval.status.name, TowerTextMuted)
+        if (showDecisionContext) {
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
+            DecisionContextBody(
+                label = "Risk rationale",
+                value = approval.riskReasons.ifEmpty { listOf("No risk rationale was supplied.") }.joinToString("\n")
+            )
+            Spacer(modifier = Modifier.height(TowerSpacing.md))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.canvas.copy(alpha = 0.42f), RoundedCornerShape(16.dp))
+                    .padding(TowerSpacing.md),
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm)
+            ) {
+                Text("Decision context", color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                DecisionContextLine("Project", approval.projectName.ifBlank { "Not provided" })
+                DecisionContextLine("Target", approval.targetBranch.ifBlank { "Not provided" })
+                DecisionContextLine("Provider", "${approval.sourceLabel} · ${if (approval.verifiedSource) "Verified source" else "Source not verified"}")
+                DecisionContextLine("Invocation", approval.sourceInvocationId?.ifBlank { null } ?: "Not provided")
+                DecisionContextLine("Expires", formatLocalizedApprovalExpiry(approval.expiresAt))
+            }
         }
-        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SourceBadge(approval)
-            StatusBadge(approval.targetBranch, TowerAccent)
+    }
+}
+
+@Composable
+private fun ExactToolSourceContext(approval: ApprovalSummary) {
+    val palette = LocalTowerPalette.current
+    val provider = approval.sourceAgentName?.takeIf { it.isNotBlank() }
+        ?: when (approval.sourceProvider.trim().uppercase()) {
+            "ANTIGRAVITY" -> "Antigravity"
+            "CODEX" -> "Codex"
+            "MCP" -> "MCP"
+            "MANUAL" -> "Manual"
+            else -> approval.sourceProvider.ifBlank { "Not provided" }
         }
+    val project = approval.projectName.ifBlank { "Not provided" }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("approval-exact-tool-context"),
+        verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)
+    ) {
+        Text(
+            text = "Provider: $provider · Project: $project",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        approval.sourceInvocationId?.takeIf { it.isNotBlank() }?.let { invocationId ->
+            Text(
+                text = "Invocation: $invocationId",
+                color = palette.inkMuted,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+    }
+}
+
+internal fun formatLocalizedApprovalExpiry(
+    value: String?,
+    locale: Locale = Locale.getDefault(),
+    zoneId: ZoneId = ZoneId.systemDefault()
+): String {
+    if (value.isNullOrBlank()) return "Not provided"
+    val instant = ApprovalDecisionPolicy.expiryInstant(value) ?: return value
+    return DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM)
+        .withLocale(locale)
+        .withZone(zoneId)
+        .format(instant)
+}
+
+internal fun formatApprovalExpiryCountdown(value: String?, now: Instant): String {
+    val expiry = ApprovalDecisionPolicy.expiryInstant(value)
+        ?: return "Expiry unavailable"
+    val secondsLeft = Duration.between(now, expiry).seconds
+    if (secondsLeft <= 0) return "Expired"
+    if (secondsLeft < 60) return "Expires in less than a minute"
+    val minutesLeft = (secondsLeft + 59) / 60
+    if (minutesLeft < 60) return "Expires in about $minutesLeft ${if (minutesLeft == 1L) "minute" else "minutes"}"
+    val hoursLeft = (minutesLeft + 59) / 60
+    return "Expires in about $hoursLeft ${if (hoursLeft == 1L) "hour" else "hours"}"
+}
+
+@Composable
+private fun DecisionContextLine(label: String, value: String) {
+    val palette = LocalTowerPalette.current
+    val fontScale = LocalDensity.current.fontScale
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val stackLabelAndValue = shouldStackDecisionContext(maxWidth, fontScale)
+        if (stackLabelAndValue) {
+            Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
+                Text(
+                    label,
+                    color = palette.inkMuted,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 20.sp
+                )
+                Text(
+                    value,
+                    color = palette.ink,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                verticalAlignment = Alignment.Top
+            ) {
+                Text(
+                    label,
+                    color = palette.inkMuted,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.width(96.dp)
+                )
+                Text(
+                    value,
+                    color = palette.ink,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    }
+}
+
+internal fun shouldStackDecisionContext(maxWidth: androidx.compose.ui.unit.Dp, fontScale: Float): Boolean =
+    maxWidth < 360.dp || fontScale >= 1.5f
+
+@Composable
+private fun DecisionContextBody(label: String, value: String) {
+    val palette = LocalTowerPalette.current
+    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.xs)) {
+        Text(
+            label,
+            color = palette.inkMuted,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            lineHeight = 20.sp
+        )
+        Text(value, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
     }
 }
 
 @Composable
 private fun DetailPanel(title: String, body: String, modifier: Modifier = Modifier) {
+    val palette = LocalTowerPalette.current
     TowerPanel(modifier = modifier, elevated = true) {
         Text(
-            title.uppercase(),
-            color = TowerTextMuted,
-            fontSize = 10.sp,
+                title,
+            color = palette.inkMuted,
+            fontSize = 14.sp,
             fontWeight = FontWeight.Medium,
             letterSpacing = 1.2.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(body, color = TowerTextPrimary, fontSize = 14.sp, lineHeight = 20.sp)
+        Text(body, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
     }
 }
 
 @Composable
 private fun WarningPanel(title: String, body: String) {
+    val palette = LocalTowerPalette.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(RiskBlocked.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
-            .border(1.dp, RiskBlocked.copy(alpha = 0.32f), RoundedCornerShape(24.dp))
+            .background(palette.danger.copy(alpha = 0.12f), RoundedCornerShape(24.dp))
+            .border(1.dp, palette.danger.copy(alpha = 0.32f), RoundedCornerShape(24.dp))
             .padding(16.dp)
     ) {
-        Text(title, color = RiskBlocked, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text(title, color = palette.danger, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Text(body, color = TowerTextPrimary, fontSize = 14.sp, lineHeight = 20.sp)
+        Text(body, color = palette.ink, style = MaterialTheme.typography.bodyLarge)
     }
 }
 
 @Composable
 private fun RequiredActionsPanel(actions: List<String>) {
+    val palette = LocalTowerPalette.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(RiskCritical.copy(alpha = 0.10f), RoundedCornerShape(24.dp))
-            .border(1.dp, RiskCritical.copy(alpha = 0.28f), RoundedCornerShape(24.dp))
+            .background(palette.danger.copy(alpha = 0.10f), RoundedCornerShape(24.dp))
+            .border(1.dp, palette.danger.copy(alpha = 0.28f), RoundedCornerShape(24.dp))
             .padding(16.dp)
     ) {
-        Text("Required Before Approval", color = RiskCritical, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text("Required Before Approval", color = palette.danger, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        actions.forEach { action -> Text("• $action", color = TowerTextPrimary, fontSize = 14.sp, lineHeight = 21.sp) }
+        actions.forEach { action -> Text("• $action", color = palette.ink, style = MaterialTheme.typography.bodyLarge) }
     }
 }
 
 @Composable
 private fun DecisionPanel(
     canApprove: Boolean,
+    exactToolRequestNeedsReview: Boolean,
+    fullDiffReviewNeedsReview: Boolean,
+    fullDiffOpened: Boolean,
+    canDecide: Boolean,
+    providerLabel: String,
+    approvalTitle: String,
+    riskLabel: String,
     isBlocked: Boolean,
+    hasUnsupportedData: Boolean,
+    decisionInFlight: Boolean,
+    decisionNeedsReconciliation: Boolean,
+    onReconcileDecision: () -> Unit,
+    compactHeight: Boolean,
+    expiresAt: String?,
+    now: Instant,
     onApprove: () -> Unit,
     onReject: () -> Unit,
-    onRevise: () -> Unit
+    modifier: Modifier = Modifier
 ) {
-    TowerPanel(elevated = true) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(modifier = modifier, elevated = true) {
         Text(
             text = "Decision Gate",
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 18.sp,
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
-            text = if (canApprove) {
-                "Approval is available. Confirm only after reviewing diff, tests, and rollback."
-            } else {
-                "Approval is disabled until safety requirements are satisfied."
-            },
-            color = if (canApprove) TowerTextMuted else RiskMedium,
-            fontSize = 13.sp,
-            lineHeight = 19.sp
+            text = "$providerLabel · $approvalTitle · Risk: $riskLabel",
+            color = palette.ink,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("approval-decision-context")
         )
-        Spacer(modifier = Modifier.height(TowerSpacing.lg))
-        Button(
-            onClick = onApprove,
-            enabled = canApprove,
-            colors = ButtonDefaults.buttonColors(containerColor = RiskLow, contentColor = TowerBackground),
-            modifier = Modifier.fillMaxWidth()
-        ) { Text("Approve") }
+        Spacer(modifier = Modifier.height(TowerSpacing.xs))
+        Text(
+            text = formatApprovalExpiryCountdown(expiresAt, now),
+            color = if (ApprovalDecisionPolicy.expiryInstant(expiresAt)?.let {
+                    Duration.between(now, it).seconds <= 300
+                } == true) palette.caution else palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("approval-decision-expiry-countdown")
+        )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = when {
+                hasUnsupportedData -> "This request contains an unrecognized status or risk value. Decisions are disabled."
+                decisionNeedsReconciliation -> "The previous decision may have reached the server, but its response was lost. Check server status before trying again."
+                decisionInFlight -> "Sending the decision and waiting for the server."
+                isBlocked -> "This request is blocked by policy. No decision can be recorded from mobile."
+                !canDecide -> "This request is no longer waiting for a decision."
+                fullDiffReviewNeedsReview && !fullDiffOpened -> "Open the full file diff, then acknowledge that you reviewed it before approving."
+                fullDiffReviewNeedsReview -> "Acknowledge that you reviewed the full file diff before approving."
+                exactToolRequestNeedsReview -> "Review the exact tool name and arguments above, then acknowledge before approving."
+                canApprove -> "Approval is available. Confirm only after reviewing diff, tests, and rollback."
+                else -> "Approval is disabled until safety requirements are satisfied."
+            },
+            modifier = Modifier
+                .testTag("approval-decision-status")
+                .semantics { liveRegion = LiveRegionMode.Polite },
+            color = if (canApprove) palette.inkMuted else palette.caution,
+            style = if (compactHeight) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(if (compactHeight) TowerSpacing.sm else TowerSpacing.lg))
+        if (decisionNeedsReconciliation) {
+            Spacer(modifier = Modifier.height(TowerSpacing.sm))
             OutlinedButton(
-                onClick = onReject,
-                modifier = Modifier.weight(1f),
-                enabled = !isBlocked
-            ) { Text("Reject", color = RiskCritical) }
-            OutlinedButton(
-                onClick = onRevise,
-                modifier = Modifier.weight(1f),
-                enabled = !isBlocked
-            ) { Text("Revise", color = TowerTextPrimary) }
+                onClick = onReconcileDecision,
+                enabled = !decisionInFlight,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Check server status") }
+        }
+        if (canDecide) {
+            Spacer(modifier = Modifier.height(if (compactHeight) TowerSpacing.sm else TowerSpacing.md))
+            Column(
+                verticalArrangement = Arrangement.spacedBy(TowerSpacing.sm),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                OutlinedButton(
+                    onClick = onReject,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .semantics {
+                            contentDescription = "Reject $approvalTitle. Risk level: $riskLabel."
+                        },
+                    enabled = canDecide
+                ) { Text("Reject", color = palette.danger) }
+                Button(
+                    onClick = onApprove,
+                    enabled = canApprove,
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.brand, contentColor = palette.onBrand),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .semantics {
+                            contentDescription = "Approve $approvalTitle. Risk level: $riskLabel."
+                        }
+                ) { Text("Approve request") }
+            }
         }
     }
 }

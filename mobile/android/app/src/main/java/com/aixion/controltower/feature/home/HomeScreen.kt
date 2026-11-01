@@ -1,6 +1,7 @@
 package com.aixion.controltower.feature.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,108 +13,71 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aixion.controltower.core.model.ApprovalSummary
+import com.aixion.controltower.core.ui.ForegroundRefreshEffect
 import com.aixion.controltower.core.ui.components.ApprovalCard
 import com.aixion.controltower.core.ui.components.ForgedLogoMark
 import com.aixion.controltower.core.ui.components.StatusBadge
-import com.aixion.controltower.core.ui.components.StatusCard
 import com.aixion.controltower.core.ui.components.TowerHeroPanel
 import com.aixion.controltower.core.ui.components.TowerPanel
 import com.aixion.controltower.core.ui.components.TowerSectionHeader
-import com.aixion.controltower.core.ui.theme.RiskBlocked
-import com.aixion.controltower.core.ui.theme.RiskCritical
-import com.aixion.controltower.core.ui.theme.RiskLow
-import com.aixion.controltower.core.ui.theme.RiskMedium
-import com.aixion.controltower.core.ui.theme.TowerAccent
-import com.aixion.controltower.core.ui.theme.TowerBackground
+import com.aixion.controltower.core.ui.theme.LocalTowerPalette
 import com.aixion.controltower.core.ui.theme.TowerSpacing
-import com.aixion.controltower.core.ui.theme.TowerTextMuted
-import com.aixion.controltower.core.ui.theme.TowerTextPrimary
+import com.aixion.controltower.core.ui.theme.TowerPalette
+import com.aixion.controltower.core.ui.theme.towerScreenHorizontalPadding
+import java.text.DateFormat
+import java.time.Instant
+import java.util.Date
 
 @Composable
 fun HomeScreen(
     viewModel: HomeViewModel = viewModel(),
     onApprovalSelected: (ApprovalSummary) -> Unit = {},
-    onOpenActionQueue: () -> Unit = {},
-    onOpenExecutionQueue: () -> Unit = {},
-    onOpenBlockedQueue: () -> Unit = {},
-    onOpenFailedTests: () -> Unit = {}
+    onOpenConnect: () -> Unit = {},
+    onOpenApprovals: () -> Unit = {}
 ) {
+    val palette = LocalTowerPalette.current
     val state by viewModel.state.collectAsState()
-    val heroTitle = when {
-        state.loading -> "Loading command state"
-        state.hasError -> "Backend sync failed"
-        state.actionRequiredCount > 0 -> "${state.actionRequiredCount} requests require review"
-        state.blockedCount > 0 -> "${state.blockedCount} blocked actions need attention"
-        else -> "All clear"
-    }
-    val heroSubtitle = when {
-        state.loading -> "Syncing approvals, worker state, and execution queues."
-        state.hasError -> "Authenticated screens do not show mock data. Fix the backend connection, then retry."
-        state.actionRequiredCount > 0 -> "AI/code execution is paused until you approve, reject, or request revision."
-        state.blockedCount > 0 -> "Policy stopped unsafe work. Review the blocked queue before retrying."
-        else -> "No action required right now. Keep building, but keep the tower watching."
-    }
+    ForegroundRefreshEffect(onRefresh = viewModel::refreshInForeground)
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(TowerBackground)
-            .padding(18.dp),
+            .background(palette.canvas)
+            .padding(horizontal = towerScreenHorizontalPadding(), vertical = TowerSpacing.lg),
         verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)
     ) {
         item {
-            HomeHeader(loading = state.loading, hasError = state.hasError)
+            HomeHeader(
+                loading = state.loading,
+                refreshing = state.refreshing,
+                hasError = state.hasError,
+                hasSuccessfulSync = state.hasSuccessfulSync,
+                lastSuccessfulSyncAt = state.lastSuccessfulSyncAt
+            )
         }
 
         item {
             TowerHeroPanel {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.Top
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        StatusBadge(
-                            label = when {
-                                state.hasError -> "BACKEND ERROR"
-                                state.actionRequiredCount > 0 -> "APPROVAL QUEUE"
-                                else -> "COMMAND STATE"
-                            },
-                            color = when {
-                                state.hasError -> RiskCritical
-                                state.actionRequiredCount > 0 -> RiskMedium
-                                else -> RiskLow
-                            }
-                        )
-                        Spacer(modifier = Modifier.height(TowerSpacing.md))
-                        Text(
-                            text = heroTitle,
-                            color = TowerTextPrimary,
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            lineHeight = 33.sp
-                        )
-                        Spacer(modifier = Modifier.height(TowerSpacing.sm))
-                        Text(
-                            text = heroSubtitle,
-                            color = TowerTextMuted,
-                            fontSize = 14.sp,
-                            lineHeight = 20.sp
-                        )
-                    }
-                    ForgedLogoMark(size = 56.dp, color = TowerTextPrimary.copy(alpha = 0.82f))
-                }
+                HomeStatusHero(state)
             }
         }
 
@@ -128,48 +92,6 @@ fun HomeScreen(
             }
         }
 
-        item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatusCard(
-                    title = "Action",
-                    value = state.actionRequiredCount.toString(),
-                    subtitle = "tap to review queue",
-                    accent = TowerAccent,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenActionQueue
-                )
-                StatusCard(
-                    title = "Execution",
-                    value = state.githubExecutionCount.toString(),
-                    subtitle = "tap to see PR path",
-                    accent = RiskMedium,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenExecutionQueue
-                )
-            }
-        }
-
-        item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatusCard(
-                    title = "Blocked",
-                    value = state.blockedCount.toString(),
-                    subtitle = "tap for stopped work",
-                    accent = RiskBlocked,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenBlockedQueue
-                )
-                StatusCard(
-                    title = "Failed Tests",
-                    value = state.failedTestsCount.toString(),
-                    subtitle = "tap for failures",
-                    accent = RiskCritical,
-                    modifier = Modifier.weight(1f),
-                    onClick = onOpenFailedTests
-                )
-            }
-        }
-
         if (state.hasError) {
             item {
                 EmptyHomePanel(
@@ -177,35 +99,45 @@ fun HomeScreen(
                     body = "This is intentional. Authenticated product screens now wait for real backend data instead of silently showing demo data. Use Retry after the backend is reachable."
                 )
             }
-        } else if (state.actionRequiredApprovals.isNotEmpty()) {
+        } else if (!state.refreshing && state.hasSuccessfulSync && state.actionRequiredApprovals.isNotEmpty()) {
             item {
-                TowerSectionHeader(
-                    title = "Needs Decision",
-                    subtitle = "Top pending requests. Tap the Action card above for the full review queue."
+                HomeApprovalPreview(
+                    approvals = state.actionRequiredApprovals,
+                    onApprovalSelected = onApprovalSelected,
+                    onOpenApprovals = onOpenApprovals
                 )
             }
-            items(state.actionRequiredApprovals.take(2)) { approval ->
-                ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
-            }
-        } else {
+        } else if (!state.refreshing && state.hasSuccessfulSync && state.unsupportedApprovals.isEmpty()) {
             item {
                 EmptyHomePanel(
                     title = "No approvals waiting",
-                    body = "The approval queue is clear. New AI/code actions will appear through the Action card when review is required."
+                    body = "The approval queue is clear. New requests will appear here when an agent needs your decision."
                 )
             }
         }
 
-        if (!state.hasError && state.githubExecutionApprovals.isNotEmpty()) {
+        if (!state.hasError && !state.refreshing && state.hasSuccessfulSync && state.unsupportedApprovals.isNotEmpty()) {
             item {
-                TowerSectionHeader(
-                    title = "Awaiting GitHub Execution",
-                    subtitle = "Approved work that still needs branch, validation, or PR completion. Tap Execution above for this queue."
+                ErrorPanel(
+                    title = "Approval data is not recognized",
+                    body = "Update the app or backend before deciding. These requests remain visible but cannot be approved.",
+                    onRetry = viewModel::refresh,
+                    retryEnabled = !state.loading
                 )
             }
-            items(state.githubExecutionApprovals.take(2)) { approval ->
+            item {
+                TowerSectionHeader(
+                    title = "Unsupported approval data",
+                    subtitle = "Decision controls are disabled for unrecognized status or risk values."
+                )
+            }
+            items(state.unsupportedApprovals) { approval ->
                 ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
             }
+        }
+
+        item {
+            HomeAgentConnectionPanel(onOpenConnect = onOpenConnect)
         }
 
         item {
@@ -215,60 +147,175 @@ fun HomeScreen(
 }
 
 @Composable
-private fun HomeHeader(loading: Boolean, hasError: Boolean) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column {
-            Text(
-                text = "AIXION",
-                color = TowerTextPrimary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 2.2.sp
-            )
-            Text(
-                text = "CONTROL TOWER",
-                color = TowerTextMuted,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Medium,
-                letterSpacing = 1.8.sp
-            )
-        }
-        StatusBadge(
-            label = when {
-                loading -> "SYNCING"
-                hasError -> "OFFLINE"
-                else -> "CONNECTED"
-            },
-            color = when {
-                loading -> RiskMedium
-                hasError -> RiskCritical
-                else -> RiskLow
+internal fun HomeStatusHero(state: HomeUiState) {
+    val palette = LocalTowerPalette.current
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val showBrandMark = maxWidth >= 380.dp && LocalDensity.current.fontScale < 1.3f
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(TowerSpacing.md),
+            verticalAlignment = Alignment.Top
+        ) {
+            Column(modifier = if (showBrandMark) Modifier.weight(1f) else Modifier.fillMaxWidth()) {
+                StatusBadge(
+                    label = when {
+                        state.hasError -> "Backend error"
+                        !state.hasSuccessfulSync && !state.loading && !state.refreshing -> "Not verified"
+                        state.unsupportedApprovals.isNotEmpty() -> "Unsupported approval"
+                        state.actionRequiredCount > 0 -> "Approval queue"
+                        state.refreshing -> "Syncing"
+                        else -> "Approval status"
+                    },
+                    color = homeHeroStatusColor(state, palette),
+                    fontSize = 14.sp,
+                    uppercase = false
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.md))
+                Text(
+                    text = homeHeroTitle(state),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("home-status-title")
+                        .semantics {
+                            heading()
+                            liveRegion = LiveRegionMode.Polite
+                        },
+                    color = palette.ink,
+                    style = MaterialTheme.typography.headlineLarge
+                )
+                Spacer(modifier = Modifier.height(TowerSpacing.sm))
+                Text(
+                    text = homeHeroSubtitle(state),
+                    color = palette.inkMuted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
+            if (showBrandMark) {
+                ForgedLogoMark(
+                    modifier = Modifier.testTag("home-hero-logo"),
+                    size = 52.dp,
+                    color = palette.ink.copy(alpha = 0.78f)
+                )
+            }
+        }
+    }
+}
+
+internal fun homeHeroStatusColor(state: HomeUiState, palette: TowerPalette) = when {
+    state.hasError || state.unsupportedApprovals.isNotEmpty() -> palette.danger
+    state.actionRequiredCount > 0 -> palette.caution
+    state.loading || state.refreshing || !state.hasSuccessfulSync -> palette.caution
+    else -> palette.inkMuted
+}
+
+@Composable
+internal fun HomeAgentConnectionPanel(onOpenConnect: () -> Unit) {
+    val palette = LocalTowerPalette.current
+    TowerPanel(elevated = false) {
+        Text(
+            text = "Connect an agent",
+            modifier = Modifier.semantics { heading() },
+            color = palette.ink,
+            style = MaterialTheme.typography.titleMedium
         )
+        Spacer(modifier = Modifier.height(TowerSpacing.sm))
+        Text(
+            text = "Set up Antigravity or Codex on the computer running your work. Keep that computer online while approvals are pending.",
+            color = palette.inkMuted,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Spacer(modifier = Modifier.height(TowerSpacing.md))
+        Button(onClick = onOpenConnect, modifier = Modifier.fillMaxWidth()) {
+            Text("Connect platform")
+        }
     }
 }
 
 @Composable
+internal fun HomeApprovalPreview(
+    approvals: List<ApprovalSummary>,
+    onApprovalSelected: (ApprovalSummary) -> Unit,
+    onOpenApprovals: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(TowerSpacing.lg)) {
+        TowerSectionHeader(
+            title = "Needs your decision",
+            subtitle = "Review the exact request before approving or rejecting it."
+        )
+        approvals.take(3).forEach { approval ->
+            ApprovalCard(approval = approval, onClick = { onApprovalSelected(approval) })
+        }
+        TextButton(onClick = onOpenApprovals, modifier = Modifier.fillMaxWidth()) {
+            Text("See all approvals")
+        }
+    }
+}
+
+@Composable
+private fun HomeHeader(
+    loading: Boolean,
+    refreshing: Boolean,
+    hasError: Boolean,
+    hasSuccessfulSync: Boolean,
+    lastSuccessfulSyncAt: Instant?
+) {
+    val palette = LocalTowerPalette.current
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            StatusBadge(
+                label = homeBackendStatusLabel(
+                    loading = loading,
+                    refreshing = refreshing,
+                    hasError = hasError,
+                    hasSuccessfulSync = hasSuccessfulSync
+                ),
+                color = when {
+                    hasError -> palette.danger
+                    loading || refreshing || !hasSuccessfulSync -> palette.caution
+                    else -> palette.positive
+                },
+                fontSize = 14.sp,
+                uppercase = false
+            )
+        }
+        lastSuccessfulSyncAt?.let { syncedAt -> HomeSyncTimestamp(syncedAt) }
+    }
+}
+
+@Composable
+internal fun HomeSyncTimestamp(syncedAt: Instant) {
+    val palette = LocalTowerPalette.current
+    Text(
+        text = "Last successful sync · ${DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date.from(syncedAt))}",
+        color = palette.inkMuted,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        modifier = Modifier.padding(top = TowerSpacing.sm)
+    )
+}
+
+@Composable
 private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEnabled: Boolean) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
-        StatusBadge(label = "REAL DATA REQUIRED", color = RiskCritical)
+        StatusBadge(label = "Real data required", color = palette.danger, fontSize = 14.sp, uppercase = false)
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = title,
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = body,
-            color = TowerTextMuted,
-            fontSize = 13.sp,
-            lineHeight = 19.sp
+            color = palette.inkMuted,
+            fontSize = 14.sp,
+            lineHeight = 21.sp
         )
         Spacer(modifier = Modifier.height(TowerSpacing.md))
         Button(onClick = onRetry, enabled = retryEnabled) {
@@ -279,19 +326,20 @@ private fun ErrorPanel(title: String, body: String, onRetry: () -> Unit, retryEn
 
 @Composable
 private fun EmptyHomePanel(title: String, body: String) {
+    val palette = LocalTowerPalette.current
     TowerPanel(elevated = true) {
         Text(
             text = title,
-            color = TowerTextPrimary,
+            color = palette.ink,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold
         )
         Spacer(modifier = Modifier.height(TowerSpacing.sm))
         Text(
             text = body,
-            color = TowerTextMuted,
-            fontSize = 13.sp,
-            lineHeight = 19.sp
+            color = palette.inkMuted,
+            fontSize = 14.sp,
+            lineHeight = 21.sp
         )
     }
 }

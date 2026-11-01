@@ -1,0 +1,4 @@
+<resources>
+    <string name="aixion_agent_tasks_channel_name">Aixion approval requests</string>
+    <string name="aixion_agent_tasks_channel_description">Approval requests that need your decision.</string>
+</resources>
