@@ -111,7 +111,9 @@ resource "google_compute_backend_service" "api" {
   name                  = "aixion-api-production-backend"
   load_balancing_scheme = "EXTERNAL_MANAGED"
   protocol              = "HTTP"
-  timeout_sec           = 60
+  # Serverless NEG backend timeout is fixed at 60 minutes by Google Cloud;
+  # timeout_sec is unsupported here. Cloud Run's service timeout is the
+  # effective request limit for the synchronous approval route.
 
   backend {
     group = google_compute_region_network_endpoint_group.api.id

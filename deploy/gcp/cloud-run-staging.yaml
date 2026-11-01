@@ -36,7 +36,9 @@ spec:
     spec:
       serviceAccountName: REPLACE_WITH_RUNTIME_SERVICE_ACCOUNT
       containerConcurrency: 20
-      timeoutSeconds: 60
+      # The synchronous MCP approval path can wait for the configured 900s
+      # approval TTL. Keep one minute of response/cleanup margin.
+      timeoutSeconds: 960
       containers:
         - image: asia-south1-docker.pkg.dev/REPLACE_WITH_PROJECT_ID/aixion/aixion-api@sha256:REPLACE_WITH_IMAGE_DIGEST
           ports:

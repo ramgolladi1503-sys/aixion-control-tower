@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from scripts.validate_cloud_run_manifest import DEFAULT_MANIFEST, validate_manifest_text
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _resolved_candidate() -> str:
@@ -37,6 +42,34 @@ def test_checked_in_cloud_run_draft_is_blocked_by_unresolved_placeholders() -> N
 
 def test_resolved_candidate_passes_local_shape_and_security_checks() -> None:
     assert validate_manifest_text(_resolved_candidate()) == []
+
+
+def test_candidate_with_timeout_shorter_than_maximum_approval_wait_is_rejected() -> None:
+    candidate = _resolved_candidate().replace("timeoutSeconds: 960", "timeoutSeconds: 60")
+
+    assert (
+        "Cloud Run request timeout must be at least 960 seconds to cover the "
+        "maximum approval wait and response margin"
+        in validate_manifest_text(candidate)
+    )
+
+
+def test_candidate_with_timeout_above_cloud_run_limit_is_rejected() -> None:
+    candidate = _resolved_candidate().replace("timeoutSeconds: 960", "timeoutSeconds: 3601")
+
+    assert "Cloud Run request timeout must not exceed 3600 seconds" in validate_manifest_text(
+        candidate
+    )
+
+
+def test_serverless_neg_terraform_drafts_do_not_set_unsupported_backend_timeout() -> None:
+    paths = (
+        ROOT / "deploy/gcp/cloud-run-load-balancer-staging.tf",
+        ROOT / "deploy/gcp/production/main.tf",
+    )
+
+    for path in paths:
+        assert re.search(r"(?m)^\s*timeout_sec\s*=", path.read_text(encoding="utf-8")) is None
 
 
 def test_candidate_with_direct_public_ingress_is_rejected() -> None:

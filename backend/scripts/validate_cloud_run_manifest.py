@@ -10,6 +10,10 @@ import yaml
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "deploy/gcp/cloud-run-staging.yaml"
 PLACEHOLDER_MARKERS = ("REPLACE_WITH_", "replace-with-", "TODO")
+# The application permits approvals to remain pending for up to 900 seconds.
+# Keep 60 seconds for the response and cleanup after the decision/expiry.
+MIN_APPROVAL_WAIT_REQUEST_TIMEOUT_SECONDS = 960
+MAX_CLOUD_RUN_REQUEST_TIMEOUT_SECONDS = 3600
 REQUIRED_ENV = {
     "AIXION_PROFILE": "production",
     "AIXION_AUTH_ENABLED": "true",
@@ -139,6 +143,17 @@ def validate_manifest_text(text: str) -> list[str]:
     if not isinstance(pod, dict):
         issues.append("spec.template.spec must be a mapping")
         pod = {}
+    request_timeout = pod.get("timeoutSeconds")
+    if isinstance(request_timeout, bool) or not isinstance(request_timeout, int):
+        issues.append("Cloud Run request timeout must be an integer number of seconds")
+    elif request_timeout < MIN_APPROVAL_WAIT_REQUEST_TIMEOUT_SECONDS:
+        issues.append(
+            "Cloud Run request timeout must be at least 960 seconds to cover the "
+            "maximum approval wait and response margin"
+        )
+    elif request_timeout > MAX_CLOUD_RUN_REQUEST_TIMEOUT_SECONDS:
+        issues.append("Cloud Run request timeout must not exceed 3600 seconds")
+
     service_account = pod.get("serviceAccountName")
     if not isinstance(service_account, str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9-]+\.iam\.gserviceaccount\.com",
