@@ -1,0 +1,80 @@
+version: 1
+project:
+  id: aixion-control-tower
+  name: Aixion Control Tower
+  status: flagship
+  lab: Aixion Lab
+  repository: ramgolladi1503-sys/aixion-control-tower
+  risk_class: high
+  purpose: mobile-first human-in-the-loop approval and execution control plane for AI-assisted software work
+
+source_of_truth:
+  product: README.md
+  release_gate: docs/FINAL_RELEASE_CHECKLIST.md
+  architecture:
+    - docs/ARCHITECTURE.md
+    - docs/APPROVAL_ENGINE.md
+    - docs/RISK_ENGINE.md
+    - docs/SECURITY_MODEL.md
+  connector_docs:
+    - docs/CONNECTED_AGENT_SCOPE.md
+    - docs/CONNECTOR_E2E_VALIDATION.md
+    - docs/CONNECTOR_TEMPLATES.md
+    - docs/PUBLIC_CONNECTOR_CALLBACK_HARDENING.md
+
+context:
+  default_budget_kb: 8
+  persist_chat_transcript: false
+  prefer_file_references_over_copying: true
+  load_failures_on_related_tasks: true
+  load_evidence_on_claims: true
+
+commands:
+  backend_tests: cd backend && python -m pytest
+  android_unit_tests: cd mobile/android && ./gradlew testDebugUnitTest
+  android_build: cd mobile/android && ./gradlew assembleDebug
+
+agent_capabilities:
+  - repo-explorer
+  - planner
+  - adapter-contract-reviewer
+  - approval-flow-verifier
+  - connector-verifier
+  - implementer
+  - verifier
+  - failure-miner
+  - release-gate
+
+high_risk_domains:
+  - approval engine
+  - risk engine
+  - authentication and authorization
+  - connector authentication
+  - HMAC callback validation
+  - MCP mutation gateway
+  - GitHub branch/file/PR worker
+  - agent task execution
+  - production configuration
+  - audit logging
+  - replay protection
+  - validation runner
+
+forbidden_without_explicit_human_approval:
+  - direct main branch edits
+  - auto-merge enablement
+  - approval bypass
+  - silent mutating MCP/tool actions
+  - external-agent scope expansion
+  - authentication weakening
+  - replay-protection weakening
+  - validation bypass
+  - production-safety downgrade
+  - secret exposure
+  - destructive data migration
+
+verification:
+  backend_change_requires_backend_tests: true
+  android_change_requires_android_tests: true
+  release_claim_requires_final_release_checklist: true
+  mutating_path_requires_audit_evidence: true
+  unsafe_missing_configuration_must_fail_closed: true
